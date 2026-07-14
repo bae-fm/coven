@@ -18,21 +18,17 @@
 //! [`BlobDecls::row_for_blob_in_namespace`] to map a blob back to its row by namespace
 //! (the read-path locality dispatch and the make-Remote completion check).
 //!
-//! A declaration's three blob properties — [`Provenance`] (the Local story),
-//! [`CacheFill`] (the Remote story), and [`BlobReplacement`] (whether the row may be
-//! repointed at a different blob) — are described by the [blob concept
-//! tree](crate::blob). The last of them is enforced here, because it is a rule about a
-//! row's `(blob id, cloud path)` pair and this is the one place coven reads that pair off
-//! a row: a replaceable blob's readable path must name its blob, and a write-once row may
-//! never be repointed. Together they are what keeps a cloud object from ever being
-//! rewritten with different bytes.
+//! A declaration's two blob properties — [`Provenance`] (the Local story) and
+//! [`CacheFill`] (the Remote story) — are described by the [blob concept
+//! tree](crate::blob). Immutable generated cloud locations include the blob id, so a
+//! consumer's readable path never determines object identity.
 
 use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::blob::{BlobRef, BlobReplacement, BlobScope, CacheFill, Provenance};
-use crate::changeset::{ChangeOp, RowChange};
+use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
+use crate::changeset::RowChange;
 use crate::sync::gate::Gates;
 use crate::sync::session::{quote_ident, table_columns as session_table_columns, SyncedTable};
 
@@ -49,18 +45,6 @@ pub enum BlobDeclError {
     InvalidSize { table: String, value: i64 },
     /// New and old changeset walks produced different row counts.
     ChangesetWalkMismatch { old_count: usize, new_count: usize },
-    /// A [`Replaceable`](BlobReplacement::Replaceable) blob's readable cloud path does not
-    /// name the blob it carries, so the row's next blob would be keyed at this blob's
-    /// cloud object and overwrite it. See [`cloud_path_names_blob`].
-    CloudPathNotKeyedByBlob {
-        table: String,
-        blob_id: String,
-        cloud_path: String,
-    },
-    /// A [`WriteOnce`](BlobReplacement::WriteOnce) row was repointed at a different blob.
-    /// Its cloud path is a stable readable name — that is what write-once buys — so the
-    /// new blob would be keyed at the old blob's cloud object and overwrite it.
-    WriteOnceBlobRepointed { table: String, blob_id: String },
     /// Walking the gate's FK graph for [`BlobDecls::refs_for_root`] failed.
     Gate(String),
 }
@@ -90,24 +74,6 @@ impl std::fmt::Display for BlobDeclError {
             } => write!(
                 f,
                 "blob declaration changeset walk mismatch: old={old_count}, new={new_count}"
-            ),
-            BlobDeclError::CloudPathNotKeyedByBlob {
-                table,
-                blob_id,
-                cloud_path,
-            } => write!(
-                f,
-                "replaceable blob {blob_id} in {table} has cloud path {cloud_path:?}, which does \
-                 not name it: the path's file name must be the blob id, or end with -{blob_id} \
-                 before its extension, so that replacing the blob moves its cloud key rather \
-                 than overwriting its cloud object"
-            ),
-            BlobDeclError::WriteOnceBlobRepointed { table, blob_id } => write!(
-                f,
-                "write-once row in {table} was repointed at blob {blob_id}: a write-once blob's \
-                 cloud path is a stable readable name, so the new blob would overwrite the cloud \
-                 object of the blob it replaced. Declare the table replaceable (and key its path \
-                 by its blob id) if its rows are meant to be repointed"
             ),
             BlobDeclError::Gate(e) => write!(f, "blob declaration FK walk failed: {e}"),
         }
@@ -153,10 +119,6 @@ struct TableBlob {
     cloud_path_col_name: Option<String>,
     /// The encryption scope, fixed per table by the declaration.
     scope: BlobScope,
-    /// Whether this table's row may be repointed at a different blob, and so which rule
-    /// keeps its cloud object from ever being rewritten. See [`TableBlob::blob_ref`] and
-    /// [`TableBlob::ref_from_change`].
-    replacement: BlobReplacement,
 }
 
 impl TableBlob {
@@ -166,32 +128,12 @@ impl TableBlob {
     /// [`BlobDecls::refs_in_db`] (live row), which differ only in how they read
     /// those per-row values.
     ///
-    /// The gate a [`Replaceable`](BlobReplacement::Replaceable) blob's readable cloud path
-    /// passes through: it must name the blob ([`cloud_path_names_blob`]), so that a row
-    /// repointed at a new blob keys it at a *new* cloud object rather than over the one it
-    /// replaced. Every blob set coven derives — the push scan, the pull scan, the snapshot
-    /// backfill, the transitions — is built here, so there is no path around it. A
-    /// [`WriteOnce`](BlobReplacement::WriteOnce) blob is exempt: its row is never
-    /// repointed ([`TableBlob::ref_from_change`] refuses that), so its object is written
-    /// once and its path is free to be a stable readable name.
     fn blob_ref(
         &self,
-        table: &str,
         id: String,
         scope: BlobScope,
         cloud_path: Option<String>,
     ) -> Result<BlobRef, BlobDeclError> {
-        if self.replacement == BlobReplacement::Replaceable {
-            if let Some(path) = cloud_path.as_deref() {
-                if !cloud_path_names_blob(path, &id) {
-                    return Err(BlobDeclError::CloudPathNotKeyedByBlob {
-                        table: table.to_string(),
-                        blob_id: id,
-                        cloud_path: path.to_string(),
-                    });
-                }
-            }
-        }
         Ok(BlobRef {
             namespace: self.namespace.clone(),
             id,
@@ -204,32 +146,15 @@ impl TableBlob {
 
     /// The blob a changeset row references.
     ///
-    /// The gate a [`WriteOnce`](BlobReplacement::WriteOnce) row passes through. A
-    /// changeset UPDATE reports only the columns whose values CHANGED, so the blob-id
-    /// column appearing in one *is* the repointing: the row now names a different blob.
-    /// That is what write-once forbids — its cloud path is a stable readable name, so the
-    /// new blob would be keyed at the old blob's object and overwrite it. Refused here,
-    /// where the change is read, rather than discovered as a corrupted bucket later.
-    fn ref_from_change(
-        &self,
-        table: &str,
-        change: &RowChange,
-    ) -> Result<Option<BlobRef>, BlobDeclError> {
+    fn ref_from_change(&self, change: &RowChange) -> Result<Option<BlobRef>, BlobDeclError> {
         let Some(id) = change.col(self.id_col).map(str::to_string) else {
             return Ok(None);
         };
-        if self.replacement == BlobReplacement::WriteOnce && change.op == ChangeOp::Update {
-            return Err(BlobDeclError::WriteOnceBlobRepointed {
-                table: table.to_string(),
-                blob_id: id,
-            });
-        }
         let cloud_path = self
             .cloud_path_col
             .and_then(|i| change.col(i))
             .map(str::to_string);
-        self.blob_ref(table, id, self.scope.clone(), cloud_path)
-            .map(Some)
+        self.blob_ref(id, self.scope.clone(), cloud_path).map(Some)
     }
 
     fn size_from_change(
@@ -268,11 +193,7 @@ impl TableBlob {
     /// indices address a `SELECT *` row in schema order, exactly as they address a
     /// changeset row. Shared by [`BlobDecls::refs_in_db`] (whole DB) and
     /// [`BlobDecls::refs_for_root`] (one root's subtree).
-    fn ref_from_row(
-        &self,
-        table: &str,
-        row: &rusqlite::Row<'_>,
-    ) -> Result<Option<BlobRef>, BlobDeclError> {
+    fn ref_from_row(&self, row: &rusqlite::Row<'_>) -> Result<Option<BlobRef>, BlobDeclError> {
         let Some(id) = row.get::<_, Option<String>>(self.id_col)? else {
             return Ok(None);
         };
@@ -280,42 +201,8 @@ impl TableBlob {
             Some(i) => row.get::<_, Option<String>>(i)?,
             None => None,
         };
-        self.blob_ref(table, id, self.scope.clone(), cloud_path)
-            .map(Some)
+        self.blob_ref(id, self.scope.clone(), cloud_path).map(Some)
     }
-}
-
-/// Whether the readable `cloud_path` a consumer supplied names the blob `blob_id` — what
-/// coven requires of a [`Replaceable`](BlobReplacement::Replaceable) blob's key on a
-/// browsable home, and what a hashed key gets for free by carrying the id itself.
-///
-/// The path's file name (its last `/`-segment), with any extension stripped, must be the
-/// blob id or end with `-{blob_id}`:
-///
-/// ```text
-/// covers/Live at Leeds/cover-0ef7a1c9.jpg   ✓   stem `cover-0ef7a1c9` ends with -0ef7a1c9
-/// covers/Live at Leeds/0ef7a1c9.jpg         ✓   stem is the blob id
-/// covers/Live at Leeds/cover.jpg            ✗   names no blob
-/// ```
-///
-/// A blob id names one immutable byte-string and is minted fresh for every stored blob, so
-/// a path carrying it moves whenever the bytes do — which is what leaves a replaced blob's
-/// object standing at its own key instead of overwritten.
-///
-/// The `-` delimiter is what makes this a near-injective mapping where a bare substring
-/// test would not be: without it, blob `1` would satisfy blob `11`'s path and the two could
-/// be keyed at one object. Two ids can still collide if one is a `-`-suffix of the other
-/// AND the consumer builds paths that land on the same file name — which ids drawn from any
-/// of the usual generators do not do.
-pub(crate) fn cloud_path_names_blob(cloud_path: &str, blob_id: &str) -> bool {
-    let file_name = cloud_path.rsplit('/').next().unwrap_or(cloud_path);
-    let stem = file_name
-        .rsplit_once('.')
-        .map_or(file_name, |(stem, _extension)| stem);
-    stem == blob_id
-        || stem
-            .strip_suffix(blob_id)
-            .is_some_and(|prefix| prefix.ends_with('-'))
 }
 
 /// The blob declarations for a database handle, resolved from the declared set +
@@ -387,7 +274,6 @@ impl BlobDecls {
                     cloud_path_col,
                     cloud_path_col_name: decl.cloud_path_column.clone(),
                     scope: decl.scope.clone(),
-                    replacement: decl.replacement,
                 },
             );
         }
@@ -436,7 +322,7 @@ impl BlobDecls {
         let Some(tb) = self.tables.get(&change.table) else {
             return Ok(None);
         };
-        tb.ref_from_change(&change.table, change)
+        tb.ref_from_change(change)
     }
 
     /// The blob a changeset row references plus the row's declared plaintext size
@@ -451,7 +337,7 @@ impl BlobDecls {
         let Some(tb) = self.tables.get(&change.table) else {
             return Ok(None);
         };
-        let Some(blob) = tb.ref_from_change(&change.table, change)? else {
+        let Some(blob) = tb.ref_from_change(change)? else {
             return Ok(None);
         };
         let size = tb.size_from_change(&change.table, change)?;
@@ -472,7 +358,7 @@ impl BlobDecls {
             let mut stmt = conn.prepare(&sql)?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
-                if let Some(blob) = tb.ref_from_row(table, row)? {
+                if let Some(blob) = tb.ref_from_row(row)? {
                     out.push(blob);
                 }
             }
@@ -510,7 +396,7 @@ impl BlobDecls {
             let mut stmt = conn.prepare(&sql)?;
             let mut rows = stmt.query([&pk])?;
             if let Some(row) = rows.next()? {
-                if let Some(blob) = tb.ref_from_row(&table, row)? {
+                if let Some(blob) = tb.ref_from_row(row)? {
                     out.push(blob);
                 }
             }
@@ -570,12 +456,6 @@ impl BlobDecls {
     /// a browsable home stores the blob at. `None` when no declared table owns
     /// `namespace`, that table declares no cloud-path column (an opaque home's blob is
     /// keyed by id), that table has no row with the id, or the row's value is NULL.
-    ///
-    /// The second place a blob's readable path is paired with its blob id, so it runs the
-    /// same [`cloud_path_names_blob`] gate [`TableBlob::blob_ref`] does. This is the path
-    /// a *repointed* row's blob takes — its changeset UPDATE carries the new blob id, so
-    /// the ref built from the change has none and reads it here — which is where a
-    /// replaceable row that kept its cloud path across a repointing is caught.
     pub fn cloud_path_for_blob_in_namespace(
         &self,
         conn: &Connection,
@@ -588,20 +468,7 @@ impl BlobDecls {
         let Some(cloud_path_col_name) = &tb.cloud_path_col_name else {
             return Ok(None);
         };
-        let cloud_path =
-            pk_carrying_blob_cloud_path(conn, table, tb, cloud_path_col_name, blob_id)?;
-        if tb.replacement == BlobReplacement::Replaceable {
-            if let Some(path) = cloud_path.as_deref() {
-                if !cloud_path_names_blob(path, blob_id) {
-                    return Err(BlobDeclError::CloudPathNotKeyedByBlob {
-                        table: table.clone(),
-                        blob_id: blob_id.to_string(),
-                        cloud_path: path.to_string(),
-                    });
-                }
-            }
-        }
-        Ok(cloud_path)
+        pk_carrying_blob_cloud_path(conn, table, tb, cloud_path_col_name, blob_id)
     }
 
     /// The plaintext byte length and content hash on row `pk` of `table` — the values a
@@ -648,52 +515,21 @@ impl BlobDecls {
     }
 
     /// The `(table, primary key)` of a live row whose declared blob resolves to
-    /// `cloud_key`. Hashed homes encode namespace + blob id in the key itself;
-    /// readable homes encode namespace + declared `cloud_path`. This is the GC-side
-    /// lookup: before honoring a tombstone for `cloud_key`, ask whether current DB
-    /// state still names that exact cloud object.
+    /// `cloud_key`. Both current generated layouts encode namespace + blob id. This
+    /// is the GC-side lookup: before honoring a tombstone for `cloud_key`, ask
+    /// whether current DB state still names that exact cloud object.
     pub fn row_for_blob_cloud_key(
         &self,
         conn: &Connection,
         cloud_key: &str,
     ) -> Result<Option<(String, String)>, BlobDeclError> {
-        if let Some((namespace, blob_id)) = hashed_blob_key_parts(cloud_key) {
+        if let Some((namespace, blob_id)) =
+            hashed_blob_key_parts(cloud_key).or_else(|| plain_blob_key_parts(cloud_key))
+        {
             if let Some(row) = self.row_for_blob_in_namespace(conn, &namespace, &blob_id)? {
                 return Ok(Some(row));
             }
         }
-
-        for (table, tb) in &self.tables {
-            let Some(cloud_path_col_name) = &tb.cloud_path_col_name else {
-                continue;
-            };
-            let Some(stored_path) = cloud_key
-                .strip_prefix(&tb.namespace)
-                .and_then(|rest| rest.strip_prefix('/'))
-            else {
-                continue;
-            };
-            let cloud_path = if let Some(rest) = stored_path.strip_prefix(".coven-generations/") {
-                let mut parts = rest.splitn(3, '/');
-                let Some(_uploader) = parts.next() else {
-                    continue;
-                };
-                let Some(_generation) = parts.next() else {
-                    continue;
-                };
-                let Some(path) = parts.next() else {
-                    continue;
-                };
-                path
-            } else {
-                stored_path
-            };
-            if let Some(pk) = pk_carrying_cloud_path(conn, table, cloud_path_col_name, cloud_path)?
-            {
-                return Ok(Some((table.clone(), pk)));
-            }
-        }
-
         Ok(None)
     }
 
@@ -708,7 +544,7 @@ impl BlobDecls {
         };
         let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(table));
         conn.query_row(&sql, [pk], |row| {
-            tb.ref_from_row(table, row).map_err(|error| {
+            tb.ref_from_row(row).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
                     rusqlite::types::Type::Text,
@@ -822,22 +658,6 @@ fn column_on_row<T: rusqlite::types::FromSql>(
         .map_err(BlobDeclError::from)
 }
 
-fn pk_carrying_cloud_path(
-    conn: &Connection,
-    table: &str,
-    cloud_path_col_name: &str,
-    cloud_path: &str,
-) -> Result<Option<String>, BlobDeclError> {
-    let sql = format!(
-        "SELECT id FROM {} WHERE {} = ?1",
-        quote_ident(table),
-        quote_ident(cloud_path_col_name),
-    );
-    conn.query_row(&sql, [cloud_path], |row| row.get::<_, String>(0))
-        .optional()
-        .map_err(BlobDeclError::from)
-}
-
 fn hashed_blob_key_parts(cloud_key: &str) -> Option<(String, String)> {
     // Map a key back to its DB row, which is keyed by namespace + id, not by who
     // uploaded it — so the uploader segment is parsed and dropped.
@@ -845,59 +665,32 @@ fn hashed_blob_key_parts(cloud_key: &str) -> Option<(String, String)> {
         .map(|(namespace, _uploader, id, _generation)| (namespace, id))
 }
 
+fn plain_blob_key_parts(cloud_key: &str) -> Option<(String, String)> {
+    let mut parts = cloud_key.splitn(6, '/');
+    let namespace = parts.next()?;
+    if parts.next()? != ".coven-generations" {
+        return None;
+    }
+    let uploader = parts.next()?;
+    let generation = parts.next()?;
+    let id = parts.next()?;
+    let cloud_path = parts.next()?;
+    crate::store_dir::validate_path_token(namespace).ok()?;
+    crate::store_dir::validate_path_token(uploader).ok()?;
+    crate::store_dir::validate_path_token(id).ok()?;
+    crate::store_dir::validate_cloud_path(cloud_path).ok()?;
+    if generation.len() != 64
+        || !generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    Some((namespace.to_string(), id.to_string()))
+}
+
 /// Column names of `table`, in declared (schema) order, via `PRAGMA table_info`.
 /// The index of a name here is the index a changeset reports for that column.
 pub(crate) fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, BlobDeclError> {
     session_table_columns(conn, table).map_err(BlobDeclError::from)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::cloud_path_names_blob;
-
-    /// A replaceable blob's readable path must name the blob standing at it, so that
-    /// repointing the row moves its cloud key instead of overwriting the object it
-    /// replaced. A path naming no blob — the natural-looking `cover.jpg` — is what makes a
-    /// replacement rewrite the object its predecessor holds.
-    #[test]
-    fn a_cloud_path_names_the_blob_whose_id_ends_its_file_name() {
-        assert!(cloud_path_names_blob(
-            "Live at Leeds/cover-0ef7a1c9.jpg",
-            "0ef7a1c9"
-        ));
-        assert!(cloud_path_names_blob(
-            "Live at Leeds/0ef7a1c9.jpg",
-            "0ef7a1c9"
-        ));
-        assert!(
-            cloud_path_names_blob("0ef7a1c9", "0ef7a1c9"),
-            "no directory and no extension: the whole path is the blob id",
-        );
-
-        assert!(
-            !cloud_path_names_blob("Live at Leeds/cover.jpg", "0ef7a1c9"),
-            "names no blob — the next cover would take this same name",
-        );
-        assert!(
-            !cloud_path_names_blob("0ef7a1c9/cover.jpg", "0ef7a1c9"),
-            "the id must name the OBJECT, not a directory above it — two blobs under one \
-             directory would still collide on the file",
-        );
-        assert!(
-            !cloud_path_names_blob("Live at Leeds/cover-0ef7a1c9-thumb.jpg", "0ef7a1c9"),
-            "the id must END the file name's stem, not sit inside it",
-        );
-    }
-
-    /// The `-` delimiter is what makes the path→blob mapping unambiguous. A bare substring
-    /// test would let one blob satisfy another's path, and the two would be keyed at one
-    /// cloud object — the exact collision the rule exists to prevent.
-    #[test]
-    fn one_blob_id_cannot_satisfy_another_s_path_by_being_a_tail_of_it() {
-        assert!(cloud_path_names_blob("cover-10ef7a1c9.jpg", "10ef7a1c9"));
-        assert!(
-            !cloud_path_names_blob("cover-10ef7a1c9.jpg", "0ef7a1c9"),
-            "blob 0ef7a1c9 must not claim blob 10ef7a1c9's object",
-        );
-    }
 }

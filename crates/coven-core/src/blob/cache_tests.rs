@@ -1054,6 +1054,32 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     );
 }
 
+#[tokio::test]
+async fn external_same_length_wrong_bytes_fail_whole_and_range_reads() {
+    let db = read_test_db("audio");
+    let (tmp, ld) = temp_store_dir();
+    let blob = blob_ref("extr-hash", "audio", CacheFill::CacheLazy);
+    let expected = b"EXPECTED-EXTERNAL";
+    let replaced = b"REPLACED-EXTERNAL";
+    assert_eq!(expected.len(), replaced.len());
+    plant_blob_row(&db, &blob.id, false, expected).await;
+    let path = write_external_file(tmp.path(), "replaced.flac", replaced);
+    db.register_external_blob(&blob.id, &blob.namespace, &path, replaced.len() as u64)
+        .await
+        .expect("register replacement path");
+
+    assert!(
+        read_blob(&db, &ld, None, &blob).await.is_err(),
+        "a whole read must reject same-length replacement bytes",
+    );
+    assert!(
+        open_blob_stream(&db, &ld, None, &blob, replaced.len() as u64, 2, 7)
+            .await
+            .is_err(),
+        "a ranged read must hash the whole opened file and reject replacement bytes",
+    );
+}
+
 /// A missing external file is [`BlobCacheError::ExternalMissing`] and a present
 /// file whose length differs from the registered size is
 /// [`BlobCacheError::ExternalSizeMismatch`] — both terminal. A cloud copy exists
@@ -1070,7 +1096,14 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
 
     // Missing file: a ref pointing at a path that does not exist.
     let missing = blob_ref("extm-aaaa", "audio", CacheFill::CacheLazy);
-    plant_blob_row_with_size_hash(&db, &missing.id, false, 1234, None).await;
+    plant_blob_row_with_size_hash(
+        &db,
+        &missing.id,
+        false,
+        1234,
+        Some(&crate::blob::content_hash(&cloud_bytes)),
+    )
+    .await;
     put_cloud_blob(&db, &storage, &missing.id, &missing.namespace, &cloud_bytes).await;
     let missing_path = tmp.path().join("external").join("gone.flac");
     db.register_external_blob(&missing.id, &missing.namespace, &missing_path, 1234)
@@ -1088,7 +1121,14 @@ async fn external_missing_and_size_mismatch_error_with_no_cloud_fallback() {
     let mism = blob_ref("exts-aaaa", "audio", CacheFill::CacheLazy);
     put_cloud_blob(&db, &storage, &mism.id, &mism.namespace, &cloud_bytes).await;
     let actual = ramp(2000);
-    plant_blob_row_with_size_hash(&db, &mism.id, false, actual.len() as u64 + 1, None).await;
+    plant_blob_row_with_size_hash(
+        &db,
+        &mism.id,
+        false,
+        actual.len() as u64 + 1,
+        Some(&crate::blob::content_hash(&actual)),
+    )
+    .await;
     let mism_path = write_external_file(tmp.path(), "wrong-size.flac", &actual);
     db.register_external_blob(
         &mism.id,
@@ -1271,6 +1311,39 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
         &store_bytes[offset as usize..(offset + len) as usize],
         "the ranged read also serves the local store",
     );
+}
+
+#[tokio::test]
+async fn local_store_same_length_wrong_bytes_fail_whole_range_and_materialize() {
+    let db = read_test_db("photos");
+    let storage = MockSyncStorage::new();
+    let (tmp, ld) = temp_store_dir();
+    let blob = host_blob_ref("locl-hash", "photos", CacheFill::CacheEager);
+    let expected = b"EXPECTED-LOCAL";
+    let replaced = b"REPLACED-LOCAL";
+    assert_eq!(expected.len(), replaced.len());
+    plant_blob_row(&db, &blob.id, false, expected).await;
+    crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, replaced)
+        .await
+        .expect("store replacement bytes");
+
+    assert!(read_blob(&db, &ld, None, &blob).await.is_err());
+    assert!(
+        open_blob_stream(&db, &ld, None, &blob, replaced.len() as u64, 1, 5)
+            .await
+            .is_err()
+    );
+
+    set_blob_remote(&db, &blob.id, true).await;
+    put_cloud_blob(&db, &storage, &blob.id, &blob.namespace, expected).await;
+    let destination = tmp.path().join("materialized");
+    assert!(
+        materialize_remote_blob_to_file(&db, &ld, Some(&storage), &blob, &destination)
+            .await
+            .is_err(),
+        "materialization must reject the corrupt local-store source",
+    );
+    assert!(!destination.exists());
 }
 
 /// A **Remote + user-provided** blob reads the cache/cloud — and never the local
@@ -1485,7 +1558,14 @@ async fn local_user_provided_blob_without_an_external_ref_errors() {
     let blob = blob_ref("extn-aaaa", "audio", CacheFill::CacheLazy);
     // Gate Local + the BlobRef's user-provided provenance ⇒ the external arm, but no
     // ref is registered. A cloud copy exists as a decoy a store-probing read would serve.
-    plant_blob_row_with_size_hash(&db, &blob.id, false, 11, None).await;
+    plant_blob_row_with_size_hash(
+        &db,
+        &blob.id,
+        false,
+        11,
+        Some(&crate::blob::content_hash(b"CLOUD-DECOY")),
+    )
+    .await;
     put_cloud_blob(&db, &storage, &blob.id, &blob.namespace, b"CLOUD-DECOY").await;
 
     let err = read_blob(&db, &ld, Some(&storage), &blob)
@@ -1517,7 +1597,14 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
     let (_tmp, ld) = temp_store_dir();
 
     let blob = host_blob_ref("res1bbbb", "photos", CacheFill::CacheEager);
-    plant_blob_row_with_size_hash(&db, &blob.id, false, 11, None).await;
+    plant_blob_row_with_size_hash(
+        &db,
+        &blob.id,
+        false,
+        11,
+        Some(&crate::blob::content_hash(b"CLOUD-DECOY")),
+    )
+    .await;
 
     // A cloud copy under the same id: a read that probed every store would serve these
     // bytes. No external ref, no local-store file, no cache file.
@@ -1620,9 +1707,9 @@ async fn read_resolves_the_blobs_own_namespace_gate_not_a_colliding_id() {
         )
         .map_err(crate::database::DbError::from)?;
         conn.execute(
-            "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-             VALUES (?1, 'note-local', 'attach', 17, '0000000001000-0000-dev1', '2026-01-01')",
-            [id],
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES (?1, 'note-local', 'attach', 17, ?2, '0000000001000-0000-dev1', '2026-01-01')",
+            rusqlite::params![id, crate::blob::content_hash(b"LOCAL-STORE-BYTES")],
         )
         .map_err(crate::database::DbError::from)?;
         conn.execute(

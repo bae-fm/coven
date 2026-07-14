@@ -32,22 +32,19 @@ pub struct ChangesetEnvelope {
     pub message: String,
     pub timestamp: String,
     pub changeset_size: usize,
-    /// Hex-encoded Ed25519 public key of the author. None for unsigned changesets.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub author_pubkey: Option<String>,
+    /// Hex-encoded Ed25519 public key of the author.
+    pub author_pubkey: String,
     /// The membership entry that authorizes this author to write, as its storage
     /// coordinate. A puller that does not yet see that entry fetches it by this
     /// coordinate to resolve a membership-propagation gap instead of skipping the
     /// changeset as non-member. Covered by the signature, so it can't be forged.
-    /// None for legacy unsigned data or a pre-initialization producer. Every
-    /// changeset accepted by an initialized session names its write grant.
+    /// None for a solo (no membership chain) store.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub membership_grant: Option<MembershipCoord>,
     pub blob_locations: Vec<BlobLocationRecord>,
     /// Hex-encoded detached Ed25519 signature over the envelope metadata and
-    /// changeset bytes (see `signing_payload`). None for unsigned.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub signature: Option<String>,
+    /// changeset bytes (see `signing_payload`).
+    pub signature: String,
 }
 
 /// The envelope fields the signature covers, in declaration order. Excludes
@@ -70,8 +67,8 @@ struct SignedEnvelopeFields<'a> {
 /// envelope metadata followed by the changeset payload. Binding the metadata --
 /// not just the payload -- means a signed changeset can't be re-stamped with a
 /// forged timestamp or position to slip past pull-side membership validation.
-fn signing_payload(env: &ChangesetEnvelope, changeset_bytes: &[u8]) -> Vec<u8> {
-    let fields = SignedEnvelopeFields {
+fn signing_fields(env: &ChangesetEnvelope) -> SignedEnvelopeFields<'_> {
+    SignedEnvelopeFields {
         device_id: &env.device_id,
         seq: env.seq,
         schema_version: env.schema_version,
@@ -80,47 +77,71 @@ fn signing_payload(env: &ChangesetEnvelope, changeset_bytes: &[u8]) -> Vec<u8> {
         changeset_size: env.changeset_size,
         membership_grant: env.membership_grant.as_ref(),
         blob_locations: &env.blob_locations,
-    };
+    }
+}
+
+fn signing_payload(fields: &SignedEnvelopeFields<'_>, changeset_bytes: &[u8]) -> Vec<u8> {
     let mut payload = serde_json::to_vec(&fields).expect("signed fields serialization cannot fail");
     payload.push(0);
     payload.extend_from_slice(changeset_bytes);
     payload
 }
 
-/// Sign a changeset envelope with the user's Ed25519 keypair.
-///
-/// Sets `author_pubkey` to the hex-encoded public key and `signature` to the
-/// hex-encoded detached signature over the envelope metadata and changeset
-/// bytes (see `signing_payload`).
-pub fn sign_envelope(env: &mut ChangesetEnvelope, keypair: &UserKeypair, changeset_bytes: &[u8]) {
-    let (author_pubkey, signature) =
-        keys::sign_hex(keypair, &signing_payload(env, changeset_bytes));
-    env.author_pubkey = Some(author_pubkey);
-    env.signature = Some(signature);
+impl ChangesetEnvelope {
+    /// Build the complete current envelope shape and sign its canonical fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed(
+        device_id: &str,
+        seq: u64,
+        schema_version: u32,
+        message: &str,
+        timestamp: &str,
+        membership_grant: Option<MembershipCoord>,
+        blob_locations: Vec<BlobLocationRecord>,
+        keypair: &UserKeypair,
+        changeset_bytes: &[u8],
+    ) -> Self {
+        let fields = SignedEnvelopeFields {
+            device_id,
+            seq,
+            schema_version,
+            message,
+            timestamp,
+            changeset_size: changeset_bytes.len(),
+            membership_grant: membership_grant.as_ref(),
+            blob_locations: &blob_locations,
+        };
+        let (author_pubkey, signature) =
+            keys::sign_hex(keypair, &signing_payload(&fields, changeset_bytes));
+        Self {
+            device_id: device_id.to_string(),
+            seq,
+            schema_version,
+            message: message.to_string(),
+            timestamp: timestamp.to_string(),
+            changeset_size: changeset_bytes.len(),
+            author_pubkey,
+            membership_grant,
+            blob_locations,
+            signature,
+        }
+    }
 }
 
 /// Verify the signature on a changeset envelope.
 ///
-/// Returns true if:
-/// - No signature is present (unsigned changesets are accepted).
-/// - A valid signature is present that matches the author's public key.
-///
-/// Returns false if a signature is present but invalid (wrong key, tampered data,
-/// or malformed hex).
+/// Returns true only for a valid signature matching the author's public key.
 pub fn verify_changeset_signature(env: &ChangesetEnvelope, changeset_bytes: &[u8]) -> bool {
-    match (&env.author_pubkey, &env.signature) {
-        (None, None) => true,
-        (Some(pk_hex), Some(sig_hex)) => {
-            keys::verify_signature_hex(pk_hex, sig_hex, &signing_payload(env, changeset_bytes))
-        }
-        (Some(_), None) | (None, Some(_)) => false,
-    }
+    keys::verify_signature_hex(
+        &env.author_pubkey,
+        &env.signature,
+        &signing_payload(&signing_fields(env), changeset_bytes),
+    )
 }
 
 /// Build a signed envelope over `changeset` and pack it into the wire format.
-/// The single place that constructs an unsigned `ChangesetEnvelope` and fills in
-/// the signature via [`sign_envelope`] — both the cycle's outgoing push and the
-/// deferred-changeset merge go through here so the signing/packing can't drift.
+/// Both the cycle's outgoing push and the deferred-changeset merge go through
+/// this constructor so signing and packing cannot drift.
 #[allow(clippy::too_many_arguments)]
 pub fn pack_signed(
     device_id: &str,
@@ -157,19 +178,17 @@ pub fn pack_signed_with_blob_locations(
     blob_locations: Vec<BlobLocationRecord>,
     changeset: &[u8],
 ) -> Vec<u8> {
-    let mut env = ChangesetEnvelope {
-        device_id: device_id.to_string(),
+    let env = ChangesetEnvelope::signed(
+        device_id,
         seq,
         schema_version,
-        message: message.to_string(),
-        timestamp: timestamp.to_string(),
-        changeset_size: changeset.len(),
-        author_pubkey: None,
+        message,
+        timestamp,
         membership_grant,
         blob_locations,
-        signature: None,
-    };
-    sign_envelope(&mut env, keypair, changeset);
+        keypair,
+        changeset,
+    );
     pack(&env, changeset)
 }
 
@@ -228,25 +247,24 @@ mod tests {
     use super::*;
     use crate::keys::UserKeypair;
 
-    fn test_envelope() -> ChangesetEnvelope {
-        ChangesetEnvelope {
-            device_id: "dev-abc123".into(),
-            seq: 42,
-            schema_version: 2,
-            message: "Imported release placeholder".into(),
-            timestamp: "2026-02-10T14:30:00Z".into(),
-            changeset_size: 4096,
-            author_pubkey: None,
-            membership_grant: None,
-            blob_locations: Vec::new(),
-            signature: None,
-        }
+    fn test_envelope(changeset: &[u8]) -> ChangesetEnvelope {
+        ChangesetEnvelope::signed(
+            "dev-abc123",
+            42,
+            2,
+            "Imported release placeholder",
+            "2026-02-10T14:30:00Z",
+            None,
+            Vec::new(),
+            &UserKeypair::generate(),
+            changeset,
+        )
     }
 
     #[test]
     fn pack_unpack_roundtrip() {
-        let envelope = test_envelope();
         let changeset = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02];
+        let envelope = test_envelope(&changeset);
 
         let packed = pack(&envelope, &changeset);
         let (unpacked_env, unpacked_cs) = unpack(&packed).expect("unpack");
@@ -257,8 +275,8 @@ mod tests {
 
     #[test]
     fn pack_unpack_empty_changeset() {
-        let envelope = test_envelope();
         let changeset: Vec<u8> = vec![];
+        let envelope = test_envelope(&changeset);
 
         let packed = pack(&envelope, &changeset);
         let (unpacked_env, unpacked_cs) = unpack(&packed).expect("unpack");
@@ -269,8 +287,8 @@ mod tests {
 
     #[test]
     fn pack_contains_null_separator() {
-        let envelope = test_envelope();
         let changeset = vec![0xFF];
+        let envelope = test_envelope(&changeset);
 
         let packed = pack(&envelope, &changeset);
 
@@ -288,10 +306,10 @@ mod tests {
 
     #[test]
     fn changeset_with_embedded_nulls() {
-        let envelope = test_envelope();
         // Changeset bytes that contain null bytes -- unpack should handle this
         // because we split on the FIRST null (after JSON).
         let changeset = vec![0x00, 0x00, 0xFF, 0x00];
+        let envelope = test_envelope(&changeset);
 
         let packed = pack(&envelope, &changeset);
         let (unpacked_env, unpacked_cs) = unpack(&packed).expect("unpack");
@@ -317,6 +335,35 @@ mod tests {
     }
 
     #[test]
+    fn unpack_rejects_missing_required_signing_fields() {
+        let changeset = b"signed changeset";
+        let packed = pack_signed(
+            "dev-abc123",
+            42,
+            2,
+            "message",
+            "2026-02-10T14:30:00Z",
+            &UserKeypair::generate(),
+            None,
+            changeset,
+        );
+        let separator = packed.iter().position(|byte| *byte == 0).unwrap();
+
+        for field in ["author_pubkey", "signature"] {
+            let mut json: serde_json::Value = serde_json::from_slice(&packed[..separator]).unwrap();
+            json.as_object_mut().unwrap().remove(field);
+            let mut missing = serde_json::to_vec(&json).unwrap();
+            missing.push(0);
+            missing.extend_from_slice(changeset);
+
+            assert!(
+                matches!(unpack(&missing), Err(UnpackError::InvalidJson(_))),
+                "missing {field} must be rejected",
+            );
+        }
+    }
+
+    #[test]
     fn unpack_empty_input() {
         assert!(matches!(unpack(&[]), Err(UnpackError::NoSeparator)));
     }
@@ -329,16 +376,19 @@ mod tests {
 
         let changeset_bytes = b"some changeset payload";
 
-        // sign_envelope produces a valid signature.
-        let mut env = test_envelope();
-        sign_envelope(&mut env, &keypair, changeset_bytes);
-
-        assert!(env.author_pubkey.is_some());
-        assert!(env.signature.is_some());
-        assert_eq!(
-            env.author_pubkey.as_ref().unwrap(),
-            &hex::encode(keypair.public_key())
+        let env = ChangesetEnvelope::signed(
+            "dev-abc123",
+            42,
+            2,
+            "Imported release placeholder",
+            "2026-02-10T14:30:00Z",
+            None,
+            Vec::new(),
+            &keypair,
+            changeset_bytes,
         );
+
+        assert_eq!(env.author_pubkey, hex::encode(keypair.public_key()));
         assert!(verify_changeset_signature(&env, changeset_bytes));
 
         // Signed envelope round-trips through pack/unpack.
@@ -369,15 +419,24 @@ mod tests {
         rehomed.device_id = "other-device".to_string();
         assert!(!verify_changeset_signature(&rehomed, changeset_bytes));
 
-        let mut with_location = test_envelope();
-        with_location.blob_locations.push(BlobLocationRecord {
+        let location = BlobLocationRecord {
             namespace: "photos".to_string(),
             blob_id: "p1".to_string(),
             location: crate::blob::CloudBlobLocation::generated("aa11", "stamp"),
             plaintext_size: 42,
             content_hash: "abcd".to_string(),
-        });
-        sign_envelope(&mut with_location, &keypair, changeset_bytes);
+        };
+        let mut with_location = ChangesetEnvelope::signed(
+            "dev-abc123",
+            42,
+            2,
+            "Imported release placeholder",
+            "2026-02-10T14:30:00Z",
+            None,
+            vec![location],
+            &keypair,
+            changeset_bytes,
+        );
         assert!(verify_changeset_signature(&with_location, changeset_bytes));
         let mut changed_generation = with_location.clone();
         changed_generation.blob_locations[0].location.generation = "deadbeef".to_string();
@@ -391,12 +450,20 @@ mod tests {
         // The authorizing membership position is bound too: re-stamping the grant
         // after signing (to claim a different, e.g. higher-privilege, entry)
         // invalidates the signature.
-        let mut signed_with_grant = test_envelope();
-        signed_with_grant.membership_grant = Some(crate::sync::membership::MembershipCoord {
-            author_pubkey: "owner-pk".to_string(),
-            seq: 2,
-        });
-        sign_envelope(&mut signed_with_grant, &keypair, changeset_bytes);
+        let signed_with_grant = ChangesetEnvelope::signed(
+            "dev-abc123",
+            42,
+            2,
+            "Imported release placeholder",
+            "2026-02-10T14:30:00Z",
+            Some(crate::sync::membership::MembershipCoord {
+                author_pubkey: "owner-pk".to_string(),
+                seq: 2,
+            }),
+            Vec::new(),
+            &keypair,
+            changeset_bytes,
+        );
         assert!(verify_changeset_signature(
             &signed_with_grant,
             changeset_bytes
@@ -408,18 +475,14 @@ mod tests {
         });
         assert!(!verify_changeset_signature(&regranted, changeset_bytes));
 
-        // Unsigned envelope passes verification.
-        let unsigned_env = test_envelope();
-        assert!(verify_changeset_signature(&unsigned_env, changeset_bytes));
-
         // Malformed hex in signature fails.
         let mut bad_sig_env = env.clone();
-        bad_sig_env.signature = Some("not-valid-hex!!".to_string());
+        bad_sig_env.signature = "not-valid-hex!!".to_string();
         assert!(!verify_changeset_signature(&bad_sig_env, changeset_bytes));
 
         // Wrong-length public key fails.
         let mut bad_pk_env = env.clone();
-        bad_pk_env.author_pubkey = Some(hex::encode([0u8; 16])); // 16 bytes, not 32
+        bad_pk_env.author_pubkey = hex::encode([0u8; 16]); // 16 bytes, not 32
         assert!(!verify_changeset_signature(&bad_pk_env, changeset_bytes));
     }
 
@@ -427,11 +490,17 @@ mod tests {
     fn signed_envelope_without_blob_locations_is_rejected() {
         let keypair = UserKeypair::generate();
         let changeset = b"current changeset";
-        let mut env = test_envelope();
-        env.changeset_size = changeset.len();
-        let (author, signature) = keys::sign_hex(&keypair, &signing_payload(&env, changeset));
-        env.author_pubkey = Some(author);
-        env.signature = Some(signature);
+        let env = ChangesetEnvelope::signed(
+            "dev-abc123",
+            42,
+            2,
+            "Imported release placeholder",
+            "2026-02-10T14:30:00Z",
+            None,
+            Vec::new(),
+            &keypair,
+            changeset,
+        );
 
         let mut json = serde_json::to_value(&env).unwrap();
         json.as_object_mut().unwrap().remove("blob_locations");

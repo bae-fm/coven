@@ -34,8 +34,7 @@ use crate::sync::membership::MembershipCoord;
 pub struct HeadJson {
     pub seq: u64,
     /// RFC 3339 timestamp of when this head was last written.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_sync: Option<String>,
+    pub last_sync: String,
     /// Hex-encoded Ed25519 public key of the device that wrote this head.
     pub author_pubkey: String,
     /// Hex-encoded detached signature over [`HeadFields`].
@@ -51,20 +50,15 @@ pub struct HeadJson {
 struct HeadFields<'a> {
     device_id: &'a str,
     seq: u64,
-    last_sync: Option<&'a str>,
+    last_sync: &'a str,
 }
 
 impl HeadJson {
     /// Build a head for slot `device_id` signed by `keypair`: fills
     /// `author_pubkey` with the device's public key and `signature` with the
     /// detached signature over the canonical payload (which binds `device_id`).
-    pub fn signed(
-        device_id: &str,
-        seq: u64,
-        last_sync: Option<String>,
-        keypair: &UserKeypair,
-    ) -> Self {
-        let payload = head_signing_payload(device_id, seq, last_sync.as_deref());
+    pub fn signed(device_id: &str, seq: u64, last_sync: String, keypair: &UserKeypair) -> Self {
+        let payload = head_signing_payload(device_id, seq, &last_sync);
         let (author_pubkey, signature) = keys::sign_hex(keypair, &payload);
         HeadJson {
             seq,
@@ -78,12 +72,12 @@ impl HeadJson {
     /// to the slot `device_id` the head was read from. A head that fails this is
     /// forged, corrupt, or relocated to a foreign slot, and must be skipped.
     pub fn verify(&self, device_id: &str) -> bool {
-        let payload = head_signing_payload(device_id, self.seq, self.last_sync.as_deref());
+        let payload = head_signing_payload(device_id, self.seq, &self.last_sync);
         keys::verify_signature_hex(&self.author_pubkey, &self.signature, &payload)
     }
 }
 
-fn head_signing_payload(device_id: &str, seq: u64, last_sync: Option<&str>) -> Vec<u8> {
+fn head_signing_payload(device_id: &str, seq: u64, last_sync: &str) -> Vec<u8> {
     let fields = HeadFields {
         device_id,
         seq,
@@ -616,7 +610,7 @@ mod tests {
     #[test]
     fn head_round_trips_and_binds_its_fields() {
         let kp = UserKeypair::generate();
-        let head = HeadJson::signed("devA", 7, Some("2026-01-01T00:00:00Z".to_string()), &kp);
+        let head = HeadJson::signed("devA", 7, "2026-01-01T00:00:00Z".to_string(), &kp);
 
         assert_eq!(head.author_pubkey, hex::encode(kp.public_key()));
         assert!(head.verify("devA"), "a freshly signed head verifies");
@@ -632,12 +626,22 @@ mod tests {
         // The signature binds the seq: bumping it after signing invalidates it,
         // so a forged head can't be re-stamped to a higher seq to drive a fetch
         // loop.
-        let mut tampered = HeadJson::signed("devA", 7, None, &kp);
+        let mut tampered = HeadJson::signed("devA", 7, "2026-01-01T00:00:00Z".to_string(), &kp);
         tampered.seq = 99;
         assert!(
             !tampered.verify("devA"),
             "a tampered seq fails verification"
         );
+    }
+
+    #[test]
+    fn head_requires_the_current_last_sync_field() {
+        let kp = UserKeypair::generate();
+        let head = HeadJson::signed("devA", 7, "2026-01-01T00:00:00Z".to_string(), &kp);
+        let mut json = serde_json::to_value(head).unwrap();
+        json.as_object_mut().unwrap().remove("last_sync");
+
+        assert!(serde_json::from_value::<HeadJson>(json).is_err());
     }
 
     #[test]
@@ -647,7 +651,7 @@ mod tests {
         // under devB — otherwise an attacker relocates a member's head to a
         // fabricated slot and drives a per-seq fetch loop / pollutes status.
         let kp = UserKeypair::generate();
-        let head = HeadJson::signed("devA", 5, None, &kp);
+        let head = HeadJson::signed("devA", 5, "2026-01-01T00:00:00Z".to_string(), &kp);
         assert!(head.verify("devA"));
         assert!(
             !head.verify("devB"),
@@ -659,7 +663,7 @@ mod tests {
     fn head_signed_by_one_key_does_not_verify_under_another() {
         let kp = UserKeypair::generate();
         let other = UserKeypair::generate();
-        let mut head = HeadJson::signed("devA", 1, None, &kp);
+        let mut head = HeadJson::signed("devA", 1, "2026-01-01T00:00:00Z".to_string(), &kp);
         // Swap the claimed author to a different key: the signature no longer
         // matches, so the head is rejected (a forger can't claim someone else's
         // pubkey).
@@ -744,11 +748,11 @@ mod tests {
     #[test]
     fn malformed_signature_fails_closed() {
         let kp = UserKeypair::generate();
-        let mut head = HeadJson::signed("devA", 1, None, &kp);
+        let mut head = HeadJson::signed("devA", 1, "2026-01-01T00:00:00Z".to_string(), &kp);
         head.signature = "not-valid-hex!!".to_string();
         assert!(!head.verify("devA"));
 
-        let mut bad_pk = HeadJson::signed("devA", 1, None, &kp);
+        let mut bad_pk = HeadJson::signed("devA", 1, "2026-01-01T00:00:00Z".to_string(), &kp);
         bad_pk.author_pubkey = hex::encode([0u8; 16]); // wrong length
         assert!(!bad_pk.verify("devA"));
     }

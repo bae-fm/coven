@@ -1645,10 +1645,16 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         "the first blob reached cloud before the second upload failed"
     );
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "firstblob", 5)
-            .await
-            .expect("read first local")
-            .is_some(),
+        crate::blob::local_files::read(
+            &ld,
+            "photos",
+            "firstblob",
+            5,
+            &crate::blob::content_hash(b"first"),
+        )
+        .await
+        .expect("read first local")
+        .is_some(),
         "the first local copy remains because the changeset was not published"
     );
 
@@ -1760,10 +1766,16 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "the first push attempt did not publish the changeset"
     );
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "lazyblob", 4)
-            .await
-            .expect("read lazy local")
-            .is_some(),
+        crate::blob::local_files::read(
+            &ld,
+            "photos",
+            "lazyblob",
+            4,
+            &crate::blob::content_hash(b"lazy"),
+        )
+        .await
+        .expect("read lazy local")
+        .is_some(),
         "the local copy remains until the changeset is published"
     );
 
@@ -1773,10 +1785,16 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "the staged retry publishes the changeset"
     );
     assert!(
-        crate::blob::local_files::read(&ld, "photos", "lazyblob", 4)
-            .await
-            .expect("read lazy local after publish")
-            .is_none(),
+        crate::blob::local_files::read(
+            &ld,
+            "photos",
+            "lazyblob",
+            4,
+            &crate::blob::content_hash(b"lazy"),
+        )
+        .await
+        .expect("read lazy local after publish")
+        .is_none(),
         "the local copy drops after the staged retry commits"
     );
 }

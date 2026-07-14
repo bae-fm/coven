@@ -282,8 +282,8 @@ impl StoreDir {
     /// `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`
     /// back into `(namespace, uploader, id, generation)`, or `None` when it is not
     /// one — a wrong
-    /// segment count, or a shard that does not rebuild (e.g. a plain
-    /// `{namespace}/{cloud_path}` key that happens to have five segments). The
+    /// segment count, or a shard that does not rebuild (including a plain generated
+    /// key). The
     /// inverse of [`Self::generated_blob_key`], and the single place the layout is
     /// parsed, shared by the GC, the blob→row lookup, and share authorization.
     pub fn parse_generated_blob_key(cloud_key: &str) -> Option<(String, String, String, String)> {

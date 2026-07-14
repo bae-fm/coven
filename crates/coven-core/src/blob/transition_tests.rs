@@ -15,10 +15,11 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use async_trait::async_trait;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 use crate::blob::transition::{cancel_make_remote, make_local, make_remote};
 use crate::blob::upload::drain_uploads;
@@ -143,6 +144,35 @@ impl BlobTransitionObserver for Recorder {
             .lock()
             .unwrap()
             .push((blob_id.to_string(), done, total));
+    }
+}
+
+#[derive(Default)]
+struct PauseAfterFirstMaterialize {
+    callbacks: AtomicUsize,
+    reached: Notify,
+    resume: Notify,
+}
+
+#[async_trait]
+impl BlobTransitionObserver for PauseAfterFirstMaterialize {
+    async fn on_blob_upload_started(&self, _blob_id: &str) {}
+    async fn on_blob_uploaded(&self, _blob_id: &str) {}
+    async fn on_blob_upload_failed(&self, _blob_id: &str, _error: &str) {}
+    async fn on_root_made_remote(&self, _root_table: &str, _root_id: &str) {}
+    async fn on_root_made_local(&self, _root_table: &str, _root_id: &str) {}
+    async fn on_blob_materialize_progress(
+        &self,
+        _root_table: &str,
+        _root_id: &str,
+        _blob_id: &str,
+        _done: u64,
+        _total: u64,
+    ) {
+        if self.callbacks.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.reached.notify_one();
+            self.resume.notified().await;
+        }
     }
 }
 
@@ -948,6 +978,46 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
             .unwrap(),
         "the cloud blob remains present",
     );
+}
+
+#[tokio::test]
+async fn make_local_rejects_same_length_corrupt_cache_before_tombstoning_cloud() {
+    let storage = MockSyncStorage::new();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, lib) = temp_store_dir();
+    let bytes = b"managed-cloud-bytes".to_vec();
+    let corrupt = vec![b'x'; bytes.len()];
+
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
+    let cache_path = lib.cache_blob_path("photos", "photoaaa").unwrap();
+    std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+    std::fs::write(&cache_path, &corrupt).unwrap();
+
+    let dest_path = tmp.path().join("dest/photoaaa.jpg");
+    let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
+    let (_cancel_tx, cancel) = watch::channel(false);
+    let cloud_key = recorded_blob_key(&db, "photos", "photoaaa", "cv/photoaaa.jpg").await;
+
+    make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        "notes",
+        "n1",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect("make_local must fetch the signed bytes instead of publishing corrupt cache bytes");
+
+    assert_eq!(std::fs::read(&dest_path).unwrap(), bytes);
+    assert_eq!(storage.blob_read_to_file_count(), 1);
+    assert_eq!(shared_flag(&db, "n1").await, 0);
+    assert_eq!(pending_deletes(&db).await, vec![cloud_key]);
 }
 
 /// A makes a Remote release Local. B's subtree is DELETEd (gate retract) and the
@@ -2333,7 +2403,7 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
 }
 
 #[tokio::test]
-async fn make_local_db_commit_failure_removes_materialized_files_before_retry() {
+async fn make_local_db_commit_failure_retains_a_replaced_user_destination() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
@@ -2355,52 +2425,44 @@ async fn make_local_db_commit_failure_removes_materialized_files_before_retry() 
     let dest_path = tmp.path().join("dest/photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
-    let error = make_local(
+    let observer = PauseAfterFirstMaterialize::default();
+    let replacement = b"replacement-owned-by-another-process".to_vec();
+    let make_local = make_local(
         &db,
         &storage,
         &lib,
         BlobPathScheme::Plain,
         &hlc,
-        None,
+        Some(&observer),
         "notes",
         "n1",
         &dest,
         &cancel,
-    )
-    .await
-    .expect_err("database commit failure must abort make_local");
+    );
+    let replace_destination = async {
+        observer.reached.notified().await;
+        std::fs::remove_file(&dest_path).expect("remove Coven's published file");
+        std::fs::write(&dest_path, &replacement).expect("publish another process's replacement");
+        observer.resume.notify_one();
+    };
+    let (result, ()) = tokio::join!(make_local, replace_destination);
+    let error = result.expect_err("database commit failure must abort make_local");
 
     assert!(matches!(
-        error,
-        crate::blob::transition::MakeLocalError::Db(_)
+        &error,
+        crate::blob::transition::MakeLocalError::PartialMaterialization {
+            retained_paths,
+            ..
+        } if retained_paths == &vec![dest_path.clone()]
     ));
-    assert!(!dest_path.exists(), "materialized file was rolled back");
+    assert_eq!(
+        std::fs::read(&dest_path).unwrap(),
+        replacement,
+        "rollback must not unlink a caller-owned pathname after it has been published",
+    );
     assert_eq!(shared_flag(&db, "n1").await, 1);
     assert!(db.external_blob("photoaaa").await.unwrap().is_none());
     assert!(pending_deletes(&db).await.is_empty());
-
-    db.call(|conn| {
-        conn.execute_batch("DROP TRIGGER reject_make_local")
-            .map_err(crate::database::DbError::from)
-    })
-    .await
-    .expect("remove commit failure trigger");
-    make_local(
-        &db,
-        &storage,
-        &lib,
-        BlobPathScheme::Plain,
-        &hlc,
-        None,
-        "notes",
-        "n1",
-        &dest,
-        &cancel,
-    )
-    .await
-    .expect("retry after rollback");
-    assert_eq!(std::fs::read(dest_path).unwrap(), bytes);
-    assert_eq!(shared_flag(&db, "n1").await, 0);
 }
 
 #[tokio::test]
@@ -2516,7 +2578,7 @@ async fn make_local_refuses_to_replace_an_existing_destination() {
 }
 
 #[tokio::test]
-async fn make_local_rolls_back_when_two_blobs_share_a_destination() {
+async fn make_local_retains_the_published_path_when_two_blobs_share_a_destination() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
@@ -2542,7 +2604,7 @@ async fn make_local_rolls_back_when_two_blobs_share_a_destination() {
             "photobbb",
             BlobScope::Master,
             Some("cv/photobbb.jpg"),
-            second,
+            second.clone(),
         )
         .await
         .unwrap();
@@ -2573,10 +2635,17 @@ async fn make_local_rolls_back_when_two_blobs_share_a_destination() {
     .expect_err("one destination cannot own two blobs");
 
     assert!(matches!(
-        error,
-        crate::blob::transition::MakeLocalError::DestinationExists { .. }
+        &error,
+        crate::blob::transition::MakeLocalError::PartialMaterialization {
+            retained_paths,
+            ..
+        } if retained_paths == &vec![destination.clone()]
     ));
-    assert!(!destination.exists());
+    let retained = std::fs::read(&destination).unwrap();
+    assert!(
+        retained == first || retained == second,
+        "the published destination contains whichever valid blob materialized first",
+    );
     assert_eq!(shared_flag(&db, "n1").await, 1);
     assert!(pending_deletes(&db).await.is_empty());
     let first_location = db

@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn passphrase_preset_envelope_fixture_v1_unlocks() {
+    fn passphrase_preset_current_v1_envelope_fixture_unlocks() {
         let (_tmp, dir) = temp_store_dir();
         std::fs::write(dir.join("master.keyring"), V1_FIXTURE_ENVELOPE_JSON)
             .expect("write fixture envelope");
@@ -396,7 +396,7 @@ mod tests {
             PassphraseCustody::new(Passphrase::new(V1_FIXTURE_PASSPHRASE.to_string()), &dir);
         let keyring = custody
             .unlock()
-            .expect("the v1 fixture must still unlock")
+            .expect("the current v1 fixture must unlock")
             .expect("the fixture names an established keyring");
         assert_eq!(
             keyring.fingerprint(),

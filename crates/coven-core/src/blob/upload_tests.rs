@@ -565,6 +565,48 @@ async fn backoff_skips_item_inside_window() {
 }
 
 #[tokio::test]
+async fn malformed_retry_timestamp_fails_drain_without_cloud_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
+    let db = open_outbox_db();
+    insert_upload(
+        &db,
+        1,
+        "fid",
+        "k1",
+        Some(path),
+        1,
+        Some("not-a-timestamp".to_string()),
+    )
+    .await;
+    let cloud = InMemoryCloudHome::new();
+
+    let result = run_drain(
+        &db,
+        &cloud,
+        &enc(),
+        &StoreDir::new(tmp.path()),
+        &fixed_clock(T0),
+        None,
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("malformed durable retry timestamp must fail the drain"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.to_string().contains("last_attempt_at"),
+        "error names the malformed durable field: {error}",
+    );
+    assert!(cloud.get("k1").is_none(), "no cloud write is attempted");
+    assert!(
+        get_upload(&db, 1).await.is_some(),
+        "the queue row is retained"
+    );
+}
+
+#[tokio::test]
 async fn observer_fires_started_then_uploaded_on_success() {
     let tmp = tempfile::tempdir().unwrap();
     let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
@@ -649,6 +691,7 @@ async fn upload_failure_recording_failure_fails_the_drain() {
     })
     .await
     .expect("install upload failure recording trigger");
+    let observer = RecordingObserver::new();
 
     let result = run_drain(
         &db,
@@ -656,7 +699,7 @@ async fn upload_failure_recording_failure_fails_the_drain() {
         &enc(),
         &StoreDir::new(tmp.path()),
         &fixed_clock(T0),
-        None,
+        Some(&observer),
     )
     .await;
     let error = match result {
@@ -674,6 +717,13 @@ async fn upload_failure_recording_failure_fails_the_drain() {
         get_upload(&db, 1).await.unwrap().0,
         0,
         "the failed update leaves the original queue row intact",
+    );
+    assert!(
+        !observer
+            .events()
+            .iter()
+            .any(|event| matches!(event, ObsEvent::Failed(_, _))),
+        "a failure that was not durably recorded cannot be notified",
     );
 }
 
@@ -1020,9 +1070,7 @@ async fn a_failed_pin_populate_keeps_the_upload_queued() {
 /// A cloud backend that gathers writes on a barrier before serving, so a test can
 /// prove the drain runs uploads concurrently and bounds them: with a barrier of size
 /// N, N writes must arrive together to release it, and `max_inflight` records the
-/// observed peak. Records each written key so the test can assert what landed. Its
-/// `delete` is a no-op (the drain's post-upload tombstone cancel deletes an absent
-/// object).
+/// observed peak. Records each written key so the test can assert what landed.
 struct BarrierCloudHome {
     keys: Mutex<Vec<String>>,
     inflight: AtomicUsize,

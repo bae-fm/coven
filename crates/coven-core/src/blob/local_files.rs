@@ -84,12 +84,13 @@ pub async fn read(
     namespace: &str,
     id: &str,
     expected_size: u64,
+    expected_hash: &str,
 ) -> Result<Option<Vec<u8>>, LocalBlobError> {
-    match path_if_present(store_dir, namespace, id, expected_size).await? {
-        Some(path) => crate::local_blob::read(&path)
+    match present_path(store_dir, namespace, id).await? {
+        Some(path) => crate::local_blob::read_verified(&path, expected_size, expected_hash)
             .await
             .map(Some)
-            .map_err(LocalBlobError::Io),
+            .map_err(|error| LocalBlobError::Io(error.to_string())),
         None => Ok(None),
     }
 }
@@ -122,15 +123,50 @@ pub async fn read_range(
     namespace: &str,
     id: &str,
     expected_size: u64,
+    expected_hash: &str,
     offset: u64,
     len: u64,
 ) -> Result<Option<Vec<u8>>, LocalBlobError> {
-    match path_if_present(store_dir, namespace, id, expected_size).await? {
-        Some(path) => crate::local_blob::read_range(&path, offset, len)
-            .await
-            .map(Some)
-            .map_err(LocalBlobError::Io),
+    match present_path(store_dir, namespace, id).await? {
+        Some(path) => {
+            crate::local_blob::read_range_verified(&path, expected_size, expected_hash, offset, len)
+                .await
+                .map(Some)
+                .map_err(|error| LocalBlobError::Io(error.to_string()))
+        }
         None => Ok(None),
+    }
+}
+
+/// Copy a present local-store blob only after authenticating its complete bytes
+/// through the same opened source handle.
+pub async fn copy_verified_if_present(
+    store_dir: &StoreDir,
+    namespace: &str,
+    id: &str,
+    expected_size: u64,
+    expected_hash: &str,
+    destination: &std::path::Path,
+) -> Result<bool, LocalBlobError> {
+    let Some(path) = present_path(store_dir, namespace, id).await? else {
+        return Ok(false);
+    };
+    crate::local_blob::copy_verified_atomic(&path, destination, expected_size, expected_hash)
+        .await
+        .map_err(|error| LocalBlobError::Io(error.to_string()))?;
+    Ok(true)
+}
+
+async fn present_path(
+    store_dir: &StoreDir,
+    namespace: &str,
+    id: &str,
+) -> Result<Option<PathBuf>, LocalBlobError> {
+    let path = store_dir.local_blob_path(namespace, id)?;
+    match crate::local_blob::exists(&path).await {
+        Ok(true) => Ok(Some(path)),
+        Ok(false) => Ok(None),
+        Err(error) => Err(LocalBlobError::Io(error)),
     }
 }
 

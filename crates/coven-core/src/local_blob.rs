@@ -23,6 +23,18 @@ pub fn is_temp_blob_path(path: &Path) -> bool {
 pub struct PlaintextReader(Box<dyn PlatformPlaintextReader>);
 
 #[derive(Debug, thiserror::Error)]
+pub enum VerifiedReadError {
+    #[error("local blob I/O error: {0}")]
+    Io(String),
+    #[error("local blob has {actual} bytes, expected {expected}")]
+    SizeMismatch { expected: u64, actual: u64 },
+    #[error("local blob content hash is {actual}, expected {expected}")]
+    HashMismatch { expected: String, actual: String },
+    #[error("local blob range {offset}..{end} exceeds {size} bytes")]
+    Range { offset: u64, end: u64, size: u64 },
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum CommitNoReplaceError {
     #[error("destination already exists: {0}")]
     DestinationExists(PathBuf),
@@ -128,6 +140,92 @@ pub async fn read(path: &Path) -> Result<Vec<u8>, String> {
 
 pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String> {
     backend().read_range(path, offset, len).await
+}
+
+/// Read and authenticate a complete local plaintext file through one opened
+/// handle. The returned bytes are the bytes that were hashed; no path is reopened
+/// between verification and use.
+pub async fn read_verified(
+    path: &Path,
+    expected_size: u64,
+    expected_hash: &str,
+) -> Result<Vec<u8>, VerifiedReadError> {
+    let mut reader = open_reader(path).await.map_err(VerifiedReadError::Io)?;
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = reader
+            .next_chunk(64 * 1024)
+            .await
+            .map_err(VerifiedReadError::Io)?;
+        if chunk.is_empty() {
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let actual_size = bytes.len() as u64;
+    if actual_size != expected_size {
+        return Err(VerifiedReadError::SizeMismatch {
+            expected: expected_size,
+            actual: actual_size,
+        });
+    }
+    let actual_hash = crate::blob::content_hash(&bytes);
+    if actual_hash != expected_hash {
+        return Err(VerifiedReadError::HashMismatch {
+            expected: expected_hash.to_string(),
+            actual: actual_hash,
+        });
+    }
+    Ok(bytes)
+}
+
+/// Authenticate the complete file through one opened handle, then return a
+/// range from those same verified bytes.
+pub async fn read_range_verified(
+    path: &Path,
+    expected_size: u64,
+    expected_hash: &str,
+    offset: u64,
+    len: u64,
+) -> Result<Vec<u8>, VerifiedReadError> {
+    let bytes = read_verified(path, expected_size, expected_hash).await?;
+    let end = offset.checked_add(len).ok_or(VerifiedReadError::Range {
+        offset,
+        end: u64::MAX,
+        size: expected_size,
+    })?;
+    if end > expected_size {
+        return Err(VerifiedReadError::Range {
+            offset,
+            end,
+            size: expected_size,
+        });
+    }
+    let start = usize::try_from(offset).map_err(|_| VerifiedReadError::Range {
+        offset,
+        end,
+        size: expected_size,
+    })?;
+    let end = usize::try_from(end).map_err(|_| VerifiedReadError::Range {
+        offset,
+        end,
+        size: expected_size,
+    })?;
+    Ok(bytes[start..end].to_vec())
+}
+
+/// Authenticate `src` through one opened handle and atomically publish those
+/// verified bytes at `dst`.
+pub async fn copy_verified_atomic(
+    src: &Path,
+    dst: &Path,
+    expected_size: u64,
+    expected_hash: &str,
+) -> Result<(), VerifiedReadError> {
+    let bytes = read_verified(src, expected_size, expected_hash).await?;
+    write_atomic(dst, &bytes)
+        .await
+        .map_err(VerifiedReadError::Io)
 }
 
 pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {

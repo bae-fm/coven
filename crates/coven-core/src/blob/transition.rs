@@ -128,6 +128,11 @@ pub enum MakeLocalError {
     CloudKey(String, String),
     #[error("make_local cancelled before the commit; the release stays Remote")]
     Cancelled,
+    #[error("make_local stopped after publishing caller-owned paths {retained_paths:?}: {detail}")]
+    PartialMaterialization {
+        retained_paths: Vec<PathBuf>,
+        detail: String,
+    },
     /// Rolling back a partially-materialized make_local could not remove a
     /// host-provided blob's local-store copy. Unlike a stray user-folder file, this
     /// leftover is presence-read by [`cache::read_blob`] AND budget-exempt, so it
@@ -135,8 +140,8 @@ pub enum MakeLocalError {
     /// caller retries (a retry re-materializes over it).
     #[error("could not roll back the local-store copy at {path}: {detail}")]
     CleanupLocalStore { path: String, detail: String },
-    #[error("could not roll back the created destination at {path}: {detail}")]
-    CleanupUserPath { path: String, detail: String },
+    #[error("could not remove the operation temp file at {path}: {detail}")]
+    CleanupTemp { path: String, detail: String },
     #[error("database error: {0}")]
     Db(#[from] DbError),
 }
@@ -649,11 +654,10 @@ struct Materialized {
     cloud_key: String,
 }
 
-/// A local copy a make_local has written, tracked so an abort can roll it back. The
-/// two kinds differ in how a *failed* removal is treated: a user-folder leftover is a
-/// harmless stray (a warning), but a local-store leftover is presence-read by
-/// [`cache::read_blob`] AND budget-exempt, so a failed removal of one is surfaced loud
-/// (see [`cleanup_partial`]).
+/// A local copy a make_local has written. A user path becomes caller-owned as soon as
+/// it is published and is retained if a later step fails. A host-provided blob's
+/// local-store path remains Coven-owned until the database commit and is removed on
+/// failure.
 #[cfg(not(target_arch = "wasm32"))]
 enum WrittenFile {
     /// A user-provided blob's materialized file at the user's chosen path.
@@ -678,9 +682,10 @@ enum WrittenFile {
 ///
 /// `dest` carries user-provided ids only; a missing host-provided dest is not an
 /// error. Cancellation, or any failure (a missing user-provided dest, a read error,
-/// a write error) before the commit, deletes the partial local copies already
-/// written and aborts: the gate is still on and the cloud is intact, so the root
-/// stays Remote and a retry re-materializes cleanly.
+/// a write error) before the commit, removes Coven-owned local-store copies and
+/// aborts: the gate is still on and the cloud is intact. User destinations already
+/// published are retained and named in [`MakeLocalError::PartialMaterialization`];
+/// once a pathname is visible to the caller, rollback never unlinks it.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 pub async fn make_local(
@@ -752,10 +757,8 @@ pub async fn make_local(
         }
     }
 
-    // Any error after the first local copy is written must roll those files back, so
-    // an aborted make_local leaves no partial materialization behind. `written` tracks
-    // what to remove (typed by kind so the rollback treats a local-store leftover
-    // loud); the loop's result drives the cleanup-or-commit decision.
+    // Track every published copy so an abort can remove Coven-owned local-store files
+    // and report caller-owned user destinations without unlinking their pathnames.
     let stamp = hlc.now().to_string();
     let mut written: Vec<WrittenFile> = Vec::new();
     let materialized = match materialize_blobs(
@@ -779,8 +782,8 @@ pub async fn make_local(
     };
 
     // Build the per-blob commit data, converting each user-provided dest to a UTF-8
-    // string FALLIBLY here — before the commit — so a non-UTF-8 path aborts cleanly
-    // (the cloud is still intact, the partials rolled back) instead of being silently
+    // string FALLIBLY here — before the commit — so a non-UTF-8 path aborts (the cloud
+    // is still intact) instead of being silently
     // rewritten by a lossy conversion, registered as a wrong external ref, and its
     // cloud copy tombstoned (data loss). Tuple: (id, namespace, external-ref path or
     // None, size, cloud key).
@@ -884,8 +887,9 @@ pub async fn make_local(
 /// records the commit needs. A user-provided blob goes to its `dest` path (required,
 /// else [`MakeLocalError::MissingDest`]); a host-provided blob goes to coven's local
 /// store (no dest). Any error (cancel, a missing user-provided dest, a read or write
-/// failure, a key-derivation failure) returns early; the caller rolls back `written`.
-/// Separated from the commit so every error path runs that one rollback.
+/// failure, a key-derivation failure) returns early; the caller removes Coven-owned
+/// copies and reports any retained user paths. Separated from the commit so every
+/// error path runs that ownership-aware handling.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 async fn materialize_blobs(
@@ -1103,43 +1107,51 @@ fn operation_temp_path(
 async fn cleanup_operation_temp(path: &std::path::Path, error: MakeLocalError) -> MakeLocalError {
     match crate::local_blob::remove_file(path).await {
         Ok(_) => error,
-        Err(detail) => MakeLocalError::CleanupUserPath {
+        Err(detail) => MakeLocalError::CleanupTemp {
             path: path.display().to_string(),
             detail,
         },
     }
 }
 
-/// Roll back the partial local copies an aborted make_local wrote, then return the
-/// error to surface. Returns the original `abort_err` when the rollback succeeds; if
-/// the rollback itself fails to remove a local-store leftover it returns THAT
-/// instead — the more urgent signal, since that leftover is a readable, budget-exempt
-/// copy of a still-Remote blob (a retry re-materializes over it).
+/// Remove Coven-owned local-store copies after an aborted make_local. User paths are
+/// never unlinked after publication: another process may already have replaced the
+/// pathname. If any were published, surface them with the operation failure so the
+/// caller owns their disposition.
 #[cfg(not(target_arch = "wasm32"))]
 async fn roll_back(written: &[WrittenFile], abort_err: MakeLocalError) -> MakeLocalError {
-    match cleanup_partial(written).await {
-        Ok(()) => abort_err,
-        Err(cleanup_err) => cleanup_err,
+    let retained_paths: Vec<PathBuf> = written
+        .iter()
+        .filter_map(|file| match file {
+            WrittenFile::UserPath(path) => Some(path.clone()),
+            WrittenFile::LocalStore(_) => None,
+        })
+        .collect();
+    let cleanup_result = cleanup_partial(written).await;
+
+    if retained_paths.is_empty() {
+        return cleanup_result.err().unwrap_or(abort_err);
+    }
+
+    let mut detail = abort_err.to_string();
+    if let Err(cleanup_error) = cleanup_result {
+        detail.push_str("; Coven-owned cleanup also failed: ");
+        detail.push_str(&cleanup_error.to_string());
+    }
+    MakeLocalError::PartialMaterialization {
+        retained_paths,
+        detail,
     }
 }
 
-/// Delete the partial local copies an aborted make_local wrote. Failure to remove
-/// either kind is surfaced: a user path was created exclusively by this operation,
-/// while a local-store leftover would make a still-Remote blob read as Local.
-/// An already-absent file is not an error
+/// Delete only Coven-owned local-store copies written by an aborted make_local. An
+/// already-absent file is not an error
 /// ([`crate::local_blob::remove_file`] reports `Ok(false)`).
 #[cfg(not(target_arch = "wasm32"))]
 async fn cleanup_partial(written: &[WrittenFile]) -> Result<(), MakeLocalError> {
     for file in written {
         match file {
-            WrittenFile::UserPath(path) => {
-                crate::local_blob::remove_file(path)
-                    .await
-                    .map_err(|detail| MakeLocalError::CleanupUserPath {
-                        path: path.display().to_string(),
-                        detail,
-                    })?;
-            }
+            WrittenFile::UserPath(_) => {}
             WrittenFile::LocalStore(path) => {
                 crate::local_blob::remove_file(path)
                     .await

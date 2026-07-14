@@ -180,11 +180,6 @@ pub(crate) async fn push_changeset(
             changeset.len()
         )));
     }
-    if envelope.author_pubkey.is_none() || envelope.signature.is_none() {
-        return Err(ChangesetPublishError::InvalidPacked(
-            "outgoing changeset is unsigned".to_string(),
-        ));
-    }
     if !super::envelope::verify_changeset_signature(&envelope, &changeset) {
         return Err(ChangesetPublishError::InvalidPacked(
             "outgoing changeset signature does not verify".to_string(),

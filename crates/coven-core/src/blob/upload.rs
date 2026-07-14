@@ -133,18 +133,18 @@ async fn record_failure(
     now: chrono::DateTime<chrono::Utc>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<(), DbError> {
-    let recorded = db
-        .record_cloud_upload_failure(entry.id, error, &now.to_rfc3339())
-        .await;
+    db.record_cloud_upload_failure(entry.id, error, &now.to_rfc3339())
+        .await
+        .map_err(|record_error| {
+            DbError(format!(
+                "{error}; failed to record upload failure for entry {}: {record_error}",
+                entry.id
+            ))
+        })?;
     if let Some(obs) = observer {
         obs.on_blob_upload_failed(file_id, error).await;
     }
-    recorded.map_err(|record_error| {
-        DbError(format!(
-            "{error}; failed to record upload failure for entry {}: {record_error}",
-            entry.id
-        ))
-    })
+    Ok(())
 }
 
 /// Open a streaming [`BlobBody`] over an upload's local plaintext file —
@@ -308,7 +308,7 @@ pub async fn drain_uploads(
             // Pull the next entry outside its retry backoff window; entries still
             // inside it are skipped this pass (a poisoned entry isn't re-attempted
             // every cycle).
-            let Some(entry) = next_ready_entry(&mut pending, now) else {
+            let Some(entry) = next_ready_entry(&mut pending, now)? else {
                 break;
             };
             inflight.push(upload_entry(
@@ -375,25 +375,23 @@ enum EntryOutcome {
 }
 
 /// Whether `entry` is still inside its retry backoff window and must be skipped this
-/// pass. A corrupt `last_attempt_at` is logged and treated as ready — an entry is
-/// never stranded on an unparseable timestamp.
-fn entry_in_backoff(entry: &OutboxEntry, now: chrono::DateTime<chrono::Utc>) -> bool {
+/// pass. A present timestamp is durable scheduling state, so malformed state aborts
+/// the drain rather than changing the entry to retry-ready.
+fn entry_in_backoff(
+    entry: &OutboxEntry,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, DbError> {
     let Some(last) = entry.last_attempt_at.as_deref() else {
-        return false;
+        return Ok(false);
     };
-    match chrono::DateTime::parse_from_rfc3339(last) {
-        Ok(last_dt) => {
-            let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
-            elapsed < backoff_window(entry.attempt_count)
-        }
-        Err(e) => {
-            warn!(
-                "Outbox entry {} has unparseable last_attempt_at {last:?}: {e}; retrying",
-                entry.id
-            );
-            false
-        }
-    }
+    let last_dt = chrono::DateTime::parse_from_rfc3339(last).map_err(|error| {
+        DbError(format!(
+            "cloud_outbox entry {} has malformed last_attempt_at {last:?}: {error}",
+            entry.id
+        ))
+    })?;
+    let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
+    Ok(elapsed < backoff_window(entry.attempt_count))
 }
 
 /// The next queued entry ready to attempt now — skipping any still inside its
@@ -401,13 +399,18 @@ fn entry_in_backoff(entry: &OutboxEntry, now: chrono::DateTime<chrono::Utc>) -> 
 fn next_ready_entry(
     pending: &mut std::vec::IntoIter<OutboxEntry>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Option<OutboxEntry> {
-    pending.by_ref().find(|entry| !entry_in_backoff(entry, now))
+) -> Result<Option<OutboxEntry>, DbError> {
+    for entry in pending {
+        if !entry_in_backoff(&entry, now)? {
+            return Ok(Some(entry));
+        }
+    }
+    Ok(None)
 }
 
 /// Upload one queued entry: seal its local plaintext, write it to the cloud, and run
-/// the post-upload bookkeeping (pin populate, tombstone cancel, and the atomic
-/// completion commit). Returns what the drain must aggregate — whether the cloud
+/// the post-upload bookkeeping (cache disposition and the atomic completion
+/// commit). Returns what the drain must aggregate — whether the cloud
 /// write landed and whether it completed a make_remote. A blob transfer failure is
 /// recorded and isolated here. A post-upload database failure is returned to the
 /// drain after the other already-running transfers finish, because the operation

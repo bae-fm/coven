@@ -13,9 +13,8 @@ pub struct DeviceActivity {
     /// member the device belongs to. Empty only for a head that carried no author.
     pub author: String,
     pub last_seq: u64,
-    /// RFC 3339 timestamp of the device's last sync. None if the head
-    /// carried no timestamp.
-    pub last_sync: Option<String>,
+    /// RFC 3339 timestamp of the device's last sync.
+    pub last_sync: String,
 }
 
 /// Sync status derived from the heads fetched during a pull.
@@ -76,13 +75,13 @@ mod tests {
             DeviceHead {
                 device_id: "dev-1".into(),
                 seq: 5,
-                last_sync: Some("2026-02-10T12:00:00Z".into()),
+                last_sync: "2026-02-10T12:00:00Z".into(),
                 author_pubkey: String::new(),
             },
             DeviceHead {
                 device_id: "dev-2".into(),
                 seq: 3,
-                last_sync: Some("2026-02-10T11:55:00Z".into()),
+                last_sync: "2026-02-10T11:55:00Z".into(),
                 author_pubkey: "abcd".into(),
             },
         ];
@@ -96,20 +95,5 @@ mod tests {
         assert_eq!(status.other_devices[0].device_id, "dev-2");
         assert_eq!(status.other_devices[0].author, "abcd");
         assert_eq!(status.other_devices[0].last_seq, 3);
-    }
-
-    #[test]
-    fn build_status_with_no_timestamps() {
-        let heads = vec![DeviceHead {
-            device_id: "dev-2".into(),
-            seq: 10,
-            last_sync: None,
-            author_pubkey: String::new(),
-        }];
-
-        let status = build_sync_status(&heads, "dev-1", None);
-        assert_eq!(status.last_sync_time, None);
-        assert_eq!(status.other_devices.len(), 1);
-        assert_eq!(status.other_devices[0].last_sync, None);
     }
 }

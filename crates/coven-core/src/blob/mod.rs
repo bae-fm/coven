@@ -1,7 +1,7 @@
 //! The blob engine: coven's single owner of a blob's whole durability lifecycle.
 //!
 //! coven syncs opaque encrypted blobs referenced by DB rows. By default it owns
-//! the cloud layout (the content-addressed `{namespace}/{ab}/{cd}/{id}`) and
+//! the cloud layout (an immutable generated location containing the blob id) and
 //! encryption; the host decides which rows carry blobs, where their plaintext
 //! lives locally, and how each is scoped for encryption. A home configured for
 //! the unobfuscated blob-path scheme instead stores each blob at the consumer's
@@ -375,51 +375,6 @@ pub enum CacheFill {
     CacheLazy,
 }
 
-/// A blob's **replacement story**: whether the row carrying it may ever be repointed at
-/// a different blob. Orthogonal to [`Provenance`] and [`CacheFill`]; a blob declares all
-/// three.
-///
-/// It exists because a cloud object must never be rewritten with different bytes. The
-/// pull verifies an object against its row's content hash and a cursor advances only over
-/// a fully-realized changeset, so a key whose content can change leaves a device that
-/// pulls an older changeset unable to satisfy it — wedged there for good, not merely
-/// missing a blob. Two declarations reach that guarantee by different routes, and coven
-/// enforces whichever one the blob declares:
-///
-/// - [`Replaceable`](Self::Replaceable) — the row may be repointed, so the *key* must
-///   move with the blob: a readable `cloud_path` has to name its blob
-///   ([`crate::blob::decl::cloud_path_names_blob`]), and a replacement then writes a new
-///   object beside the one it replaces instead of over it.
-/// - [`WriteOnce`](Self::WriteOnce) — the row is never repointed, so the object at its
-///   key is written once and there is nothing to protect it from. Its path is free to be
-///   a stable, fully readable name. coven refuses the repointing.
-///
-/// `Replaceable` is the default: its guarantee is the airtight one (the key itself
-/// carries the blob id, so no path can ever be reused), while `WriteOnce` is a weaker
-/// contract a consumer opts into knowingly — see its docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlobReplacement {
-    /// The row may be repointed at a new blob id — replacing a cover, swapping an
-    /// attachment. Requires a readable `cloud_path` that names its blob, so that the
-    /// replacement's fresh blob id yields a fresh key.
-    Replaceable,
-    /// The row is never repointed: the blob it names when it is inserted is the blob it
-    /// names for life. Repointing one is refused.
-    ///
-    /// This buys a stable, fully readable cloud path — `Live at Leeds/01 Sonata.flac`
-    /// rather than `01 Sonata-0ef7a1c9.flac` — for content that is written once and never
-    /// rewritten: an imported file, whose bytes are what they are.
-    ///
-    /// **What coven enforces, and what it does not.** coven refuses to repoint the row,
-    /// which is the reuse it can see. It cannot see a consumer *deleting* a row and
-    /// inserting a different blob at the same `cloud_path` — the deleted row is gone, and
-    /// coven keeps no history of the paths it has used. Declaring `WriteOnce` is therefore
-    /// also a promise that the path is never reused by a different blob. Derive it from
-    /// data that never repeats and it holds by construction: a path carrying a freshly
-    /// minted id for the thing being imported can never be handed out twice.
-    WriteOnce,
-}
-
 /// A blob a row references: its cloud identity, encryption scope, and the two
 /// declared properties ([`provenance`](BlobRef::provenance) +
 /// [`fill`](BlobRef::fill)). coven derives it from the row's declared columns
@@ -431,16 +386,16 @@ pub enum BlobReplacement {
 /// from the validated namespace + id — see [`cache`]).
 #[derive(Debug, Clone)]
 pub struct BlobRef {
-    /// Cloud namespace, e.g. `"images"`. Becomes `{namespace}/{ab}/{cd}/{id}`
-    /// under the hashed scheme, or `{namespace}/{cloud_path}` under the plain one.
+    /// Cloud namespace, e.g. `"images"`. It is the first segment of either current
+    /// generated cloud-key layout.
     pub namespace: String,
     /// Blob id (typically the id of the blob-bearing row).
     pub id: String,
     /// Encryption scope for this blob.
     pub scope: BlobScope,
     /// The consumer's readable cloud-relative path for this blob, e.g.
-    /// `"Artist - Album/cover.jpg"`. Used as the object key under `namespace` when
-    /// the home's [`crate::sync::cloud_storage::BlobPathScheme`] is `Plain`;
+    /// `"Artist - Album/cover.jpg"`. Used as the readable suffix when the home's
+    /// [`crate::sync::cloud_storage::BlobPathScheme`] is `Plain`;
     /// ignored when `Hashed`. `None` is only valid for a `Hashed` home — a `Plain`
     /// home with no `cloud_path` is a surfaced error, never a silent fallback.
     pub cloud_path: Option<String>,

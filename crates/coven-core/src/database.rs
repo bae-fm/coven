@@ -216,7 +216,7 @@ impl DatabaseCore {
         // are stripped on snapshot, so a versioned ledger can't track them; the
         // host's synced ladder version rides inside the snapshot's DB header.
         apply_coven_schema(&conn).map_err(DbError::from)?;
-        migrate_bookkeeping_schema(&conn)?;
+        validate_published_blob_drop_intents_schema(&conn)?;
         let schema_version = run_migrations(&conn, migrations)?;
 
         // Enforce the synced-table contract against the live host schema: each
@@ -1837,7 +1837,7 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
             // for an upload), so its absence is also corruption.
             let scope_str: String = r.get(5)?;
             let scope = crate::blob::BlobScope::from_outbox_str(&scope_str)
-                .unwrap_or_else(|| panic!("invalid cloud_outbox.scope: {scope_str:?}"));
+                .ok_or_else(|| invalid_outbox_value(5, "scope", &scope_str))?;
             OutboxOperation::Upload {
                 file_id: r.get(2)?,
                 source_path: r.get(4)?,
@@ -1847,7 +1847,7 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
             }
         }
         "delete" => OutboxOperation::Delete,
-        other => panic!("invalid cloud_outbox.operation: {other:?}"),
+        other => return Err(invalid_outbox_value(1, "operation", other)),
     };
     Ok(OutboxEntry {
         id: r.get(0)?,
@@ -1856,6 +1856,17 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
         last_attempt_at: r.get(8)?,
         operation,
     })
+}
+
+fn invalid_outbox_value(index: usize, column: &str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid cloud_outbox.{column}: {value:?}"),
+        )),
+    )
 }
 
 /// Seed the register clock from one candidate floor, if present. A present but
@@ -2036,31 +2047,34 @@ fn open_connection(path: &Path) -> Result<Connection, DbError> {
     )
 }
 
-fn migrate_bookkeeping_schema(conn: &Connection) -> Result<(), DbError> {
-    if !table_has_column(conn, "published_blob_drop_intents", "size")? {
-        conn.execute(
-            "ALTER TABLE published_blob_drop_intents ADD COLUMN size INTEGER",
-            [],
-        )
+fn validate_published_blob_drop_intents_schema(conn: &Connection) -> Result<(), DbError> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(published_blob_drop_intents)")
         .map_err(DbError::from)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? != 0,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(DbError::from)?;
+    let actual = rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)?;
+    let expected = vec![
+        ("seq".to_string(), "INTEGER".to_string(), true, 1),
+        ("namespace".to_string(), "TEXT".to_string(), true, 2),
+        ("blob_id".to_string(), "TEXT".to_string(), true, 3),
+        ("size".to_string(), "INTEGER".to_string(), true, 0),
+        ("disposition".to_string(), "TEXT".to_string(), true, 0),
+    ];
+    if actual != expected {
+        return Err(DbError(format!(
+            "published_blob_drop_intents has a non-current schema; expected required size INTEGER column and canonical columns, found {actual:?}"
+        )));
     }
     Ok(())
-}
-
-fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, DbError> {
-    let sql = format!(
-        "PRAGMA table_info({})",
-        crate::sync::session::quote_ident(table)
-    );
-    let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
-    let mut rows = stmt.query([]).map_err(DbError::from)?;
-    while let Some(row) = rows.next().map_err(DbError::from)? {
-        let name: String = row.get(1).map_err(DbError::from)?;
-        if name == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(test)]
@@ -2209,6 +2223,54 @@ mod tests {
         assert!(
             error.contains("device_id") && error.contains("empty"),
             "error names the empty device id: {error}",
+        );
+    }
+
+    #[test]
+    fn database_open_rejects_non_current_bookkeeping_schema() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("non-current.sqlite");
+        let conn = Connection::open(&path).expect("open fixture database");
+        conn.execute_batch(
+            "CREATE TABLE published_blob_drop_intents (
+                seq INTEGER NOT NULL,
+                namespace TEXT NOT NULL,
+                blob_id TEXT NOT NULL,
+                disposition TEXT NOT NULL CHECK (disposition IN ('drop', 'cache', 'pin')),
+                PRIMARY KEY (seq, namespace, blob_id)
+            ) STRICT;",
+        )
+        .expect("create non-current bookkeeping table");
+        drop(conn);
+
+        let result = Database::open(
+            &path,
+            Vec::new(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "non-current-bookkeeping".to_string(),
+            &[],
+        );
+        let error = match result {
+            Ok(_) => panic!("open must reject a non-current bookkeeping table"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(
+            error.contains("published_blob_drop_intents") && error.contains("size"),
+            "open names the non-current table and missing column: {error}",
+        );
+        let conn = Connection::open(&path).expect("reopen rejected fixture");
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(published_blob_drop_intents)")
+            .expect("prepare table info")
+            .query_map([], |row| row.get(1))
+            .expect("query table info")
+            .collect::<Result<_, _>>()
+            .expect("collect table columns");
+        assert!(
+            !columns.iter().any(|column| column == "size"),
+            "a rejected open must not rewrite the non-current schema",
         );
     }
 
@@ -2492,5 +2554,66 @@ mod tests {
             Some("0"),
             "retain_pinned must default to 0",
         );
+    }
+
+    async fn assert_malformed_outbox_row_is_error(operation: &str, scope: Option<&str>) {
+        let (db, _stamper) = Database::open(
+            Path::new(":memory:"),
+            Vec::new(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "malformed-outbox".to_string(),
+            &[],
+        )
+        .expect("open database");
+        let operation = operation.to_string();
+        let scope = scope.map(str::to_string);
+        db.call(move |conn| {
+            conn.pragma_update(None, "ignore_check_constraints", true)
+                .map_err(DbError::from)?;
+            conn.execute(
+                "INSERT INTO cloud_outbox \
+                 (operation, file_id, cloud_key, expected_hash, scope, created_at) \
+                 VALUES (?1, 'blob', 'photos/key', 'hash', ?2, 'stamp')",
+                (operation, scope),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("insert malformed durable row");
+
+        let result = db
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT id, operation, file_id, cloud_key, source_path, scope, \
+                            retain_pinned, attempt_count, last_attempt_at, expected_hash \
+                     FROM cloud_outbox",
+                    [],
+                    row_to_outbox_entry,
+                )
+                .map_err(DbError::from)
+            })
+            .await;
+        assert!(result.is_err(), "malformed durable row must return DbError");
+
+        let usable = db
+            .call(|conn| {
+                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                    .map_err(DbError::from)
+            })
+            .await
+            .expect("database remains usable after malformed row");
+        assert_eq!(usable, 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_outbox_operation_returns_error_without_poisoning_database() {
+        assert_malformed_outbox_row_is_error("invalid", None).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_outbox_scope_returns_error_without_poisoning_database() {
+        assert_malformed_outbox_row_is_error("upload", Some("invalid")).await;
     }
 }

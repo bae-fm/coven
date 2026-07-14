@@ -61,23 +61,6 @@ device through an encrypted local (Finder/iTunes) backup, because the item is
 bound to this device's Secure Enclave. This is the default, not an opt-in — a
 host does not choose it and cannot opt out of it.
 
-The access policy an item is created under is fixed for its lifetime; an item
-a build wrote before this policy existed keeps its old accessibility class
-until something deletes and recreates it.
-[`StoreKeys::reprotect_apple_keys`](rustdoc:method:coven::StoreKeys::reprotect_apple_keys)
-is the explicit upgrade path — a host calls it once per store, after
-upgrading to a coven build that writes device-only, to bring items an older
-build wrote forward. coven never does this on its own, on a read or a write.
-
-```rust
-// Per store: the master key, the store's signing identity, cloud-home
-// credentials, and any host secret names the host passes (coven doesn't
-// track which names a host used).
-key_service.reprotect_apple_keys(&["discogs_api_key"])?;
-```
-
-Cfg'd to Apple targets only.
-
 ## Custody is a choice, with working presets
 
 Two of the three secrets coven manages — the store's master key, and that
@@ -232,11 +215,7 @@ a host secret even under the same name. coven validates it: empty,
 containing `:` (the account scheme's own separator — allowing it would let a
 host secret's name forge another store's account), or matching one of
 coven's own reserved slot names, is refused with
-[`KeyError::InvalidSecretName`](rustdoc:enum:coven::KeyError). On Apple, a
-host secret is not automatically reprotected when coven ships a build that
-changes the default policy — coven doesn't track which names a host used —
-so `StoreKeys::reprotect_apple_keys` takes the host's own secret names as an
-argument (see [above](#correct-access-policy-by-default)).
+[`KeyError::InvalidSecretName`](rustdoc:enum:coven::KeyError).
 
 ## Per-platform host requirements
 
@@ -301,9 +280,9 @@ A plain `cargo test` binary can never carry a provisioning profile (Apple
 doesn't code-sign `cargo test` harnesses), so it can never reach the real
 data-protection keychain — this is a platform limitation, not a coven gap.
 coven's own tests mock the keyring for this reason
-(`keyring_core::mock::Store`); a real key operation — reading, writing, or
-reprotecting an Apple keyring item — needs the entitlement and profile above,
-in CI as much as on a device.
+(`keyring_core::mock::Store`); a real key operation — reading or writing an
+Apple keyring item — needs the entitlement and profile above, in CI as much
+as on a device.
 
 ### Linux
 

@@ -12,6 +12,7 @@ use crate::sync::test_helpers::{open_test_db, temp_store_dir};
 async fn store_read_drop_round_trip() {
     let (_tmp, ld) = temp_store_dir();
     let bytes: Vec<u8> = (0..2000).map(|i| (i % 251) as u8).collect();
+    let hash = crate::blob::content_hash(&bytes);
 
     local_files::store(&ld, "covers", "cov0aaaa", &bytes)
         .await
@@ -21,16 +22,23 @@ async fn store_read_drop_round_trip() {
         "the bytes land at storage/local/<namespace>/<id>",
     );
 
-    let read = local_files::read(&ld, "covers", "cov0aaaa", bytes.len() as u64)
+    let read = local_files::read(&ld, "covers", "cov0aaaa", bytes.len() as u64, &hash)
         .await
         .expect("read");
     assert_eq!(read, Some(bytes.clone()), "the whole blob round-trips");
 
     let (offset, len) = (500u64, 300u64);
-    let ranged =
-        local_files::read_range(&ld, "covers", "cov0aaaa", bytes.len() as u64, offset, len)
-            .await
-            .expect("ranged read");
+    let ranged = local_files::read_range(
+        &ld,
+        "covers",
+        "cov0aaaa",
+        bytes.len() as u64,
+        &hash,
+        offset,
+        len,
+    )
+    .await
+    .expect("ranged read");
     assert_eq!(
         ranged,
         Some(bytes[offset as usize..(offset + len) as usize].to_vec()),
@@ -40,7 +48,7 @@ async fn store_read_drop_round_trip() {
     // A blob that isn't stored reads back as None (no error), so a caller falls
     // through to the cache/cloud path.
     assert_eq!(
-        local_files::read(&ld, "covers", "absent00", bytes.len() as u64)
+        local_files::read(&ld, "covers", "absent00", bytes.len() as u64, &hash)
             .await
             .unwrap(),
         None,
@@ -52,7 +60,7 @@ async fn store_read_drop_round_trip() {
         .expect("drop");
     assert!(removed, "drop reports the file was there");
     assert_eq!(
-        local_files::read(&ld, "covers", "cov0aaaa", bytes.len() as u64)
+        local_files::read(&ld, "covers", "cov0aaaa", bytes.len() as u64, &hash)
             .await
             .unwrap(),
         None,
@@ -76,6 +84,7 @@ async fn local_store_blob_survives_an_evict_to_budget_sweep() {
 
     // A host-provided blob in the local store.
     let store_bytes = vec![7u8; 5000];
+    let store_hash = crate::blob::content_hash(&store_bytes);
     local_files::store(&ld, "covers", "keep0aaa", &store_bytes)
         .await
         .expect("store the local blob");
@@ -110,9 +119,15 @@ async fn local_store_blob_survives_an_evict_to_budget_sweep() {
         "the local-store blob survives — the budget sweep never walks storage/local/",
     );
     assert_eq!(
-        local_files::read(&ld, "covers", "keep0aaa", store_bytes.len() as u64)
-            .await
-            .unwrap(),
+        local_files::read(
+            &ld,
+            "covers",
+            "keep0aaa",
+            store_bytes.len() as u64,
+            &store_hash
+        )
+        .await
+        .unwrap(),
         Some(store_bytes),
         "and its bytes are intact",
     );

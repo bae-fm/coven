@@ -265,14 +265,15 @@ choice set when the home is created:
 - An **opaque** home (the default) encrypts every object under the store key
   and stores it with the `.enc` suffix (`changes/{device}/{seq}.enc`,
   `heads/{device}.json.enc`, `snapshot/{author}/{seq}.db.enc`,
-  `snapshot/current.json.enc`, ...), and keys each blob by its content-addressed
-  shard `{namespace}/{ab}/{cd}/{id}`. A provider sees `changes/dev1/42.enc` and a
+  `snapshot/current.json.enc`, ...), and keys each blob by its generated path
+  `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`. A provider sees `changes/dev1/42.enc` and a
   blob of ciphertext under an opaque key; it never sees a todo title or an
   attachment's bytes.
 - A **browsable** home stores every object verbatim and drops the suffix, so the
   same objects are at bare names (`changes/{device}/{seq}`,
   `snapshot/{author}/{seq}.db`, ...), and stores each blob at the consumer's
-  readable [`{namespace}/{cloud_path}`](/docs/blobs#browsable-home-blob-paths).
+  readable generated path
+  [`{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}`](/docs/blobs#browsable-home-blob-paths).
   Anyone with bucket access reads the actual bytes by name.
 
 ## Ranged reads

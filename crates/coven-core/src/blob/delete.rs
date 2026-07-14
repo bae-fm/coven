@@ -80,11 +80,11 @@ fn tombstone_key(cloud_key: &str, suffix: &str) -> String {
     format!("{TOMBSTONE_PREFIX}{cloud_key}{suffix}")
 }
 
-/// The uploader segment of a hashed blob cloud key
-/// `{namespace}/{uploader}/{ab}/{cd}/{id}`, used to scope reclaim to a prefix, or
-/// `None` for a plain-scheme key (`{namespace}/{cloud_path}`), which carries no
-/// uploader and no per-member prefix. The rebuild guard confirms the key really is
-/// a hashed key rather than a plain path that happens to have five segments.
+/// The uploader segment of the current hashed generated layout
+/// `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`, used to scope
+/// reclaim to a member prefix. Plain generated keys return `None` because their
+/// uploader segment is provenance inside a browsable layout, not a member ACL
+/// prefix. The parser accepts only the current hashed layout.
 fn blob_key_uploader(cloud_key: &str) -> Option<String> {
     crate::store_dir::StoreDir::parse_generated_blob_key(cloud_key)
         .map(|(_namespace, uploader, _id, _generation)| uploader)
@@ -709,9 +709,8 @@ pub async fn gc_tombstones(
         // prefix, unless this device is a current owner (which sweeps absent
         // members' orphans). A blob under another member's prefix is left standing
         // — its own GC, or an owner sweep, reclaims it — so the tombstone stays too,
-        // for whichever party can act. A plain-scheme key carries no uploader
-        // segment, so this path-level ownership gate does not apply; membership
-        // authorization above still applies.
+        // for whichever party can act. A plain-scheme key has no member ACL prefix,
+        // so this hashed-prefix authorization does not gate it.
         if let Some(uploader) = blob_key_uploader(&tombstone.cloud_key) {
             if uploader != self_pubkey && !is_owner {
                 debug!(

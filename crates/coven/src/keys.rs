@@ -158,8 +158,7 @@ impl KeyringSlot {
     /// durable storage contract: a device's already-stored keys are found only
     /// at these exact accounts, so changing any of them strands stored keys.
     /// `HostSecret`'s rendering is a storage contract with the *host*, not
-    /// just coven: it must stay byte-identical to whatever account a host
-    /// already wrote its secrets under before this API existed.
+    /// just coven: the host supplies the account-name prefix.
     pub(crate) fn account(&self) -> String {
         match self {
             KeyringSlot::DeviceSigningKey(store_id) => {
@@ -238,12 +237,6 @@ pub(crate) fn validate_host_secret_name(name: &str) -> Result<(), KeyError> {
 /// backup restore" is an Apple concept tied to Apple's accessibility
 /// classes.
 ///
-/// The access policy an item is created under is fixed for its lifetime —
-/// `SecItemUpdate` changes only the stored secret, never the accessibility
-/// class — so an item created before this dispatch existed keeps its old
-/// class until something deletes and re-creates it (a rotation, a
-/// credential refresh, or an explicit
-/// [`StoreKeys::reprotect_apple_keys`] call).
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) fn entry_for(account: &str) -> Result<keyring_core::Entry, KeyError> {
     let service = keyring_service()?;
@@ -303,24 +296,6 @@ pub(crate) fn delete(slot: &KeyringSlot) -> Result<bool, KeyError> {
         Err(keyring_core::Error::NoEntry) => Ok(false),
         Err(e) => Err(map_keyring_error(e)),
     }
-}
-
-/// Re-create `slot` under whatever policy [`entry_for`] applies today —
-/// delete the existing item and write its value back under a fresh entry.
-/// Reads and deletes are no-ops when the slot is absent (nothing to
-/// reprotect). Delete-then-write is the only sequence the Keychain API
-/// exposes for changing an item's accessibility class; there is no atomic
-/// "recreate under a new class" primitive, so a failure between the delete
-/// and the write is reported to the caller as an error — the value is not
-/// recoverable by this function once that happens — rather than retried or
-/// covered up.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn reprotect_slot(slot: &KeyringSlot) -> Result<(), KeyError> {
-    let Some(value) = read(slot)? else {
-        return Ok(());
-    };
-    delete(slot)?;
-    write(slot, &value)
 }
 
 /// This store's established signing identity through `custody`, or
@@ -433,9 +408,6 @@ pub(crate) fn discard_pending_identity(request_public_key_hex: &str) -> Result<(
 /// (`{base}:{store_id}`). The store's signing identity is not here — it goes
 /// through [`crate::identity_custody::IdentityCustody`], the same way the
 /// master key goes through [`crate::custody::KeyCustody`] — but
-/// [`reprotect_apple_keys`](Self::reprotect_apple_keys) also sweeps its fixed
-/// keyring account, since that account name never depends on which custody
-/// policy is active.
 #[derive(Clone)]
 pub struct StoreKeys {
     store_id: String,
@@ -546,36 +518,6 @@ impl StoreKeys {
         validate_host_secret_name(name)?;
         if delete(&self.host_secret_slot(name))? {
             info!("Host secret {name:?} deleted from keyring");
-        }
-        Ok(())
-    }
-
-    /// Re-create this store's Apple keyring items (the encryption master
-    /// key, the signing identity — if [`crate::identity_custody::IdentityCustody::Keyring`]
-    /// is what actually wrote it; the sweep is a no-op otherwise, since
-    /// nothing lives at that account — the cloud-home credentials, and every
-    /// host secret named in `host_secrets`) under today's device-only
-    /// accessibility policy (see [`entry_for`]). Each slot that is absent is
-    /// left absent — nothing to reprotect there. coven does not enumerate a
-    /// store's host-secret names, so a host secret omitted from
-    /// `host_secrets` keeps its old accessibility policy; the host passes its
-    /// own names, which it already holds as constants. A host calls this
-    /// explicitly, once per store, after upgrading to a coven build that
-    /// writes device-only, to bring items created under an older
-    /// accessibility policy forward; coven never does this on its own on a
-    /// read or write.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    pub fn reprotect_apple_keys(&self, host_secrets: &[&str]) -> Result<(), KeyError> {
-        reprotect_slot(&KeyringSlot::DeviceSigningKey(self.store_id.clone()))?;
-        reprotect_slot(&KeyringSlot::EncryptionMasterKey(self.store_id.clone()))?;
-        reprotect_slot(&KeyringSlot::CloudHomeCredentials(self.store_id.clone()))?;
-        for name in host_secrets {
-            // A reserved name here would render the same account as one of
-            // the two slots just reprotected above — reject it rather than
-            // silently reprotecting that slot a second time under the guise
-            // of a host secret.
-            validate_host_secret_name(name)?;
-            reprotect_slot(&self.host_secret_slot(name))?;
         }
         Ok(())
     }
@@ -1035,144 +977,5 @@ mod tests {
                 .expect("store b's identity")
                 .public_key(),
         );
-    }
-
-    // =========================================================================
-    // reprotect_apple_keys
-    //
-    // These exercise `reprotect_slot`'s delete-then-write orchestration and
-    // fail-loud behavior against the mock store — the same store every other
-    // test in this module uses. What's Apple-specific about
-    // `reprotect_apple_keys` is *which policy* `entry_for` applies, which
-    // `entry_for_dispatches_to_the_protected_store_device_only` in
-    // `tests/apple_keyring.rs` pins against the real protected store; the
-    // orchestration under test here (read, delete, write, and what happens
-    // when a step fails) does not depend on which store is installed.
-    // =========================================================================
-
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    #[test]
-    fn reprotect_apple_keys_round_trips_a_present_store_slot() {
-        test_keyring::install();
-        let keys = StoreKeys::new("reprotect-store-round-trip".to_string());
-        keys.set_encryption_key("the-master-key").expect("set");
-
-        keys.reprotect_apple_keys(&[]).expect("reprotect");
-
-        assert_eq!(
-            keys.get_encryption_key().expect("get after reprotect"),
-            Some("the-master-key".to_string()),
-        );
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    #[test]
-    fn reprotect_apple_keys_is_a_no_op_when_every_store_slot_is_absent() {
-        test_keyring::install();
-        let keys = StoreKeys::new("reprotect-store-absent".to_string());
-
-        keys.reprotect_apple_keys(&[])
-            .expect("reprotecting an established-nothing store is not an error");
-
-        assert_eq!(keys.get_encryption_key().expect("get"), None);
-        assert!(keys.get_cloud_home_credentials().expect("get").is_none());
-    }
-
-    /// A host secret named in `host_secrets` round-trips through
-    /// `reprotect_apple_keys` exactly like the encryption master key and the
-    /// cloud-home credentials — the Apple device-only sweep reaches a host's
-    /// own secrets, not just coven's.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    #[test]
-    fn reprotect_apple_keys_round_trips_a_named_host_secret() {
-        test_keyring::install();
-        let keys = StoreKeys::new("reprotect-store-host-secret".to_string());
-        keys.set_host_secret("discogs_api_key", "the-discogs-key")
-            .expect("set");
-
-        keys.reprotect_apple_keys(&["discogs_api_key"])
-            .expect("reprotect");
-
-        assert_eq!(
-            keys.get_host_secret("discogs_api_key")
-                .expect("get after reprotect"),
-            Some("the-discogs-key".to_string()),
-        );
-    }
-
-    /// A failure on the first step of a slot's reprotect (here, the read)
-    /// surfaces as `Err` from `reprotect_apple_keys` rather than being
-    /// swallowed, and — because the failure lands before the destructive
-    /// delete — the already-stored value is left exactly as it was.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    #[test]
-    fn reprotect_apple_keys_fails_loud_and_leaves_the_value_untouched() {
-        test_keyring::install();
-        let keys = StoreKeys::new("reprotect-store-fails-loud".to_string());
-        keys.set_encryption_key("untouched-value").expect("set");
-
-        let account = KeyringSlot::EncryptionMasterKey(keys.store_id().to_string()).account();
-        let entry = entry_for(&account).expect("build entry for the account under test");
-        let mock: &keyring_core::mock::Cred = entry
-            .as_any()
-            .downcast_ref()
-            .expect("the mock store is installed");
-        mock.set_error(keyring_core::Error::Invalid(
-            "induced".to_string(),
-            "reprotect's first read fails".to_string(),
-        ));
-
-        keys.reprotect_apple_keys(&[])
-            .expect_err("an injected read failure must surface, not be swallowed");
-
-        assert_eq!(
-            keys.get_encryption_key()
-                .expect("get after failed reprotect"),
-            Some("untouched-value".to_string()),
-            "a failure before the destructive delete must leave the stored value unchanged",
-        );
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    #[test]
-    fn store_keys_reprotect_apple_keys_round_trips_the_signing_identity() {
-        test_keyring::install();
-        let store_id = "reprotect-store-signing-identity";
-
-        let keypair = UserKeypair::generate();
-        write(
-            &KeyringSlot::DeviceSigningKey(store_id.to_string()),
-            &hex::encode(keypair.to_keypair_bytes()),
-        )
-        .expect("establish this store's identity");
-
-        StoreKeys::new(store_id.to_string())
-            .reprotect_apple_keys(&[])
-            .expect("reprotect");
-
-        let custody = test_identity_custody(store_id);
-        assert_eq!(
-            require_identity(custody.as_ref())
-                .expect("read after reprotect")
-                .public_key(),
-            keypair.public_key(),
-        );
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    #[test]
-    fn store_keys_reprotect_apple_keys_is_a_no_op_with_no_established_identity() {
-        test_keyring::install();
-        let store_id = "reprotect-store-no-identity";
-
-        StoreKeys::new(store_id.to_string())
-            .reprotect_apple_keys(&[])
-            .expect("reprotecting with no established identity is not an error");
-
-        let custody = test_identity_custody(store_id);
-        assert!(matches!(
-            require_identity(custody.as_ref()),
-            Err(KeyError::NoDeviceIdentity)
-        ));
     }
 }

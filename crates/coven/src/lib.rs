@@ -561,8 +561,7 @@ pub use coven_core::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeSt
 
 // Blob descriptors, cache error, the host-implemented transition observer.
 pub use coven_core::{
-    BlobCacheError, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
-    Provenance,
+    BlobCacheError, BlobRef, BlobScope, BlobTransitionObserver, CacheFill, Provenance,
 };
 
 // Applied-sync change notification.

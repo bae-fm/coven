@@ -34,7 +34,6 @@ SyncedTable::new("todo_attachments").carries_blob(
         // .with_id_column("file_id")              // defaults to the PK ("id")
         // .with_cloud_path_column("path")         // for a browsable home
         // .with_scope(BlobScope::Derived("attachments".into()))
-        // .write_once()                           // this row is never repointed
 )
 ```
 
@@ -46,7 +45,6 @@ pub struct BlobDecl {
     pub scope: BlobScope,                   // Master | Derived(name)
     pub provenance: Provenance,             // UserProvided | HostProvided  (the Local story)
     pub fill: CacheFill,                    // CacheEager | CacheLazy       (the Remote story)
-    pub replacement: BlobReplacement,       // Replaceable | WriteOnce      (the replacement story)
 }
 ```
 
@@ -85,8 +83,8 @@ host never names where a blob file lives.
 
 `cloud_path` is consulted only by a [browsable home](#browsable-home-blob-paths);
 an opaque home (the default) ignores it, so leave the `cloud_path_column` unset
-unless the home is browsable. What a browsable home requires of that path depends on
-whether the blob is [replaceable or write-once](#a-cloud-object-is-never-rewritten).
+unless the home is browsable. The path is a readable suffix; generated uploader,
+generation, and blob-id segments supply the immutable object identity.
 
 ### Cache fill
 
@@ -327,44 +325,43 @@ the blob, then deletes the tombstone. An unreferenced-but-not-yet-deleted blob i
 <text class="lbl s11" x="540" y="92" text-anchor="middle">GC verifies, deletes both</text>
 </svg>
 
-A re-upload wins over a pending deletion by construction. Enqueuing an upload drops
-a same-device pending delete row; and after a successful (re-)upload the drain
-cancels any tombstone a prior cycle (possibly another device) already wrote, so the
-GC never reclaims a blob that has just been re-uploaded.
+A later upload uses a new immutable generation. A pending tombstone names only the
+earlier generated key, so collecting it cannot delete the later upload.
 
 ## Cloud layout
 
-Under an opaque home (the default) a blob is stored at a content-addressed key:
+Under an opaque home (the default) a blob is stored at an immutable generated key:
 
 ```
-{namespace}/{ab}/{cd}/{id}
+{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}
 ```
 
 `ab` and `cd` are the first two byte-pairs of the dash-stripped `id`, built by
 [`StoreDir::hashed_path`](rustdoc:method:coven::store_dir::StoreDir::hashed_path).
-The two levels of fan-out keep a store with many blobs off a single flat prefix
-the storage layer would have to list in one call. The provider sees this key and
-the encrypted bytes, never the plaintext file or its name.
+The uploader aligns the key with member access, and the generation distinguishes
+later publications of the same blob id. The provider sees this key and encrypted
+bytes, never the plaintext file or its name.
 
 ## Browsable-home blob paths
 
 A [browsable home](/docs/encryption#opaque-and-browsable-homes) stores each blob
-verbatim at a readable path the consumer supplies, instead of by id:
+verbatim below an immutable generated prefix, ending in the readable path the
+consumer supplies:
 
 ```
-{namespace}/{cloud_path}
+{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}
 ```
 
 where `cloud_path` is the value coven reads from the declaration's
-`cloud_path_column` for that row, e.g. `attachments/Project Plan/diagram.png` rather
-than `attachments/0e/f7/0ef7…`. Anyone with bucket access then sees the names the
-consumer chose. This is one half of what a browsable home selects; the other half
-is that it stores its objects in the clear (see
+`cloud_path_column` for that row, e.g. `Project Plan/diagram.png`. Anyone with bucket
+access still sees the names the consumer chose below Coven's generated prefix. This
+is one half of what a browsable home selects; the other half is that it stores its
+objects in the clear (see
 [encryption](/docs/encryption#opaque-and-browsable-homes)). The two are one choice,
 not two.
 
 coven never invents these names. The consumer owns them: it declares a
-`cloud_path_column` and stores a readable key in it on every blob-bearing row. A
+`cloud_path_column` and stores a readable suffix in it on every blob-bearing row. A
 browsable home with a blob whose `cloud_path` is absent is a surfaced error, never a
 silent fall back to the hashed layout.
 
@@ -375,84 +372,23 @@ The two schemes at a glance:
 | Config `cloud_home.storage` | `opaque` | `browsable` |
 | Runtime scheme | `BlobPathScheme::Hashed` | `BlobPathScheme::Plain` |
 | `cloud_path_column` | ignored (leave unset) | required |
-| Cloud key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |
+| Cloud key | `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}` | `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}` |
 | Blob with no `cloud_path` | keyed by id | surfaced error |
-| Key names its blob | by the `{id}` in the key | [depends on the blob](#a-cloud-object-is-never-rewritten) |
+| Key names its blob | by the `{id}` in the key | by the `{id}` before the readable suffix |
 
-### A cloud object is never rewritten
+### Immutable generated keys
 
-A cloud object is never rewritten with different bytes. That is not a nicety — the pull
-verifies an object against its row's content hash, and a cursor only advances over a
-changeset whose blobs all arrived, so a device that pulls a changeset written *before* the
-bytes at its key changed can never satisfy it. It is stuck there for good.
+Every cloud key carries the exact uploader, publication generation, and blob id.
+Retrying one durable publication reuses that key; a later publication uses another
+generation. A readable `cloud_path` is therefore presentation, not identity: rows may
+be repointed and different blobs may use the same readable suffix without sharing an
+object.
 
-A hashed key gets this for free: it carries the blob id, and a blob id names one immutable
-byte-string, minted fresh for every stored blob. A readable path is the consumer's own, so
-coven asks the consumer one question about each blob-bearing table — **can this row ever be
-repointed at a different blob?** — and enforces whichever guarantee follows.
-
-#### Replaceable (the default)
-
-The row may be repointed: a cover is changed, an attachment is swapped. Then the **key must
-move with the blob**, so the path has to name it. Its file name — the last `/`-segment,
-extension stripped — must be the blob id, or end with `-{blob_id}`:
-
-```
-covers/Live at Leeds/cover-0ef7a1c9.jpg     ✓ names its blob
-covers/Live at Leeds/0ef7a1c9.jpg           ✓ names its blob
-covers/Live at Leeds/cover.jpg              ✗ surfaced error — names no blob
-covers/Live at Leeds/0ef7a1c9/cover.jpg     ✗ surfaced error — the id must name the object,
-                                              not a directory above it
-```
-
-The id must *end* the file name's stem, so that blob `1` cannot satisfy blob `11`'s path and
-the two be keyed at one object. Replacing the blob then writes a *new* object beside the one
-it replaced, which stands at its own key until its [tombstone](#deleting-a-blob) is
-collected.
-
-#### Write-once
-
-```rust
-SyncedTable::new("release_files").carries_blob(
-    BlobDecl::new("audio", Provenance::UserProvided, CacheFill::CacheLazy)
-        .with_cloud_path_column("cloud_path")
-        .write_once()
-)
-```
-
-The row is never repointed: the blob it names when it is inserted is the blob it names for
-life. Nothing ever rewrites the object at its key, so there is nothing to protect it from —
-and the path is free to be a **stable, fully readable name**, which is what a browsable home
-is for:
-
-```
-audio/Live at Leeds/01 Sonata No. 3.flac    ✓ the consumer's own name, no blob id
-```
-
-coven holds the consumer to the declaration: **repointing a write-once row is a surfaced
-error.** A changeset UPDATE reports only the columns whose values changed, so a blob-id
-column appearing in one *is* the repointing, and coven refuses it there rather than
-discovering a rewritten object later.
-
-Write-once is the weaker of the two guarantees, and it is opt-in for that reason. coven
-refuses the reuse it can see — the repointing. It cannot see a consumer *deleting* a row and
-inserting a different blob at the same `cloud_path`: the deleted row is gone, and coven keeps
-no history of the paths it has handed out. **Declaring `write_once()` is therefore also a
-promise that a path is never reused by a different blob.** Derive the path from data that
-never repeats and it holds by construction — a path carrying a freshly minted id for the
-thing being imported can never be handed out twice, even though no blob id appears in the
-name a human reads.
-
-#### What either guarantee buys
-
-Because no two blobs ever share a key, an object standing at a blob's key *is* that blob's
-bytes. A sealed cloud object never has to be asked what it holds, and coven keeps no record
-of what it wrote where — the push simply skips an upload when the object is already there.
-And two failures that no retry can repair become unrepresentable:
+This prevents two failures:
 
 - **Two devices replacing the same blob at once** would otherwise write one key, leaving the
   object holding whichever device the bucket saw last while the row holds whichever device
-  last-write-wins picked. With the key moving with the blob, they are two objects, and the
+  last-write-wins picked. With uploader and generation in the key, they are two objects, and the
   row's winner names one of them.
 - **A changeset written before a replacement** would otherwise name bytes that were
   overwritten, and the device that pulls it late could never satisfy its hash. The

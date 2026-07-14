@@ -87,8 +87,9 @@ is the wire `schema_version` every changeset is stamped with. Bumping the
 schema *is* adding a migration; a device cannot stamp a version it has not
 migrated to.
 
-The ladder covers the host's *synced* schema only. coven's own bookkeeping
-tables are reconciled declaratively at every open, outside the ladder.
+The ladder covers the host's *synced* schema only. Coven creates its bookkeeping
+tables in the current shape and rejects a non-current shape at open; those tables
+are outside the host migration ladder.
 
 ## Additive vs. structural changes
 

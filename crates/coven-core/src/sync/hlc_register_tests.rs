@@ -15,7 +15,7 @@ use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::cycle::run_single_sync_cycle;
-use crate::sync::envelope::{self, ChangesetEnvelope};
+use crate::sync::envelope;
 use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
 use crate::sync::pull::pull_changes;
@@ -36,19 +36,17 @@ fn store_signed_changeset(
     author: &UserKeypair,
     env_ts: &str,
 ) {
-    let mut env = ChangesetEnvelope {
-        device_id: device_id.to_string(),
+    let env = envelope::ChangesetEnvelope::signed(
+        device_id,
         seq,
-        schema_version: SCHEMA_VERSION,
-        message: String::new(),
-        timestamp: env_ts.to_string(),
-        changeset_size: changeset_bytes.len(),
-        author_pubkey: None,
-        membership_grant: None,
-        blob_locations: Vec::new(),
-        signature: None,
-    };
-    envelope::sign_envelope(&mut env, author, changeset_bytes);
+        SCHEMA_VERSION,
+        "",
+        env_ts,
+        None,
+        Vec::new(),
+        author,
+        changeset_bytes,
+    );
     let packed = envelope::pack(&env, changeset_bytes);
     storage.put_changeset_packed(device_id, seq, packed);
 }

@@ -1,7 +1,7 @@
 //! A blob's bytes are pinned by the content hash on its (signed) row, not by
 //! where the bytes were found. Two attacks the hash closes, driven against the
 //! real [`CloudSyncStorage`] over an [`InMemoryCloudHome`] so the true
-//! `{namespace}/{uploader}/{ab}/{cd}/{id}` keying and per-member prefixes are
+//! current generated hashed keying and per-member prefixes are
 //! exercised:
 //!
 //! 1. A member plants a same-size blob of its choosing under its OWN uploader

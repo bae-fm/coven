@@ -739,15 +739,14 @@ impl CovenHandle {
         crate::blob::cache::unpin(&self.store_dir, blobs).await
     }
 
-    /// The cloud object key a blob's bytes live at, derived under the connected
-    /// home's path scheme (`Hashed` → `{namespace}/{ab}/{cd}/{id}`, `Plain` →
-    /// `{namespace}/{cloud_path}`). coven owns this derivation — the host passes a
-    /// [`BlobRef`] and never reconstructs the cloud layout. The host enqueues a
-    /// blob's cloud removal under this key (its delete drains to a tombstone; see
-    /// [`crate::blob::delete`]), and a test asserts an upload's key matches the
-    /// read key with it. A `Plain` home whose `cloud_path` is absent, or does not
-    /// name the blob it carries, is a surfaced error — see
-    /// [`CloudSyncStorage::blob_key`].
+    /// The exact immutable cloud object key recorded for a blob. The hashed layout is
+    /// `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`;
+    /// the plain layout is
+    /// `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}`.
+    /// Coven owns this derivation — the host passes a [`BlobRef`] and never
+    /// reconstructs the layout.
+    /// The host enqueues removal under this key, which drains to a tombstone. Missing
+    /// location metadata or a required plain `cloud_path` is surfaced.
     pub async fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
         let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
         let location = self
@@ -1157,8 +1156,8 @@ mod tests {
         // Local vs Remote).
         let db = read_test_db("images");
 
-        // A browsable home: plaintext at rest, readable `{namespace}/{cloud_path}`
-        // blob keys. The cipher passed below is the matching `Plaintext`.
+        // A browsable home: plaintext at rest, with a readable suffix below each
+        // immutable generated blob identity. The cipher below is the matching `Plaintext`.
         let mut config = Config::with_defaults(
             "lib-test".to_string(),
             "test-device".to_string(),
@@ -1204,8 +1203,8 @@ mod tests {
         let plaintext = b"cover-art-bytes-for-the-test-home".to_vec();
         let source = tmp.path().join("cover-source.jpg");
         std::fs::write(&source, &plaintext).expect("write source file");
-        // {namespace}/{cloud_path} under the plain scheme. The readable path names the blob
-        // it carries, which is what keeps a cloud object from ever being rewritten.
+        // The plain scheme keeps this consumer path readable below the generated
+        // uploader, generation, and blob-id prefix.
         let location = crate::sync::test_helpers::test_blob_location("test-uploader", 1000);
         let cloud_key = CloudSyncStorage::blob_key(
             BlobPathScheme::Plain,
@@ -1547,8 +1546,8 @@ mod tests {
             .await
             .expect("connect over the injected opaque home, resolving the cipher from custody");
 
-        // Enqueue this device's own blob under the hashed key an opaque home uses
-        // (`{namespace}/{uploader}/{ab}/{cd}/{id}`) so the drain seals it and the
+        // Enqueue this device's own blob under the current hashed generated key so
+        // the drain seals it and the
         // read resolves the same uploader to fetch it back.
         let uploader = handle
             .get_user_pubkey()

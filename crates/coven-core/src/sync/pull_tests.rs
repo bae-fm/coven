@@ -192,6 +192,16 @@ async fn store_local(ld: &crate::store_dir::StoreDir, id: &str, bytes: &[u8]) {
         .expect("store host-provided blob in the local store");
 }
 
+fn remove_envelope_field(packed: &[u8], field: &str) -> Vec<u8> {
+    let separator = packed.iter().position(|byte| *byte == 0).unwrap();
+    let mut json: serde_json::Value = serde_json::from_slice(&packed[..separator]).unwrap();
+    json.as_object_mut().unwrap().remove(field);
+    let mut malformed = serde_json::to_vec(&json).unwrap();
+    malformed.push(0);
+    malformed.extend_from_slice(&packed[separator + 1..]);
+    malformed
+}
+
 #[tokio::test]
 async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
     let storage = MockSyncStorage::new();
@@ -754,7 +764,7 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
     // signature, leaving the rest of the envelope (including the newer
     // schema_version) intact so the object reaches the signature and schema gates.
     let (mut env, changeset_bytes) = envelope::unpack(&packed).unwrap();
-    env.signature = Some("0".repeat(128));
+    env.signature = "0".repeat(128);
     storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &changeset_bytes));
 
     let db2 = open_test_db();
@@ -1031,10 +1041,8 @@ async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
 
 /// A changeset whose envelope `changeset_size` disagrees with the actual trailing
 /// bytes is corrupt or tampered: it must be rejected, not applied. The size is one
-/// of the fields the signature covers, so a signed changeset whose bytes were
-/// altered after signing surfaces here (and at the signature check); an unsigned
-/// one is caught by this gate alone. Either way the bytes failed their own
-/// integrity check and the row must never land. The cursor is held back so the
+/// of the fields the signature covers, and the byte-count check identifies the
+/// corrupt object before its payload is used. The row must never land. The cursor is held back so the
 /// next cycle re-examines the same object instead of suppressing the seq.
 #[tokio::test]
 async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
@@ -1053,20 +1061,19 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         ],
     )
     .await;
-    let mut env = envelope::ChangesetEnvelope {
-        device_id: "dev1".to_string(),
-        seq: 1,
-        schema_version: SCHEMA_VERSION,
-        message: String::new(),
-        timestamp: "2026-02-10T00:00:00Z".to_string(),
-        // The lie: the envelope claims one fewer byte than the payload carries.
-        changeset_size: cs.len() - 1,
-        author_pubkey: None,
-        membership_grant: None,
-        blob_locations: Vec::new(),
-        signature: None,
-    };
-    envelope::sign_envelope(&mut env, &author, &cs);
+    let mut env = envelope::ChangesetEnvelope::signed(
+        "dev1",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-02-10T00:00:00Z",
+        None,
+        Vec::new(),
+        &author,
+        &cs,
+    );
+    // The lie: the envelope claims one fewer byte than the payload carries.
+    env.changeset_size = cs.len() - 1;
     storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &cs));
 
     let db2 = open_test_db();
@@ -1376,6 +1383,107 @@ async fn malformed_envelope_isolates_to_one_device() {
         result.held_changesets[0].reason,
         HeldChangesetReason::MalformedEnvelope { .. }
     ));
+}
+
+#[tokio::test]
+async fn solo_store_holds_envelopes_missing_required_signing_fields() {
+    let storage = MockSyncStorage::new();
+    let author = UserKeypair::generate();
+    let source = open_test_db();
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'MissingSigningField', NULL, '0000000001000-0000-devA', '2026-01-01')",
+        ],
+    )
+    .await;
+
+    for (device, field) in [("devA", "author_pubkey"), ("devB", "signature")] {
+        let packed = envelope::pack_signed(
+            device,
+            1,
+            SCHEMA_VERSION,
+            "",
+            "2026-03-01T00:01:00Z",
+            &author,
+            None,
+            &changeset,
+        );
+        storage.put_changeset_packed(device, 1, remove_envelope_field(&packed, field));
+    }
+
+    let target = open_test_db();
+    let (updated, result) = pull_into_result(&target, &storage, "devTarget", &temp_store_dir().1)
+        .await
+        .expect("malformed signing fields isolate to their device streams");
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.held_changesets.len(), 2);
+    assert!(result
+        .held_changesets
+        .iter()
+        .all(|held| matches!(held.reason, HeldChangesetReason::MalformedEnvelope { .. })));
+    assert_eq!(updated.get("devA"), None);
+    assert_eq!(updated.get("devB"), None);
+    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+}
+
+#[tokio::test]
+async fn chained_store_holds_envelopes_missing_required_signing_fields() {
+    let owner = UserKeypair::generate();
+    let owner_pubkey = hex::encode(owner.public_key());
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+    let mut chain = MembershipChain::new();
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    append_membership_entry(&storage, &mut chain, &owner_pubkey, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+
+    let source = open_test_db();
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'MissingSigningField', NULL, '0000000001000-0000-devA', '2026-01-01')",
+        ],
+    )
+    .await;
+    let grant = Some(MembershipCoord {
+        author_pubkey: owner_pubkey.clone(),
+        seq: 1,
+    });
+    for (device, field) in [("devA", "author_pubkey"), ("devB", "signature")] {
+        let packed = envelope::pack_signed(
+            device,
+            1,
+            SCHEMA_VERSION,
+            "",
+            "2026-03-01T00:01:00Z",
+            &owner,
+            grant.clone(),
+            &changeset,
+        );
+        storage.put_changeset_packed(device, 1, remove_envelope_field(&packed, field));
+    }
+
+    let target = open_test_db();
+    target
+        .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pubkey)
+        .await
+        .unwrap();
+    let (updated, result) = pull_into_result(&target, &storage, "devTarget", &temp_store_dir().1)
+        .await
+        .expect("malformed signing fields isolate to their device streams");
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.held_changesets.len(), 2);
+    assert!(result
+        .held_changesets
+        .iter()
+        .all(|held| matches!(held.reason, HeldChangesetReason::MalformedEnvelope { .. })));
+    assert_eq!(updated.get("devA"), None);
+    assert_eq!(updated.get("devB"), None);
+    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
 }
 
 /// The malformed-envelope hold is a bounded stall, not a permanent skip: once a
@@ -2214,17 +2322,17 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
 }
 
 /// The `note_photos` declaration for the plain (browsable) scheme: the blob's
-/// readable cloud key comes from the row's `cloud_path` column.
+/// readable suffix comes from the row's `cloud_path` column.
 fn readable_photo_decl() -> BlobDecl {
     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
         .with_cloud_path_column("cloud_path")
 }
 
-/// A plain-scheme home stores a changeset-driven blob at the consumer's readable
-/// `cloud_path` (`photos/n1/cover-p1cover.jpg`), not the content-addressed shard, and a
-/// second device with the same declaration pulls it from that readable key and
-/// recovers the bytes. This is the changeset-push / changeset-pull half of the blob
-/// path, end to end over a real `CloudSyncStorage` in `BlobPathScheme::Plain`.
+/// A plain-scheme home stores a changeset-driven blob below its generated identity,
+/// with `n1/cover-p1cover.jpg` as the readable suffix, and a second device with the
+/// same declaration pulls it from that generated readable key and recovers the
+/// bytes. This is the changeset-push / changeset-pull half of the blob path, end to
+/// end over a real `CloudSyncStorage` in `BlobPathScheme::Plain`.
 #[tokio::test]
 async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     let keypair = UserKeypair::generate();
@@ -2340,12 +2448,11 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     );
 }
 
-/// A browsable home's cloud key is `{namespace}/{cloud_path}`, and coven requires a
-/// host-provided blob's `cloud_path` to name the blob it holds. A path that does not is
-/// refused where coven derives the blob from its row — the push aborts rather than
-/// keying a blob at an object another blob could also be keyed at.
+/// A plain generated key carries the blob id independently of the readable suffix, so a
+/// host-provided blob may use the consumer's stable readable name without a redundant id
+/// in that name.
 #[tokio::test]
-async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
+async fn plain_scheme_host_blob_accepts_a_stable_readable_path() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
     let storage = CloudSyncStorage::new(
@@ -2361,8 +2468,6 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
     let tables = test_synced_tables_with_blob(readable_photo_decl());
     let (_t, ld) = temp_store_dir();
     store_local(&ld, "p1cover", bytes).await;
-    // `n1/cover.jpg` names no blob: it would key p1cover today and its replacement
-    // tomorrow at one and the same cloud object.
     let outgoing = capture_bytes(
         &db,
         &[
@@ -2380,40 +2485,21 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
     )
     .await;
 
-    let err = sync_for_test(
-        "dev1",
-        &db,
-        &tables,
-        outgoing,
-        0,
-        &storage,
-        "2026-01-01T00:00:00Z",
-        "",
-        &keypair,
-        &ld,
-    )
-    .await
-    .err()
-    .expect("a cloud path that does not name its blob must fail the cycle");
-
-    let message = err.to_string();
-    assert!(
-        message.contains("p1cover") && message.contains("n1/cover.jpg"),
-        "the error must name the blob and the path it was given, got {message:?}",
-    );
-    assert!(
-        home.get("photos/n1/cover.jpg").is_none(),
-        "nothing is uploaded for a blob coven refuses to key",
+    push_cycle(&db, &tables, &storage, outgoing, 0, &keypair, &ld).await;
+    let key = current_blob_key(&db, &storage, "photos", "p1cover", Some("n1/cover.jpg")).await;
+    assert_eq!(
+        home.get(&key).as_deref(),
+        Some(bytes.as_slice()),
+        "the blob id in the generated prefix makes the readable suffix collision-safe",
     );
 }
 
 /// Replacing a blob-bearing row on a browsable home writes a NEW cloud object; it never
 /// overwrites the one it replaces.
 ///
-/// A blob id names one immutable byte-string, and a host-provided blob's `cloud_path`
-/// must name its blob — so the replacement's fresh blob id carries a fresh path, hence a
-/// fresh key. The object the replaced blob occupies is a different object, and it stands
-/// at its own key until its tombstone is collected.
+/// A blob id names one immutable byte-string, and every generated key carries that id.
+/// The replacement therefore gets a fresh key even if its readable suffix is reused. The
+/// object it replaced stands at its own key until its tombstone is collected.
 ///
 /// Device A publishes a cover and device B pulls it; A then replaces the row with a fresh
 /// one — new blob id, new bytes in the local store, a path naming the new blob — and B
@@ -2560,14 +2646,14 @@ async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
         "test-lib",
         keypair.clone(),
     );
-    let tables = test_synced_tables_with_blob(replaceable_photo_decl());
+    let tables = test_synced_tables_with_blob(repointable_photo_decl());
 
     let original = b"ORIGINAL-COVER";
     let from_a = b"COVER-FROM-A";
     let from_b = b"COVER-FROM-B-BYTES";
 
     // Device A publishes the original cover; device B pulls it. Both now hold row `ph1`.
-    let db_a = open_test_db_with_blob(replaceable_photo_decl());
+    let db_a = open_test_db_with_blob(repointable_photo_decl());
     let (_ta, ld_a) = temp_store_dir();
     store_local(&ld_a, "p0cover", original).await;
     let outgoing = capture_bytes(
@@ -2588,7 +2674,7 @@ async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
     .await;
     push_cycle(&db_a, &tables, &storage, outgoing, 0, &keypair, &ld_a).await;
 
-    let db_b = open_test_db_with_blob(replaceable_photo_decl());
+    let db_b = open_test_db_with_blob(repointable_photo_decl());
     let (_tb, ld_b) = temp_store_dir();
     pull_into(&db_b, &storage, "dev2", &ld_b).await;
 
@@ -2661,7 +2747,7 @@ async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
     // verifies against its row's hash and nothing is left unsatisfiable. Under a key that
     // did not name its blob, the surviving row could name bytes the other device had
     // already overwritten, and no retry would ever resolve it.
-    let db_c = open_test_db_with_blob(replaceable_photo_decl());
+    let db_c = open_test_db_with_blob(repointable_photo_decl());
     let (_tc, ld_c) = temp_store_dir();
     let (_updated, result) = pull_into(&db_c, &storage, "dev3", &ld_c).await;
     assert!(
@@ -2793,27 +2879,17 @@ async fn plain_scheme_a_changeset_older_than_a_replacement_still_finds_its_blob(
     );
 }
 
-/// A **write-once** browsable declaration: the row is never repointed at a different
-/// blob, so its readable cloud path is free to be a stable, fully human-readable name —
-/// no blob id in it. The blob id is its own column, so the shape of an (illegal)
-/// repointing is expressible and can be tested.
-fn write_once_photo_decl() -> BlobDecl {
+/// A browsable declaration whose readable suffix is independent of its blob id.
+fn stable_path_photo_decl() -> BlobDecl {
     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
         .with_id_column("blob_id")
         .with_cloud_path_column("cloud_path")
-        .write_once()
 }
 
-/// A write-once blob keeps a stable, fully readable cloud path — no blob id in the name —
-/// and round-trips through the cloud on it.
-///
-/// This is the shape a browsable home exists for: the bucket mirrors the consumer's own
-/// names (`n1/Sonata No. 3.flac`), and a reader who is not coven can find and play the
-/// file. It is safe precisely because the row is never repointed, so nothing ever rewrites
-/// the object standing at that key — which is what [`BlobDecl::write_once`] declares and
-/// what the test below enforces.
+/// A blob keeps a stable, fully readable suffix with no blob id in the name and
+/// round-trips through the cloud. The generated prefix supplies its immutable identity.
 #[tokio::test]
-async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
+async fn plain_scheme_blob_keeps_a_stable_readable_path() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
     let storage = CloudSyncStorage::new(
@@ -2826,8 +2902,8 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     // A readable name with no blob id anywhere in it.
 
     let bytes = b"AUDIO-BYTES";
-    let db1 = open_test_db_with_blob(write_once_photo_decl());
-    let tables = test_synced_tables_with_blob(write_once_photo_decl());
+    let db1 = open_test_db_with_blob(stable_path_photo_decl());
+    let tables = test_synced_tables_with_blob(stable_path_photo_decl());
     let (_t1, ld1) = temp_store_dir();
     store_local(&ld1, "f1audio", bytes).await;
     let outgoing = capture_bytes(
@@ -2863,7 +2939,7 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     );
 
     // A peer pulls it off that readable key and verifies it against the row's hash.
-    let db2 = open_test_db_with_blob(write_once_photo_decl());
+    let db2 = open_test_db_with_blob(stable_path_photo_decl());
     let (_t2, ld2) = temp_store_dir();
     let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
     assert!(!result.asset_downloads_failed);
@@ -2876,18 +2952,10 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     assert_eq!(cached, bytes.as_slice());
 }
 
-/// Repointing a write-once row is refused.
-///
-/// A write-once row's cloud path is a stable readable name that does NOT carry its blob
-/// id, so a second blob under that row would be keyed at the first blob's cloud object and
-/// overwrite it — the corruption the whole model exists to prevent. Write-once is the
-/// declaration that this never happens, and coven holds the consumer to it: the repointing
-/// is a loud error, not a silently rewritten object.
-///
-/// A changeset UPDATE reports only the columns whose values changed, so the blob-id column
-/// appearing in one *is* the repointing.
+/// Repointing a row while retaining its readable suffix writes a distinct generated key
+/// because the key carries both the publication generation and blob id.
 #[tokio::test]
-async fn plain_scheme_repointing_a_write_once_row_is_refused() {
+async fn plain_scheme_repointing_a_stable_readable_path_writes_a_distinct_object() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
     let storage = CloudSyncStorage::new(
@@ -2901,8 +2969,8 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
     let first = b"FIRST-AUDIO";
     let second = b"SECOND-AUDIO-BYTES";
 
-    let db = open_test_db_with_blob(write_once_photo_decl());
-    let tables = test_synced_tables_with_blob(write_once_photo_decl());
+    let db = open_test_db_with_blob(stable_path_photo_decl());
+    let tables = test_synced_tables_with_blob(stable_path_photo_decl());
     let (_t, ld) = temp_store_dir();
     store_local(&ld, "f1audio", first).await;
     let outgoing = capture_bytes(
@@ -2931,8 +2999,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
     )
     .await;
 
-    // Repoint the write-once row at a second blob — the move that would rewrite the object
-    // the first blob occupies.
+    // Repoint the row at a second blob without changing its readable suffix.
     store_local(&ld, "f2audio", second).await;
     let outgoing = capture_bytes(
         &db,
@@ -2944,38 +3011,32 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
         )],
     )
     .await;
-    let err = sync_for_test(
-        "dev1",
+    push_cycle(&db, &tables, &storage, outgoing, 1, &keypair, &ld).await;
+    let second_key = current_blob_key(
         &db,
-        &tables,
-        outgoing,
-        1,
         &storage,
-        "2026-01-01T00:00:00Z",
-        "",
-        &keypair,
-        &ld,
+        "photos",
+        "f2audio",
+        Some("n1/Sonata No. 3.flac"),
     )
-    .await
-    .err()
-    .expect("repointing a write-once row must fail the cycle");
-
-    let message = err.to_string();
-    assert!(
-        message.contains("f2audio") && message.contains("write-once"),
-        "the error must name the blob the row was repointed at, got {message:?}",
-    );
+    .await;
+    assert_ne!(audio_key, second_key);
     assert_eq!(
         home.get(&audio_key).as_deref(),
         Some(first.as_slice()),
-        "the first blob's cloud object is untouched — the cycle aborted before any upload",
+        "the first generated object remains immutable",
+    );
+    assert_eq!(
+        home.get(&second_key).as_deref(),
+        Some(second.as_slice()),
+        "the replacement lands at its own generated key",
     );
 }
 
 /// A browsable home's `note_photos` declaration: the blob id is its own column, apart
 /// from the primary key, so a row can be repointed at a new blob while keeping its
-/// identity; the readable cloud key comes from `cloud_path`, which moves with the blob.
-fn replaceable_photo_decl() -> BlobDecl {
+/// identity; `cloud_path` supplies the readable suffix.
+fn repointable_photo_decl() -> BlobDecl {
     BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
         .with_id_column("blob_id")
         .with_cloud_path_column("cloud_path")
@@ -2983,10 +3044,9 @@ fn replaceable_photo_decl() -> BlobDecl {
 
 /// Repointing a row at a new blob moves its cloud key, and the new bytes land there.
 ///
-/// The row keeps its primary key and gets a new blob — which means a new blob id, and
-/// therefore a new `cloud_path`, because a host-provided path must name its blob. So the
-/// repointing writes a new cloud object and leaves the one it replaced standing at its own
-/// key.
+/// The row keeps its primary key and gets a new blob id and readable suffix. The generated
+/// key includes the new blob id, so the repointing writes a new cloud object and leaves the
+/// one it replaced standing at its own key.
 ///
 /// Device A publishes a cover and device B pulls it; A then repoints the row at a fresh
 /// blob and pushes; B pulls again and must serve the new bytes and drop the old.
@@ -3007,8 +3067,8 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     let old_bytes = b"OLD-COVER-BYTES";
     let new_bytes = b"NEW-COVER-BYTES";
 
-    let db1 = open_test_db_with_blob(replaceable_photo_decl());
-    let tables = test_synced_tables_with_blob(replaceable_photo_decl());
+    let db1 = open_test_db_with_blob(repointable_photo_decl());
+    let tables = test_synced_tables_with_blob(repointable_photo_decl());
     let (_t1, ld1) = temp_store_dir();
     store_local(&ld1, "p1cover", old_bytes).await;
     let outgoing = capture_bytes(
@@ -3044,7 +3104,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
 
     // Device B takes the cover before the replacement, so it is a peer holding the
     // replaced blob when the new one arrives.
-    let db2 = open_test_db_with_blob(replaceable_photo_decl());
+    let db2 = open_test_db_with_blob(repointable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
     pull_into(&db2, &storage, "dev2", &ld2).await;
 
@@ -3113,13 +3173,10 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     );
 }
 
-/// Repointing a row at a new blob while HOLDING its cloud path is the shape the rule
-/// exists to refuse, and it is the one a changeset cannot show on its own: an UPDATE
-/// reports only the columns whose values changed, so it carries the new blob id and not
-/// the (unchanged) path. coven reads the path from the row that owns the blob — which is
-/// where it catches that the path names the blob the row no longer points at.
+/// Repointing a row at a new blob while retaining its cloud path is safe because the
+/// generated key carries the new blob id independently of that readable suffix.
 #[tokio::test]
-async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused() {
+async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_distinct() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
     let storage = CloudSyncStorage::new(
@@ -3133,8 +3190,8 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
     let old_bytes = b"OLD-COVER-BYTES";
     let new_bytes = b"NEW-COVER-BYTES";
 
-    let db1 = open_test_db_with_blob(replaceable_photo_decl());
-    let tables = test_synced_tables_with_blob(replaceable_photo_decl());
+    let db1 = open_test_db_with_blob(repointable_photo_decl());
+    let tables = test_synced_tables_with_blob(repointable_photo_decl());
     let (_t1, ld1) = temp_store_dir();
     store_local(&ld1, "p1cover", old_bytes).await;
     let outgoing = capture_bytes(
@@ -3163,8 +3220,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
     )
     .await;
 
-    // The repointing leaves `cloud_path` naming the blob it replaced, so the new blob
-    // would be keyed at the old blob's object.
+    // The repointing leaves `cloud_path` unchanged.
     store_local(&ld1, "p2cover", new_bytes).await;
     let outgoing = capture_bytes(
         &db1,
@@ -3176,31 +3232,25 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
         )],
     )
     .await;
-    let err = sync_for_test(
-        "dev1",
+    push_cycle(&db1, &tables, &storage, outgoing, 1, &keypair, &ld1).await;
+    let new_key = current_blob_key(
         &db1,
-        &tables,
-        outgoing,
-        1,
         &storage,
-        "2026-01-01T00:00:00Z",
-        "",
-        &keypair,
-        &ld1,
+        "photos",
+        "p2cover",
+        Some("n1/cover-p1cover.jpg"),
     )
-    .await
-    .err()
-    .expect("a repointing that holds its cloud path must fail the cycle");
-
-    let message = err.to_string();
-    assert!(
-        message.contains("p2cover") && message.contains("n1/cover-p1cover.jpg"),
-        "the error must name the new blob and the path it kept, got {message:?}",
-    );
+    .await;
+    assert_ne!(old_key, new_key);
     assert_eq!(
         home.get(&old_key).as_deref(),
         Some(old_bytes.as_slice()),
-        "the replaced blob's object is untouched — the cycle aborted before any upload",
+        "the replaced blob's generated object is untouched",
+    );
+    assert_eq!(
+        home.get(&new_key).as_deref(),
+        Some(new_bytes.as_slice()),
+        "the new blob lands at a distinct generated key despite reusing the readable suffix",
     );
 }
 
@@ -3995,53 +4045,6 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
     );
 }
 
-#[tokio::test]
-async fn pull_rejects_unsigned_changeset_when_chain_exists() {
-    // A membership chain exists. Coven always signs its changesets, so an
-    // unsigned one here is forged; a chained store must reject it. The mock
-    // signs the head it publishes for dev1 with the founder's keypair (a current
-    // member), so the head passes its authorization check and pull goes on to
-    // examine — and reject — the unsigned changeset behind it.
-    let founder = UserKeypair::generate();
-    let storage = MockSyncStorage::with_keypair(founder.clone());
-    let founder_pk = hex::encode(founder.public_key());
-
-    let entry = founder_entry(&founder, "2026-03-01T00:00:00Z");
-    let mut chain = MembershipChain::new();
-    append_membership_entry(&storage, &mut chain, &founder_pk, 1, entry).await;
-    publish_membership_chain_head(&storage, &chain, &founder).await;
-
-    let db1 = open_test_db();
-    let cs = capture_bytes(
-        &db1,
-        &[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-           VALUES ('n1', 'Forged', NULL, '0000000001000-0000-dev1', '2026-01-01')",
-        ],
-    )
-    .await;
-    storage.store_unsigned_changeset("dev1", 1, &cs, SCHEMA_VERSION);
-
-    let db2 = open_test_db();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
-
-    assert_eq!(result.changesets_applied, 0);
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    // An unsigned changeset carries no grant coordinate, so it is genuinely
-    // unauthorized (nothing can authorize it) — not a can't-authorize-yet lag. It
-    // is surfaced as a rejected-unauthorized changeset, and the cursor advances
-    // past it so the device isn't stuck refetching it.
-    assert_eq!(result.rejected_unauthorized.len(), 1);
-    assert_eq!(result.rejected_unauthorized[0].device_id, "dev1");
-    assert_eq!(result.rejected_unauthorized[0].seq, 1);
-    assert_eq!(result.rejected_unauthorized[0].author, None);
-    assert_eq!(updated.get("dev1"), Some(&1));
-    assert_eq!(
-        db2.get_all_sync_cursors().await.unwrap().get("dev1"),
-        Some(&1),
-    );
-}
-
 /// Owner anchoring (issue #95/#102): a puller with a pinned owner refuses a chain
 /// whose founder is a different key — the wipe-and-refound takeover — rather than
 /// adopting it and authorizing the attacker.
@@ -4659,7 +4662,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     assert_eq!(result.rejected_unauthorized[0].seq, 1);
     assert_eq!(
         result.rejected_unauthorized[0].author,
-        Some(hex::encode(outsider.public_key()))
+        hex::encode(outsider.public_key())
     );
     assert_eq!(updated.get("devX"), Some(&1));
     assert_eq!(
@@ -4714,7 +4717,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     // intact (the changeset_size still matches, so this reaches the signature check
     // rather than failing envelope parsing).
     let (mut env, changeset_bytes) = envelope::unpack(&packed).unwrap();
-    env.signature = Some("0".repeat(128));
+    env.signature = "0".repeat(128);
     storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &changeset_bytes));
 
     let db2 = open_test_db();
@@ -4808,7 +4811,7 @@ async fn pull_skips_a_removed_members_changeset() {
     assert_eq!(result.rejected_unauthorized.len(), 1);
     assert_eq!(
         result.rejected_unauthorized[0].author,
-        Some(hex::encode(member.public_key()))
+        hex::encode(member.public_key())
     );
     assert_eq!(updated.get("devM"), Some(&1));
 }
@@ -4901,7 +4904,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     assert_eq!(result.rejected_unauthorized.len(), 1);
     assert_eq!(
         result.rejected_unauthorized[0].author,
-        Some(hex::encode(member.public_key()))
+        hex::encode(member.public_key())
     );
     assert_eq!(updated.get("devM"), Some(&1));
 }

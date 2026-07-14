@@ -16,7 +16,7 @@ use crate::migration::Migration;
 use crate::storage::cloud::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
 use crate::store_dir::StoreDir;
 use crate::sync::apply::resolve_and_apply_changeset;
-use crate::sync::envelope::{self, ChangesetEnvelope};
+use crate::sync::envelope;
 use crate::sync::membership::{
     sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipCoord,
     MembershipEntry,
@@ -1023,9 +1023,7 @@ impl MockSyncStorage {
             .cloned()
     }
 
-    /// Store a changeset in the mock storage (simulates what push would do). The
-    /// changeset itself is left unsigned (for tests exercising unsigned-changeset
-    /// rejection); the device head it advances is signed by the mock's keypair.
+    /// Store a changeset in the mock storage (simulates what push would do).
     pub fn store_changeset(
         &self,
         device_id: &str,
@@ -1036,9 +1034,7 @@ impl MockSyncStorage {
         // Sign with the mock's keypair, as production always does: the author is
         // what the pull records as each introduced blob's uploader (there is no
         // listing scan), so a blob a signed changeset introduces is downloadable
-        // and later readable. A test that specifically needs an unsigned envelope
-        // (a pre-initialization unanchored path or an unsigned-rejection path) uses
-        // [`store_unsigned_changeset`].
+        // and later readable.
         let packed = envelope::pack_signed(
             device_id,
             seq,
@@ -1074,32 +1070,6 @@ impl MockSyncStorage {
         self.store_packed(device_id, seq, packed);
     }
 
-    /// Store an unsigned changeset envelope (`author_pubkey`/`signature` both
-    /// `None`), for tests that exercise the pre-initialization unanchored path or
-    /// assert pull rejects an unsigned changeset once a membership chain exists.
-    pub fn store_unsigned_changeset(
-        &self,
-        device_id: &str,
-        seq: u64,
-        changeset_bytes: &[u8],
-        schema_version: u32,
-    ) {
-        let env = ChangesetEnvelope {
-            device_id: device_id.to_string(),
-            seq,
-            schema_version,
-            message: String::new(),
-            timestamp: "2026-02-10T00:00:00Z".to_string(),
-            changeset_size: changeset_bytes.len(),
-            author_pubkey: None,
-            membership_grant: None,
-            blob_locations: Vec::new(),
-            signature: None,
-        };
-        let packed = envelope::pack(&env, changeset_bytes);
-        self.store_packed(device_id, seq, packed);
-    }
-
     /// Store a pre-packed envelope (already signed/packed by the caller) and
     /// advance the device head. For tests that need a specific signature or
     /// envelope timestamp `store_changeset`'s synthetic envelope can't express.
@@ -1122,7 +1092,12 @@ impl MockSyncStorage {
     /// but reusable by the changeset-fabrication helpers. Signs with the mock's
     /// keypair and stores the resulting `HeadJson` JSON bytes.
     fn publish_head(&self, device_id: &str, seq: u64) {
-        let head = HeadJson::signed(device_id, seq, None, &self.keypair);
+        let head = HeadJson::signed(
+            device_id,
+            seq,
+            "2026-01-01T00:00:00Z".to_string(),
+            &self.keypair,
+        );
         let bytes = serde_json::to_vec(&head).expect("serialize head");
         self.heads
             .lock()
@@ -1141,7 +1116,7 @@ impl MockSyncStorage {
     /// changeset-GC test give each device a head attributed to its own membership
     /// key (the author changeset reclamation matches each device's ack against).
     pub fn publish_head_as(&self, device_id: &str, seq: u64, keypair: &UserKeypair) {
-        let head = HeadJson::signed(device_id, seq, None, keypair);
+        let head = HeadJson::signed(device_id, seq, "2026-01-01T00:00:00Z".to_string(), keypair);
         let bytes = serde_json::to_vec(&head).expect("serialize head");
         self.heads
             .lock()
@@ -1245,7 +1220,7 @@ impl SyncStorage for MockSyncStorage {
         // Record the timestamp on the head the way the cloud does, so `list_heads`
         // returns it as the device's `last_sync` — the field the sync-status view
         // reads.
-        let head = HeadJson::signed(device_id, seq, Some(timestamp.to_string()), &self.keypair);
+        let head = HeadJson::signed(device_id, seq, timestamp.to_string(), &self.keypair);
         let bytes = serde_json::to_vec(&head).expect("serialize head");
         self.heads
             .lock()

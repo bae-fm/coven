@@ -10,7 +10,7 @@
 /// changes/{device_id}/{seq}{suffix}              -- changeset envelopes
 /// heads/{device_id}.json{suffix}                 -- head pointers
 /// {namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation} -- generated hashed blob
-/// {namespace}/.coven-generations/{uploader}/{generation}/{cloud_path} -- generated plain blob
+/// {namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path} -- generated plain blob
 /// snapshot/{author}/{publish_id}.db{suffix}      -- a generation's full DB snapshot
 /// snapshot/{author}/{publish_id}_meta.json{suffix} -- a generation's per-device cursors
 /// snapshot/current.json{suffix}                  -- signed pointer naming the live {author, publish_id}
@@ -56,7 +56,7 @@
 /// [`BlobPathScheme`](crate::sync::cloud_storage::BlobPathScheme): the default
 /// hashed scheme keys each generated blob under its uploader, a reserved
 /// generation component, and its sharded id; the plain scheme places generated
-/// objects below `{namespace}/.coven-generations/{uploader}/{generation}/`.
+/// objects below `{namespace}/.coven-generations/{uploader}/{generation}/{id}/`.
 /// Reads use the signed location record exactly.
 /// The blob-path scheme is independent of the at-rest cipher below.
 ///
@@ -71,10 +71,8 @@ use std::path::Path;
 pub struct DeviceHead {
     pub device_id: String,
     pub seq: u64,
-    /// RFC 3339 timestamp of when this head was last updated (i.e., when
-    /// the device last synced). None for heads written before this field
-    /// was added.
-    pub last_sync: Option<String>,
+    /// RFC 3339 timestamp of when this head was last updated.
+    pub last_sync: String,
     /// Hex-encoded Ed25519 public key the head's signature verified against, set
     /// by [`SyncStorage::list_heads`] once the embedded signature is checked. The
     /// caller uses it to decide whether the head's author is a current member (the
@@ -194,12 +192,13 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         timestamp: &str,
     ) -> Result<(), StorageError>;
 
-    /// Upload a blob. Under the hashed (default) scheme it is keyed
-    /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}` under this device's own
-    /// public key (`cloud_path` ignored); under the plain scheme it is keyed
-    /// `{namespace}/{cloud_path}` verbatim, so the bucket is browsable, and a
-    /// missing `cloud_path` is an error. A device only ever uploads blobs it
-    /// authored, so a write always keys under itself.
+    /// Upload a blob at its immutable [`CloudBlobLocation`](crate::blob::CloudBlobLocation).
+    /// The hashed scheme uses
+    /// `{namespace}/{uploader}/.coven-generations/{id[0..2]}/{id[2..4]}/{id}/{generation}`
+    /// (`cloud_path` ignored). The plain scheme uses
+    /// `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}` so the
+    /// consumer-supplied suffix remains browsable; a missing `cloud_path` is an
+    /// error.
     /// On an encrypted home the plaintext is sealed with the key `scope` selects
     /// (master, or a per-scope derived key); on a plaintext home it is stored
     /// verbatim (scope ignored).
@@ -225,15 +224,10 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         source_path: &Path,
     ) -> Result<(), StorageError>;
 
-    /// Download and open a blob, keyed
-    /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}` under the hashed scheme
-    /// or `{namespace}/{cloud_path}` under the plain one, using the key the
-    /// resolved `scope` selects on an encrypted home (verbatim on a plaintext one).
-    /// `uploader` is the hex public key of the device that uploaded the blob (the
-    /// caller resolves it — a peer's, not necessarily this device's); it is
-    /// required by the hashed scheme and ignored by the plain one (a browsable home
-    /// carries no uploader segment). A plain-scheme home with no `cloud_path` is an
-    /// error.
+    /// Download and open the exact immutable location. Both path schemes include
+    /// its uploader and generation; the plain scheme additionally requires the
+    /// consumer-supplied `cloud_path`. The resolved `scope` selects the key on an
+    /// encrypted home; a plaintext home stores the bytes verbatim.
     async fn get_blob(
         &self,
         namespace: &str,

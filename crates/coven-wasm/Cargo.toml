@@ -22,7 +22,7 @@ bytes = "1.11"
 futures-util = "0.3"
 gloo-timers = { version = "0.4", features = ["futures"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
-getrandom_legacy = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 hex = "0.4"
 http = "1"
 percent-encoding = "2.3"

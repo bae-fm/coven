@@ -986,12 +986,9 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
 
 /// A replaced blob's cloud object is reclaimed, and the blob that replaced it is not.
 ///
-/// On a browsable home the GC resolves a tombstone's cloud key back to a live row by the
-/// row's readable `cloud_path`. Since that path names its blob, a replacement moves it —
-/// so the replaced blob's key matches no live row and is collected, while the live blob's
-/// key matches its row and is protected. Under a path that did not name its blob the two
-/// keys would be one, and the GC could not tell "reclaim the blob the row dropped" from
-/// "keep the blob the row holds".
+/// On a browsable home the generated key carries the blob id before its readable path.
+/// The replaced blob's key therefore maps to no live row and is collected, while the
+/// replacement's key maps to its row and is protected.
 #[tokio::test]
 async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_it() {
     let (storage, founder, member) = storage_with_chain().await;
@@ -1021,7 +1018,7 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
     )
     .unwrap();
 
-    // The row has been repointed: it carries the replacement, and its path names it.
+    // The row has been repointed and now carries the replacement.
     exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \

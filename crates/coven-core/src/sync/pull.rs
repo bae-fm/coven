@@ -79,9 +79,8 @@ fn is_current_owner(members: &[(String, MemberRole)], pubkey: &str) -> bool {
 pub struct RejectedUnauthorized {
     pub device_id: String,
     pub seq: u64,
-    /// Hex-encoded author pubkey, or `None` for an unsigned changeset in a chain
-    /// store (which nothing can authorize).
-    pub author: Option<String>,
+    /// Hex-encoded author pubkey claimed by the signed envelope.
+    pub author: String,
 }
 
 /// A changeset rejected because its signature did not verify — forged or corrupt,
@@ -241,8 +240,8 @@ pub struct CycleMembership {
 /// Load and anchor the cycle's membership chain once. Every successful listing
 /// is validated; a loader error aborts regardless of owner pin because an
 /// unpinned database may already have accepted author floors. Only the loader's
-/// explicit `Ok(None)` represents an unpinned pre-initialization read. LIST
-/// transport errors retain their separate pinned/unpinned classification.
+/// explicit `Ok(None)` is an unpinned chain-less store. A LIST transport error
+/// cannot establish that the store has no membership state, so it always aborts.
 pub async fn load_cycle_membership(
     storage: &dyn SyncStorage,
     db: &Database,
@@ -255,24 +254,10 @@ pub async fn load_cycle_membership(
         .await
         .map_err(|e| PullError::Apply(format!("read pinned owner: {e}")))?;
 
-    let listed_entries = match storage.list_membership_entries().await {
-        Ok(entries) => entries,
-        Err(e) => {
-            // Can't even list membership. For an owner-pinned store we cannot
-            // verify authorship, so fail closed (abort, retry next cycle) rather
-            // than apply changesets unvalidated. Only an unpinned
-            // pre-initialization caller can proceed without a chain.
-            if pinned_owner.is_some() {
-                return Err(PullError::Storage(e));
-            }
-            warn!("failed to list membership entries for validation: {e}");
-            return Ok(CycleMembership {
-                chain: None,
-                pinned_owner,
-                listed_entries: Vec::new(),
-            });
-        }
-    };
+    let listed_entries = storage
+        .list_membership_entries()
+        .await
+        .map_err(PullError::Storage)?;
 
     // Load + validate the chain and anchor it to the pinned owner. Every
     // successful LIST result, including an empty one, reaches the same optional
@@ -540,6 +525,29 @@ pub async fn pull_changes(
                 break;
             }
 
+            // The envelope's declared changeset_size must match the trailing bytes.
+            // A mismatch is present-but-invalid cloud data. Hold this device's
+            // cursor and surface it; do not advance past bytes whose integrity check
+            // failed.
+            if env.changeset_size != changeset_bytes.len() {
+                error!(
+                    device_id = %head.device_id,
+                    seq,
+                    expected = env.changeset_size,
+                    actual = changeset_bytes.len(),
+                    "changeset_size mismatch in envelope; holding cursor for this device"
+                );
+                result.held_changesets.push(HeldChangeset {
+                    device_id: head.device_id.clone(),
+                    seq,
+                    reason: HeldChangesetReason::SizeMismatch {
+                        expected: env.changeset_size,
+                        actual: changeset_bytes.len(),
+                    },
+                });
+                break;
+            }
+
             // Signature check: reject changesets with invalid signatures. A bad
             // signature is forged or corrupt; hold the cursor and stop this device
             // stream at the bad seq so it surfaces as a bounded stall instead of
@@ -567,12 +575,12 @@ pub async fn pull_changes(
             // envelope cannot occupy a signed member stream. This mismatch is
             // permanent attacker-controlled content, so reject and advance rather
             // than letting it hold the stream forever.
-            if env.author_pubkey.as_deref() != Some(head.author_pubkey.as_str()) {
+            if env.author_pubkey != head.author_pubkey {
                 error!(
                     device_id = %head.device_id,
                     seq,
                     head_author = %head.author_pubkey,
-                    envelope_author = ?env.author_pubkey,
+                    envelope_author = %env.author_pubkey,
                     "changeset signer does not match the verified device-head signer; rejecting"
                 );
                 result.rejected_unauthorized.push(RejectedUnauthorized {
@@ -643,7 +651,7 @@ pub async fn pull_changes(
                     db,
                     current,
                     owner_pubkey.as_deref(),
-                    env.author_pubkey.as_deref(),
+                    &env.author_pubkey,
                     env.membership_grant.as_ref(),
                 )
                 .await
@@ -661,7 +669,7 @@ pub async fn pull_changes(
                         error!(
                             device_id = %head.device_id,
                             seq,
-                            author = ?env.author_pubkey,
+                            author = %env.author_pubkey,
                             "changeset author is not a write-capable member \
                              against the membership entry it is signed under; \
                              skipping (forged or revoked)"
@@ -1089,14 +1097,9 @@ async fn resolve_membership_authorization(
     db: &Database,
     current: &MembershipChain,
     owner_pubkey: Option<&str>,
-    author: Option<&str>,
+    author: &str,
     grant: Option<&MembershipCoord>,
 ) -> MembershipJudgment {
-    let Some(author) = author else {
-        // Unsigned changeset in a chain store: nothing can authorize it.
-        return MembershipJudgment::Unauthorized;
-    };
-
     let Some(coord) = grant else {
         return MembershipJudgment::Unauthorized;
     };
@@ -1878,7 +1881,31 @@ impl std::error::Error for PullError {}
 mod tests {
     use super::*;
     use crate::sync::session::{BlobDecl, SyncedTable};
-    use crate::sync::test_helpers::{capture_bytes, exec, open_test_db_with_blob, temp_store_dir};
+    use crate::sync::test_helpers::{
+        capture_bytes, exec, open_test_db_with_blob, temp_store_dir, MockSyncStorage,
+    };
+
+    #[tokio::test]
+    async fn cycle_membership_list_failure_aborts_an_unpinned_store() {
+        let storage = MockSyncStorage::new();
+        storage.fail_membership_listing();
+        let (db, _stamper) = Database::open(
+            std::path::Path::new(":memory:"),
+            Vec::new(),
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "test-device".to_string(),
+            &[],
+        )
+        .expect("open database");
+
+        let error = match load_cycle_membership(&storage, &db).await {
+            Ok(_) => panic!("a membership LIST failure must abort every store"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, PullError::Storage(_)));
+    }
 
     #[test]
     fn cleanup_intent_derivation_rejects_mismatched_lengths() {

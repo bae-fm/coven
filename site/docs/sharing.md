@@ -206,9 +206,9 @@ For each incoming changeset envelope,
    Follower, or forged) is skipped and the cursor advances past it, surfaced
    in `PullResult::rejected_unauthorized`.
 
-An initialized store never accepts an unsigned envelope or a changeset without
-a valid write grant. A missing, wiped, malformed, or differently founded chain
-prevents the sync runtime from starting instead of opening authorization.
+A store with no membership entries still requires every envelope to carry a valid
+author and signature. The membership authorization check begins once the chain is
+non-empty; signature verification never becomes optional.
 
 ## Revocation is key rotation
 

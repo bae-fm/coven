@@ -210,19 +210,13 @@ pub struct BlobDecl {
     /// into the cache on every pull) or [`crate::blob::CacheFill::CacheLazy`]
     /// (fetched into the cache on first read).
     pub fill: crate::blob::CacheFill,
-    /// The blob's **replacement story**: whether this row may be repointed at a
-    /// different blob ([`crate::blob::BlobReplacement`]). Decides what coven requires of
-    /// the blob's cloud key so that a cloud object is never rewritten with different
-    /// bytes. Defaults to [`crate::blob::BlobReplacement::Replaceable`].
-    pub replacement: crate::blob::BlobReplacement,
 }
 
 impl BlobDecl {
     /// A blob declaration in `namespace` with the given `provenance` (its Local
     /// story) and cache `fill` (its Remote story), the blob id taken from the
-    /// primary key (`id`), no readable cloud path, master-scoped, and
-    /// [`Replaceable`](crate::blob::BlobReplacement::Replaceable). Refine with the
-    /// `with_*` builders.
+    /// primary key (`id`), no readable cloud path, and master-scoped. Refine with
+    /// the `with_*` builders.
     pub fn new(
         namespace: impl Into<String>,
         provenance: crate::blob::Provenance,
@@ -237,19 +231,7 @@ impl BlobDecl {
             scope: crate::blob::BlobScope::Master,
             provenance,
             fill,
-            replacement: crate::blob::BlobReplacement::Replaceable,
         }
-    }
-
-    /// Declare that this table's row is never repointed at a different blob
-    /// ([`crate::blob::BlobReplacement::WriteOnce`]), which frees its readable
-    /// `cloud_path` to be a stable, fully human-readable name. coven refuses a
-    /// repointing. Read that variant's docs before reaching for this: it is a weaker
-    /// contract than the default, and it asks the consumer to guarantee the part coven
-    /// cannot see — that a path is never reused by a different blob.
-    pub fn write_once(mut self) -> Self {
-        self.replacement = crate::blob::BlobReplacement::WriteOnce;
-        self
     }
 
     /// Take the blob id from `column` instead of the primary key.

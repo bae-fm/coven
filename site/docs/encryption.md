@@ -175,12 +175,14 @@ bucket sees the actual files instead of ciphertext.
 
 - An **opaque home** (`storage: opaque`, the default) seals every object under
   the store key and stores it with the `.enc` suffix, and keys each blob by its
-  content-addressed shard `{namespace}/{ab}/{cd}/{id}`. Anyone with bucket access
+  generated path
+  `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`. Anyone with bucket access
   sees only ciphertext under opaque keys.
 - A **browsable home** (`storage: browsable`) stores every object verbatim with
   no `.enc` suffix (bare names like `snapshot/{author}/{seq}.db`,
   `heads/{device}.json`, `changes/{device}/{seq}`) and stores each blob at the
-  consumer's own readable path `{namespace}/{cloud_path}`. Anyone with bucket
+  generated readable path
+  `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}`. Anyone with bucket
   access can open the snapshot or a blob directly without any key, which is the
   point: it is for a store whose contents are not secret and whose owner wants
   to read the bucket by name (e.g. inspect it in the storage console).
@@ -191,9 +193,10 @@ blob-path scheme, both held by a `CloudSyncStorage`:
 - `CloudCipher::Encrypted(key)` (opaque) seals every object under the store key
   (the behavior described everywhere above); `CloudCipher::Plaintext` (browsable)
   stores every object verbatim and drops the `.enc` suffix.
-- `BlobPathScheme::Hashed` (opaque) keys a blob by its content-addressed shard;
-  `BlobPathScheme::Plain` (browsable) keys it at the readable `cloud_path` the
-  consumer supplies (see [blobs](blobs.md#browsable-home-blob-paths)).
+- `BlobPathScheme::Hashed` (opaque) uses an id-sharded generated path;
+  `BlobPathScheme::Plain` (browsable) places the consumer's readable `cloud_path`
+  below a generated uploader, generation, and blob-id prefix (see
+  [blobs](blobs.md#browsable-home-blob-paths)).
 
 The storage mode changes only what happens at rest. Changesets, snapshots, the
 snapshot metadata, the min-schema marker, membership entries, and blobs are
@@ -223,7 +226,7 @@ The two kinds of home at a glance:
 | Blob-path scheme | `BlobPathScheme::Hashed` | `BlobPathScheme::Plain` |
 | Object bytes at rest | sealed (XChaCha20-Poly1305) | verbatim |
 | Object-key suffix | `.enc` | none |
-| Blob key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |
+| Blob key | `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}` | `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}` |
 | Sharing (invite / remove member) | available | error |
 
 ## Chunked encryption

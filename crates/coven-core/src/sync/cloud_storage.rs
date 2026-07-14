@@ -283,10 +283,12 @@ pub async fn restore_pending_rotation(
     pending_rotation: &PendingRotation,
 ) -> Result<(), crate::database::DbError> {
     if let Some(value) = db.get_sync_state(PENDING_ROTATION_STATE_KEY).await? {
-        match value.parse::<u64>() {
-            Ok(generation) => pending_rotation.mark_committed(generation),
-            Err(_) => warn!("ignoring malformed persisted pending-rotation generation {value:?}"),
-        }
+        let generation = value.parse::<u64>().map_err(|error| {
+            crate::database::DbError(format!(
+                "malformed {PENDING_ROTATION_STATE_KEY} value {value:?}: {error}"
+            ))
+        })?;
+        pending_rotation.mark_committed(generation);
     }
     Ok(())
 }
@@ -312,11 +314,12 @@ pub async fn persist_pending_rotation(
 /// opaque home is `Hashed` + encrypted, a browsable home is `Plain` + plaintext.
 #[derive(Clone, Copy)]
 pub enum BlobPathScheme {
-    /// Content-addressed shard `{namespace}/{ab}/{cd}/{id}` (an opaque home).
+    /// Generated hashed path
+    /// `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`.
     Hashed,
-    /// The consumer's own readable path, verbatim: `{namespace}/{cloud_path}`
-    /// (a browsable home). The consumer must supply `cloud_path` on every blob;
-    /// coven errors otherwise.
+    /// Generated plain path
+    /// `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}`.
+    /// The consumer must supply `cloud_path` on every blob; Coven errors otherwise.
     Plain,
 }
 
@@ -669,27 +672,18 @@ impl CloudSyncStorage {
 
     /// The cloud object key for a blob under the home's [`BlobPathScheme`].
     ///
-    /// **A cloud object is never rewritten with different bytes, so no two blobs ever
-    /// share a key.** `Hashed` gets that from the key itself; `Plain` gets it from the
-    /// blob's declared [`BlobReplacement`](crate::blob::BlobReplacement), which coven
-    /// enforces where a blob is derived from its row ([`crate::blob::decl::BlobDecls`]) —
-    /// a replaceable blob's readable path must name it, and a write-once blob's row can
-    /// never be repointed. Either way, an object's *presence* at a blob's key is proof of
-    /// its *content*, which is what lets the push skip an upload without asking a sealed
-    /// object what it holds.
+    /// A location's generation makes the object immutable: retrying one publication
+    /// reuses its key, while a later publication uses another generation.
     ///
     /// `Hashed` ignores `cloud_path` and shards by the id under the uploading
-    /// device: `{namespace}/{uploader}/{ab}/{cd}/{id}` — the id is right there, and the
-    /// `{uploader}` segment aligns the keyspace to the storage-access rule (a member
-    /// writes only under its own public key), so `uploader` is required and a missing one
-    /// is an error.
+    /// device: `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`.
+    /// `uploader` aligns the keyspace to the storage-access rule and `generation`
+    /// identifies the exact publication.
     ///
-    /// `Plain` uses the consumer's `cloud_path` verbatim: `{namespace}/{cloud_path}`,
-    /// keeping the bucket browsable. Plain blob naming carries no uploader segment
-    /// and ignores `uploader`; the store still has membership authorization. A
-    /// `Plain` home with no `cloud_path` is an error — coven never silently falls
-    /// back to the hashed layout, which would scatter readable-path blobs under
-    /// unfindable shard keys.
+    /// `Plain` uses
+    /// `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}`. The
+    /// reserved prefix and immutable location prevent collisions while the path suffix
+    /// remains readable. A `Plain` home with no `cloud_path` is an error.
     pub fn blob_key(
         scheme: BlobPathScheme,
         namespace: &str,
@@ -715,6 +709,7 @@ impl CloudSyncStorage {
                     ))
                 })?;
                 crate::store_dir::validate_path_token(namespace)?;
+                crate::store_dir::validate_path_token(id)?;
                 crate::store_dir::validate_cloud_path(path)?;
                 if path.split('/').next() == Some(".coven-generations") {
                     return Err(StorageError::Parse(format!(
@@ -723,8 +718,8 @@ impl CloudSyncStorage {
                 }
                 location.validate().map_err(StorageError::Parse)?;
                 Ok(format!(
-                    "{namespace}/.coven-generations/{}/{}/{path}",
-                    location.uploader, location.generation
+                    "{namespace}/.coven-generations/{}/{}/{id}/{path}",
+                    location.uploader, location.generation,
                 ))
             }
         }
@@ -736,13 +731,10 @@ impl CloudSyncStorage {
 ///
 /// The namespace prefix of a blob `cloud_key` — the segment before the first `/`.
 ///
-/// Every blob `cloud_key` [`CloudSyncStorage::blob_key`] produces is `{namespace}/…`
-/// in BOTH [`BlobPathScheme`] variants (`Hashed` = `{namespace}/{ab}/{cd}/{id}`,
-/// `Plain` = `{namespace}/{cloud_path}`), and a namespace is a single slash-free path
-/// token (validated by [`crate::store_dir::validate_path_token`]). So the namespace
-/// is always recoverable from the key with no second stored copy — the durable
-/// `cloud_outbox` row carries only the key, and the upload drain recovers the
-/// namespace here for the cache copy it places (`storage/cache/<namespace>/…`).
+/// Every blob key [`CloudSyncStorage::blob_key`] produces starts with the validated,
+/// slash-free namespace in both [`BlobPathScheme`] variants. The durable
+/// `cloud_outbox` row therefore needs no second namespace copy; the upload drain
+/// recovers it here for the cache copy it places (`storage/cache/<namespace>/…`).
 /// `split_once` returns the prefix for a real key; a slashless key (never produced by
 /// `blob_key`, only by a unit-test fixture that does not exercise namespaced cache
 /// placement) has no prefix and is returned whole.
@@ -1217,7 +1209,7 @@ impl SyncStorage for CloudSyncStorage {
         seq: u64,
         timestamp: &str,
     ) -> Result<(), StorageError> {
-        let head = HeadJson::signed(device_id, seq, Some(timestamp.to_string()), &self.keypair);
+        let head = HeadJson::signed(device_id, seq, timestamp.to_string(), &self.keypair);
         let json = serde_json::to_vec(&head)
             .map_err(|e| StorageError::Parse(format!("serialize head: {e}")))?;
         let key = format!("heads/{device_id}.json{}", self.suffix());
@@ -1437,12 +1429,12 @@ impl SyncStorage for CloudSyncStorage {
             .map_err(|e| StorageError::Parse(format!("parse min_schema_version: {e}")))?;
 
         // The bucket is untrusted: a floor set by anyone with the credential can
-        // freeze the fleet or force a downgrade. Treat a value whose signature
-        // doesn't verify as absent (None) rather than honoring it; the caller
-        // separately checks the verified author is a current owner.
+        // freeze the fleet or force a downgrade. A present value therefore must
+        // verify; absence is reserved for a missing object.
         if !parsed.verify() {
-            warn!("ignoring min_schema_version with an invalid signature");
-            return Ok(None);
+            return Err(StorageError::Parse(
+                "min_schema_version has an invalid signature".to_string(),
+            ));
         }
 
         Ok(Some(MinSchemaVersion {
@@ -1703,6 +1695,25 @@ mod tests {
             after_restart.check(&live_gen_1).is_ok(),
             "a resolved rotation leaves no durable pause behind",
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_persisted_pending_rotation_aborts_restore() {
+        let db = open_test_db();
+        db.set_sync_state(PENDING_ROTATION_STATE_KEY, "not-a-generation")
+            .await
+            .expect("seed malformed durable rotation");
+        let restored = PendingRotation::none();
+
+        let error = restore_pending_rotation(&db, &restored)
+            .await
+            .expect_err("malformed durable rotation must abort restore");
+
+        assert!(
+            error.to_string().contains(PENDING_ROTATION_STATE_KEY),
+            "error names the malformed durable field: {error}",
+        );
+        assert_eq!(restored.pending_generation(), None);
     }
 
     #[derive(Clone)]
@@ -2214,7 +2225,7 @@ mod tests {
         // check, not the cipher.
         let forged = HeadJson {
             seq: 100,
-            last_sync: None,
+            last_sync: "2026-01-01T00:00:00Z".to_string(),
             author_pubkey: hex::encode(UserKeypair::generate().public_key()),
             signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
         };
@@ -2306,11 +2317,10 @@ mod tests {
     }
 
     /// A validly signed `min_schema_version` round-trips and surfaces its author;
-    /// one whose signature is invalid is treated as absent (`None`), so a bucket
-    /// writer can't freeze the fleet or force a downgrade by planting a forged
-    /// floor.
+    /// a present floor with an invalid signature is corrupt durable control state,
+    /// not absence, and must fail the read.
     #[tokio::test]
-    async fn get_min_schema_version_verifies_and_ignores_a_forged_floor() {
+    async fn get_min_schema_version_rejects_a_forged_present_floor() {
         let keypair = UserKeypair::generate();
         let cipher = CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32]));
         let storage = CloudSyncStorage::new(
@@ -2328,8 +2338,7 @@ mod tests {
         assert_eq!(got.version, 7);
         assert_eq!(got.author_pubkey, hex::encode(keypair.public_key()));
 
-        // Overwrite it with a forged floor (valid shape, bad signature): it is
-        // treated as absent.
+        // Overwrite it with a forged floor (valid shape, bad signature).
         let forged = MinSchemaVersionJson {
             min_schema_version: 9999,
             author_pubkey: hex::encode(UserKeypair::generate().public_key()),
@@ -2348,13 +2357,13 @@ mod tests {
             )
             .await
             .expect("write forged floor");
+        let error = storage
+            .get_min_schema_version()
+            .await
+            .expect_err("a present floor with an invalid signature must fail");
         assert!(
-            storage
-                .get_min_schema_version()
-                .await
-                .expect("get forged floor")
-                .is_none(),
-            "a floor with an invalid signature is treated as absent",
+            error.to_string().contains("signature"),
+            "the error names the invalid signature: {error}",
         );
     }
 
@@ -2536,9 +2545,9 @@ mod tests {
         );
     }
 
-    /// A `BlobPathScheme::Plain` home stores each blob at the consumer's readable
-    /// `cloud_path` (`{namespace}/{cloud_path}`), not the content-addressed shard:
-    /// the bucket is browsable. Asserts the blob lands at the exact readable key,
+    /// A `BlobPathScheme::Plain` home stores each blob below its generated identity
+    /// with the consumer's `cloud_path` as the readable suffix. Asserts the blob lands
+    /// at the exact generated readable key,
     /// that the hashed shard key it *would* have used is absent, and that
     /// `get_blob` with the same `cloud_path` round-trips.
     #[tokio::test]
@@ -2592,7 +2601,7 @@ mod tests {
             "the hashed shard key must be absent under the plain scheme",
         );
 
-        // Round-trips with the same cloud_path (a plain home carries no uploader).
+        // Round-trips with the same generated location and cloud_path.
         let got = storage
             .get_blob(
                 "images",
@@ -2604,6 +2613,87 @@ mod tests {
             .await
             .expect("get_blob plain");
         assert_eq!(got, bytes);
+    }
+
+    #[tokio::test]
+    async fn plain_scheme_distinguishes_two_blob_ids_in_one_generated_readable_path() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "test-lib",
+            UserKeypair::generate(),
+        );
+        let location = location(&storage);
+        let cloud_path = "Artist - Album/cover.jpg";
+
+        storage
+            .put_blob(
+                "images",
+                &location,
+                "cover-first",
+                BlobScope::Master,
+                Some(cloud_path),
+                b"first bytes".to_vec(),
+            )
+            .await
+            .unwrap();
+        storage
+            .put_blob(
+                "images",
+                &location,
+                "cover-second",
+                BlobScope::Master,
+                Some(cloud_path),
+                b"second bytes".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        let first_key = CloudSyncStorage::blob_key(
+            BlobPathScheme::Plain,
+            "images",
+            &location,
+            "cover-first",
+            Some(cloud_path),
+        )
+        .unwrap();
+        let second_key = CloudSyncStorage::blob_key(
+            BlobPathScheme::Plain,
+            "images",
+            &location,
+            "cover-second",
+            Some(cloud_path),
+        )
+        .unwrap();
+        assert_ne!(first_key, second_key);
+        assert_eq!(
+            storage
+                .get_blob(
+                    "images",
+                    &location,
+                    "cover-first",
+                    BlobScope::Master,
+                    Some(cloud_path),
+                )
+                .await
+                .unwrap(),
+            b"first bytes",
+        );
+        assert_eq!(
+            storage
+                .get_blob(
+                    "images",
+                    &location,
+                    "cover-second",
+                    BlobScope::Master,
+                    Some(cloud_path),
+                )
+                .await
+                .unwrap(),
+            b"second bytes",
+        );
     }
 
     #[test]
@@ -2633,7 +2723,7 @@ mod tests {
             )
             .unwrap(),
             format!(
-                "photos/.coven-generations/aa11/{}/Artist/cover.jpg",
+                "photos/.coven-generations/aa11/{}/aabbccdd/Artist/cover.jpg",
                 generated.generation
             ),
         );

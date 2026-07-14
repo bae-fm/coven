@@ -390,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn passphrase_preset_envelope_fixture_v1_unlocks() {
+    fn passphrase_preset_current_v1_envelope_fixture_unlocks() {
         let (_tmp, dir) = temp_store_dir();
         std::fs::write(dir.join("identity.envelope"), V1_FIXTURE_ENVELOPE_JSON)
             .expect("write fixture envelope");
@@ -401,7 +401,7 @@ mod tests {
         );
         let keypair = custody
             .unlock()
-            .expect("the v1 fixture must still unlock")
+            .expect("the current v1 fixture must unlock")
             .expect("the fixture names an established identity");
 
         let expected = UserKeypair::from_signing_key_bytes(

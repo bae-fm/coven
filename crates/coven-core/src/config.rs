@@ -38,14 +38,15 @@ impl CloudProvider {
 /// mechanisms together:
 ///
 /// - `Opaque` (the default): every object is encrypted at rest under the store
-///   key (the `.enc` suffix) and blobs use coven's content-addressed path under
-///   the uploading device, `{namespace}/{uploader}/{ab}/{cd}/{id}`. Anyone with
-///   bucket access sees only ciphertext
-///   under opaque keys. Sharing a store (inviting members) requires an opaque
-///   home, because it wraps and rotates the store key.
-/// - `Browsable`: every object is stored in the clear (no `.enc` suffix) and
-///   blobs use the consumer-supplied readable path `{namespace}/{cloud_path}`, so
-///   anyone with bucket access can read the actual files by name.
+///   key (the `.enc` suffix) and blobs use the immutable generated path
+///   `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`. Anyone
+///   with bucket access sees only ciphertext under opaque keys. Sharing a store
+///   (inviting members) requires an opaque home, because it wraps and rotates the
+///   store key.
+/// - `Browsable`: every object is stored in the clear (no `.enc` suffix) at
+///   `{namespace}/.coven-generations/{uploader}/{generation}/{id}/{cloud_path}`. The
+///   generation keeps each upload immutable while the consumer-supplied suffix
+///   preserves the readable path and filename.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HomeStorage {
