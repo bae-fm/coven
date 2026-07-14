@@ -52,6 +52,19 @@ fn cursor_for_device(cursors: &HashMap<String, u64>, device_id: &str) -> u64 {
     }
 }
 
+/// Durably skip one authenticated changeset, then reflect that committed
+/// position in this pull's returned cursor vector.
+async fn advance_skipped_changeset(
+    db: &Database,
+    updated_cursors: &mut HashMap<String, u64>,
+    device_id: &str,
+    seq: u64,
+) -> Result<(), crate::database::DbError> {
+    db.advance_sync_cursor(device_id, seq - 1, seq).await?;
+    updated_cursors.insert(device_id.to_string(), seq);
+    Ok(())
+}
+
 fn is_current_owner(members: &[(String, MemberRole)], pubkey: &str) -> bool {
     members
         .iter()
@@ -569,10 +582,9 @@ pub async fn pull_changes(
                     seq,
                     author: env.author_pubkey.clone(),
                 });
-                db.advance_sync_cursor(&head.device_id, seq - 1, seq)
+                advance_skipped_changeset(db, &mut updated_cursors, &head.device_id, seq)
                     .await
                     .map_err(|e| PullError::Apply(e.0))?;
-                updated_cursors.insert(head.device_id.clone(), seq);
                 continue;
             }
 
@@ -661,10 +673,9 @@ pub async fn pull_changes(
                             seq,
                             author: env.author_pubkey.clone(),
                         });
-                        db.advance_sync_cursor(&head.device_id, seq - 1, seq)
+                        advance_skipped_changeset(db, &mut updated_cursors, &head.device_id, seq)
                             .await
                             .map_err(|e| PullError::Apply(e.0))?;
-                        updated_cursors.insert(head.device_id.clone(), seq);
                         continue;
                     }
                     MembershipJudgment::Indeterminate => {
@@ -684,10 +695,9 @@ pub async fn pull_changes(
             }
 
             if changeset_bytes.is_empty() {
-                db.advance_sync_cursor(&head.device_id, seq - 1, seq)
+                advance_skipped_changeset(db, &mut updated_cursors, &head.device_id, seq)
                     .await
                     .map_err(|e| PullError::Apply(e.0))?;
-                updated_cursors.insert(head.device_id.clone(), seq);
                 continue;
             }
 
