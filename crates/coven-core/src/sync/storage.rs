@@ -365,10 +365,11 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// Get the minimum schema version required to sync with this storage, with
     /// the public key its signature verified against.
     ///
-    /// Returns `None` if no minimum has been set, or if the stored object's
-    /// signature is invalid (a forged floor is treated as absent, not trusted).
-    /// Reads from `min_schema_version.json{suffix}`. The caller checks the
-    /// returned `author_pubkey` is a current owner before honoring the version.
+    /// Returns `None` only when no minimum has been set. A present object that
+    /// cannot be opened, parsed, or signature-verified fails the read rather than
+    /// being treated as absence. Reads from `min_schema_version.json{suffix}`. The
+    /// caller checks the returned `author_pubkey` is a current owner before honoring
+    /// the version.
     async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError>;
 
     /// Set the minimum schema version required to sync with this storage.

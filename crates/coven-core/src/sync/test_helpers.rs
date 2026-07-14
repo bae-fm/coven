@@ -1472,10 +1472,12 @@ impl SyncStorage for MockSyncStorage {
         };
         let parsed: MinSchemaVersionJson = serde_json::from_slice(bytes)
             .map_err(|e| StorageError::Parse(format!("parse min_schema_version: {e}")))?;
-        // Mirror the cloud: an unverifiable floor is treated as absent, and logged.
+        // Mirror the cloud: absence is reserved for no published floor. A present
+        // unverifiable floor is corrupt durable control state and fails the read.
         if !parsed.verify() {
-            tracing::warn!("ignoring min_schema_version with an invalid signature");
-            return Ok(None);
+            return Err(StorageError::Parse(
+                "min_schema_version has an invalid signature".to_string(),
+            ));
         }
         Ok(Some(MinSchemaVersion {
             version: parsed.min_schema_version,
@@ -1942,4 +1944,27 @@ pub async fn publish_test_founder(
     timestamp: &str,
 ) -> Result<(), String> {
     crate::sync::membership_ops::write_founder_entry(storage, owner, timestamp).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mock_min_schema_version_rejects_a_forged_present_floor() {
+        let storage = MockSyncStorage::new();
+        let forged = MinSchemaVersionJson {
+            min_schema_version: 9999,
+            author_pubkey: hex::encode(UserKeypair::generate().public_key()),
+            signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
+        };
+        *storage.min_schema_version.lock().unwrap() =
+            Some(serde_json::to_vec(&forged).expect("serialize forged floor"));
+
+        let error = storage
+            .get_min_schema_version()
+            .await
+            .expect_err("a present floor with an invalid signature must fail");
+        assert!(error.to_string().contains("signature"), "{error}");
+    }
 }
