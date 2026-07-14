@@ -796,7 +796,14 @@ impl CovenHandle {
     /// delete path only — a Remote blob's cloud copy is tombstoned separately via
     /// [`blob_cloud_key`](Self::blob_cloud_key).
     pub async fn evict_blob(&self, blob: &BlobRef) -> Result<(), BlobCacheError> {
-        crate::blob::cache::drop_all_local_copies(&self.store_dir, &blob.namespace, &blob.id).await
+        let content_hash = crate::blob::cache::expected_blob_hash(&self.db, blob).await?;
+        crate::blob::cache::drop_all_local_copies(
+            &self.store_dir,
+            &blob.namespace,
+            &blob.id,
+            &content_hash,
+        )
+        .await
     }
 
     /// Make `(root_table, root_id)` Remote (Local → Remote): enqueue an upload per

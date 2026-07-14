@@ -299,7 +299,7 @@ async fn load_published_blob_drop_intents(
     db.call(move |conn| {
         let mut stmt = conn
             .prepare(
-                "SELECT seq, namespace, blob_id, size, disposition \
+                "SELECT seq, namespace, blob_id, size, content_hash, disposition \
                  FROM published_blob_drop_intents \
                  WHERE seq <= ?1 \
                  ORDER BY seq, namespace, blob_id",
@@ -328,7 +328,7 @@ async fn load_published_blob_drop_intents(
                         )),
                     ));
                 }
-                let disposition_raw: String = row.get(4)?;
+                let disposition_raw: String = row.get(5)?;
                 let disposition = disposition_from_db(&disposition_raw).map_err(|message| {
                     rusqlite::Error::FromSqlConversionFailure(
                         4,
@@ -345,6 +345,7 @@ async fn load_published_blob_drop_intents(
                         namespace: row.get(1)?,
                         id: row.get(2)?,
                         size: size as u64,
+                        content_hash: row.get(4)?,
                         disposition,
                     },
                 })
@@ -375,11 +376,12 @@ async fn clear_published_blob_drop_intent(
     let seq = intent.seq;
     let namespace = intent.drop.namespace.clone();
     let id = intent.drop.id.clone();
+    let content_hash = intent.drop.content_hash.clone();
     db.call(move |conn| {
         conn.execute(
             "DELETE FROM published_blob_drop_intents \
-             WHERE seq = ?1 AND namespace = ?2 AND blob_id = ?3",
-            rusqlite::params![seq as i64, namespace, id],
+             WHERE seq = ?1 AND namespace = ?2 AND blob_id = ?3 AND content_hash = ?4",
+            rusqlite::params![seq as i64, namespace, id, content_hash],
         )
         .map(|_| ())
         .map_err(DbError::from)
@@ -407,14 +409,15 @@ pub(crate) fn insert_published_blob_drop_intent(
 ) -> Result<(), DbError> {
     tx.execute(
         "INSERT INTO published_blob_drop_intents \
-         (seq, namespace, blob_id, size, disposition) \
-         VALUES (?1, ?2, ?3, ?4, ?5) \
-         ON CONFLICT(seq, namespace, blob_id) DO NOTHING",
+         (seq, namespace, blob_id, size, content_hash, disposition) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         ON CONFLICT(seq, namespace, blob_id, content_hash) DO NOTHING",
         rusqlite::params![
             seq as i64,
             drop.namespace,
             drop.id,
             drop.size as i64,
+            drop.content_hash,
             disposition_to_db(drop.disposition),
         ],
     )

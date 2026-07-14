@@ -12,13 +12,19 @@ use crate::store_dir::StoreDir;
 pub struct LocalBlobCleanupIntent {
     namespace: String,
     blob_id: String,
+    content_hash: String,
 }
 
 impl LocalBlobCleanupIntent {
-    pub fn new(namespace: impl Into<String>, blob_id: impl Into<String>) -> Self {
+    pub fn new(
+        namespace: impl Into<String>,
+        blob_id: impl Into<String>,
+        content_hash: impl Into<String>,
+    ) -> Self {
         Self {
             namespace: namespace.into(),
             blob_id: blob_id.into(),
+            content_hash: content_hash.into(),
         }
     }
 
@@ -28,6 +34,10 @@ impl LocalBlobCleanupIntent {
 
     pub fn blob_id(&self) -> &str {
         &self.blob_id
+    }
+
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
     }
 }
 
@@ -39,17 +49,16 @@ pub fn record_if_unreferenced_on(
     decls: &BlobDecls,
     intent: &LocalBlobCleanupIntent,
 ) -> Result<bool, DbError> {
-    if decls
-        .row_for_blob_in_namespace(conn, intent.namespace(), intent.blob_id())
-        .map_err(|error| DbError(error.to_string()))?
-        .is_some()
-    {
+    let live_hash = decls
+        .hash_for_blob_in_namespace(conn, intent.namespace(), intent.blob_id())
+        .map_err(|error| DbError(error.to_string()))?;
+    if live_hash.as_deref() == Some(intent.content_hash()) {
         return Ok(false);
     }
     let inserted = conn
         .execute(
-            "INSERT OR IGNORE INTO local_cleanup_intents (namespace, blob_id) VALUES (?1, ?2)",
-            (intent.namespace(), intent.blob_id()),
+            "INSERT OR IGNORE INTO local_cleanup_intents (namespace, blob_id, content_hash) VALUES (?1, ?2, ?3)",
+            (intent.namespace(), intent.blob_id(), intent.content_hash()),
         )
         .map_err(DbError::from)?;
     if inserted == 0 {
@@ -77,8 +86,8 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
         .call(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT namespace, blob_id FROM local_cleanup_intents \
-                     ORDER BY namespace, blob_id",
+                    "SELECT namespace, blob_id, content_hash FROM local_cleanup_intents \
+                     ORDER BY namespace, blob_id, content_hash",
                 )
                 .map_err(DbError::from)?;
             let rows = stmt
@@ -86,6 +95,7 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
                     Ok(LocalBlobCleanupIntent::new(
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
                     ))
                 })
                 .map_err(DbError::from)?;
@@ -107,6 +117,7 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
             store_dir,
             intent.namespace(),
             intent.blob_id(),
+            intent.content_hash(),
         )
         .await
         {
@@ -122,10 +133,11 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
 
         let namespace = intent.namespace;
         let blob_id = intent.blob_id;
+        let content_hash = intent.content_hash;
         db.call(move |conn| {
             conn.execute(
-                "DELETE FROM local_cleanup_intents WHERE namespace = ?1 AND blob_id = ?2",
-                (&namespace, &blob_id),
+                "DELETE FROM local_cleanup_intents WHERE namespace = ?1 AND blob_id = ?2 AND content_hash = ?3",
+                (&namespace, &blob_id, &content_hash),
             )
             .map(|_| ())
             .map_err(DbError::from)

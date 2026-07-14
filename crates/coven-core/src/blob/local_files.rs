@@ -2,7 +2,7 @@
 //!
 //! A host-provided blob (the host hands coven the data — cover art, an artist
 //! image, and keeps nothing) lives, while its release is **Local**, at
-//! `storage/local/<namespace>/<id>`. This is not a copy of anything: it IS the
+//! `storage/local/<namespace>/<id>/<content_hash>`. This is not a copy of anything: it IS the
 //! blob, its only instance, for as long as the blob is Local. The contrast with
 //! the [`cache`](super::cache):
 //!
@@ -57,7 +57,7 @@ impl From<PathTokenError> for LocalBlobError {
 }
 
 /// Store a host-provided blob in the local store at
-/// `storage/local/<namespace>/<id>`, so a read serves it locally while its release
+/// `storage/local/<namespace>/<id>/<content_hash>`, so a read serves it locally while its release
 /// is Local. Reads verify the file length against the blob's declared row size.
 /// There is NO eviction: the local store is never swept (the bytes here ARE the
 /// blob while Local, not a re-fetchable cache mirror).
@@ -68,7 +68,8 @@ pub async fn store(
     id: &str,
     bytes: &[u8],
 ) -> Result<(), LocalBlobError> {
-    let dest = store_dir.local_blob_path(namespace, id)?;
+    let hash = crate::blob::content_hash(bytes);
+    let dest = store_dir.local_blob_path(namespace, id, &hash)?;
     crate::local_blob::write_atomic(&dest, bytes)
         .await
         .map_err(LocalBlobError::Io)
@@ -86,7 +87,7 @@ pub async fn read(
     expected_size: u64,
     expected_hash: &str,
 ) -> Result<Option<Vec<u8>>, LocalBlobError> {
-    match present_path(store_dir, namespace, id).await? {
+    match present_path(store_dir, namespace, id, expected_hash).await? {
         Some(path) => crate::local_blob::read_verified(&path, expected_size, expected_hash)
             .await
             .map(Some)
@@ -102,8 +103,9 @@ pub async fn path_if_present(
     namespace: &str,
     id: &str,
     expected_size: u64,
+    expected_hash: &str,
 ) -> Result<Option<PathBuf>, LocalBlobError> {
-    let path = store_dir.local_blob_path(namespace, id)?;
+    let path = store_dir.local_blob_path(namespace, id, expected_hash)?;
     match crate::local_blob::exists(&path).await {
         Ok(true) => {
             ensure_file_len(&path, expected_size).await?;
@@ -127,7 +129,7 @@ pub async fn read_range(
     offset: u64,
     len: u64,
 ) -> Result<Option<Vec<u8>>, LocalBlobError> {
-    match present_path(store_dir, namespace, id).await? {
+    match present_path(store_dir, namespace, id, expected_hash).await? {
         Some(path) => {
             crate::local_blob::read_range_verified(&path, expected_size, expected_hash, offset, len)
                 .await
@@ -148,7 +150,7 @@ pub async fn copy_verified_if_present(
     expected_hash: &str,
     destination: &std::path::Path,
 ) -> Result<bool, LocalBlobError> {
-    let Some(path) = present_path(store_dir, namespace, id).await? else {
+    let Some(path) = present_path(store_dir, namespace, id, expected_hash).await? else {
         return Ok(false);
     };
     crate::local_blob::copy_verified_atomic(&path, destination, expected_size, expected_hash)
@@ -161,8 +163,9 @@ async fn present_path(
     store_dir: &StoreDir,
     namespace: &str,
     id: &str,
+    expected_hash: &str,
 ) -> Result<Option<PathBuf>, LocalBlobError> {
-    let path = store_dir.local_blob_path(namespace, id)?;
+    let path = store_dir.local_blob_path(namespace, id, expected_hash)?;
     match crate::local_blob::exists(&path).await {
         Ok(true) => Ok(Some(path)),
         Ok(false) => Ok(None),
@@ -190,8 +193,9 @@ pub async fn drop_blob(
     store_dir: &StoreDir,
     namespace: &str,
     id: &str,
+    content_hash: &str,
 ) -> Result<bool, LocalBlobError> {
-    let path = store_dir.local_blob_path(namespace, id)?;
+    let path = store_dir.local_blob_path(namespace, id, content_hash)?;
     crate::local_blob::remove_file(&path)
         .await
         .map_err(LocalBlobError::Io)

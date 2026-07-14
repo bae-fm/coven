@@ -1323,9 +1323,16 @@ async fn local_store_same_length_wrong_bytes_fail_whole_range_and_materialize() 
     let replaced = b"REPLACED-LOCAL";
     assert_eq!(expected.len(), replaced.len());
     plant_blob_row(&db, &blob.id, false, expected).await;
-    crate::blob::local_files::store(&ld, &blob.namespace, &blob.id, replaced)
+    let expected_path = ld
+        .local_blob_path(
+            &blob.namespace,
+            &blob.id,
+            &crate::blob::content_hash(expected),
+        )
+        .expect("expected-version local path");
+    crate::local_blob::write_atomic(&expected_path, replaced)
         .await
-        .expect("store replacement bytes");
+        .expect("store corrupt bytes under the expected version path");
 
     assert!(read_blob(&db, &ld, None, &blob).await.is_err());
     assert!(
@@ -1507,7 +1514,10 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
     assert!(
         !ld.cache_blob_path("photos", "lazy0001").unwrap().exists()
             && !ld.pinned_blob_path("photos", "lazy0001").unwrap().exists()
-            && !ld.local_blob_path("photos", "lazy0001").unwrap().exists(),
+            && !ld
+                .local_blob_path("photos", "lazy0001", &crate::blob::content_hash(bytes))
+                .unwrap()
+                .exists(),
         "CacheLazy host-provided blobs under a remote root are not downloaded on pull"
     );
 

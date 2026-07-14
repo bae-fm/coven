@@ -1660,8 +1660,11 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     .await;
     exec(
         &db1,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at, cloud_path) \
-         VALUES ('p-row', 'n1', 'cover', 8, '0000000001000-0000-dev1', '2026-01-01', 'oldaaaa')",
+        "INSERT INTO note_photos \
+         (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+         VALUES ('p-row', 'n1', 'cover', 8, \
+                 'f3f47f35e084260cb147209c1985f34a9b9b07cda169516f91b30be0fdf3c6f7', \
+                 '0000000001000-0000-dev1', '2026-01-01', 'oldaaaa')",
     )
     .await;
     // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
@@ -1722,8 +1725,11 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     .await;
     exec(
         &db2,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at, cloud_path) \
-         VALUES ('p-row', 'n1', 'cover', 8, '0000000001000-0000-dev2', '2026-01-01', 'oldaaaa')",
+        "INSERT INTO note_photos \
+         (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+         VALUES ('p-row', 'n1', 'cover', 8, \
+                 'f3f47f35e084260cb147209c1985f34a9b9b07cda169516f91b30be0fdf3c6f7', \
+                 '0000000001000-0000-dev2', '2026-01-01', 'oldaaaa')",
     )
     .await;
     crate::local_blob::write_atomic(
@@ -1763,8 +1769,11 @@ async fn update_to_null_drops_old_local_blob_copy() {
     .await;
     exec(
         &db1,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-         VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01', 'oldnull')",
+        "INSERT INTO note_photos \
+         (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+         VALUES ('p-row', 'n1', 'cover', 8, \
+                 'f3f47f35e084260cb147209c1985f34a9b9b07cda169516f91b30be0fdf3c6f7', \
+                 '0000000001000-0000-dev1', '2026-01-01', 'oldnull')",
     )
     .await;
     // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
@@ -1789,8 +1798,11 @@ async fn update_to_null_drops_old_local_blob_copy() {
     .await;
     exec(
         &db2,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at, cloud_path) \
-         VALUES ('p-row', 'n1', 'cover', '0000000001000-0000-dev2', '2026-01-01', 'oldnull')",
+        "INSERT INTO note_photos \
+         (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+         VALUES ('p-row', 'n1', 'cover', 8, \
+                 'f3f47f35e084260cb147209c1985f34a9b9b07cda169516f91b30be0fdf3c6f7', \
+                 '0000000001000-0000-dev2', '2026-01-01', 'oldnull')",
     )
     .await;
     crate::local_blob::write_atomic(
@@ -2288,7 +2300,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
 
     // This device now holds no copy of the blob at all: the push moved the local-store
     // copy into the cache, and the cache copy is then evicted.
-    local_files::drop_blob(&ld, "photos", "p1cover")
+    local_files::drop_blob(&ld, "photos", "p1cover", &crate::blob::content_hash(bytes))
         .await
         .expect("drop any local-store copy");
     let cached = ld.cache_blob_path("photos", "p1cover").expect("cache path");
@@ -2567,9 +2579,14 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
     // carried by a fresh row whose readable path names it; the replaced row and its local
     // copy go away.
     store_local(&ld1, "p2cover", new_bytes).await;
-    local_files::drop_blob(&ld1, "photos", "p1cover")
-        .await
-        .expect("drop the replaced blob's local copy");
+    local_files::drop_blob(
+        &ld1,
+        "photos",
+        "p1cover",
+        &crate::blob::content_hash(old_bytes),
+    )
+    .await
+    .expect("drop the replaced blob's local copy");
     let outgoing = capture_bytes(
         &db1,
         &[
@@ -2832,9 +2849,14 @@ async fn plain_scheme_a_changeset_older_than_a_replacement_still_finds_its_blob(
     // The replacement is published while the laggard is away, so the laggard has never
     // seen either changeset when it finally pulls.
     store_local(&ld1, "p2cover", new_bytes).await;
-    local_files::drop_blob(&ld1, "photos", "p1cover")
-        .await
-        .expect("drop the replaced blob's local copy");
+    local_files::drop_blob(
+        &ld1,
+        "photos",
+        "p1cover",
+        &crate::blob::content_hash(old_bytes),
+    )
+    .await
+    .expect("drop the replaced blob's local copy");
     let outgoing = capture_bytes(
         &db1,
         &[
@@ -3111,9 +3133,14 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     // Repoint the row at a new blob: same primary key, new blob id, and the cloud path
     // moves with it because it names the blob. The replaced blob's local copy goes away.
     store_local(&ld1, "p2cover", new_bytes).await;
-    local_files::drop_blob(&ld1, "photos", "p1cover")
-        .await
-        .expect("drop the replaced blob's local copy");
+    local_files::drop_blob(
+        &ld1,
+        "photos",
+        "p1cover",
+        &crate::blob::content_hash(old_bytes),
+    )
+    .await
+    .expect("drop the replaced blob's local copy");
     let outgoing = capture_bytes(
         &db1,
         &[&format!(
@@ -3535,14 +3562,26 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
         "an eager blob's local copy is moved into the cache",
     );
     assert!(
-        !ld1.local_blob_path("photos", "peager01").unwrap().exists(),
+        !ld1.local_blob_path(
+            "photos",
+            "peager01",
+            &crate::blob::content_hash(b"EAGER-BYTES"),
+        )
+        .unwrap()
+        .exists(),
         "a Remote blob's bytes must not stay in the local store (would read as Local)",
     );
 
     // CacheLazy: dropped from the local store, NOT placed in the cache. A later read
     // fetches it from the cloud.
     assert!(
-        !ld1.local_blob_path("covers", "clazy001").unwrap().exists(),
+        !ld1.local_blob_path(
+            "covers",
+            "clazy001",
+            &crate::blob::content_hash(b"LAZY-BYTES"),
+        )
+        .unwrap()
+        .exists(),
         "a lazy blob's local copy is dropped after upload",
     );
     assert!(
@@ -3629,8 +3668,8 @@ async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
         &source,
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01'); \
-         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('cleanup01', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01');",
+         INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+         VALUES ('cleanup01', 'n1', 'cover', 9, 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17', '0000000001000-0000-dev1', '2026-01-01');",
     )
     .await;
     let deletion =
@@ -3644,8 +3683,8 @@ async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
         &target,
         "INSERT INTO notes (id, title, body, _updated_at, created_at) \
          VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev2', '2026-01-01'); \
-         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('cleanup01', 'n1', 'cover', '0000000001000-0000-dev2', '2026-01-01');",
+         INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+         VALUES ('cleanup01', 'n1', 'cover', 9, 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17', '0000000001000-0000-dev2', '2026-01-01');",
     )
     .await;
 
@@ -3717,15 +3756,15 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
                  '0000000001000-0000-dev2', '2026-01-01'); \
          INSERT INTO note_photos \
          (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
-         VALUES ('existing-row', 'n1', 'cover', 9, NULL, 'other-blob', \
+         VALUES ('existing-row', 'n1', 'cover', 9, 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17', 'other-blob', \
                  '0000000001000-0000-dev2', '2026-01-01')",
     )
     .await;
     target
         .call(|conn| {
             conn.execute(
-                "INSERT INTO local_cleanup_intents (namespace, blob_id) \
-                 VALUES ('photos', 'cleanup-race')",
+                "INSERT INTO local_cleanup_intents (namespace, blob_id, content_hash) \
+                 VALUES ('photos', 'cleanup-race', 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17')",
                 [],
             )
             .map(|_| ())
@@ -3758,7 +3797,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
                 tx.execute(
                     "INSERT INTO note_photos \
                          (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
-                         VALUES ('new-row', 'n1', 'cover', 9, NULL, 'cleanup-race', \
+                         VALUES ('new-row', 'n1', 'cover', 9, 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17', 'cleanup-race', \
                                  '0000000002000-0000-dev2', '2026-01-01')",
                     [],
                 )
@@ -3807,7 +3846,11 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     );
     assert!(
         !store_dir
-            .local_blob_path("photos", "cleanup-race")
+            .local_blob_path(
+                "photos",
+                "cleanup-race",
+                &crate::blob::content_hash(b"old bytes"),
+            )
             .unwrap()
             .exists(),
         "cleanup removes the unreferenced old bytes",
@@ -3831,8 +3874,8 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     target
         .call(|conn| {
             conn.execute(
-                "INSERT INTO local_cleanup_intents (namespace, blob_id) \
-                 VALUES ('photos', 'shared-intent')",
+                "INSERT INTO local_cleanup_intents (namespace, blob_id, content_hash) \
+                 VALUES ('photos', 'shared-intent', 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17')",
                 [],
             )
             .map(|_| ())
@@ -3873,7 +3916,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
                 tx.execute(
                     "INSERT INTO note_photos \
                      (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
-                     VALUES ('blocked-row', 'n1', 'cover', 9, NULL, 'shared-intent', \
+                     VALUES ('blocked-row', 'n1', 'cover', 9, 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17', 'shared-intent', \
                              '0000000002000-0000-dev2', '2026-01-01')",
                     [],
                 )
@@ -3918,7 +3961,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
         &target,
         "INSERT INTO note_photos \
          (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
-         VALUES ('live-row', 'n1', 'cover', 9, NULL, 'shared-intent', \
+         VALUES ('live-row', 'n1', 'cover', 15, 'e81a30ccb96fde2c2355782144d45064e8d62ce37a73e5a509198f3d9c528bce', 'shared-intent', \
                  '0000000003000-0000-dev2', '2026-01-01')",
     )
     .await;
@@ -3928,7 +3971,11 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
         .unwrap());
     assert!(
         store_dir
-            .local_blob_path("photos", "shared-intent")
+            .local_blob_path(
+                "photos",
+                "shared-intent",
+                &crate::blob::content_hash(b"recreated bytes"),
+            )
             .unwrap()
             .exists(),
         "a live blob recreated after cleanup is not owned by an old drain"

@@ -283,18 +283,23 @@ impl BlobDecls {
     /// Install connection-local guards that keep a blob cleanup intent exclusive
     /// until its filesystem deletion finishes. A cleanup intent is committed
     /// before the database releases the row; while it exists, no INSERT or UPDATE
-    /// may make the same `(namespace, blob id)` live again. TEMP triggers keep this
-    /// runtime guard out of snapshots and use each declaration's resolved blob-id
-    /// column rather than assuming the row primary key carries the blob id.
+    /// may make the same `(namespace, blob id, content hash)` live again. TEMP
+    /// triggers keep this runtime guard out of snapshots and use each declaration's
+    /// resolved blob-id and content-hash columns rather than assuming the row primary
+    /// key carries the blob id.
     pub(crate) fn install_cleanup_guards(&self, conn: &Connection) -> Result<(), BlobDeclError> {
         for (table, blob) in &self.tables {
             let table_ident = quote_ident(table);
             let id_ident = quote_ident(&blob.id_col_name);
+            let hash_ident = quote_ident(&blob.hash_col_name);
             let namespace_literal: String =
                 conn.query_row("SELECT quote(?1)", [&blob.namespace], |row| row.get(0))?;
             for (trigger_kind, event_clause) in [
                 ("insert", "BEFORE INSERT".to_string()),
-                ("update", format!("BEFORE UPDATE OF {id_ident}")),
+                (
+                    "update",
+                    format!("BEFORE UPDATE OF {id_ident}, {hash_ident}"),
+                ),
             ] {
                 let trigger = quote_ident(&format!("coven_cleanup_guard_{trigger_kind}_{table}"));
                 conn.execute_batch(&format!(
@@ -304,6 +309,7 @@ impl BlobDecls {
                          SELECT 1 FROM local_cleanup_intents \
                          WHERE namespace = {namespace_literal} \
                            AND blob_id = NEW.{id_ident}\
+                           AND content_hash = NEW.{hash_ident}\
                      ) \
                      BEGIN \
                          SELECT RAISE(ABORT, 'blob local cleanup in progress'); \

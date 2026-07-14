@@ -197,7 +197,7 @@ struct DeferredChangeset {
     changes: Vec<RowChange>,
     /// Exact row/location bindings re-applied alongside the rows on retry.
     blob_uploads: Vec<BlobLocationAssignment>,
-    cleanup_intents: Vec<LocalBlobCleanupIntent>,
+    cleanup_candidates: Vec<LocalBlobCleanupCandidate>,
 }
 
 struct CompletedChangeset<'a> {
@@ -794,7 +794,7 @@ pub async fn pull_changes(
                     break;
                 }
             };
-            let cleanup_intents =
+            let cleanup_candidates =
                 match local_blob_cleanup_intents(&blob_decls, &old_changes, &changes) {
                     Ok(intents) => intents,
                     Err(e) => {
@@ -823,7 +823,7 @@ pub async fn pull_changes(
                 schema.clone(),
                 receiver_wall_ms,
                 &blob_uploads,
-                &cleanup_intents,
+                &cleanup_candidates,
             )
             .await
             {
@@ -860,7 +860,7 @@ pub async fn pull_changes(
                         changeset: changeset_bytes.clone(),
                         changes,
                         blob_uploads,
-                        cleanup_intents,
+                        cleanup_candidates,
                     });
                     break;
                 }
@@ -905,7 +905,7 @@ pub async fn pull_changes(
                 schema.clone(),
                 receiver_wall_ms,
                 &d.blob_uploads,
-                &d.cleanup_intents,
+                &d.cleanup_candidates,
             )
             .await
             {
@@ -980,12 +980,12 @@ async fn commit_remote_changeset(
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
     blob_uploads: &[BlobLocationAssignment],
-    cleanup_intents: &[LocalBlobCleanupIntent],
+    cleanup_candidates: &[LocalBlobCleanupCandidate],
 ) -> Result<RemoteApplyOutcome, crate::database::DbError> {
     let device_id = device_id.to_string();
     let changeset = changeset.to_vec();
     let blob_uploads = blob_uploads.to_vec();
-    let cleanup_intents = cleanup_intents.to_vec();
+    let cleanup_candidates = cleanup_candidates.to_vec();
     let mut changeset_max = None;
     advance_max_updated_at(&mut changeset_max, changes, &schema, receiver_wall_ms);
     let hlc = db.hlc();
@@ -994,6 +994,9 @@ async fn commit_remote_changeset(
         let tx = conn
             .unchecked_transaction()
             .map_err(crate::database::DbError::from)?;
+        let cleanup_intents =
+            resolve_local_blob_cleanup_intents(&tx, &blob_decls, cleanup_candidates)
+                .map_err(|error| crate::database::DbError(error.to_string()))?;
         let apply = resolve_and_apply_changeset_with_schema_on(
             &tx,
             &changeset,
@@ -1245,10 +1248,21 @@ pub(crate) struct BlobDownload {
 /// check. Recovering an omitted column from local state cannot cover that; only reading the
 /// blob's length from its own cloud object would, and the object is reachable precisely
 /// because its key names the blob.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct PreApplyRow {
     table: String,
     pk: String,
+}
+
+/// A cleanup obligation derived from the signed row change. SQLite omits unchanged
+/// columns from an UPDATE, so the old hash may need to be read from `pre_apply` while
+/// the apply transaction still holds the row's prior state.
+#[derive(Clone, Debug)]
+struct LocalBlobCleanupCandidate {
+    namespace: String,
+    blob_id: String,
+    content_hash: Option<String>,
+    pre_apply: Option<PreApplyRow>,
 }
 
 /// Where the download reads a blob's declared plaintext size and content hash
@@ -1599,7 +1613,7 @@ fn local_blob_cleanup_intents(
     blob_decls: &BlobDecls,
     old_changes: &[RowChange],
     new_changes: &[RowChange],
-) -> Result<Vec<LocalBlobCleanupIntent>, crate::blob::decl::BlobDeclError> {
+) -> Result<Vec<LocalBlobCleanupCandidate>, crate::blob::decl::BlobDeclError> {
     if old_changes.len() != new_changes.len() {
         return Err(crate::blob::decl::BlobDeclError::ChangesetWalkMismatch {
             old_count: old_changes.len(),
@@ -1609,30 +1623,82 @@ fn local_blob_cleanup_intents(
     let mut intents = Vec::new();
     for (old, new) in old_changes.iter().zip(new_changes) {
         let old_blob_to_drop = match old.op {
-            crate::changeset::ChangeOp::Delete => blob_decls.ref_from_change(old)?,
+            crate::changeset::ChangeOp::Delete => blob_decls
+                .ref_size_hash_from_change(old)?
+                .map(|(blob, _, hash)| (blob, hash)),
             crate::changeset::ChangeOp::Update => {
-                let Some(old_blob) = blob_decls.ref_from_change(old)? else {
+                let Some((old_blob, _, old_hash)) = blob_decls.ref_size_hash_from_change(old)?
+                else {
                     continue;
                 };
-                let should_drop = match blob_decls.ref_from_change(new)? {
-                    Some(new_blob) => {
-                        old_blob.namespace != new_blob.namespace || old_blob.id != new_blob.id
+                let should_drop = match blob_decls.ref_size_hash_from_change(new)? {
+                    Some((new_blob, _, new_hash)) => {
+                        old_blob.namespace != new_blob.namespace
+                            || old_blob.id != new_blob.id
+                            || new_hash.as_ref().or(old_hash.as_ref()) != old_hash.as_ref()
                     }
                     None => true,
                 };
                 if should_drop {
-                    Some(old_blob)
+                    Some((old_blob, old_hash))
                 } else {
                     None
                 }
             }
             crate::changeset::ChangeOp::Insert => None,
         };
-        if let Some(blob) = old_blob_to_drop {
-            intents.push(LocalBlobCleanupIntent::new(blob.namespace, blob.id));
+        if let Some((blob, content_hash)) = old_blob_to_drop {
+            intents.push(LocalBlobCleanupCandidate {
+                namespace: blob.namespace,
+                blob_id: blob.id,
+                content_hash,
+                pre_apply: old.pk().map(|pk| PreApplyRow {
+                    table: old.table.clone(),
+                    pk: pk.to_string(),
+                }),
+            });
         }
     }
     Ok(intents)
+}
+
+/// Resolve every candidate to the exact immutable local-store version before the
+/// row apply mutates the pre-image. This runs inside the same transaction as apply,
+/// intent insertion, and cursor advancement.
+fn resolve_local_blob_cleanup_intents(
+    conn: &rusqlite::Connection,
+    blob_decls: &BlobDecls,
+    candidates: Vec<LocalBlobCleanupCandidate>,
+) -> Result<Vec<LocalBlobCleanupIntent>, crate::blob::decl::BlobDeclError> {
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            let content_hash = match candidate.content_hash {
+                Some(hash) => hash,
+                None => {
+                    let pre_apply = candidate.pre_apply.ok_or_else(|| {
+                        crate::blob::decl::BlobDeclError::Gate(format!(
+                            "removed blob {}/{} has no signed content hash or carrying row",
+                            candidate.namespace, candidate.blob_id
+                        ))
+                    })?;
+                    blob_decls
+                        .hash_for_row(conn, &pre_apply.table, &pre_apply.pk)?
+                        .ok_or_else(|| {
+                            crate::blob::decl::BlobDeclError::Gate(format!(
+                                "removed blob {}/{} has no signed content hash",
+                                candidate.namespace, candidate.blob_id
+                            ))
+                        })?
+                }
+            };
+            Ok(LocalBlobCleanupIntent::new(
+                candidate.namespace,
+                candidate.blob_id,
+                content_hash,
+            ))
+        })
+        .collect()
 }
 
 /// Download each blob in `blobs` into the evictable cache
@@ -1690,29 +1756,6 @@ pub(crate) async fn download_blobs(
             continue;
         }
 
-        // The coven-built destination: the evictable cache
-        // `storage/cache/<namespace>/<id>`. Building it validates the namespace and id
-        // again (and that the id can form the `{ab}/{cd}` shard); a failure is the
-        // same bad-data refusal as the token check above. A pinned copy (in
-        // `pinned/`) is checked for presence below but never written here — a pull
-        // populates the evictable cache, never the kept folder.
-        let dest = match store_dir.cache_blob_path(&blob.namespace, &blob.id) {
-            Ok(p) => p,
-            Err(e) => {
-                error!(id = %blob.id, "cannot build cache blob path ({e}); refusing");
-                all_ok = false;
-                continue;
-            }
-        };
-        let pinned = match store_dir.pinned_blob_path(&blob.namespace, &blob.id) {
-            Ok(p) => p,
-            Err(e) => {
-                error!(id = %blob.id, "cannot build pinned blob path ({e}); refusing");
-                all_ok = false;
-                continue;
-            }
-        };
-
         let location_record = known_locations
             .iter()
             .find(|record| record.namespace == blob.namespace && record.blob_id == blob.id);
@@ -1743,6 +1786,23 @@ pub(crate) async fn download_blobs(
             Ok(hash) => hash,
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob content hash, skipping download");
+                all_ok = false;
+                continue;
+            }
+        };
+
+        let dest = match store_dir.cache_blob_path(&blob.namespace, &blob.id) {
+            Ok(path) => path,
+            Err(error) => {
+                error!(id = %blob.id, %error, "cannot build cache blob path; refusing");
+                all_ok = false;
+                continue;
+            }
+        };
+        let pinned = match store_dir.pinned_blob_path(&blob.namespace, &blob.id) {
+            Ok(path) => path,
+            Err(error) => {
+                error!(id = %blob.id, %error, "cannot build pinned blob path; refusing");
                 all_ok = false;
                 continue;
             }
@@ -1948,7 +2008,7 @@ mod tests {
             &source,
             &["INSERT INTO note_photos \
                (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
-               VALUES ('remote-row', 'n1', 'cover', 9, NULL, 'guarded-blob', \
+               VALUES ('remote-row', 'n1', 'cover', 9, 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17', 'guarded-blob', \
                        '0000000002000-0000-dev1', '2026-01-01')"],
         )
         .await;
@@ -1962,11 +2022,20 @@ mod tests {
                      '0000000001000-0000-dev2', '2026-01-01')",
         )
         .await;
+        exec(
+            &target,
+            "INSERT INTO note_photos \
+             (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
+             VALUES ('hash-row', 'n1', 'cover', 9, \
+                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+                     'guarded-blob', '0000000001500-0000-dev2', '2026-01-01')",
+        )
+        .await;
         target
             .call(|conn| {
                 conn.execute(
-                    "INSERT INTO local_cleanup_intents (namespace, blob_id) \
-                     VALUES ('photos', 'guarded-blob')",
+                    "INSERT INTO local_cleanup_intents (namespace, blob_id, content_hash) \
+                     VALUES ('photos', 'guarded-blob', 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17')",
                     [],
                 )
                 .map(|_| ())
@@ -1974,12 +2043,28 @@ mod tests {
             })
             .await
             .unwrap();
+        let hash_only_update = target
+            .call(|conn| {
+                conn.execute(
+                    "UPDATE note_photos SET \
+                     hash = 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17' \
+                     WHERE id = 'hash-row'",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+            })
+            .await;
+        assert!(
+            hash_only_update.is_err(),
+            "changing only the content hash cannot make the version under cleanup live"
+        );
         let direct_write = target
             .call(|conn| {
                 conn.execute(
                     "INSERT INTO note_photos \
                      (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
-                     VALUES ('direct-row', 'n1', 'cover', 9, NULL, 'guarded-blob', \
+                     VALUES ('direct-row', 'n1', 'cover', 9, 'b4dddecf813201f4a83f2ae71f6fa1a03ea961c3738e3da7fff94859c5ad1c17', 'guarded-blob', \
                              '0000000002000-0000-dev2', '2026-01-01')",
                     [],
                 )

@@ -48,7 +48,7 @@
 //!   *Local*. *User-provided*: the user's own file at a path coven references (the
 //!   Remote→Local restore writes back to a user path, so it needs one).
 //!   *Host-provided*: data the host hands coven, which coven keeps in its own local
-//!   store at `storage/local/<namespace>/<id>` (no path needed to restore).
+//!   store at `storage/local/<namespace>/<id>/<content_hash>` (no path needed to restore).
 //! - **Cache fill** ([`blob::CacheFill`]) — how a device gets the bytes while the
 //!   blob is *Remote*. [`CacheEager`](blob::CacheFill::CacheEager) fetches into the
 //!   cache on pull (cover art, so a grid renders from local bytes);

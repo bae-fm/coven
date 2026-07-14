@@ -72,7 +72,7 @@
 //!   (`storage/pinned/` protected, `storage/cache/` evictable). Read (whole and
 //!   ranged), pin/unpin, clear, and budget eviction.
 //! - [`local_files`] — coven's own copy of a **host-provided Local** blob, in the
-//!   local store (`storage/local/<namespace>/<id>`). Never evicted; the budget
+//!   local store (`storage/local/<namespace>/<id>/<content_hash>`). Never evicted; the budget
 //!   sweep never walks it. Store, read, drop.
 //! - [`upload`] — the cloud-write half: drain the durable upload queue, sealing
 //!   each blob under its scope and writing it to the cloud with coalesced progress,
@@ -348,7 +348,7 @@ pub enum Provenance {
     /// the bytes back to a user file, so it **needs a destination path**.
     UserProvided,
     /// The host hands coven the data; coven keeps its own copy in the local store
-    /// (`storage/local/<namespace>/<id>`, see [`local_files`]). `make_local`
+    /// (`storage/local/<namespace>/<id>/<content_hash>`, see [`local_files`]). `make_local`
     /// restores it to the local store, so it needs **no path**.
     HostProvided,
 }
@@ -381,7 +381,7 @@ pub enum CacheFill {
 /// ([`crate::sync::session::BlobDecl`]) via [`decl::BlobDecls`]. Where its bytes
 /// live depends on its locality and provenance: a user-provided Local blob is the
 /// user's file at its path; a host-provided Local blob is in coven's local store
-/// (`storage/local/<namespace>/<id>`); a Remote blob's device-local copy is a cache
+/// (`storage/local/<namespace>/<id>/<content_hash>`); a Remote blob's device-local copy is a cache
 /// copy (`storage/pinned/<namespace>/<id>` / `storage/cache/<namespace>/<id>`, built
 /// from the validated namespace + id — see [`cache`]).
 #[derive(Debug, Clone)]

@@ -79,7 +79,8 @@ macro_rules! coven_tables {
             "
     namespace TEXT NOT NULL,
     blob_id   TEXT NOT NULL,
-    PRIMARY KEY (namespace, blob_id)
+    content_hash TEXT NOT NULL,
+    PRIMARY KEY (namespace, blob_id, content_hash)
 "
         );
         $visit!(
@@ -89,8 +90,9 @@ macro_rules! coven_tables {
     namespace TEXT NOT NULL,
     blob_id TEXT NOT NULL,
     size INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
     disposition TEXT NOT NULL CHECK (disposition IN ('drop', 'cache', 'pin')),
-    PRIMARY KEY (seq, namespace, blob_id)
+    PRIMARY KEY (seq, namespace, blob_id, content_hash)
 "
         );
         $visit!(

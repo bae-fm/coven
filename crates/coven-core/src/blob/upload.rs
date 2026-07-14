@@ -183,7 +183,7 @@ pub(crate) async fn verified_upload_snapshot(
     expected_hash: &str,
 ) -> Result<std::path::PathBuf, String> {
     let local_path = store_dir
-        .local_blob_path(namespace, file_id)
+        .local_blob_path(namespace, file_id, expected_hash)
         .map_err(|error| error.to_string())?;
     let parent = local_path.parent().ok_or_else(|| {
         format!(

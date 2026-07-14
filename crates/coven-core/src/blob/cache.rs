@@ -465,9 +465,10 @@ pub async fn drop_all_local_copies(
     store_dir: &StoreDir,
     namespace: &str,
     id: &str,
+    content_hash: &str,
 ) -> Result<(), BlobCacheError> {
     drop_cached_blob(store_dir, namespace, id).await?;
-    crate::blob::local_files::drop_blob(store_dir, namespace, id)
+    crate::blob::local_files::drop_blob(store_dir, namespace, id, content_hash)
         .await
         .map_err(BlobCacheError::from)?;
     Ok(())
@@ -512,7 +513,8 @@ pub async fn is_pinned(
 /// ([`BlobCacheError::NoExternalRef`] if not: a Local user-provided blob without its
 /// ref is corruption, not a fall-through), and a vanished/short file is
 /// [`BlobCacheError::ExternalMissing`] / [`BlobCacheError::ExternalSizeMismatch`]. A
-/// **host-provided** blob is in the **local store** (`storage/local/<namespace>/<id>`,
+/// **host-provided** blob is in the **local store**
+/// (`storage/local/<namespace>/<id>/<content_hash>`,
 /// see [`local_files`](super::local_files)), its only copy — a miss is
 /// [`BlobCacheError::NoLocalCopy`], fail-loud corruption, never a cloud fetch.
 pub async fn read_blob(
@@ -1121,7 +1123,7 @@ enum BlobSource {
     /// (`local_blob_refs`).
     External,
     /// Local (gate off) + host-provided: coven's local store
-    /// (`storage/local/<namespace>/<id>`).
+    /// (`storage/local/<namespace>/<id>/<content_hash>`).
     LocalStore,
 }
 
@@ -1557,10 +1559,7 @@ pub(crate) async fn expected_blob_size(
 /// whole-blob download verifies the decrypted plaintext against. An absent hash
 /// (a row with no such column value) is refused rather than serving unverified
 /// bytes: the hash is the authority that pins the bytes to the row's author.
-pub(crate) async fn expected_blob_hash(
-    db: &Database,
-    blob: &BlobRef,
-) -> Result<String, BlobCacheError> {
+pub async fn expected_blob_hash(db: &Database, blob: &BlobRef) -> Result<String, BlobCacheError> {
     let decls = db.blob_decls();
     let namespace = blob.namespace.clone();
     let id = blob.id.clone();

@@ -423,18 +423,21 @@ async fn insert_published_drop_intent(
     namespace: &str,
     blob_id: &str,
     size: u64,
+    content_hash: &str,
     disposition: &str,
 ) {
-    let (ns, id, disp) = (
+    let (ns, id, hash, disp) = (
         namespace.to_string(),
         blob_id.to_string(),
+        content_hash.to_string(),
         disposition.to_string(),
     );
     db.call(move |conn| {
         conn.execute(
-            "INSERT INTO published_blob_drop_intents (seq, namespace, blob_id, size, disposition) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![seq, ns, id, size as i64, disp],
+            "INSERT INTO published_blob_drop_intents \
+             (seq, namespace, blob_id, size, content_hash, disposition) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![seq, ns, id, size as i64, hash, disp],
         )
         .map(|_| ())
         .map_err(crate::database::DbError::from)
@@ -1219,7 +1222,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     );
     assert!(
         !lib_a
-            .local_blob_path("covers", "coveraaa")
+            .local_blob_path("covers", "coveraaa", &crate::blob::content_hash(&cover))
             .unwrap()
             .exists(),
         "the cover is no longer in the local store (it is Remote now)",
@@ -1322,7 +1325,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     );
     assert!(
         lib_a
-            .local_blob_path("covers", "coveraaa")
+            .local_blob_path("covers", "coveraaa", &crate::blob::content_hash(&cover))
             .unwrap()
             .exists(),
         "the host-provided cover is back in the local store (no dest needed)",
@@ -1449,7 +1452,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     );
     assert!(
         !lib_a
-            .local_blob_path("covers", "coverhost")
+            .local_blob_path("covers", "coverhost", &crate::blob::content_hash(&cover))
             .unwrap()
             .exists(),
         "after Remote upload the local store no longer holds the blob"
@@ -1563,9 +1566,13 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "the disposition is deferred to the drain, so the pin has not been applied yet",
     );
     assert!(
-        lib.local_blob_path("covers", "cover-drop")
-            .unwrap()
-            .exists(),
+        lib.local_blob_path(
+            "covers",
+            "cover-drop",
+            &crate::blob::content_hash(&drop_bytes)
+        )
+        .unwrap()
+        .exists(),
         "the dropped cover's local copy is still present until the drain runs",
     );
 
@@ -1583,13 +1590,23 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "is_pinned reports the recovered pin",
     );
     assert!(
-        !lib.local_blob_path("covers", "cover-pin").unwrap().exists(),
+        !lib.local_blob_path(
+            "covers",
+            "cover-pin",
+            &crate::blob::content_hash(&pin_bytes)
+        )
+        .unwrap()
+        .exists(),
         "the pinned cover no longer sits in the local store",
     );
     assert!(
-        !lib.local_blob_path("covers", "cover-drop")
-            .unwrap()
-            .exists(),
+        !lib.local_blob_path(
+            "covers",
+            "cover-drop",
+            &crate::blob::content_hash(&drop_bytes)
+        )
+        .unwrap()
+        .exists(),
         "recovery drops the un-pinned cover's local copy",
     );
     assert!(
@@ -1634,7 +1651,16 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
         .await
         .unwrap();
     db.set_sync_state("local_seq", "1").await.unwrap();
-    insert_published_drop_intent(&db, 1, "covers", "cov-pin", bytes.len() as u64, "pin").await;
+    insert_published_drop_intent(
+        &db,
+        1,
+        "covers",
+        "cov-pin",
+        bytes.len() as u64,
+        &crate::blob::content_hash(&bytes),
+        "pin",
+    )
+    .await;
 
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
@@ -1665,7 +1691,16 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
         .await
         .unwrap();
     db.set_sync_state("local_seq", "1").await.unwrap();
-    insert_published_drop_intent(&db, 1, "covers", "cov-cache", bytes.len() as u64, "cache").await;
+    insert_published_drop_intent(
+        &db,
+        1,
+        "covers",
+        "cov-cache",
+        bytes.len() as u64,
+        &crate::blob::content_hash(&bytes),
+        "cache",
+    )
+    .await;
 
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
@@ -1689,7 +1724,16 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
     let (_tmp, lib) = temp_store_dir();
 
     db.set_sync_state("local_seq", "1").await.unwrap();
-    insert_published_drop_intent(&db, 1, "covers", "cov-lost", 7, "pin").await;
+    insert_published_drop_intent(
+        &db,
+        1,
+        "covers",
+        "cov-lost",
+        7,
+        &crate::blob::content_hash(b"missing"),
+        "pin",
+    )
+    .await;
 
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
@@ -2466,7 +2510,7 @@ async fn make_local_db_commit_failure_retains_a_replaced_user_destination() {
 }
 
 #[tokio::test]
-async fn make_local_db_commit_failure_removes_host_local_store_file() {
+async fn make_local_db_commit_failure_retains_verified_host_local_store_file() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(cover_decl());
@@ -2481,7 +2525,7 @@ async fn make_local_db_commit_failure_removes_host_local_store_file() {
             "coveraaa",
             BlobScope::Master,
             Some("cv/coveraaa.jpg"),
-            bytes,
+            bytes.clone(),
         )
         .await
         .unwrap();
@@ -2519,9 +2563,122 @@ async fn make_local_db_commit_failure_removes_host_local_store_file() {
         error,
         crate::blob::transition::MakeLocalError::Db(_)
     ));
-    assert!(!lib.local_blob_path("covers", "coveraaa").unwrap().exists());
+    assert_eq!(
+        std::fs::read(
+            lib.local_blob_path("covers", "coveraaa", &crate::blob::content_hash(&bytes))
+                .unwrap(),
+        )
+        .unwrap(),
+        bytes,
+        "an aborted operation does not exclusively own the canonical blob path",
+    );
     assert_eq!(shared_flag(&db, "n1").await, 1);
     assert!(pending_deletes(&db).await.is_empty());
+}
+
+#[tokio::test]
+async fn stale_cancelled_make_local_cannot_replace_another_database_newer_blob_version() {
+    let storage = MockSyncStorage::new();
+    let hlc = Hlc::new("A".to_string());
+    let db_a = open_test_db_with_blob(cover_decl());
+    let db_b = open_test_db_with_blob(cover_decl());
+    let (_tmp, lib) = temp_store_dir();
+    let old_bytes = b"old-managed-cover".to_vec();
+    let newer_bytes = b"new-managed-cover".to_vec();
+    seed_release_rows(&db_a, "n1", "coveraaa", "cv/coveraaa.jpg", 1, &old_bytes).await;
+    seed_release_rows(&db_b, "n1", "coveraaa", "cv/coveraaa.jpg", 1, &newer_bytes).await;
+    let old_location = test_blob_location(&storage.own_uploader().unwrap(), 1000);
+    let newer_location = test_blob_location(&storage.own_uploader().unwrap(), 2000);
+    storage
+        .put_blob(
+            "covers",
+            &old_location,
+            "coveraaa",
+            BlobScope::Master,
+            Some("cv/coveraaa.jpg"),
+            old_bytes.clone(),
+        )
+        .await
+        .unwrap();
+    storage
+        .put_blob(
+            "covers",
+            &newer_location,
+            "coveraaa",
+            BlobScope::Master,
+            Some("cv/coveraaa.jpg"),
+            newer_bytes.clone(),
+        )
+        .await
+        .unwrap();
+    db_a.record_blob_location("covers", "coveraaa", &old_location)
+        .await
+        .unwrap();
+    db_b.record_blob_location("covers", "coveraaa", &newer_location)
+        .await
+        .unwrap();
+
+    let (_cancel_newer_tx, cancel_newer) = watch::channel(false);
+    make_local(
+        &db_b,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        "notes",
+        "n1",
+        &HashMap::new(),
+        &cancel_newer,
+    )
+    .await
+    .expect("the newer database commits its local blob version");
+    cache::write_blob(&db_a, &lib, "covers", "coveraaa", &old_bytes)
+        .await
+        .expect("stage the stale version in its verified cache path");
+
+    let observer = PauseAfterFirstMaterialize::default();
+    let (cancel_stale_tx, cancel_stale) = watch::channel(false);
+    let destinations = HashMap::new();
+    let stale = make_local(
+        &db_a,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        Some(&observer),
+        "notes",
+        "n1",
+        &destinations,
+        &cancel_stale,
+    );
+    let cancel_after_materialize = async {
+        observer.reached.notified().await;
+        cancel_stale_tx.send(true).unwrap();
+        observer.resume.notify_one();
+    };
+
+    let (stale_result, ()) = tokio::join!(stale, cancel_after_materialize);
+
+    assert!(matches!(
+        stale_result,
+        Err(crate::blob::transition::MakeLocalError::Cancelled)
+    ));
+    assert_eq!(shared_flag(&db_a, "n1").await, 1);
+    assert_eq!(shared_flag(&db_b, "n1").await, 0);
+    assert_eq!(
+        std::fs::read(
+            lib.local_blob_path(
+                "covers",
+                "coveraaa",
+                &crate::blob::content_hash(&newer_bytes),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+        newer_bytes,
+        "a stale operation cannot replace the newer local blob version",
+    );
 }
 
 #[tokio::test]

@@ -18,8 +18,10 @@ async fn store_read_drop_round_trip() {
         .await
         .expect("store");
     assert!(
-        ld.local_blob_path("covers", "cov0aaaa").unwrap().exists(),
-        "the bytes land at storage/local/<namespace>/<id>",
+        ld.local_blob_path("covers", "cov0aaaa", &hash)
+            .unwrap()
+            .exists(),
+        "the bytes land at storage/local/<namespace>/<id>/<content_hash>",
     );
 
     let read = local_files::read(&ld, "covers", "cov0aaaa", bytes.len() as u64, &hash)
@@ -55,7 +57,7 @@ async fn store_read_drop_round_trip() {
         "an unstored blob reads back as None",
     );
 
-    let removed = local_files::drop_blob(&ld, "covers", "cov0aaaa")
+    let removed = local_files::drop_blob(&ld, "covers", "cov0aaaa", &hash)
         .await
         .expect("drop");
     assert!(removed, "drop reports the file was there");
@@ -67,7 +69,7 @@ async fn store_read_drop_round_trip() {
         "after the drop the blob is gone",
     );
     assert!(
-        !local_files::drop_blob(&ld, "covers", "cov0aaaa")
+        !local_files::drop_blob(&ld, "covers", "cov0aaaa", &hash)
             .await
             .unwrap(),
         "dropping an already-absent blob reports false, not an error",
@@ -115,7 +117,13 @@ async fn local_store_blob_survives_an_evict_to_budget_sweep() {
         .expect("evict");
 
     assert!(
-        ld.local_blob_path("covers", "keep0aaa").unwrap().exists(),
+        ld.local_blob_path(
+            "covers",
+            "keep0aaa",
+            &crate::blob::content_hash(&store_bytes)
+        )
+        .unwrap()
+        .exists(),
         "the local-store blob survives — the budget sweep never walks storage/local/",
     );
     assert_eq!(

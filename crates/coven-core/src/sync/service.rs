@@ -59,6 +59,7 @@ pub struct DeferredLocalBlobDrop {
     pub namespace: String,
     pub id: String,
     pub size: u64,
+    pub content_hash: String,
     pub disposition: DeferredLocalBlobDisposition,
 }
 
@@ -354,6 +355,7 @@ struct ReadyHostProvidedMakeRemote {
 struct UploadedHostBlob {
     blob: BlobRef,
     expected_size: u64,
+    expected_hash: String,
     cleanup_local_store_after_publish: bool,
 }
 
@@ -367,6 +369,7 @@ impl UploadedHostBlob {
                 namespace: self.blob.namespace,
                 id: self.blob.id,
                 size: self.expected_size,
+                content_hash: self.expected_hash,
                 disposition,
             })
     }
@@ -385,6 +388,7 @@ impl UploadedHostBlob {
                     namespace: self.blob.namespace,
                     id: self.blob.id,
                     size: self.expected_size,
+                    content_hash: self.expected_hash,
                     disposition,
                 },
             )
@@ -423,12 +427,14 @@ async fn local_host_blob(
     store_dir: &StoreDir,
     blob: &BlobRef,
     expected_size: u64,
+    expected_hash: &str,
 ) -> Result<Option<LocalHostBlob>, SyncCycleError> {
     if let Some(path) = crate::blob::local_files::path_if_present(
         store_dir,
         &blob.namespace,
         &blob.id,
         expected_size,
+        expected_hash,
     )
     .await
     .map_err(|e| {
@@ -455,10 +461,10 @@ async fn upload_host_provided_blob(
     let blob = &with_row_cloud_path(db, blob).await?;
     let expected_size = expected_blob_size(db, blob).await?;
 
-    let local = local_host_blob(store_dir, blob, expected_size).await?;
     let expected_hash = crate::blob::cache::expected_blob_hash(db, blob)
         .await
         .map_err(|error| SyncCycleError::AssetUpload(error.to_string()))?;
+    let local = local_host_blob(store_dir, blob, expected_size, &expected_hash).await?;
     // Every cloud key names the blob standing at it — the hashed scheme carries the id in
     // the key, and a browsable home's readable path is required to name it
     // ([`crate::sync::cloud_storage::CloudSyncStorage::blob_key`]). So no two blobs share
@@ -547,6 +553,7 @@ async fn upload_host_provided_blob(
     Ok(UploadedHostBlob {
         blob: blob.clone(),
         expected_size,
+        expected_hash,
         cleanup_local_store_after_publish: local.is_some_and(|local| local.in_local_store()),
     })
 }
@@ -599,6 +606,7 @@ pub async fn apply_deferred_local_blob_drop(
         &deferred.namespace,
         &deferred.id,
         deferred.size,
+        &deferred.content_hash,
     )
     .await
     .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
@@ -641,10 +649,15 @@ pub async fn apply_deferred_local_blob_drop(
             return recognize_applied_disposition_or_fail(&cached, deferred).await;
         }
     }
-    crate::blob::local_files::drop_blob(store_dir, &deferred.namespace, &deferred.id)
-        .await
-        .map(|_| ())
-        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))
+    crate::blob::local_files::drop_blob(
+        store_dir,
+        &deferred.namespace,
+        &deferred.id,
+        &deferred.content_hash,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))
 }
 
 /// A Pin/Cache disposition whose local-store source is gone is either already applied

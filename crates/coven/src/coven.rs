@@ -587,9 +587,10 @@ impl CovenHandle {
     async fn stage_blobs(&self, blobs: Vec<NewBlob>) -> CovenResult<Vec<StagedBlob>> {
         let mut staged = Vec::new();
         for blob in blobs {
-            let final_path = self
-                .store_dir()
-                .local_blob_path(&blob.namespace, &blob.id)?;
+            let content_hash = crate::blob::content_hash(&blob.bytes);
+            let final_path =
+                self.store_dir()
+                    .local_blob_path(&blob.namespace, &blob.id, &content_hash)?;
             let staged_path = local_stage_temp_path(&final_path)?;
             if let Err(e) = crate::local_blob::write_atomic(&staged_path, &blob.bytes).await {
                 remove_staged_files(&staged).await;
@@ -764,6 +765,28 @@ fn run_write_batch_on_connection<R>(
         Database::run_pending_journaled_transaction_on(conn, &tables, |tx| -> CovenResult<R> {
             let decls = crate::blob::decl::BlobDecls::from_tables(tx, &tables)
                 .map_err(|e| CovenError::Blob(e.to_string()))?;
+            let deletion_intents = deleted
+                .iter()
+                .map(|blob| {
+                    let content_hash = decls
+                        .hash_for_blob_in_namespace(tx, &blob.namespace, &blob.id)
+                        .map_err(|error| CovenError::Blob(error.to_string()))?
+                        .ok_or_else(|| {
+                            CovenError::Blob(format!(
+                                "deleted blob {}/{} has no signed content hash",
+                                blob.namespace, blob.id
+                            ))
+                        })?;
+                    let _ = store_dir.local_blob_path(&blob.namespace, &blob.id, &content_hash)?;
+                    let _ = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
+                    let _ = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
+                    Ok(crate::blob::local_cleanup::LocalBlobCleanupIntent::new(
+                        &blob.namespace,
+                        &blob.id,
+                        content_hash,
+                    ))
+                })
+                .collect::<CovenResult<Vec<_>>>()?;
             for blob in &staged {
                 match decls.row_for_blob_in_namespace(tx, &blob.namespace, &blob.id) {
                     Ok(Some(_)) => {
@@ -803,16 +826,9 @@ fn run_write_batch_on_connection<R>(
                 sql(SqlContext::new(tx, stamper))
             })) {
                 Ok(Ok(value)) => {
-                    for blob in &deleted {
-                        let _ = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-                        let _ = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-                        let _ = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
-                        let intent = crate::blob::local_cleanup::LocalBlobCleanupIntent::new(
-                            &blob.namespace,
-                            &blob.id,
-                        );
+                    for (blob, intent) in deleted.iter().zip(&deletion_intents) {
                         if !crate::blob::local_cleanup::record_if_unreferenced_on(
-                            tx, &decls, &intent,
+                            tx, &decls, intent,
                         )? {
                             return Err(CovenError::BlobStillReferenced {
                                 namespace: blob.namespace.clone(),
@@ -883,6 +899,12 @@ mod tests {
             dir,
             "Test".to_string(),
         )
+    }
+
+    fn local_blob_path(store_dir: &StoreDir, id: &str, bytes: &[u8]) -> PathBuf {
+        store_dir
+            .local_blob_path("media-files", id, &crate::blob::content_hash(bytes))
+            .expect("local blob path")
     }
 
     fn media_files_decl() -> BlobDecl {
@@ -1442,9 +1464,7 @@ mod tests {
     async fn open_removes_orphaned_local_blob_temps() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
-        let final_path = dir
-            .local_blob_path("media-files", "tempaaaa")
-            .expect("local path");
+        let final_path = local_blob_path(&dir, "tempaaaa", b"interrupted write");
         let temp = local_stage_temp_path(&final_path).expect("stage temp path");
         write_raw_file(&temp, b"interrupted write").await;
 
@@ -1459,9 +1479,7 @@ mod tests {
             "open removes orphaned local blob staging temps"
         );
         assert!(
-            !dir.local_blob_path("media-files", "tempaaaa")
-                .expect("local path")
-                .exists(),
+            !local_blob_path(&dir, "tempaaaa", b"interrupted write").exists(),
             "the interrupted blob has no committed final file"
         );
     }
@@ -1490,10 +1508,7 @@ mod tests {
             )
             .await
             .expect("write row and blob");
-        let path = handle
-            .store_dir()
-            .local_blob_path("media-files", "blobaaaa")
-            .expect("local path");
+        let path = local_blob_path(&handle.store_dir(), "blobaaaa", b"piece-bytes");
         assert_eq!(
             std::fs::read(path).expect("read local blob"),
             b"piece-bytes"
@@ -1503,10 +1518,7 @@ mod tests {
     #[tokio::test]
     async fn orphaned_final_blob_is_replaced_by_next_write() {
         let (_tmp, handle) = open_files_handle();
-        let path = handle
-            .store_dir()
-            .local_blob_path("media-files", "orphaaaa")
-            .expect("local path");
+        let path = local_blob_path(&handle.store_dir(), "orphaaaa", b"committed bytes");
         write_raw_file(&path, b"orphaned bytes").await;
 
         handle
@@ -1575,10 +1587,7 @@ mod tests {
             result,
             Err(CovenError::BlobAlreadyReferenced { .. })
         ));
-        let path = handle
-            .store_dir()
-            .local_blob_path("media-files", "dupeaaaa")
-            .expect("dupe path");
+        let path = local_blob_path(&handle.store_dir(), "dupeaaaa", b"original");
         assert_eq!(
             std::fs::read(path).expect("read original blob"),
             b"original"
@@ -1674,10 +1683,7 @@ mod tests {
             .await
             .expect_err("write fails");
         assert!(err.to_string().contains("sql failed"));
-        let path = handle
-            .store_dir()
-            .local_blob_path("media-files", "blobbbbb")
-            .expect("local path");
+        let path = local_blob_path(&handle.store_dir(), "blobbbbb", b"staged");
         assert!(!path.exists());
     }
 
@@ -1723,8 +1729,14 @@ mod tests {
         handle
             .sql(|sql| {
                 sql.tx().execute(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, ?2, 3, ?3)",
-                    params!["file-1", "oldaaaa", sql.stamp()],
+                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES (?1, ?2, 3, ?3, ?4)",
+                    params![
+                        "file-1",
+                        "oldaaaa",
+                        crate::blob::content_hash(b"old"),
+                        sql.stamp()
+                    ],
                 )?;
                 Ok(())
             })
@@ -1747,24 +1759,17 @@ mod tests {
                 },
                 move |sql| {
                     sql.tx().execute(
-                        "UPDATE files SET blob_id = ?1, size = 3, _updated_at = ?2 WHERE id = 'file-1'",
-                        params!["newaaaa", sql.stamp()],
+                        "UPDATE files SET blob_id = ?1, size = 3, hash = ?2, \
+                         _updated_at = ?3 WHERE id = 'file-1'",
+                        params!["newaaaa", crate::blob::content_hash(b"new"), sql.stamp()],
                     )?;
                     Ok(())
                 },
             )
             .await
             .expect("replace blob");
-        assert!(!handle
-            .store_dir()
-            .local_blob_path("media-files", "oldaaaa")
-            .expect("old path")
-            .exists());
-        assert!(handle
-            .store_dir()
-            .local_blob_path("media-files", "newaaaa")
-            .expect("new path")
-            .exists());
+        assert!(!local_blob_path(&handle.store_dir(), "oldaaaa", b"old").exists());
+        assert!(local_blob_path(&handle.store_dir(), "newaaaa", b"new").exists());
     }
 
     #[tokio::test]
@@ -1786,8 +1791,14 @@ mod tests {
         handle
             .sql(|sql| {
                 sql.tx().execute(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, ?2, 3, ?3)",
-                    params!["file-1", "oldcccc", sql.stamp()],
+                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES (?1, ?2, 3, ?3, ?4)",
+                    params![
+                        "file-1",
+                        "oldcccc",
+                        crate::blob::content_hash(b"old"),
+                        sql.stamp()
+                    ],
                 )?;
                 Ok(())
             })
@@ -1820,11 +1831,7 @@ mod tests {
             .await
             .expect("delete blob");
 
-        assert!(!handle
-            .store_dir()
-            .local_blob_path("media-files", "oldcccc")
-            .expect("local path")
-            .exists());
+        assert!(!local_blob_path(&handle.store_dir(), "oldcccc", b"old").exists());
         assert!(!pinned.exists(), "pinned copy is removed");
         assert!(!cached.exists(), "cache copy is removed");
     }
@@ -1843,8 +1850,14 @@ mod tests {
         handle
             .sql(|sql| {
                 sql.tx().execute(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, ?2, 3, ?3)",
-                    params!["file-1", "oldddddd", sql.stamp()],
+                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES (?1, ?2, 3, ?3, ?4)",
+                    params![
+                        "file-1",
+                        "oldddddd",
+                        crate::blob::content_hash(b"old"),
+                        sql.stamp()
+                    ],
                 )?;
                 Ok(())
             })
@@ -1881,11 +1894,7 @@ mod tests {
             cleanup_intent_count(&handle, "media-files", "oldddddd").await,
             1
         );
-        assert!(handle
-            .store_dir()
-            .local_blob_path("media-files", "oldddddd")
-            .expect("local path")
-            .exists());
+        assert!(local_blob_path(&handle.store_dir(), "oldddddd", b"old").exists());
 
         std::fs::remove_dir_all(&pinned).expect("remove pinned blocker");
         handle
@@ -1907,11 +1916,7 @@ mod tests {
             cleanup_intent_count(&handle, "media-files", "oldddddd").await,
             0
         );
-        assert!(!handle
-            .store_dir()
-            .local_blob_path("media-files", "oldddddd")
-            .expect("local path")
-            .exists());
+        assert!(!local_blob_path(&handle.store_dir(), "oldddddd", b"old").exists());
     }
 
     #[tokio::test]
@@ -1920,23 +1925,25 @@ mod tests {
         let blob_id = "shared01";
         handle
             .sql(move |sql| {
-                sql.tx().execute_batch(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) \
-                     VALUES ('remote-deletes', 'shared01', 4, \
-                             '0000000001000-0000-dev-remote'); \
-                     INSERT INTO files (id, blob_id, size, _updated_at) \
-                     VALUES ('still-live', 'shared01', 4, \
-                             '0000000001000-0000-dev-remote');",
+                let hash = crate::blob::content_hash(b"live");
+                sql.tx().execute(
+                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES ('remote-deletes', 'shared01', 4, ?1, \
+                             '0000000001000-0000-dev-remote')",
+                    [&hash],
+                )?;
+                sql.tx().execute(
+                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES ('still-live', 'shared01', 4, ?1, \
+                             '0000000001000-0000-dev-remote')",
+                    [&hash],
                 )?;
                 Ok(())
             })
             .await
             .expect("seed two rows sharing the blob");
 
-        let local = handle
-            .store_dir()
-            .local_blob_path("media-files", blob_id)
-            .expect("local path");
+        let local = local_blob_path(&handle.store_dir(), blob_id, b"live");
         let pinned = handle
             .store_dir()
             .pinned_blob_path("media-files", blob_id)
@@ -1958,13 +1965,13 @@ mod tests {
             &[files_migration()],
         )
         .expect("open remote source");
-        capture_bytes(
-            &source,
-            &["INSERT INTO files (id, blob_id, size, _updated_at) \
-                 VALUES ('remote-deletes', 'shared01', 4, \
-                         '0000000001000-0000-dev-remote')"],
-        )
-        .await;
+        let remote_insert = format!(
+            "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+             VALUES ('remote-deletes', 'shared01', 4, '{}', \
+                     '0000000001000-0000-dev-remote')",
+            crate::blob::content_hash(b"live")
+        );
+        capture_bytes(&source, &[&remote_insert]).await;
         let remote_delete =
             capture_bytes(&source, &["DELETE FROM files WHERE id = 'remote-deletes'"]).await;
         let storage = Arc::new(MockSyncStorage::new());
@@ -2032,8 +2039,14 @@ mod tests {
         handle
             .sql(|sql| {
                 sql.tx().execute(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, ?2, 3, ?3)",
-                    params!["file-1", "oldbbbb", sql.stamp()],
+                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES (?1, ?2, 3, ?3, ?4)",
+                    params![
+                        "file-1",
+                        "oldbbbb",
+                        crate::blob::content_hash(b"old"),
+                        sql.stamp()
+                    ],
                 )?;
                 Ok(())
             })
@@ -2067,16 +2080,8 @@ mod tests {
             result,
             Err(CovenError::BlobStillReferenced { .. })
         ));
-        assert!(handle
-            .store_dir()
-            .local_blob_path("media-files", "oldbbbb")
-            .expect("old path")
-            .exists());
-        assert!(!handle
-            .store_dir()
-            .local_blob_path("media-files", "newbbbb")
-            .expect("new path")
-            .exists());
+        assert!(local_blob_path(&handle.store_dir(), "oldbbbb", b"old").exists());
+        assert!(!local_blob_path(&handle.store_dir(), "newbbbb", b"new").exists());
     }
 
     #[tokio::test]
@@ -2092,11 +2097,7 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(CovenError::WriteClosurePanicked)));
-        assert!(!handle
-            .store_dir()
-            .local_blob_path("media-files", "panicccc")
-            .expect("panic path")
-            .exists());
+        assert!(!local_blob_path(&handle.store_dir(), "panicccc", b"new").exists());
     }
 
     #[tokio::test]
@@ -2141,10 +2142,7 @@ mod tests {
         assert!(winner_result.is_ok() || loser_result.is_ok());
         assert!(winner_result.is_err() || loser_result.is_err());
 
-        let path = handle
-            .store_dir()
-            .local_blob_path("media-files", "raceblob")
-            .expect("race path");
+        let path = local_blob_path(&handle.store_dir(), "raceblob", b"committed");
         assert_eq!(std::fs::read(path).expect("read race blob"), b"committed");
         let rows: i64 = handle
             .sql(|sql| {

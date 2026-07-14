@@ -115,7 +115,7 @@ declares both:
   Bringing the blob back from Remote writes the bytes to a user file, so it needs a
   destination path.
 - `HostProvided`: data the host hands coven, kept in coven's own local store at
-  `storage/local/<namespace>/<id>`. Bringing it back from Remote restores it there,
+  `storage/local/<namespace>/<id>/<content_hash>`. Bringing it back from Remote restores it there,
   no path needed.
 
 
@@ -399,7 +399,7 @@ This prevents two failures:
 
 coven uploads a blob from whichever local copy its [provenance](#provenance) names.
 A **host-provided** blob is data the host hands coven, which coven keeps in its own
-local store at `storage/local/<namespace>/<id>` (via
+local store at `storage/local/<namespace>/<id>/<content_hash>` (via
 [`local_files::store`](rustdoc:fn:coven::blob::local_files::store)); the inline push
 reads it back to upload, then moves the copy into the [cache](/docs/cache) as the
 blob becomes Remote. A **user-provided** blob is the user's own file at a path coven

@@ -44,6 +44,8 @@ pub enum PathTokenError {
     Unindexable,
     /// A cloud object generation is not exactly 64 lowercase hexadecimal characters.
     InvalidGeneration,
+    /// A blob content hash is not exactly 64 lowercase hexadecimal characters.
+    InvalidContentHash,
 }
 
 impl std::fmt::Display for PathTokenError {
@@ -65,6 +67,12 @@ impl std::fmt::Display for PathTokenError {
                 write!(
                     f,
                     "blob generation must be exactly 64 lowercase hexadecimal characters"
+                )
+            }
+            PathTokenError::InvalidContentHash => {
+                write!(
+                    f,
+                    "blob content hash must be exactly 64 lowercase hexadecimal characters"
                 )
             }
         }
@@ -366,22 +374,36 @@ impl StoreDir {
         Ok(self.storage_dir().join(folder).join(namespace))
     }
 
-    /// coven's own copy of a **host-provided Local** blob:
-    /// `storage/local/<namespace>/<id>`. This is NOT a cache copy — it is the blob's
+    /// coven's own copy of a **host-provided Local** blob version:
+    /// `storage/local/<namespace>/<id>/<content_hash>`. This is NOT a cache copy — it is the blob's
     /// home while its release is Local (a host-provided blob has no user path). It
     /// is never evicted: the budget sweep walks only [`Self::cache_dir`], never
-    /// `storage/local`. Both `namespace` and `id` are validated as single path
-    /// tokens (the blob columns come from a row any write-capable member authored),
-    /// so neither can escape the store. `Err` if either is unsafe.
-    pub fn local_blob_path(&self, namespace: &str, id: &str) -> Result<PathBuf, PathTokenError> {
+    /// `storage/local`. `namespace` and `id` are validated as single path tokens;
+    /// `content_hash` must be the fixed-size lowercase hexadecimal SHA-256 carried
+    /// by the signed row. Including it prevents two row versions with the same id
+    /// from overwriting or deleting each other's only local bytes.
+    pub fn local_blob_path(
+        &self,
+        namespace: &str,
+        id: &str,
+        content_hash: &str,
+    ) -> Result<PathBuf, PathTokenError> {
         validate_path_token(namespace)?;
         validate_path_token(id)?;
+        if content_hash.len() != 64
+            || !content_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(PathTokenError::InvalidContentHash);
+        }
         Ok(self
             .path
             .join("storage")
             .join("local")
             .join(namespace)
-            .join(id))
+            .join(id)
+            .join(content_hash))
     }
 
     /// The evictable-cache root, `storage/cache`, holding every namespace's subtree.

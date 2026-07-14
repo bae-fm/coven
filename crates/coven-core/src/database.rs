@@ -2067,11 +2067,12 @@ fn validate_published_blob_drop_intents_schema(conn: &Connection) -> Result<(), 
         ("namespace".to_string(), "TEXT".to_string(), true, 2),
         ("blob_id".to_string(), "TEXT".to_string(), true, 3),
         ("size".to_string(), "INTEGER".to_string(), true, 0),
+        ("content_hash".to_string(), "TEXT".to_string(), true, 4),
         ("disposition".to_string(), "TEXT".to_string(), true, 0),
     ];
     if actual != expected {
         return Err(DbError(format!(
-            "published_blob_drop_intents has a non-current schema; expected required size INTEGER column and canonical columns, found {actual:?}"
+            "published_blob_drop_intents has a non-current schema; expected required size and content_hash columns, found {actual:?}"
         )));
     }
     Ok(())
