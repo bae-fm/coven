@@ -3176,6 +3176,212 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
     );
 }
 
+struct PersistedCycleRemoval {
+    storage: MockSyncStorage,
+    db: crate::database::Database,
+    founder_pubkey: String,
+    second_owner_pubkey: String,
+    removed_member_pubkey: String,
+}
+
+async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
+    let founder = UserKeypair::generate();
+    let second_owner = UserKeypair::generate();
+    let removed_member = UserKeypair::generate();
+    let founder_pubkey = hex::encode(founder.public_key());
+    let second_owner_pubkey = hex::encode(second_owner.public_key());
+    let removed_member_pubkey = hex::encode(removed_member.public_key());
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    if pin_owner {
+        db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder_pubkey)
+            .await
+            .unwrap();
+    }
+
+    let mut chain = MembershipChain::new();
+    let founder_entry = founder_entry(&founder, "2026-03-01T00:00:00Z");
+    append_membership_entry(&storage, &mut chain, &founder_pubkey, 1, founder_entry).await;
+    let add_owner = make_linked_entry(
+        &chain,
+        &founder,
+        MembershipAction::Add,
+        &second_owner,
+        MemberRole::Owner,
+        "2026-03-01T00:01:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &founder_pubkey, 2, add_owner).await;
+    let add_member = make_linked_entry(
+        &chain,
+        &founder,
+        MembershipAction::Add,
+        &removed_member,
+        MemberRole::Member,
+        "2026-03-01T00:02:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &founder_pubkey, 3, add_member).await;
+    let remove_member = make_linked_entry(
+        &chain,
+        &second_owner,
+        MembershipAction::Remove,
+        &removed_member,
+        MemberRole::Member,
+        "2026-03-01T00:03:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &second_owner_pubkey, 1, remove_member).await;
+    publish_membership_chain_head(&storage, &chain, &founder).await;
+    publish_membership_chain_head(&storage, &chain, &second_owner).await;
+
+    let initial = crate::sync::pull::load_cycle_membership(&storage, &db)
+        .await
+        .expect("accept and persist the complete multi-author chain");
+    assert!(!initial
+        .chain
+        .expect("listed membership chain")
+        .can_write_now(&removed_member_pubkey));
+
+    for seq in 1..=3 {
+        storage.hide_membership_from_listing(&founder_pubkey, seq);
+    }
+    storage.hide_membership_from_listing(&second_owner_pubkey, 1);
+
+    PersistedCycleRemoval {
+        storage,
+        db,
+        founder_pubkey,
+        second_owner_pubkey,
+        removed_member_pubkey,
+    }
+}
+
+#[tokio::test]
+async fn pinned_cycle_recovers_persisted_authors_when_membership_listing_is_empty() {
+    let fixture = persisted_cycle_removal(true).await;
+
+    let recovered = crate::sync::pull::load_cycle_membership(&fixture.storage, &fixture.db)
+        .await
+        .expect("empty LIST must use the persisted author floors");
+
+    assert_eq!(
+        recovered.pinned_owner.as_deref(),
+        Some(fixture.founder_pubkey.as_str())
+    );
+    assert!(recovered.listed_entries.is_empty());
+    assert!(!recovered
+        .chain
+        .expect("persisted membership chain")
+        .can_write_now(&fixture.removed_member_pubkey));
+}
+
+#[tokio::test]
+async fn unpinned_cycle_recovers_persisted_authors_when_membership_listing_is_empty() {
+    let fixture = persisted_cycle_removal(false).await;
+
+    let recovered = crate::sync::pull::load_cycle_membership(&fixture.storage, &fixture.db)
+        .await
+        .expect("an unpinned prior chain must not fall open on an empty LIST");
+
+    assert!(recovered.pinned_owner.is_none());
+    assert!(recovered.listed_entries.is_empty());
+    assert!(!recovered
+        .chain
+        .expect("persisted membership chain")
+        .can_write_now(&fixture.removed_member_pubkey));
+}
+
+#[tokio::test]
+async fn unpinned_cycle_rejects_missing_state_required_by_a_persisted_floor() {
+    let fixture = persisted_cycle_removal(false).await;
+    fixture
+        .storage
+        .remove_membership_head(&fixture.second_owner_pubkey);
+
+    let error = match crate::sync::pull::load_cycle_membership(&fixture.storage, &fixture.db).await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("a persisted author floor requires its signed head"),
+    };
+
+    assert!(
+        matches!(&error, PullError::MembershipTampered(message) if message.contains(&fixture.second_owner_pubkey)),
+        "missing persisted-author state must be membership tamper: {error}"
+    );
+}
+
+#[tokio::test]
+async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floor() {
+    let owner = UserKeypair::generate();
+    let owner_pubkey = hex::encode(owner.public_key());
+    let member = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+    let target = open_test_db();
+    target
+        .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pubkey)
+        .await
+        .unwrap();
+
+    let mut chain = MembershipChain::new();
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    append_membership_entry(&storage, &mut chain, &owner_pubkey, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+    let cycle_membership = crate::sync::pull::load_cycle_membership(&storage, &target)
+        .await
+        .expect("load founder at cycle start");
+
+    let add_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "2026-03-01T00:01:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pubkey, 2, add_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+    storage.hide_membership_from_listing(&owner_pubkey, 1);
+    storage.hide_membership_from_listing(&owner_pubkey, 2);
+
+    let source = open_test_db();
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'AdvancedHead', NULL, '0000000002000-0000-devM', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "devM",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:02:00Z",
+        &member,
+        None,
+        &changeset,
+    );
+    storage.put_changeset_packed("devM", 1, packed);
+
+    let (_tmp, store_dir) = temp_store_dir();
+    let (updated, result) = crate::sync::pull::pull_changes(
+        &target,
+        target.synced_tables(),
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &store_dir,
+        cycle_membership.chain,
+        cycle_membership.pinned_owner,
+    )
+    .await
+    .expect("pull with an empty mid-cycle membership LIST");
+
+    assert_eq!(result.changesets_applied, 1);
+    assert!(result.rejected_unauthorized.is_empty());
+    assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get("devM"), Some(&1));
+}
+
 /// `list_membership_entries` itself failing (a flaky LIST, not bad chain data) on
 /// an owner-pinned store must abort the cycle, not fall open to "no chain,
 /// accept everything" — the first failure mode #88 names. A real chain and a
@@ -3743,6 +3949,81 @@ async fn pull_resolves_a_changeset_naming_a_grant_no_head_yet_covers() {
     assert_eq!(result.changesets_applied, 1);
     assert!(result.rejected_unauthorized.is_empty());
     assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get("devM"), Some(&1));
+}
+
+#[tokio::test]
+async fn relocated_membership_grant_cannot_authorize_a_changeset() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key());
+    let member = UserKeypair::generate();
+    let relocated_author = hex::encode(UserKeypair::generate().public_key());
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+    let add_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "2026-03-01T00:01:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+
+    let grant_bytes = storage
+        .get_membership_entry(&owner_pk, 2)
+        .await
+        .expect("owner's uncommitted grant");
+    storage
+        .put_membership_entry(&relocated_author, 2, grant_bytes)
+        .await
+        .expect("relocate the grant to another author's coordinate");
+
+    let source = open_test_db();
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'RelocatedGrant', NULL, '0000000002000-0000-devM', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "devM",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:02:00Z",
+        &member,
+        Some(MembershipCoord {
+            author_pubkey: relocated_author,
+            seq: 2,
+        }),
+        &changeset,
+    );
+    storage.put_changeset_packed("devM", 1, packed);
+
+    let target = open_test_db();
+    target
+        .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+    let (updated, result) = pull_into(
+        &target,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_store_dir().1,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.rejected_unauthorized.len(), 1);
+    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert_eq!(updated.get("devM"), Some(&1));
 }
 

@@ -608,6 +608,12 @@ fn blob_key(namespace: &str, id: &str, cloud_path: Option<&str>) -> String {
     }
 }
 
+struct MembershipHeadReadPause {
+    author_pubkey: String,
+    snapshot_held: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
 /// In-memory mock of SyncStorage for tests.
 ///
 /// Stores changesets as plaintext (no encryption in tests) but signs and verifies
@@ -637,6 +643,9 @@ pub struct MockSyncStorage {
     /// An author absent from this map has not committed a head (its entries are
     /// uncommitted).
     membership_heads: Mutex<HashMap<String, Vec<u8>>>,
+    /// One membership-head read to pause after snapshotting its bytes. The two
+    /// notifications tell the test that the snapshot is held and release it.
+    membership_head_read_pause: Mutex<Option<MembershipHeadReadPause>>,
     /// The device identity this mock signs its head/min_schema with. Defaults to a
     /// fresh keypair; a membership test that needs the head/floor attributed to a
     /// specific member constructs the mock with [`Self::with_keypair`].
@@ -726,6 +735,7 @@ impl MockSyncStorage {
             snapshot_objects: Mutex::new(HashMap::new()),
             min_schema_version: Mutex::new(None),
             membership_heads: Mutex::new(HashMap::new()),
+            membership_head_read_pause: Mutex::new(None),
             keypair,
             fail_membership_list: std::sync::atomic::AtomicBool::new(false),
             fail_membership_list_on: std::sync::atomic::AtomicUsize::new(0),
@@ -808,6 +818,56 @@ impl MockSyncStorage {
             .lock()
             .unwrap()
             .insert((author_pubkey.to_string(), seq));
+    }
+
+    /// Remove an author's published membership head while leaving its entries
+    /// stored, so a reader test can distinguish a missing required head from a
+    /// lagging entry listing.
+    pub fn remove_membership_head(&self, author_pubkey: &str) {
+        assert!(
+            self.membership_heads
+                .lock()
+                .unwrap()
+                .remove(author_pubkey)
+                .is_some(),
+            "remove_membership_head: no head for {author_pubkey}",
+        );
+    }
+
+    /// Remove one membership entry from keyed storage as well as the listing.
+    pub fn remove_membership_entry(&self, author_pubkey: &str, seq: u64) {
+        let key = format!("membership/{author_pubkey}/{seq}");
+        assert!(
+            self.objects.lock().unwrap().remove(&key).is_some(),
+            "remove_membership_entry: no entry at {author_pubkey}/{seq}",
+        );
+    }
+
+    /// Pause the next read of `author_pubkey`'s membership head after cloning its
+    /// current bytes. Returns `(snapshot_held, release)` notifications.
+    pub fn pause_next_membership_head_read(
+        &self,
+        author_pubkey: &str,
+    ) -> (
+        std::sync::Arc<tokio::sync::Notify>,
+        std::sync::Arc<tokio::sync::Notify>,
+    ) {
+        let snapshot_held = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let previous =
+            self.membership_head_read_pause
+                .lock()
+                .unwrap()
+                .replace(MembershipHeadReadPause {
+                    author_pubkey: author_pubkey.to_string(),
+                    snapshot_held: snapshot_held.clone(),
+                    release: release.clone(),
+                });
+        assert!(
+            previous.is_none(),
+            "a membership-head read is already paused"
+        );
+        (snapshot_held, release)
     }
 
     pub fn fail_next_blob_puts(&self, count: usize) {
@@ -1505,12 +1565,29 @@ impl SyncStorage for MockSyncStorage {
     }
 
     async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError> {
-        self.membership_heads
+        let bytes = self
+            .membership_heads
             .lock()
             .unwrap()
             .get(author_pubkey)
             .cloned()
-            .ok_or_else(|| StorageError::NotFound(format!("membership/{author_pubkey}/head")))
+            .ok_or_else(|| StorageError::NotFound(format!("membership/{author_pubkey}/head")))?;
+        let pause = {
+            let mut pause = self.membership_head_read_pause.lock().unwrap();
+            if pause
+                .as_ref()
+                .is_some_and(|pause| pause.author_pubkey == author_pubkey)
+            {
+                pause.take()
+            } else {
+                None
+            }
+        };
+        if let Some(pause) = pause {
+            pause.snapshot_held.notify_one();
+            pause.release.notified().await;
+        }
+        Ok(bytes)
     }
 
     async fn put_wrapped_key(

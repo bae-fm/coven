@@ -19,7 +19,7 @@ use super::membership::{
 };
 use super::storage::{StorageError, SyncStorage};
 use crate::database::Database;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Why a high-level membership operation (list members, invite, remove, rotate)
 /// failed. The security-critical orchestration layer that downloads the chain,
@@ -92,11 +92,8 @@ pub async fn current_membership_floor(
     watermark_db: Option<&Database>,
 ) -> Result<Vec<super::membership::MembershipCoord>, MembershipOpsError> {
     let entries = storage.list_membership_entries().await?;
-    if entries.is_empty() {
-        return Ok(Vec::new());
-    }
-    let chain = load_anchored_chain(storage, &entries, pinned_owner, watermark_db).await?;
-    Ok(chain.author_heads())
+    let chain = load_anchored_chain_if_known(storage, &entries, pinned_owner, watermark_db).await?;
+    Ok(chain.map_or_else(Vec::new, |chain| chain.author_heads()))
 }
 
 /// Read the membership chain from the sync storage and return the current members.
@@ -399,22 +396,39 @@ pub async fn download_entries(
 ) -> Result<Vec<(MembershipCoord, MembershipEntry)>, String> {
     let mut entries = Vec::with_capacity(entry_keys.len());
     for (author, seq) in entry_keys {
+        let coord = MembershipCoord {
+            author_pubkey: author.clone(),
+            seq: *seq,
+        };
         let data = storage
             .get_membership_entry(author, *seq)
             .await
             .map_err(|e| format!("Failed to get membership entry {author}/{seq}: {e}"))?;
-
-        let entry: MembershipEntry = serde_json::from_slice(&data)
-            .map_err(|e| format!("Failed to parse membership entry {author}/{seq}: {e}"))?;
-        entries.push((
-            MembershipCoord {
-                author_pubkey: author.clone(),
-                seq: *seq,
-            },
-            entry,
-        ));
+        let entry = parse_membership_entry_at(&coord, &data)?;
+        entries.push((coord, entry));
     }
     Ok(entries)
+}
+
+/// Parse a membership entry read from `coord` and bind its signed author to the
+/// author namespace in that coordinate.
+pub(crate) fn parse_membership_entry_at(
+    coord: &MembershipCoord,
+    data: &[u8],
+) -> Result<MembershipEntry, String> {
+    let entry: MembershipEntry = serde_json::from_slice(data).map_err(|error| {
+        format!(
+            "Failed to parse membership entry {}/{}: {error}",
+            coord.author_pubkey, coord.seq
+        )
+    })?;
+    if entry.author_pubkey != coord.author_pubkey {
+        return Err(format!(
+            "membership entry {}/{} declares author {}",
+            coord.author_pubkey, coord.seq, entry.author_pubkey
+        ));
+    }
+    Ok(entry)
 }
 
 /// Download and build a membership chain from the storage.
@@ -585,20 +599,9 @@ pub(crate) async fn load_membership_chain(
         .await
         .map_err(MembershipAuthorAuthorizationError::ListMembershipEntries)?;
 
-    if entries.is_empty() {
-        if let Some(owner) = pinned_owner {
-            return Err(MembershipAuthorAuthorizationError::Unauthorized(format!(
-                "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
-            )));
-        }
-
-        return Ok(None);
-    }
-
-    let chain = load_anchored_chain(storage, &entries, pinned_owner, watermark_db)
+    load_anchored_chain_if_known(storage, &entries, pinned_owner, watermark_db)
         .await
-        .map_err(|e| MembershipAuthorAuthorizationError::Unauthorized(e.to_string()))?;
-    Ok(Some(chain))
+        .map_err(|error| MembershipAuthorAuthorizationError::Unauthorized(error.to_string()))
 }
 
 /// Download and validate the membership chain from `entry_keys`, then confirm it
@@ -612,18 +615,17 @@ pub(crate) async fn load_membership_chain(
 /// store with no pinned owner (browsable) skips the anchor check — it is open by
 /// design and has no owner to anchor to.
 ///
-/// `entry_keys` must be non-empty (an empty listing is each caller's own
-/// short-circuit: pull falls open, snapshot accepts on signature alone), so an
-/// empty set here surfaces as a `LoadFailed` (the chain won't validate) rather
-/// than a silent success.
-///
-/// The committed set is the union of every author's committed prefix: for each
-/// author that has a signed head, entries `1..=head.seq` are admitted (fetched by
-/// keyed GET, so a listing that lags a fresh write can't hide a committed entry).
-/// `validate` then re-derives owner authorship across the merged, timestamp-ordered
-/// set, so an author who was never an owner has its entries rejected — the same
-/// fold authorization already performs. An author whose head is missing contributes
-/// nothing: its entries stay uncommitted until it publishes a head covering them.
+/// The committed set is the union of every known author's committed prefix. Known
+/// authors come from both the current entry listing and this reader's persisted
+/// head floors, so hiding an entire listed prefix cannot erase a head this reader
+/// already accepted. For each author that has a signed head, entries
+/// `1..=head.seq` are admitted (fetched by keyed GET, so a listing that lags a
+/// fresh write can't hide a committed entry). `validate` then re-derives owner
+/// authorship across the merged, timestamp-ordered set, so an author who was never
+/// an owner has its entries rejected — the same fold authorization already
+/// performs. A listed author with no persisted floor may have entries but no head;
+/// those entries stay uncommitted until it publishes a head covering them. An
+/// author with a persisted floor must retain a readable head at or above it.
 ///
 /// `watermark_db`, when present, makes the read monotonic per author: a head whose
 /// seq regresses the last one this reader accepted (persisted in `sync_state`) is
@@ -636,18 +638,58 @@ pub(crate) async fn load_anchored_chain(
     owner_pubkey: Option<&str>,
     watermark_db: Option<&Database>,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let authors: BTreeSet<String> = entry_keys
+    load_anchored_chain_if_known(storage, entry_keys, owner_pubkey, watermark_db)
+        .await?
+        .ok_or_else(|| {
+            AnchoredChainError::LoadFailed("no membership authors are known".to_string())
+        })
+}
+
+/// The central membership loader for callers that distinguish an actual
+/// chain-less store from a required chain. `entry_keys` is the caller's one
+/// already-fetched LIST result; persisted floors can supply authors it omits.
+pub(crate) async fn load_anchored_chain_if_known(
+    storage: &dyn SyncStorage,
+    entry_keys: &[(String, u64)],
+    owner_pubkey: Option<&str>,
+    watermark_db: Option<&Database>,
+) -> Result<Option<MembershipChain>, AnchoredChainError> {
+    let _membership_load = match watermark_db {
+        Some(db) => Some(db.lock_membership_load().await),
+        None => None,
+    };
+    let persisted_floors = match watermark_db {
+        Some(db) => read_head_watermarks(db)
+            .await
+            .map_err(AnchoredChainError::LoadFailed)?,
+        None => BTreeMap::new(),
+    };
+    let mut authors: BTreeSet<String> = entry_keys
         .iter()
         .map(|(author, _)| author.clone())
         .collect();
+    authors.extend(persisted_floors.keys().cloned());
+    if authors.is_empty() {
+        if let Some(owner) = owner_pubkey {
+            return Err(AnchoredChainError::LoadFailed(format!(
+                "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
+            )));
+        }
+        return Ok(None);
+    }
 
     let mut heads: Vec<AuthorHead> = Vec::new();
     for author in &authors {
         let bytes = match storage.get_membership_head(author).await {
             Ok(bytes) => bytes,
             Err(StorageError::NotFound(_)) => {
-                // Entries exist but no head: this author has committed nothing yet,
-                // so its prefix contributes nothing to the committed set.
+                if let Some(accepted) = persisted_floors.get(author) {
+                    return Err(AnchoredChainError::LoadFailed(format!(
+                        "membership head {author} is missing below the accepted floor {accepted}"
+                    )));
+                }
+                // This author is known only from listed entries and has no head:
+                // its prefix remains uncommitted.
                 debug!(%author, "membership head absent; author's entries are uncommitted");
                 continue;
             }
@@ -660,22 +702,23 @@ pub(crate) async fn load_anchored_chain(
         let head: AuthorHead = serde_json::from_slice(&bytes).map_err(|e| {
             AnchoredChainError::LoadFailed(format!("parse membership head {author}: {e}"))
         })?;
+        if head.author_pubkey != *author {
+            return Err(AnchoredChainError::LoadFailed(format!(
+                "membership head stored for {author} declares author {}",
+                head.author_pubkey
+            )));
+        }
         if !head.verify() {
             return Err(AnchoredChainError::LoadFailed(format!(
                 "membership head {author} has an invalid signature"
             )));
         }
-        if let Some(db) = watermark_db {
-            if let Some(accepted) = read_head_watermark(db, author)
-                .await
-                .map_err(AnchoredChainError::LoadFailed)?
-            {
-                if head.seq < accepted {
-                    return Err(AnchoredChainError::LoadFailed(format!(
-                        "membership head {author} regressed to seq {} below the accepted {accepted}",
-                        head.seq
-                    )));
-                }
+        if let Some(accepted) = persisted_floors.get(author) {
+            if head.seq < *accepted {
+                return Err(AnchoredChainError::LoadFailed(format!(
+                    "membership head {author} regressed to seq {} below the accepted {accepted}",
+                    head.seq
+                )));
             }
         }
         heads.push(head);
@@ -719,7 +762,7 @@ pub(crate) async fn load_anchored_chain(
         }
     }
 
-    Ok(chain)
+    Ok(Some(chain))
 }
 
 /// `sync_state` key holding the greatest membership-head seq this reader has
@@ -728,15 +771,45 @@ fn head_watermark_key(author: &str) -> String {
     format!("membership_head_seq/{author}")
 }
 
-async fn read_head_watermark(db: &Database, author: &str) -> Result<Option<u64>, String> {
-    match db.get_sync_state(&head_watermark_key(author)).await {
-        Ok(Some(value)) => value
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|e| format!("membership head watermark for {author} is not a seq: {e}")),
-        Ok(None) => Ok(None),
-        Err(e) => Err(format!("read membership head watermark for {author}: {e}")),
-    }
+async fn read_head_watermarks(db: &Database) -> Result<BTreeMap<String, u64>, String> {
+    let prefix = head_watermark_key("");
+    db.call(move |conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT key, value FROM sync_state \
+                 WHERE substr(key, 1, length(?1)) = ?1 \
+                 ORDER BY key",
+            )
+            .map_err(crate::database::DbError::from)?;
+        let rows = statement
+            .query_map([&prefix], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(crate::database::DbError::from)?;
+        let mut watermarks = BTreeMap::new();
+        for row in rows {
+            let (key, value) = row.map_err(crate::database::DbError::from)?;
+            let author = key.strip_prefix(&prefix).ok_or_else(|| {
+                crate::database::DbError(format!(
+                    "membership head watermark key {key:?} is outside its queried prefix"
+                ))
+            })?;
+            if author.is_empty() {
+                return Err(crate::database::DbError(
+                    "membership head watermark has an empty author".to_string(),
+                ));
+            }
+            let seq = value.parse::<u64>().map_err(|error| {
+                crate::database::DbError(format!(
+                    "membership head watermark for {author} is not a seq: {error}"
+                ))
+            })?;
+            watermarks.insert(author.to_string(), seq);
+        }
+        Ok(watermarks)
+    })
+    .await
+    .map_err(|error| format!("read membership head watermarks: {error}"))
 }
 
 /// Persist `seq` as `author`'s head watermark, monotonically: a write at or
@@ -794,7 +867,351 @@ mod tests {
         append_membership_entry, founder_entry, make_linked_entry, pubkey_hex, MockSyncStorage,
         TestCustody,
     };
-    use std::sync::RwLock;
+    use std::sync::{Arc, RwLock};
+
+    struct CommittedRemoval {
+        storage: MockSyncStorage,
+        db: Database,
+        founder_pubkey: String,
+        second_owner_pubkey: String,
+        removed_member_pubkey: String,
+    }
+
+    impl CommittedRemoval {
+        fn hide_all_entries_from_listing(&self) {
+            for seq in 1..=3 {
+                self.storage
+                    .hide_membership_from_listing(&self.founder_pubkey, seq);
+            }
+            self.storage
+                .hide_membership_from_listing(&self.second_owner_pubkey, 1);
+        }
+    }
+
+    async fn committed_removal_by_second_owner() -> CommittedRemoval {
+        use crate::sync::test_helpers::open_test_db;
+
+        let founder = UserKeypair::generate();
+        let second_owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let storage = MockSyncStorage::new();
+        let db = open_test_db();
+        let founder_pubkey = pubkey_hex(&founder);
+        let second_owner_pubkey = pubkey_hex(&second_owner);
+        let removed_member_pubkey = pubkey_hex(&member);
+        let mut chain = MembershipChain::new();
+
+        let founder_entry = founder_entry(&founder, "0000000001000-0000-founder");
+        append_membership_entry(&storage, &mut chain, &founder_pubkey, 1, founder_entry).await;
+        let add_owner = make_linked_entry(
+            &chain,
+            &founder,
+            MembershipAction::Add,
+            &second_owner,
+            MemberRole::Owner,
+            "0000000002000-0000-founder",
+        );
+        append_membership_entry(&storage, &mut chain, &founder_pubkey, 2, add_owner).await;
+        let add_member = make_linked_entry(
+            &chain,
+            &founder,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000003000-0000-founder",
+        );
+        append_membership_entry(&storage, &mut chain, &founder_pubkey, 3, add_member).await;
+        let remove_member = make_linked_entry(
+            &chain,
+            &second_owner,
+            MembershipAction::Remove,
+            &member,
+            MemberRole::Member,
+            "0000000004000-0000-second",
+        );
+        append_membership_entry(&storage, &mut chain, &second_owner_pubkey, 1, remove_member).await;
+        publish_membership_head(&storage, &chain, &founder)
+            .await
+            .unwrap();
+        publish_membership_head(&storage, &chain, &second_owner)
+            .await
+            .unwrap();
+
+        let visible = storage.list_membership_entries().await.unwrap();
+        let accepted = load_anchored_chain(&storage, &visible, Some(&founder_pubkey), Some(&db))
+            .await
+            .expect("accept committed multi-owner chain");
+        assert!(!accepted.can_write_now(&removed_member_pubkey));
+
+        CommittedRemoval {
+            storage,
+            db,
+            founder_pubkey,
+            second_owner_pubkey,
+            removed_member_pubkey,
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_author_floor_recovers_head_when_listing_omits_author() {
+        let fixture = committed_removal_by_second_owner().await;
+        fixture
+            .storage
+            .hide_membership_from_listing(&fixture.second_owner_pubkey, 1);
+        let visible = fixture.storage.list_membership_entries().await.unwrap();
+
+        let loaded = load_anchored_chain(
+            &fixture.storage,
+            &visible,
+            Some(&fixture.founder_pubkey),
+            Some(&fixture.db),
+        )
+        .await
+        .expect("persisted author floor requires its committed prefix");
+
+        assert!(
+            !loaded.can_write_now(&fixture.removed_member_pubkey),
+            "hiding the removing Owner's listing prefix must not reactivate the member",
+        );
+    }
+
+    #[tokio::test]
+    async fn current_floor_recovers_every_author_when_listing_is_empty() {
+        let fixture = committed_removal_by_second_owner().await;
+        fixture.hide_all_entries_from_listing();
+
+        let floor = current_membership_floor(
+            &fixture.storage,
+            Some(&fixture.founder_pubkey),
+            Some(&fixture.db),
+        )
+        .await
+        .expect("persisted floors recover an entirely omitted membership listing");
+
+        assert_eq!(floor.len(), 2);
+        assert!(floor
+            .iter()
+            .any(|coord| { coord.author_pubkey == fixture.founder_pubkey && coord.seq == 3 }));
+        assert!(floor
+            .iter()
+            .any(|coord| { coord.author_pubkey == fixture.second_owner_pubkey && coord.seq == 1 }));
+    }
+
+    #[tokio::test]
+    async fn current_floor_requires_every_keyed_entry_when_listing_is_empty() {
+        let fixture = committed_removal_by_second_owner().await;
+        fixture.hide_all_entries_from_listing();
+        fixture
+            .storage
+            .remove_membership_entry(&fixture.second_owner_pubkey, 1);
+
+        let error = current_membership_floor(
+            &fixture.storage,
+            Some(&fixture.founder_pubkey),
+            Some(&fixture.db),
+        )
+        .await
+        .expect_err("a persisted head requires every entry in its committed prefix");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("{}/1", fixture.second_owner_pubkey)),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_membership_loads_complete_in_floor_order() {
+        use crate::sync::test_helpers::open_test_db;
+
+        let founder = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let founder_pubkey = pubkey_hex(&founder);
+        let member_pubkey = pubkey_hex(&member);
+        let storage = Arc::new(MockSyncStorage::new());
+        let db = open_test_db();
+        let mut chain = MembershipChain::new();
+
+        let first = founder_entry(&founder, "0000000001000-0000-founder");
+        append_membership_entry(&storage, &mut chain, &founder_pubkey, 1, first).await;
+        let add_member = make_linked_entry(
+            &chain,
+            &founder,
+            MembershipAction::Add,
+            &member,
+            MemberRole::Member,
+            "0000000002000-0000-founder",
+        );
+        append_membership_entry(&storage, &mut chain, &founder_pubkey, 2, add_member).await;
+        publish_membership_head(storage.as_ref(), &chain, &founder)
+            .await
+            .unwrap();
+
+        let old_listing = storage.list_membership_entries().await.unwrap();
+        let accepted = load_anchored_chain(
+            storage.as_ref(),
+            &old_listing,
+            Some(&founder_pubkey),
+            Some(&db),
+        )
+        .await
+        .expect("accept member at the initial floor");
+        assert!(accepted.can_write_now(&member_pubkey));
+
+        let (old_head_snapshotted, release_old_load) =
+            storage.pause_next_membership_head_read(&founder_pubkey);
+        let old_storage = storage.clone();
+        let old_db = db.clone();
+        let old_owner = founder_pubkey.clone();
+        let old_load = tokio::spawn(async move {
+            load_anchored_chain(
+                old_storage.as_ref(),
+                &old_listing,
+                Some(&old_owner),
+                Some(&old_db),
+            )
+            .await
+        });
+        old_head_snapshotted.notified().await;
+
+        let remove_member = make_linked_entry(
+            &chain,
+            &founder,
+            MembershipAction::Remove,
+            &member,
+            MemberRole::Member,
+            "0000000003000-0000-founder",
+        );
+        append_membership_entry(
+            storage.as_ref(),
+            &mut chain,
+            &founder_pubkey,
+            3,
+            remove_member,
+        )
+        .await;
+        publish_membership_head(storage.as_ref(), &chain, &founder)
+            .await
+            .unwrap();
+        let new_listing = storage.list_membership_entries().await.unwrap();
+
+        let new_storage = storage.clone();
+        let new_db = db.clone();
+        let new_owner = founder_pubkey.clone();
+        let mut new_load = tokio::spawn(async move {
+            load_anchored_chain(
+                new_storage.as_ref(),
+                &new_listing,
+                Some(&new_owner),
+                Some(&new_db),
+            )
+            .await
+        });
+
+        let new_completed_while_old_was_paused =
+            tokio::time::timeout(std::time::Duration::from_millis(500), &mut new_load).await;
+        release_old_load.notify_one();
+        let old_chain = old_load
+            .await
+            .expect("old load task")
+            .expect("old load returns its accepted chain");
+
+        match new_completed_while_old_was_paused {
+            Ok(result) => {
+                let new_chain = result.expect("new load task").expect("new load result");
+                assert!(!new_chain.can_write_now(&member_pubkey));
+                panic!("a newer floor committed while an older membership load could still return");
+            }
+            Err(_) => {
+                assert!(old_chain.can_write_now(&member_pubkey));
+                let new_chain = new_load
+                    .await
+                    .expect("new load task")
+                    .expect("new load result");
+                assert!(!new_chain.can_write_now(&member_pubkey));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_author_floor_requires_readable_head() {
+        let fixture = committed_removal_by_second_owner().await;
+        fixture
+            .storage
+            .hide_membership_from_listing(&fixture.second_owner_pubkey, 1);
+        fixture
+            .storage
+            .remove_membership_head(&fixture.second_owner_pubkey);
+        let visible = fixture.storage.list_membership_entries().await.unwrap();
+
+        let error = load_anchored_chain(
+            &fixture.storage,
+            &visible,
+            Some(&fixture.founder_pubkey),
+            Some(&fixture.db),
+        )
+        .await
+        .expect_err("a persisted author floor requires a readable head");
+
+        assert!(
+            error.to_string().contains(&fixture.second_owner_pubkey),
+            "missing-head error must name the persisted author: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn membership_head_must_match_storage_author() {
+        let fixture = committed_removal_by_second_owner().await;
+        fixture
+            .storage
+            .hide_membership_from_listing(&fixture.second_owner_pubkey, 1);
+        let other_author = hex::encode([9u8; 32]);
+        let second_owner_head = fixture
+            .storage
+            .get_membership_head(&fixture.second_owner_pubkey)
+            .await
+            .unwrap();
+        fixture
+            .storage
+            .put_membership_head(&other_author, second_owner_head)
+            .await
+            .unwrap();
+        let mut visible = fixture.storage.list_membership_entries().await.unwrap();
+        visible.push((other_author.clone(), 1));
+
+        let error = load_anchored_chain(
+            &fixture.storage,
+            &visible,
+            Some(&fixture.founder_pubkey),
+            None,
+        )
+        .await
+        .expect_err("a signed head must match the author namespace it was read from");
+
+        let message = error.to_string();
+        assert!(message.contains(&other_author), "{message}");
+        assert!(message.contains(&fixture.second_owner_pubkey), "{message}");
+    }
+
+    #[tokio::test]
+    async fn membership_entry_must_match_storage_author() {
+        let author = UserKeypair::generate();
+        let other_author = hex::encode([8u8; 32]);
+        let entry = founder_entry(&author, "0000000001000-0000-author");
+        let storage = MockSyncStorage::new();
+        storage
+            .put_membership_entry(&other_author, 1, serde_json::to_vec(&entry).unwrap())
+            .await
+            .unwrap();
+
+        let error = download_entries(&storage, &[(other_author.clone(), 1)])
+            .await
+            .expect_err("an entry must match the author namespace it was read from");
+
+        let message = error.to_string();
+        assert!(message.contains(&other_author), "{message}");
+        assert!(message.contains(&pubkey_hex(&author)), "{message}");
+    }
 
     /// Adopting a rotated key re-checks under the write lock that the incoming
     /// keyring genuinely extends the live one. A concurrent member op may have
@@ -1349,14 +1766,22 @@ mod tests {
         persist_head_watermark(&db, author, 10).await.unwrap();
         persist_head_watermark(&db, author, 9).await.unwrap();
         assert_eq!(
-            read_head_watermark(&db, author).await.unwrap(),
+            read_head_watermarks(&db)
+                .await
+                .unwrap()
+                .get(author)
+                .copied(),
             Some(10),
             "an out-of-order lower persist must not regress the stored watermark",
         );
 
         persist_head_watermark(&db, author, 11).await.unwrap();
         assert_eq!(
-            read_head_watermark(&db, author).await.unwrap(),
+            read_head_watermarks(&db)
+                .await
+                .unwrap()
+                .get(author)
+                .copied(),
             Some(11),
             "a higher persist still advances it",
         );

@@ -829,23 +829,12 @@ async fn restore_pins_the_chain_founder_as_owner() {
 }
 
 /// Mirrors join_tests.rs's `a_fresh_joiner_refuses_a_rolled_back_membership_head`:
-/// a restore code seeds the same per-author watermark from its own floor.
-///
-/// Unlike join, restore's very first bootstrap pull (`open_db_and_pull`) itself
-/// still succeeds even against the rolled-back head: restore has no owner
-/// pinned yet at that point (`restore_pins_the_chain_founder_as_owner` above —
-/// it adopts the founder only *after* this first pull), so
-/// `load_cycle_membership` treats a failed chain load as the legitimate
-/// chain-less case and falls open for that one bootstrap cycle, the same
-/// trust-on-first-use the snapshot phase already documents. The seeded
-/// watermark still closes the window that matters: this bootstrap pins the
-/// founder from the raw listing (unaffected by which head the provider
-/// serves), so the very next sync cycle runs with a pinned owner and a seeded
-/// watermark, and refuses the still-rolled-back head — instead of silently
-/// treating the removed member as current forever, which is what an unseeded
-/// device would do.
+/// a restore code seeds the same per-author watermark from its own floor. Owner
+/// pinning follows this call in the restore flow, but the accepted floor is
+/// already authoritative: the bootstrap pull must reject a lower signed head
+/// instead of treating a failed unpinned chain load as a chain-less store.
 #[tokio::test]
-async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_from_its_next_sync_cycle() {
+async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap() {
     use crate::sync::membership::{entry_hash, AuthorHead, MemberRole, MembershipAction};
 
     let storage = MockSyncStorage::new();
@@ -930,7 +919,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_from_its_next_sy
     let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
         .await
         .expect("B bootstrap");
-    open_db_and_pull(
+    let error = open_db_and_pull(
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
@@ -943,45 +932,16 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_from_its_next_sy
         &tokio::sync::watch::channel(false).1,
     )
     .await
-    .expect("restore's own bootstrap pull is trust-on-first-use and completes");
+    .expect_err("the restore bootstrap must enforce its seeded membership floor");
 
-    let (db_b, _stamper) = Database::open(
-        &lib_b.db_path(),
-        tables.clone(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        "B".to_string(),
-        &test_migrations(),
-    )
-    .expect("open B db");
-
-    // The founder is now pinned (from the raw listing, unaffected by the
-    // rolled-back head) and the watermark was seeded before the pull. The very
-    // next sync cycle re-reads the pinned owner and must refuse the
-    // still-rolled-back head.
-    let b_hlc = Hlc::new("B".to_string());
-    let cipher_lock = RwLock::new(CloudCipher::Plaintext);
-    let result = run_single_sync_cycle(
-        &storage,
-        "test-lib",
-        "B",
-        &b_hlc,
-        &SystemClock,
-        &db_b,
-        &cipher_lock,
-        &PendingRotation::none(),
-        &UserKeypair::generate(),
-        None,
-        &lib_b,
-        None,
-        None,
-    )
-    .await;
-
+    let message = match &error {
+        BootstrapError::Pull(crate::sync::pull::PullError::MembershipTampered(message)) => message,
+        other => panic!("expected membership tamper from the bootstrap pull, got {other:?}"),
+    };
+    assert!(message.contains(&owner_pk), "{message}");
     assert!(
-        result.is_err(),
-        "a restorer seeded from the restore code's floor must refuse the \
-         rolled-back head on its first real sync cycle, got {result:?}",
+        message.contains("regressed to seq 2 below the accepted 3"),
+        "{message}"
     );
 }
 

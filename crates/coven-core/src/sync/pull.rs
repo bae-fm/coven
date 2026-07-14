@@ -231,11 +231,11 @@ pub struct CycleMembership {
     pub listed_entries: Vec<(String, u64)>,
 }
 
-/// Load and anchor the cycle's membership chain once. Mirrors the fail-closed
-/// stance every authorization site shares: for an owner-pinned (opaque) store a
-/// chain that can't be listed, is wiped, or won't anchor to the pinned owner is a
-/// takeover attempt (#95/#104) and aborts the cycle; a browsable store has no
-/// pinned owner, legitimately has no chain, and stays open on any load problem.
+/// Load and anchor the cycle's membership chain once. Every successful listing
+/// is validated; a loader error aborts regardless of owner pin because an
+/// unpinned database may already have accepted author floors. Only the loader's
+/// explicit `Ok(None)` is an unpinned chain-less store. LIST transport errors
+/// retain their separate pinned/unpinned classification.
 pub async fn load_cycle_membership(
     storage: &dyn SyncStorage,
     db: &Database,
@@ -249,42 +249,8 @@ pub async fn load_cycle_membership(
         .await
         .map_err(|e| PullError::Apply(format!("read pinned owner: {e}")))?;
 
-    let (listed_entries, chain) = match storage.list_membership_entries().await {
-        Ok(entries) if !entries.is_empty() => {
-            // Load + validate the chain and anchor it to the pinned owner. For an
-            // owner-pinned store a chain that won't validate, or one founded by a
-            // different key, is a refound/tamper: fail closed (refuse the cycle)
-            // rather than fall open to "no chain, accept everything". Browsable (no
-            // owner) has nothing to anchor, so a load failure there just leaves it
-            // open. The `Some(db)` makes the read monotonic per author (the head
-            // watermark) and writes that watermark — once, for the whole cycle.
-            let chain = match super::membership_ops::load_anchored_chain(
-                storage,
-                &entries,
-                pinned_owner.as_deref(),
-                Some(db),
-            )
-            .await
-            {
-                Ok(chain) => Some(chain),
-                Err(e) => {
-                    if pinned_owner.is_some() {
-                        return Err(PullError::MembershipTampered(e.to_string()));
-                    }
-                    warn!("failed to load membership chain for validation: {e}");
-                    None
-                }
-            };
-            (entries, chain)
-        }
-        Ok(entries) => {
-            if let Some(owner) = &pinned_owner {
-                return Err(PullError::MembershipTampered(format!(
-                    "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
-                )));
-            }
-            (entries, None)
-        }
+    let listed_entries = match storage.list_membership_entries().await {
+        Ok(entries) => entries,
         Err(e) => {
             // Can't even list membership. For an owner-pinned store we cannot
             // verify authorship, so fail closed (abort, retry next cycle) rather
@@ -293,8 +259,32 @@ pub async fn load_cycle_membership(
                 return Err(PullError::Storage(e));
             }
             warn!("failed to list membership entries for validation: {e}");
-            (Vec::new(), None)
+            return Ok(CycleMembership {
+                chain: None,
+                pinned_owner,
+                listed_entries: Vec::new(),
+            });
         }
+    };
+
+    // Load + validate the chain and anchor it to the pinned owner. Every
+    // successful LIST result, including an empty one, reaches the same optional
+    // loader: persisted author floors can recover heads and entries omitted by
+    // the listing. For an owner-pinned store a chain that won't validate, or one
+    // founded by a different key, is tamper. This also fails loud without an
+    // owner pin: an unpinned database may already hold accepted author floors,
+    // whose missing or regressed state must not turn authorization off. The
+    // database makes this load monotonic per author.
+    let chain = match super::membership_ops::load_anchored_chain_if_known(
+        storage,
+        &listed_entries,
+        pinned_owner.as_deref(),
+        Some(db),
+    )
+    .await
+    {
+        Ok(chain) => chain,
+        Err(error) => return Err(PullError::MembershipTampered(error.to_string())),
     };
 
     Ok(CycleMembership {
@@ -1084,23 +1074,19 @@ async fn resolve_membership_authorization(
 
     // Best-effort fresh reload to catch an authorizing entry the cycle-start LIST
     // lagged. This is ONLY an optimization to refresh the broader chain; nothing
-    // here decides retry-vs-skip, so nothing here returns Indeterminate. On ANY
-    // reload problem — a storage read failure, an unparseable/undecryptable entry,
+    // here decides retry-vs-skip, so nothing here returns Indeterminate. On a
+    // reload error — a storage read failure, an unparseable/undecryptable entry,
     // a chain that won't validate, a head that regresses this reader's watermark,
     // or a chain that no longer anchors to the pinned owner — fall back to the
-    // known-good cycle-start chain. The keyed grant GET below is the sole
+    // known-good cycle-start chain. A successful load with no listed or persisted
+    // authors does not reuse that chain. The keyed grant GET below is the sole
     // authority: it fetches the one specific entry (bypassing a poisoned whole
     // set) and it alone separates a real I/O error (retry) from forged content
     // (skip). A genuine storage outage therefore still surfaces as Indeterminate
     // via that GET, while no bogus entry can stall the pull.
     let fresh = match storage.list_membership_entries().await {
-        Ok(entries) if entries.is_empty() => {
-            // Append-only chain came back empty mid-cycle — an anomalous transient.
-            warn!("membership re-list came back empty mid-cycle; keeping the cycle-start chain");
-            current.clone()
-        }
         Ok(entries) => {
-            match super::membership_ops::load_anchored_chain(
+            match super::membership_ops::load_anchored_chain_if_known(
                 storage,
                 &entries,
                 owner_pubkey,
@@ -1108,7 +1094,14 @@ async fn resolve_membership_authorization(
             )
             .await
             {
-                Ok(chain) => chain,
+                Ok(Some(chain)) => chain,
+                Ok(None) => {
+                    warn!(
+                        "membership reload found no listed or persisted authors; \
+                         treating the changeset as unauthorized"
+                    );
+                    return MembershipJudgment::Unauthorized;
+                }
                 Err(e) => {
                     warn!(
                         error = %e,
@@ -1143,16 +1136,17 @@ async fn resolve_membership_authorization(
         .get_membership_entry(&coord.author_pubkey, coord.seq)
         .await
     {
-        Ok(bytes) => match serde_json::from_slice::<MembershipEntry>(&bytes) {
+        Ok(bytes) => match super::membership_ops::parse_membership_entry_at(coord, &bytes) {
             Ok(entry) => entry,
-            // The named object exists but isn't a parseable membership entry — a
-            // bogus or corrupt claim. Log the cause and reject; not a reason to stall.
-            Err(e) => {
+            // The named object exists but either is not a membership entry or
+            // declares a different author than its storage coordinate. Reject the
+            // bogus claim; this is not a reason to stall.
+            Err(error) => {
                 warn!(
                     grant_author = %coord.author_pubkey,
                     grant_seq = coord.seq,
-                    error = %e,
-                    "membership grant entry the changeset names did not parse; \
+                    error = %error,
+                    "membership grant entry the changeset names did not bind to its coordinate; \
                      treating the changeset as unauthorized"
                 );
                 return MembershipJudgment::Unauthorized;

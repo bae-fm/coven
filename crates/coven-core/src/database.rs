@@ -68,6 +68,9 @@ struct DatabaseState {
     /// drain and the pin loop (both hold `&Database`). Open-time host config carried
     /// here for the same single-owner reason as `blob_tombstone_grace`.
     transfer_limits: crate::blob::TransferLimits,
+    /// Serializes complete membership-chain loads that share this database, so a
+    /// load cannot return an older chain after another load commits a newer floor.
+    membership_load: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// The owned SQLite connection and the sync bookkeeping resolved beside it at
@@ -228,6 +231,7 @@ impl DatabaseCore {
             blob_decls: self.blob_decls.clone(),
             blob_tombstone_grace: self.blob_tombstone_grace,
             transfer_limits: self.transfer_limits,
+            membership_load: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -537,6 +541,12 @@ fn table_is_strict(conn: &Connection, table: &str) -> Result<Option<bool>, DbErr
 }
 
 impl Database {
+    /// Lock the complete membership load transaction for this database handle
+    /// and every clone that shares its state.
+    pub(crate) async fn lock_membership_load(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.state.membership_load.clone().lock_owned().await
+    }
+
     /// Open and own the connection at `path`.
     ///
     /// Runs coven's bookkeeping migration, then the host's synced-schema migration
