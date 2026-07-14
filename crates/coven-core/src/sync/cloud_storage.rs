@@ -528,13 +528,14 @@ impl CloudSyncStorage {
 
     /// The cloud object key for a blob under the home's [`BlobPathScheme`].
     ///
-    /// **Every key names the blob standing at it.** A blob id names one immutable
-    /// byte-string and is minted fresh for each stored blob, so a key that carries the
-    /// id changes whenever the bytes do: no two blobs ever share a key, a cloud object is
-    /// never overwritten by a different blob, and an object's *presence* at a blob's key
-    /// is therefore proof of its *content* — which is what lets the push skip an upload
-    /// without asking a sealed object what it holds, and what leaves a replaced blob's
-    /// object standing at its own key for a peer that has not caught up yet.
+    /// **A cloud object is never rewritten with different bytes, so no two blobs ever
+    /// share a key.** `Hashed` gets that from the key itself; `Plain` gets it from the
+    /// blob's declared [`BlobReplacement`](crate::blob::BlobReplacement), which coven
+    /// enforces where a blob is derived from its row ([`crate::blob::decl::BlobDecls`]) —
+    /// a replaceable blob's readable path must name it, and a write-once blob's row can
+    /// never be repointed. Either way, an object's *presence* at a blob's key is proof of
+    /// its *content*, which is what lets the push skip an upload without asking a sealed
+    /// object what it holds.
     ///
     /// `Hashed` ignores `cloud_path` and shards by the id under the uploading
     /// device: `{namespace}/{uploader}/{ab}/{cd}/{id}` — the id is right there, and the
@@ -544,12 +545,9 @@ impl CloudSyncStorage {
     ///
     /// `Plain` uses the consumer's `cloud_path` verbatim: `{namespace}/{cloud_path}`,
     /// keeping the bucket browsable — a browsable home has no membership chain, so it
-    /// carries no uploader segment and `uploader` is ignored. coven cannot put the id
-    /// there itself without taking the consumer's names away from it, so it requires the
-    /// consumer's path to name the blob ([`cloud_path_names_blob`]) and refuses the key
-    /// otherwise. A `Plain` home with no `cloud_path` is likewise an error — coven never
-    /// silently falls back to the hashed layout, which would scatter readable-path blobs
-    /// under unfindable shard keys.
+    /// carries no uploader segment and `uploader` is ignored. A `Plain` home with no
+    /// `cloud_path` is an error — coven never silently falls back to the hashed layout,
+    /// which would scatter readable-path blobs under unfindable shard keys.
     pub fn blob_key(
         scheme: BlobPathScheme,
         namespace: &str,
@@ -576,46 +574,10 @@ impl CloudSyncStorage {
                 })?;
                 crate::store_dir::validate_path_token(namespace)?;
                 crate::store_dir::validate_cloud_path(path)?;
-                if !cloud_path_names_blob(path, id) {
-                    return Err(StorageError::Parse(format!(
-                        "cloud_path {path:?} does not name blob {namespace}/{id}: its file name \
-                         must be the blob id, or end with -{id} before the extension, so that \
-                         replacing the blob moves its cloud key instead of overwriting its object"
-                    )));
-                }
                 Ok(format!("{namespace}/{path}"))
             }
         }
     }
-}
-
-/// Whether the readable `cloud_path` a consumer supplied names the blob `blob_id` — what
-/// [`CloudSyncStorage::blob_key`] requires of a browsable home's key, and what a hashed
-/// key gets for free by carrying the id itself.
-///
-/// The path's file name (its last `/`-segment), with any extension stripped, must be the
-/// blob id or end with `-{blob_id}`:
-///
-/// ```text
-/// covers/Live at Leeds/cover-0ef7a1c9.jpg   ✓   stem `cover-0ef7a1c9` ends with -0ef7a1c9
-/// covers/Live at Leeds/0ef7a1c9.jpg         ✓   stem is the blob id
-/// covers/Live at Leeds/cover.jpg            ✗   names no blob
-/// ```
-///
-/// The `-` delimiter is what makes this a near-injective mapping where a bare substring
-/// test would not be: without it, blob `1` would satisfy blob `11`'s path and the two
-/// could be keyed at one object. Two ids can still collide if one is a `-`-suffix of the
-/// other AND the consumer builds paths that land on the same file name — which ids drawn
-/// from any of the usual generators do not do.
-pub(crate) fn cloud_path_names_blob(cloud_path: &str, blob_id: &str) -> bool {
-    let file_name = cloud_path.rsplit('/').next().unwrap_or(cloud_path);
-    let stem = file_name
-        .rsplit_once('.')
-        .map_or(file_name, |(stem, _extension)| stem);
-    stem == blob_id
-        || stem
-            .strip_suffix(blob_id)
-            .is_some_and(|prefix| prefix.ends_with('-'))
 }
 
 /// The cache namespace a blob's `cloud_key` belongs to: the key's first
@@ -2475,58 +2437,6 @@ mod tests {
             .await
             .expect("get_blob plain");
         assert_eq!(got, bytes);
-    }
-
-    /// A cloud key names the blob standing at it. Under the plain scheme that is a
-    /// requirement on the consumer's `cloud_path`, and a path that does not name its blob
-    /// cannot be keyed at all — so a blob replaced at a "stable" readable path, which
-    /// would overwrite the object its predecessor holds, is refused rather than written.
-    #[tokio::test]
-    async fn plain_scheme_cloud_path_must_name_its_blob() {
-        let key = |cloud_path| {
-            CloudSyncStorage::blob_key(
-                BlobPathScheme::Plain,
-                "covers",
-                None,
-                "0ef7a1c9",
-                Some(cloud_path),
-            )
-        };
-
-        assert_eq!(
-            key("Live at Leeds/cover-0ef7a1c9.jpg").expect("a readable name carrying the blob id"),
-            "covers/Live at Leeds/cover-0ef7a1c9.jpg",
-        );
-        assert_eq!(
-            key("Live at Leeds/0ef7a1c9.jpg").expect("a file name that IS the blob id"),
-            "covers/Live at Leeds/0ef7a1c9.jpg",
-        );
-        assert_eq!(
-            key("0ef7a1c9").expect("no extension, no directory"),
-            "covers/0ef7a1c9",
-        );
-
-        assert!(
-            key("Live at Leeds/cover.jpg").is_err(),
-            "a path naming no blob would key a replacement onto the object it replaces",
-        );
-        assert!(
-            key("0ef7a1c9/cover.jpg").is_err(),
-            "the blob id in a DIRECTORY does not name the object — two blobs under one \
-             directory would still collide on the file",
-        );
-        assert!(
-            key("Live at Leeds/cover-0ef7a1c9-thumb.jpg").is_err(),
-            "the id must end the file name's stem, not sit inside it",
-        );
-
-        // The `-` delimiter is what keeps the mapping from key to blob unambiguous: with a
-        // bare substring test, this path (blob `10ef7a1c9`'s) would also satisfy blob
-        // `0ef7a1c9`, and the two would be keyed at one object.
-        assert!(
-            key("Live at Leeds/cover-10ef7a1c9.jpg").is_err(),
-            "one blob id must not satisfy another's path by being a tail of it",
-        );
     }
 
     /// A plain-scheme home with no `cloud_path` is a surfaced error, never a

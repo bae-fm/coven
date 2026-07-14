@@ -2256,6 +2256,172 @@ async fn plain_scheme_a_changeset_older_than_a_replacement_still_finds_its_blob(
     );
 }
 
+/// A **write-once** browsable declaration: the row is never repointed at a different
+/// blob, so its readable cloud path is free to be a stable, fully human-readable name —
+/// no blob id in it. The blob id is its own column, so the shape of an (illegal)
+/// repointing is expressible and can be tested.
+fn write_once_photo_decl() -> BlobDecl {
+    BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheEager)
+        .with_id_column("blob_id")
+        .with_cloud_path_column("cloud_path")
+        .write_once()
+}
+
+/// A write-once blob keeps a stable, fully readable cloud path — no blob id in the name —
+/// and round-trips through the cloud on it.
+///
+/// This is the shape a browsable home exists for: the bucket mirrors the consumer's own
+/// names (`n1/Sonata No. 3.flac`), and a reader who is not coven can find and play the
+/// file. It is safe precisely because the row is never repointed, so nothing ever rewrites
+/// the object standing at that key — which is what [`BlobDecl::write_once`] declares and
+/// what the test below enforces.
+#[tokio::test]
+async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
+    let home = InMemoryCloudHome::new();
+    let keypair = UserKeypair::generate();
+    let storage = CloudSyncStorage::new(
+        std::sync::Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        keypair.clone(),
+    );
+    // A readable name with no blob id anywhere in it.
+    const AUDIO_KEY: &str = "photos/n1/Sonata No. 3.flac";
+
+    let bytes = b"AUDIO-BYTES";
+    let db1 = open_test_db_with_blob(write_once_photo_decl());
+    let tables = test_synced_tables_with_blob(write_once_photo_decl());
+    let (_t1, ld1) = temp_store_dir();
+    store_local(&ld1, "f1audio", bytes).await;
+    let outgoing = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, cloud_path, blob_id, _updated_at, created_at) \
+                 VALUES ('ph1', 'n1', 'audio', {}, '{}', 'n1/Sonata No. 3.flac', 'f1audio', \
+                 '0000000001000-0000-dev1', '2026-01-01')",
+                bytes.len(),
+                crate::blob::content_hash(bytes),
+            ),
+        ],
+    )
+    .await;
+    push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+
+    assert_eq!(
+        home.get(AUDIO_KEY).as_deref(),
+        Some(bytes.as_slice()),
+        "the blob lands at the consumer's own readable name, with no blob id in it",
+    );
+
+    // A peer pulls it off that readable key and verifies it against the row's hash.
+    let db2 = open_test_db_with_blob(write_once_photo_decl());
+    let (_t2, ld2) = temp_store_dir();
+    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld2).await;
+    assert!(!result.asset_downloads_failed);
+    assert_eq!(result.changesets_applied, 1);
+    let cached = std::fs::read(
+        ld2.cache_blob_path("photos", "f1audio")
+            .expect("cache path"),
+    )
+    .expect("device B cached the audio");
+    assert_eq!(cached, bytes.as_slice());
+}
+
+/// Repointing a write-once row is refused.
+///
+/// A write-once row's cloud path is a stable readable name that does NOT carry its blob
+/// id, so a second blob under that row would be keyed at the first blob's cloud object and
+/// overwrite it — the corruption the whole model exists to prevent. Write-once is the
+/// declaration that this never happens, and coven holds the consumer to it: the repointing
+/// is a loud error, not a silently rewritten object.
+///
+/// A changeset UPDATE reports only the columns whose values changed, so the blob-id column
+/// appearing in one *is* the repointing.
+#[tokio::test]
+async fn plain_scheme_repointing_a_write_once_row_is_refused() {
+    let home = InMemoryCloudHome::new();
+    let keypair = UserKeypair::generate();
+    let storage = CloudSyncStorage::new(
+        std::sync::Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        keypair.clone(),
+    );
+    const AUDIO_KEY: &str = "photos/n1/Sonata No. 3.flac";
+
+    let first = b"FIRST-AUDIO";
+    let second = b"SECOND-AUDIO-BYTES";
+
+    let db = open_test_db_with_blob(write_once_photo_decl());
+    let tables = test_synced_tables_with_blob(write_once_photo_decl());
+    let (_t, ld) = temp_store_dir();
+    store_local(&ld, "f1audio", first).await;
+    let outgoing = capture_bytes(
+        &db,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, cloud_path, blob_id, _updated_at, created_at) \
+                 VALUES ('ph1', 'n1', 'audio', {}, '{}', 'n1/Sonata No. 3.flac', 'f1audio', \
+                 '0000000001000-0000-dev1', '2026-01-01')",
+                first.len(),
+                crate::blob::content_hash(first),
+            ),
+        ],
+    )
+    .await;
+    push_cycle(&db, &tables, &storage, outgoing, 0, &keypair, &ld).await;
+
+    // Repoint the write-once row at a second blob — the move that would rewrite the object
+    // the first blob occupies.
+    store_local(&ld, "f2audio", second).await;
+    let outgoing = capture_bytes(
+        &db,
+        &[&format!(
+            "UPDATE note_photos SET blob_id = 'f2audio', size = {}, hash = '{}', \
+             _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
+            second.len(),
+            crate::blob::content_hash(second),
+        )],
+    )
+    .await;
+    let err = sync_for_test(
+        "dev1",
+        &db,
+        &tables,
+        outgoing,
+        1,
+        &HashMap::new(),
+        &storage,
+        "2026-01-01T00:00:00Z",
+        "",
+        &keypair,
+        &ld,
+    )
+    .await
+    .err()
+    .expect("repointing a write-once row must fail the cycle");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("f2audio") && message.contains("write-once"),
+        "the error must name the blob the row was repointed at, got {message:?}",
+    );
+    assert_eq!(
+        home.get(AUDIO_KEY).as_deref(),
+        Some(first.as_slice()),
+        "the first blob's cloud object is untouched — the cycle aborted before any upload",
+    );
+}
+
 /// A browsable home's `note_photos` declaration: the blob id is its own column, apart
 /// from the primary key, so a row can be repointed at a new blob while keeping its
 /// identity; the readable cloud key comes from `cloud_path`, which moves with the blob.

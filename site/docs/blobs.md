@@ -34,6 +34,7 @@ SyncedTable::new("todo_attachments").carries_blob(
         // .with_id_column("file_id")              // defaults to the PK ("id")
         // .with_cloud_path_column("path")         // for a browsable home
         // .with_scope(BlobScope::Derived("attachments".into()))
+        // .write_once()                           // this row is never repointed
 )
 ```
 
@@ -45,6 +46,7 @@ pub struct BlobDecl {
     pub scope: BlobScope,                   // Master | Derived(name)
     pub provenance: Provenance,             // UserProvided | HostProvided  (the Local story)
     pub fill: CacheFill,                    // CacheEager | CacheLazy       (the Remote story)
+    pub replacement: BlobReplacement,       // Replaceable | WriteOnce      (the replacement story)
 }
 ```
 
@@ -83,8 +85,8 @@ host never names where a blob file lives.
 
 `cloud_path` is consulted only by a [browsable home](#browsable-home-blob-paths);
 an opaque home (the default) ignores it, so leave the `cloud_path_column` unset
-unless the home is browsable. A browsable home requires the path to
-[name the blob it carries](#a-readable-path-must-name-its-blob).
+unless the home is browsable. What a browsable home requires of that path depends on
+whether the blob is [replaceable or write-once](#a-cloud-object-is-never-rewritten).
 
 ### Cache fill
 
@@ -375,20 +377,25 @@ The two schemes at a glance:
 | `cloud_path_column` | ignored (leave unset) | required |
 | Cloud key | `{namespace}/{ab}/{cd}/{id}` | `{namespace}/{cloud_path}` |
 | Blob with no `cloud_path` | keyed by id | surfaced error |
-| Key names its blob | by the `{id}` in the key | [required of `cloud_path`](#a-readable-path-must-name-its-blob) |
+| Key names its blob | by the `{id}` in the key | [depends on the blob](#a-cloud-object-is-never-rewritten) |
 
-### A readable path must name its blob
+### A cloud object is never rewritten
 
-A cloud object is never rewritten with different bytes. A blob id names one immutable
-byte-string and is minted fresh for every stored blob, so **a blob's cloud key carries its
-blob id** — and replacing a blob writes a *new* object at a *new* key, leaving the one it
-replaced standing until its [tombstone](#deleting-a-blob) is collected. A hashed key gets
-this for free: the id is right there in `{namespace}/{ab}/{cd}/{id}`. A readable path is
-the consumer's own, and coven will not rewrite the consumer's names, so it requires the
-property of them instead:
+A cloud object is never rewritten with different bytes. That is not a nicety — the pull
+verifies an object against its row's content hash, and a cursor only advances over a
+changeset whose blobs all arrived, so a device that pulls a changeset written *before* the
+bytes at its key changed can never satisfy it. It is stuck there for good.
 
-> A blob's `cloud_path` must name its blob. The path's file name — its last `/`-segment,
-> extension stripped — must be the blob id, or end with `-{blob_id}`.
+A hashed key gets this for free: it carries the blob id, and a blob id names one immutable
+byte-string, minted fresh for every stored blob. A readable path is the consumer's own, so
+coven asks the consumer one question about each blob-bearing table — **can this row ever be
+repointed at a different blob?** — and enforces whichever guarantee follows.
+
+#### Replaceable (the default)
+
+The row may be repointed: a cover is changed, an attachment is swapped. Then the **key must
+move with the blob**, so the path has to name it. Its file name — the last `/`-segment,
+extension stripped — must be the blob id, or end with `-{blob_id}`:
 
 ```
 covers/Live at Leeds/cover-0ef7a1c9.jpg     ✓ names its blob
@@ -398,37 +405,59 @@ covers/Live at Leeds/0ef7a1c9/cover.jpg     ✗ surfaced error — the id must n
                                               not a directory above it
 ```
 
-A path that does not name its blob cannot be keyed, so it is refused at the write that
-produced it rather than silently written to the bucket. The delimiter matters: the id must
-*end* the file name's stem, so that blob `1` cannot satisfy blob `11`'s path and the two be
-keyed at one object.
+The id must *end* the file name's stem, so that blob `1` cannot satisfy blob `11`'s path and
+the two be keyed at one object. Replacing the blob then writes a *new* object beside the one
+it replaced, which stands at its own key until its [tombstone](#deleting-a-blob) is
+collected.
 
-This is what makes a replacement safe. `cover.jpg` looks like the natural name, but it is a
-name the *next* cover would take too — so the row would be repointed at a new blob, the same
-cloud object would be overwritten, and two things no retry can repair would follow:
+#### Write-once
 
-- **Two devices replacing the same blob at once** would write one key. The object would hold
-  whichever device the bucket saw last, while the row holds whichever device
-  last-write-wins picked, and they need not be the same one — leaving peers with a row whose
-  content hash no object matches.
-- **A changeset written before the replacement** could never be applied again, because the
-  bytes its row names were overwritten at the reused key. A device that pulls it late is
-  stuck on it for good: its cursor cannot advance past a changeset whose blob it cannot
-  verify.
+```rust
+SyncedTable::new("release_files").carries_blob(
+    BlobDecl::new("audio", Provenance::UserProvided, CacheFill::CacheLazy)
+        .with_cloud_path_column("cloud_path")
+        .write_once()
+)
+```
 
-Neither is expressible once the key names the blob. Two replacements mint two blob ids, so
-they are two keys and two objects, and the superseded object stands at its own key until its
-tombstone is collected — which is the same convergence window coven already promises a
-device that has been away.
+The row is never repointed: the blob it names when it is inserted is the blob it names for
+life. Nothing ever rewrites the object at its key, so there is nothing to protect it from —
+and the path is free to be a **stable, fully readable name**, which is what a browsable home
+is for:
 
-It is also what lets the push skip an upload on presence alone: an object standing at a
-blob's key *is* that blob's bytes, because nothing else can be keyed there. A sealed cloud
-object never has to be asked what it holds, and coven keeps no record of what it wrote where.
+```
+audio/Live at Leeds/01 Sonata No. 3.flac    ✓ the consumer's own name, no blob id
+```
 
-The cost is that a browsable bucket's file names carry an id — `cover-0ef7a1c9.jpg` rather
-than `cover.jpg`. The directory structure above them is untouched and is still the
-consumer's, so the bucket is still browsable by the names that matter; what a readable path
-cannot be is *reused*.
+coven holds the consumer to the declaration: **repointing a write-once row is a surfaced
+error.** A changeset UPDATE reports only the columns whose values changed, so a blob-id
+column appearing in one *is* the repointing, and coven refuses it there rather than
+discovering a rewritten object later.
+
+Write-once is the weaker of the two guarantees, and it is opt-in for that reason. coven
+refuses the reuse it can see — the repointing. It cannot see a consumer *deleting* a row and
+inserting a different blob at the same `cloud_path`: the deleted row is gone, and coven keeps
+no history of the paths it has handed out. **Declaring `write_once()` is therefore also a
+promise that a path is never reused by a different blob.** Derive the path from data that
+never repeats and it holds by construction — a path carrying a freshly minted id for the
+thing being imported can never be handed out twice, even though no blob id appears in the
+name a human reads.
+
+#### What either guarantee buys
+
+Because no two blobs ever share a key, an object standing at a blob's key *is* that blob's
+bytes. A sealed cloud object never has to be asked what it holds, and coven keeps no record
+of what it wrote where — the push simply skips an upload when the object is already there.
+And two failures that no retry can repair become unrepresentable:
+
+- **Two devices replacing the same blob at once** would otherwise write one key, leaving the
+  object holding whichever device the bucket saw last while the row holds whichever device
+  last-write-wins picked. With the key moving with the blob, they are two objects, and the
+  row's winner names one of them.
+- **A changeset written before a replacement** would otherwise name bytes that were
+  overwritten, and the device that pulls it late could never satisfy its hash. The
+  superseded object instead stands at its own key for the whole tombstone grace — the same
+  convergence window coven already promises a device that has been away.
 
 ## Where a blob's bytes come from
 

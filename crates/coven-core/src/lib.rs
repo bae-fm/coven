@@ -134,7 +134,9 @@ pub use rusqlite;
 // Blob descriptors, errors, the host-implemented observer.
 pub use blob::cache::BlobCacheError;
 // The Remote→Local transition (and its error) is native-only.
-pub use blob::{BlobRef, BlobScope, BlobTransitionObserver, CacheFill, Provenance};
+pub use blob::{
+    BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill, Provenance,
+};
 
 // Applied-sync change notification (the host reacts to these).
 pub use changeset::{ChangeOp, RowChange};
