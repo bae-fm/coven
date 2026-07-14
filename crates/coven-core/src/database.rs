@@ -1128,23 +1128,7 @@ impl Database {
 
     // ---- Bookkeeping: exact immutable blob cloud locations ----
 
-    /// The hex public key of the device that uploaded blob `(namespace, id)`, or
-    /// `None` if this device has never recorded one. The read dispatch consults it
-    /// to key a blob under its uploader's prefix; a `None` is a missing dispatch
-    /// key the read surfaces loud, never a cue to scan an untrusted listing.
-    #[cfg(test)]
-    pub(crate) async fn blob_uploader(
-        &self,
-        namespace: &str,
-        id: &str,
-    ) -> Result<Option<String>, DbError> {
-        Ok(self
-            .blob_location(namespace, id)
-            .await?
-            .map(|location| location.uploader))
-    }
-
-    pub(crate) async fn blob_location(
+    pub async fn blob_location(
         &self,
         namespace: &str,
         id: &str,
@@ -1174,23 +1158,6 @@ impl Database {
             .map_err(DbError::from)
     }
 
-    /// Record a legacy uploader-only location on `conn` for tests and old signed
-    /// envelopes. New envelopes use [`Self::record_blob_location_on`].
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn record_blob_uploader_on(
-        conn: &Connection,
-        namespace: &str,
-        id: &str,
-        uploader: &str,
-    ) -> Result<(), DbError> {
-        Self::record_blob_location_on(
-            conn,
-            namespace,
-            id,
-            &crate::blob::CloudBlobLocation::legacy(uploader),
-        )
-    }
-
     pub(crate) fn record_blob_location_on(
         conn: &Connection,
         namespace: &str,
@@ -1206,35 +1173,32 @@ impl Database {
             )
             .optional()
             .map_err(DbError::from)?;
-        if let Some(version) = &location.version {
-            if floor.as_ref().is_some_and(|floor| version < floor) {
-                return Ok(());
-            }
-            if floor.as_ref() == Some(version) {
-                let existing: Option<(String, Option<String>, Option<String>)> = conn
-                    .query_row(
-                        "SELECT uploader, generation, version FROM blob_uploaders \
-                         WHERE namespace = ?1 AND blob_id = ?2",
-                        (namespace, id),
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?;
-                let expected = (
-                    location.uploader.clone(),
-                    location.generation.clone(),
-                    location.version.clone(),
-                );
-                return match existing {
-                    Some(existing) if existing == expected => Ok(()),
-                    Some(_) => Err(DbError(format!(
-                        "blob location {namespace}/{id} reuses version {version} for different storage"
-                    ))),
-                    None => Ok(()),
-                };
-            }
-        } else if floor.is_some() {
+        let version = &location.version;
+        if floor.as_ref().is_some_and(|floor| version < floor) {
             return Ok(());
+        }
+        if floor.as_ref() == Some(version) {
+            let existing: Option<(String, String, String)> = conn
+                .query_row(
+                    "SELECT uploader, generation, version FROM blob_uploaders \
+                         WHERE namespace = ?1 AND blob_id = ?2",
+                    (namespace, id),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let expected = (
+                location.uploader.clone(),
+                location.generation.clone(),
+                location.version.clone(),
+            );
+            return match existing {
+                Some(existing) if existing == expected => Ok(()),
+                Some(_) => Err(DbError(format!(
+                    "blob location {namespace}/{id} reuses version {version} for different storage"
+                ))),
+                None => Ok(()),
+            };
         }
         conn.execute(
             "INSERT INTO blob_uploaders (namespace, blob_id, uploader, generation, version) VALUES (?1, ?2, ?3, ?4, ?5) \
@@ -1242,30 +1206,14 @@ impl Database {
             rusqlite::params![namespace, id, location.uploader, location.generation, location.version],
         )
         .map_err(DbError::from)?;
-        if let Some(version) = &location.version {
-            conn.execute(
-                "INSERT INTO blob_location_versions (namespace, blob_id, version) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(namespace, blob_id) DO UPDATE SET version = excluded.version \
-                 WHERE excluded.version > blob_location_versions.version",
-                (namespace, id, version),
-            )
-            .map_err(DbError::from)?;
-        }
+        conn.execute(
+            "INSERT INTO blob_location_versions (namespace, blob_id, version) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(namespace, blob_id) DO UPDATE SET version = excluded.version \
+             WHERE excluded.version > blob_location_versions.version",
+            (namespace, id, version),
+        )
+        .map_err(DbError::from)?;
         Ok(())
-    }
-
-    /// Record a legacy uploader-only location outside a caller transaction.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) async fn record_blob_uploader(
-        &self,
-        namespace: &str,
-        id: &str,
-        uploader: &str,
-    ) -> Result<(), DbError> {
-        let (namespace, id, uploader) =
-            (namespace.to_string(), id.to_string(), uploader.to_string());
-        self.call(move |conn| Self::record_blob_uploader_on(conn, &namespace, &id, &uploader))
-            .await
     }
 
     pub(crate) async fn record_blob_location(
@@ -1299,7 +1247,7 @@ impl Database {
         .map_err(DbError::from)?;
         conn.execute(
             "DELETE FROM blob_uploaders WHERE namespace = ?1 AND blob_id = ?2 \
-             AND (version IS NULL OR version <= ?3)",
+             AND version <= ?3",
             (namespace, id, version),
         )
         .map(|_| ())
@@ -1471,12 +1419,14 @@ impl Database {
         source_path: Option<&str>,
         scope: crate::blob::BlobScope,
         retain_pinned: bool,
+        expected_hash: &str,
         created_at: &str,
     ) -> Result<(), DbError> {
-        let (file_id, cloud_key, source_path, created_at) = (
+        let (file_id, cloud_key, source_path, expected_hash, created_at) = (
             file_id.to_string(),
             cloud_key.to_string(),
             source_path.map(str::to_string),
+            expected_hash.to_string(),
             created_at.to_string(),
         );
         self.call(move |conn| {
@@ -1487,7 +1437,7 @@ impl Database {
                 source_path.as_deref(),
                 scope,
                 retain_pinned,
-                None,
+                &expected_hash,
                 &created_at,
             )
         })
@@ -1506,7 +1456,7 @@ impl Database {
         source_path: Option<&str>,
         scope: crate::blob::BlobScope,
         retain_pinned: bool,
-        expected_hash: Option<&str>,
+        expected_hash: &str,
         created_at: &str,
     ) -> Result<(), DbError> {
         // One exact immutable key cannot be both pending upload and pending delete.
@@ -1604,26 +1554,6 @@ impl Database {
         self.pending_outbox("delete").await
     }
 
-    pub(crate) async fn get_pending_cloud_cancels(&self) -> Result<Vec<OutboxEntry>, DbError> {
-        self.pending_outbox("cancel").await
-    }
-
-    pub(crate) fn enqueue_legacy_cancel_on(
-        conn: &Connection,
-        cloud_key: &str,
-        created_at: &str,
-    ) -> Result<(), DbError> {
-        conn.execute(
-            "INSERT INTO cloud_outbox (operation, cloud_key, scope, created_at) \
-             VALUES ('cancel', ?1, NULL, ?2) \
-             ON CONFLICT(operation, cloud_key) DO UPDATE SET \
-                 attempt_count = 0, last_error = NULL, last_attempt_at = NULL",
-            (cloud_key, created_at),
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    }
-
     async fn pending_outbox(&self, op_str: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
         self.call(move |conn| {
             let mut stmt = conn
@@ -1708,26 +1638,6 @@ impl Database {
                 "UPDATE cloud_outbox \
                  SET attempt_count = attempt_count + 1, last_error = ?1, last_attempt_at = ?2 \
                  WHERE id = ?3 AND operation = 'delete'",
-                (error, attempted_at, id),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
-    pub(crate) async fn record_cloud_cancel_failure(
-        &self,
-        id: i64,
-        error: &str,
-        attempted_at: &str,
-    ) -> Result<(), DbError> {
-        let (error, attempted_at) = (error.to_string(), attempted_at.to_string());
-        self.call(move |conn| {
-            conn.execute(
-                "UPDATE cloud_outbox SET attempt_count = attempt_count + 1, \
-                 last_error = ?1, last_attempt_at = ?2 \
-                 WHERE id = ?3 AND operation = 'cancel'",
                 (error, attempted_at, id),
             )
             .map(|_| ())
@@ -1937,7 +1847,6 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
             }
         }
         "delete" => OutboxOperation::Delete,
-        "cancel" => OutboxOperation::Cancel,
         other => panic!("invalid cloud_outbox.operation: {other:?}"),
     };
     Ok(OutboxEntry {

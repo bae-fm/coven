@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
-use super::apply::resolve_and_apply_changeset_with_schema_on;
+use super::apply::{resolve_and_apply_changeset_with_schema_on, BlobLocationAssignment};
 use super::conflict::TableSchema;
 use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
@@ -196,10 +196,8 @@ struct DeferredChangeset {
     seq: u64,
     changeset: Vec<u8>,
     changes: Vec<RowChange>,
-    /// The `(namespace, blob_id, uploader)` records the retry re-applies alongside
-    /// the rows, so a deferred changeset records its blobs' uploaders on the pass
-    /// that finally commits it.
-    blob_uploads: Vec<(String, String, crate::blob::CloudBlobLocation)>,
+    /// Exact row/location bindings re-applied alongside the rows on retry.
+    blob_uploads: Vec<BlobLocationAssignment>,
     cleanup_intents: Vec<LocalBlobCleanupIntent>,
 }
 
@@ -754,15 +752,8 @@ pub async fn pull_changes(
             };
             // The author of this changeset uploaded the blobs it introduces, so it
             // is the prefix they live under.
-            let blobs_ok = download_blobs(
-                db,
-                cache_eager,
-                storage,
-                store_dir,
-                &env.blob_locations,
-                env.author_pubkey.as_deref(),
-            )
-            .await;
+            let blobs_ok =
+                download_blobs(db, cache_eager, storage, store_dir, &env.blob_locations).await;
             if !blobs_ok {
                 warn!(
                     "Blob download failed for {}/{}, not applying; cursor not advanced",
@@ -778,12 +769,11 @@ pub async fn pull_changes(
             // echo as this device's own outgoing changes.
             // The blobs this changeset introduces are keyed under its author (who
             // uploaded them); record that atomically with the applied rows.
-            let blob_uploads = match introduced_blob_uploads(
+            let blob_uploads = match blob_location_assignments(
                 &blob_decls,
-                &old_changes,
                 &changes,
+                &schema,
                 &env.blob_locations,
-                env.author_pubkey.as_deref(),
             ) {
                 Ok(uploads) => uploads,
                 Err(e) => {
@@ -981,7 +971,7 @@ async fn commit_remote_changeset(
     changes: &[RowChange],
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
-    blob_uploads: &[(String, String, crate::blob::CloudBlobLocation)],
+    blob_uploads: &[BlobLocationAssignment],
     cleanup_intents: &[LocalBlobCleanupIntent],
 ) -> Result<RemoteApplyOutcome, crate::database::DbError> {
     let device_id = device_id.to_string();
@@ -1341,7 +1331,8 @@ impl BlobDownload {
         size: BlobDownloadSize,
         record: Option<&super::envelope::BlobLocationRecord>,
     ) -> Result<u64, String> {
-        if let Some(signed_size) = record.and_then(|record| record.plaintext_size) {
+        if let Some(record) = record {
+            let signed_size = record.plaintext_size;
             if let BlobDownloadSize::Declared(declared_size) = &size {
                 if *declared_size != signed_size {
                     return Err(format!(
@@ -1375,7 +1366,8 @@ impl BlobDownload {
         hash: BlobDownloadHash,
         record: Option<&super::envelope::BlobLocationRecord>,
     ) -> Result<String, String> {
-        if let Some(signed_hash) = record.and_then(|record| record.content_hash.as_deref()) {
+        if let Some(record) = record {
+            let signed_hash = record.content_hash.as_str();
             if let BlobDownloadHash::Declared(declared_hash) = &hash {
                 if declared_hash != signed_hash {
                     return Err(format!(
@@ -1464,71 +1456,48 @@ pub(crate) fn cache_eager_blobs(
         .collect()
 }
 
-/// The blobs a changeset *introduces* — a row whose new blob ref the pre-image
-/// lacked, or differs from — paired with the `author` that uploaded them (the
-/// author of a changeset uploads the blobs its rows introduce, into its own cloud
-/// prefix). A row updated without changing its blob re-references an existing
-/// object and introduces nothing, so it is not recorded here. Empty when the
-/// author is unknown, which is possible only before membership initialization.
-/// Returns `(namespace, blob_id, uploader)` for the local uploader index.
-fn introduced_blob_uploads(
+/// Bind each referenced blob location to the signed row version that carries it.
+/// The apply records the location only when that exact row version wins.
+fn blob_location_assignments(
     blob_decls: &BlobDecls,
-    old_changes: &[RowChange],
     changes: &[RowChange],
+    schema: &TableSchema,
     records: &[super::envelope::BlobLocationRecord],
-    author: Option<&str>,
-) -> Result<Vec<(String, String, crate::blob::CloudBlobLocation)>, crate::blob::decl::BlobDeclError>
-{
-    if old_changes.len() != changes.len() {
-        return Err(crate::blob::decl::BlobDeclError::ChangesetWalkMismatch {
-            old_count: old_changes.len(),
-            new_count: changes.len(),
-        });
-    }
-    let mut introduced = Vec::new();
+) -> Result<Vec<BlobLocationAssignment>, crate::blob::decl::BlobDeclError> {
     let mut referenced = Vec::new();
-    for (old, new) in old_changes.iter().zip(changes) {
+    for new in changes {
         let Some(new_blob) = blob_decls.ref_from_change(new)? else {
             continue;
         };
-        if !matches!(new.op, crate::changeset::ChangeOp::Delete) {
-            referenced.push((new_blob.namespace.clone(), new_blob.id.clone()));
+        if matches!(new.op, crate::changeset::ChangeOp::Delete) {
+            continue;
         }
-        // An insert always introduces its blob; an update introduces one only when
-        // it moves the row to a different blob (a same-blob update re-references an
-        // existing object and uploads nothing). A delete carries no new blob and is
-        // already skipped above.
-        let is_introduced = match new.op {
-            crate::changeset::ChangeOp::Insert => true,
-            crate::changeset::ChangeOp::Update => match blob_decls.ref_from_change(old)? {
-                Some(old_blob) => {
-                    old_blob.namespace != new_blob.namespace || old_blob.id != new_blob.id
-                }
-                None => true,
-            },
-            crate::changeset::ChangeOp::Delete => false,
-        };
-        if is_introduced {
-            introduced.push((new_blob.namespace, new_blob.id));
-        }
+        let pk = new.pk().ok_or_else(|| {
+            crate::blob::decl::BlobDeclError::Gate(format!(
+                "blob-bearing {} row has no primary key",
+                new.table
+            ))
+        })?;
+        let version_index = schema.updated_at(&new.table).ok_or_else(|| {
+            crate::blob::decl::BlobDeclError::Gate(format!(
+                "blob-bearing table {} has no _updated_at column",
+                new.table
+            ))
+        })?;
+        let row_version = new.col(version_index).ok_or_else(|| {
+            crate::blob::decl::BlobDeclError::Gate(format!(
+                "blob-bearing {}/{} has no _updated_at value",
+                new.table, pk
+            ))
+        })?;
+        referenced.push((
+            new.table.clone(),
+            pk.to_string(),
+            row_version.to_string(),
+            new_blob.namespace,
+            new_blob.id,
+        ));
     }
-    if records.is_empty() {
-        return Ok(match author {
-            Some(author) => introduced
-                .into_iter()
-                .map(|(namespace, id)| {
-                    (
-                        namespace,
-                        id,
-                        crate::blob::CloudBlobLocation::legacy(author),
-                    )
-                })
-                .collect(),
-            None => Vec::new(),
-        });
-    }
-    referenced.sort();
-    referenced.dedup();
     let mut by_blob = HashMap::new();
     for record in records {
         crate::store_dir::validate_path_token(&record.namespace).map_err(|error| {
@@ -1555,20 +1524,36 @@ fn introduced_blob_uploads(
             )));
         }
     }
+    let referenced_keys = referenced
+        .iter()
+        .map(|(_, _, _, namespace, id)| (namespace.clone(), id.clone()))
+        .collect::<HashSet<_>>();
     let resolved = referenced
         .into_iter()
-        .map(|(namespace, id)| {
+        .map(|(table, pk, row_version, namespace, id)| {
             let location = by_blob
-                .remove(&(namespace.clone(), id.clone()))
+                .get(&(namespace.clone(), id.clone()))
+                .cloned()
                 .ok_or_else(|| {
                     crate::blob::decl::BlobDeclError::Gate(format!(
                         "changeset omits cloud location for {namespace}/{id}"
                     ))
                 })?;
-            Ok((namespace, id, location))
+            Ok(BlobLocationAssignment {
+                table,
+                pk,
+                row_version,
+                namespace,
+                blob_id: id,
+                location,
+            })
         })
         .collect::<Result<Vec<_>, crate::blob::decl::BlobDeclError>>()?;
-    if let Some(((namespace, id), _)) = by_blob.into_iter().next() {
+    if let Some((namespace, id)) = by_blob
+        .keys()
+        .find(|key| !referenced_keys.contains(*key))
+        .cloned()
+    {
         return Err(crate::blob::decl::BlobDeclError::Gate(format!(
             "changeset carries cloud location for unreferenced blob {namespace}/{id}"
         )));
@@ -1664,16 +1649,14 @@ fn local_blob_cleanup_intents(
 /// Shared by the incremental pull (per applied changeset) and the snapshot
 /// bootstrap backfill (per row in the freshly bootstrapped DB), so the
 /// download/decrypt/write path lives in one place.
-/// Download a set of blobs into the cache. New envelopes provide each exact
-/// location; legacy signed envelopes infer the author's legacy location. Snapshot
-/// backfill resolves the location from the preserved local index.
+/// Download a set of blobs into the cache. Changesets provide each exact
+/// location; snapshot backfill resolves the location from the preserved local index.
 pub(crate) async fn download_blobs(
     db: &Database,
     blobs: Vec<BlobDownload>,
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
     known_locations: &[super::envelope::BlobLocationRecord],
-    known_uploader: Option<&str>,
 ) -> bool {
     let mut all_ok = true;
     for download in blobs {
@@ -1727,20 +1710,6 @@ pub(crate) async fn download_blobs(
             }
         };
 
-        // Already on disk in either cache folder — don't re-download. A failed
-        // existence check is a local-disk fault, not a missing blob — and the
-        // download's own write would hit the same fault. Hold the cursor and retry
-        // next cycle rather than treat the error as absence.
-        match cached_in_either_folder(&dest, &pinned).await {
-            Ok(true) => continue,
-            Ok(false) => {}
-            Err(e) => {
-                error!(id = %blob.id, error = %e, "cannot check for local blob; holding");
-                all_ok = false;
-                continue;
-            }
-        }
-
         let location_record = known_locations
             .iter()
             .find(|record| record.namespace == blob.namespace && record.blob_id == blob.id);
@@ -1776,6 +1745,16 @@ pub(crate) async fn download_blobs(
             }
         };
 
+        match cached_in_either_folder(&dest, &pinned, source_size, &expected_hash).await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(e) => {
+                error!(id = %blob.id, error = %e, "cannot validate local blob; holding");
+                all_ok = false;
+                continue;
+            }
+        }
+
         // The readable key a browsable home stores the blob at. A row repointed at a
         // new blob leaves its cloud path alone, so the change omits the column and the
         // path comes from the pre-apply row instead — which is the same value, that
@@ -1796,17 +1775,13 @@ pub(crate) async fn download_blobs(
             }
         }
 
-        // The exact location from new signed metadata, legacy author inference, or
-        // the snapshot-preserved local index.
+        // The exact location from signed metadata or the snapshot-preserved local index.
         let location = match location_record {
-            Some(record) => Some(record.location.clone()),
+            Some(record) => record.location.clone(),
             None if !known_locations.is_empty() => {
                 warn!(id = %blob.id, namespace = %blob.namespace, "changeset omits blob location; skipping download");
                 all_ok = false;
                 continue;
-            }
-            None if known_uploader.is_some() => {
-                known_uploader.map(crate::blob::CloudBlobLocation::legacy)
             }
             None => match crate::blob::cache::resolve_blob_location(db, storage, &blob).await {
                 Ok(location) => location,
@@ -1817,23 +1792,11 @@ pub(crate) async fn download_blobs(
                 }
             },
         };
-        let location = if location.is_none() && known_uploader.is_none() {
-            match crate::blob::cache::resolve_blob_location(db, storage, &blob).await {
-                Ok(location) => location,
-                Err(e) => {
-                    warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot resolve blob location, skipping download");
-                    all_ok = false;
-                    continue;
-                }
-            }
-        } else {
-            location
-        };
 
         match storage
-            .read_blob_to_file_at(
+            .read_blob_to_file(
                 &blob.namespace,
-                location.as_ref(),
+                &location,
                 &blob.id,
                 blob.scope.clone(),
                 cloud_path.as_deref(),
@@ -1860,10 +1823,17 @@ pub(crate) async fn download_blobs(
 async fn cached_in_either_folder(
     cache: &std::path::Path,
     pinned: &std::path::Path,
+    expected_size: u64,
+    expected_hash: &str,
 ) -> Result<bool, String> {
     for path in [cache, pinned] {
         if crate::local_blob::exists(path).await? {
-            return Ok(true);
+            let size = crate::local_blob::file_len(path).await?;
+            let hash = crate::blob::content_hash_file(path).await?;
+            if size == expected_size && hash == expected_hash {
+                return Ok(true);
+            }
+            crate::local_blob::remove_file(path).await?;
         }
     }
     Ok(false)

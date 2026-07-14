@@ -246,16 +246,14 @@ pub async fn sync(
             let plaintext_size = crate::blob::cache::expected_blob_size(db, &blob)
                 .await
                 .map_err(|error| SyncCycleError::AssetScan(error.to_string()))?;
-            let content_hash = match crate::blob::cache::expected_blob_hash(db, &blob).await {
-                Ok(hash) => Some(hash),
-                Err(crate::blob::cache::BlobCacheError::MissingContentHash { .. }) => None,
-                Err(error) => return Err(SyncCycleError::AssetScan(error.to_string())),
-            };
+            let content_hash = crate::blob::cache::expected_blob_hash(db, &blob)
+                .await
+                .map_err(|error| SyncCycleError::AssetScan(error.to_string()))?;
             outgoing_blob_locations.push(envelope::BlobLocationRecord {
                 namespace: blob.namespace,
                 blob_id: blob.id,
                 location,
-                plaintext_size: Some(plaintext_size),
+                plaintext_size,
                 content_hash,
             });
         }
@@ -458,11 +456,9 @@ async fn upload_host_provided_blob(
     let expected_size = expected_blob_size(db, blob).await?;
 
     let local = local_host_blob(store_dir, blob, expected_size).await?;
-    let expected_hash = match crate::blob::cache::expected_blob_hash(db, blob).await {
-        Ok(hash) => Some(hash),
-        Err(crate::blob::cache::BlobCacheError::MissingContentHash { .. }) => None,
-        Err(error) => return Err(SyncCycleError::AssetUpload(error.to_string())),
-    };
+    let expected_hash = crate::blob::cache::expected_blob_hash(db, blob)
+        .await
+        .map_err(|error| SyncCycleError::AssetUpload(error.to_string()))?;
     // Every cloud key names the blob standing at it — the hashed scheme carries the id in
     // the key, and a browsable home's readable path is required to name it
     // ([`crate::sync::cloud_storage::CloudSyncStorage::blob_key`]). So no two blobs share
@@ -490,7 +486,7 @@ async fn upload_host_provided_blob(
         .await
         .map_err(|error| SyncCycleError::AssetUpload(error.0))?;
     let uploaded = storage
-        .blob_exists_at(
+        .blob_exists(
             &blob.namespace,
             &location,
             &blob.id,
@@ -516,12 +512,12 @@ async fn upload_host_provided_blob(
                 &blob.namespace,
                 &blob.id,
                 &format!("host:{timestamp}:{}:{}", blob.namespace, blob.id),
-                expected_hash.as_deref(),
+                &expected_hash,
             )
             .await
             .map_err(SyncCycleError::AssetUpload)?;
             let upload = storage
-                .put_blob_from_file_at(
+                .put_blob_from_file(
                     &blob.namespace,
                     &location,
                     &blob.id,

@@ -55,7 +55,7 @@ thread_local! {
 /// SQLite path that the browser VFS hashes into an OPFS storage filename, and
 /// must be distinct per store on one origin). `storage` is
 /// `"opaque"` (end-to-end-encrypted with obfuscated, content-addressed blob keys
-/// — then `encryption_key_hex`, 64 hex chars = a 32-byte key, is required) or
+/// — then `encryption_keyring_json`, serialized keyring JSON, is required) or
 /// `"browsable"` (a plaintext bucket at readable blob paths). `device_id`
 /// identifies this writer in the sync protocol (each tab/device must use a
 /// distinct one).
@@ -72,7 +72,7 @@ struct OpenConfig {
     store_id: String,
     storage: HomeStorage,
     #[serde(default)]
-    encryption_key_hex: Option<String>,
+    encryption_keyring_json: Option<String>,
     device_id: String,
 }
 
@@ -167,7 +167,7 @@ impl CovenStore {
 
         // Build the cipher first so a bad/missing encryption key fails before any
         // storage or database side effects.
-        let cipher = build_cipher(config.storage, config.encryption_key_hex.as_deref())
+        let cipher = build_cipher(config.storage, config.encryption_keyring_json.as_deref())
             .map_err(|e| JsValue::from_str(&e))?;
         let home: Box<dyn CloudHome> = Box::new(S3WasmCloudHome::new(
             config.bucket,
@@ -406,14 +406,17 @@ fn production_schedule() -> WasmSyncSchedule {
 
 /// Build the at-rest [`CloudCipher`] from the home's [`HomeStorage`].
 ///
-/// An opaque home requires a 64-hex-char (32-byte) key; its absence or a parse
+/// An opaque home requires serialized keyring JSON; its absence or a parse
 /// failure is an error, never a silent fall back to plaintext (which would write
 /// the store's data to the bucket in the clear). A browsable home takes no key.
-fn build_cipher(storage: HomeStorage, key_hex: Option<&str>) -> Result<CloudCipher, String> {
+pub(crate) fn build_cipher(
+    storage: HomeStorage,
+    keyring_json: Option<&str>,
+) -> Result<CloudCipher, String> {
     if storage.is_opaque() {
-        let hex = key_hex.ok_or("opaque home requires `encryption_key_hex`")?;
-        let service =
-            EncryptionService::new(hex).map_err(|e| format!("invalid encryption_key_hex: {e}"))?;
+        let serialized = keyring_json.ok_or("opaque home requires `encryption_keyring_json`")?;
+        let service = EncryptionService::from_keyring_json(serialized)
+            .map_err(|e| format!("invalid encryption_keyring_json: {e}"))?;
         Ok(CloudCipher::Encrypted(service))
     } else {
         Ok(CloudCipher::Plaintext)

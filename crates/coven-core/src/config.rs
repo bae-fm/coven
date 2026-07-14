@@ -181,7 +181,7 @@ impl Config {
     /// Read `store_dir/config.yaml` back into a runtime `Config`; `store_dir`
     /// is supplied by the caller, since it is not itself persisted (see the
     /// module doc). A missing or unparseable file is a loud [`ConfigError`]
-    /// naming the path — there is no legacy shape to tolerate.
+    /// naming the path.
     pub fn load_from_config_yaml(store_dir: StoreDir) -> Result<Config, ConfigError> {
         let path = store_dir.config_path();
         let text = std::fs::read_to_string(&path)

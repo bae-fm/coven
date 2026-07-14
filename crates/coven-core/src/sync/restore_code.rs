@@ -151,8 +151,8 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     if matches!(code.provider, CloudHomeJoinInfo::CloudKitShare { .. }) {
         return Err(RestoreCodeError::CloudKitShareNotRestorable);
     }
-    if let Some(key_hex) = &code.ek {
-        crate::encryption::EncryptionService::new(key_hex)
+    if let Some(serialized_keyring) = &code.ek {
+        crate::encryption::EncryptionService::from_keyring_json(serialized_keyring)
             .map_err(|e| RestoreCodeError::InvalidEncryptionKey(e.to_string()))?;
     }
     decode_hex_bytes("signing key", &code.sk, 64).map_err(RestoreCodeError::InvalidSigningKey)?;
@@ -232,11 +232,17 @@ mod tests {
         }]
     }
 
+    fn test_ek(byte: u8) -> String {
+        crate::encryption::EncryptionService::from_key([byte; 32])
+            .to_keyring_string()
+            .expect("serialize test keyring")
+    }
+
     fn sample_s3_code() -> RestoreCode {
         RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
-            ek: Some("aa".repeat(32)),
+            ek: Some(test_ek(0xAA)),
             name: "Test Store".to_string(),
             provider: CloudHomeJoinInfo::S3 {
                 bucket: "my-bucket".to_string(),
@@ -289,7 +295,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-123".to_string(),
-            ek: Some("bb".repeat(32)),
+            ek: Some(test_ek(0xBB)),
             name: "CloudKit Store".to_string(),
             provider: CloudHomeJoinInfo::CloudKit,
             sk: test_sk(),
@@ -306,7 +312,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-456".to_string(),
-            ek: Some("cc".repeat(32)),
+            ek: Some(test_ek(0xCC)),
             name: "GDrive Store".to_string(),
             provider: CloudHomeJoinInfo::GoogleDrive {
                 folder_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs".to_string(),
@@ -328,7 +334,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-789".to_string(),
-            ek: Some("dd".repeat(32)),
+            ek: Some(test_ek(0xDD)),
             name: "Dropbox Store".to_string(),
             provider: CloudHomeJoinInfo::Dropbox {
                 folder_path: "/Apps/your-app/My Store".to_string(),
@@ -350,7 +356,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-abc".to_string(),
-            ek: Some("ee".repeat(32)),
+            ek: Some(test_ek(0xEE)),
             name: "OneDrive Store".to_string(),
             provider: CloudHomeJoinInfo::OneDrive {
                 drive_id: "drive-id-123".to_string(),
@@ -379,7 +385,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-ck-share".to_string(),
-            ek: Some("ff".repeat(32)),
+            ek: Some(test_ek(0xFF)),
             name: "CloudKit Share Store".to_string(),
             provider: CloudHomeJoinInfo::CloudKitShare {
                 share_url: "https://share.example/abc".to_string(),
@@ -463,7 +469,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-1".to_string(),
-            ek: Some("aa".repeat(32)),
+            ek: Some(test_ek(0xAA)),
             name: "Test Store".to_string(),
             provider: CloudHomeJoinInfo::S3 {
                 bucket: "b".to_string(),
@@ -584,7 +590,7 @@ mod tests {
     #[test]
     fn invalid_encryption_key_rejected_at_decode() {
         let mut code = sample_s3_code();
-        code.ek = Some("not hex".to_string());
+        code.ek = Some("not JSON".to_string());
         let encoded = encode_restore_code(&code);
         assert!(matches!(
             decode_restore_code(&encoded),
@@ -592,7 +598,7 @@ mod tests {
         ));
 
         let mut code = sample_s3_code();
-        code.ek = Some(hex::encode([0u8; 31]));
+        code.ek = Some(serde_json::json!({ "keys": [] }).to_string());
         let encoded = encode_restore_code(&code);
         assert!(matches!(
             decode_restore_code(&encoded),

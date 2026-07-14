@@ -25,6 +25,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 use crate::config::HomeStorage;
+use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::migration::Migration;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
@@ -33,9 +34,25 @@ use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::hlc::Timestamp;
 use crate::sync::session::SyncedTable;
 use crate::sync::wasm_runtime::WasmSyncSchedule;
-use crate::wasm_facade::CovenStore;
+use crate::wasm_facade::{build_cipher, CovenStore};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+#[wasm_bindgen_test]
+fn opaque_cipher_accepts_keyring_json_and_rejects_raw_hex() {
+    let raw_hex = hex::encode([0x22u8; 32]);
+    assert!(
+        build_cipher(HomeStorage::Opaque, Some(&raw_hex)).is_err(),
+        "raw key material is not serialized keyring JSON",
+    );
+
+    let keyring_json = EncryptionService::from_key([0x22u8; 32])
+        .to_keyring_string()
+        .expect("serialize test keyring");
+    let cipher = build_cipher(HomeStorage::Opaque, Some(&keyring_json))
+        .expect("serialized keyring JSON builds the opaque cipher");
+    assert!(matches!(cipher, CloudCipher::Encrypted(_)));
+}
 
 /// Build a started [`CovenStore`] for `device_id` over a clone of the shared
 /// cloud, plaintext at rest with readable blob paths — the simplest home, and the

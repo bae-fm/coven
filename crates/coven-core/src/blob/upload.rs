@@ -132,19 +132,19 @@ async fn record_failure(
     error: &str,
     now: chrono::DateTime<chrono::Utc>,
     observer: Option<&dyn BlobTransitionObserver>,
-) {
-    if let Err(e) = db
+) -> Result<(), DbError> {
+    let recorded = db
         .record_cloud_upload_failure(entry.id, error, &now.to_rfc3339())
-        .await
-    {
-        warn!(
-            "Failed to record upload failure for entry {}: {e}",
-            entry.id
-        );
-    }
+        .await;
     if let Some(obs) = observer {
         obs.on_blob_upload_failed(file_id, error).await;
     }
+    recorded.map_err(|record_error| {
+        DbError(format!(
+            "{error}; failed to record upload failure for entry {}: {record_error}",
+            entry.id
+        ))
+    })
 }
 
 /// Open a streaming [`BlobBody`] over an upload's local plaintext file —
@@ -180,7 +180,7 @@ pub(crate) async fn verified_upload_snapshot(
     namespace: &str,
     file_id: &str,
     operation_id: &str,
-    expected_hash: Option<&str>,
+    expected_hash: &str,
 ) -> Result<std::path::PathBuf, String> {
     let local_path = store_dir
         .local_blob_path(namespace, file_id)
@@ -196,11 +196,12 @@ pub(crate) async fn verified_upload_snapshot(
     let staged = parent.join(format!(".upload.{operation_token}"));
     crate::local_blob::copy_atomic(source, &staged).await?;
     let actual_hash = crate::blob::content_hash_file(&staged).await?;
-    if expected_hash.is_some_and(|expected_hash| actual_hash != expected_hash) {
-        let _ = crate::local_blob::remove_file(&staged).await;
+    if actual_hash != expected_hash {
+        crate::local_blob::remove_file(&staged).await.map_err(|cleanup| {
+            format!("upload source content hash {actual_hash} does not match the row's signed hash {expected_hash}; failed to remove upload snapshot {}: {cleanup}", staged.display())
+        })?;
         return Err(format!(
-            "upload source content hash {actual_hash} does not match the row's signed hash {}",
-            expected_hash.unwrap_or_default()
+            "upload source content hash {actual_hash} does not match the row's signed hash {expected_hash}",
         ));
     }
     Ok(staged)
@@ -262,6 +263,7 @@ pub async fn drain_uploads(
     let now_rfc = now.to_rfc3339();
     let mut count = 0;
     let mut yielded_for_publish = false;
+    let mut drain_error = None;
 
     // The blob/gate model the make_remote completion check reads, resolved once from
     // the declared set + live schema (the schema can't change mid-drain). An upload's
@@ -328,7 +330,7 @@ pub async fn drain_uploads(
         }
 
         match inflight.next().await {
-            Some(EntryOutcome::Uploaded { made_remote }) => {
+            Some(Ok(EntryOutcome::Uploaded { made_remote })) => {
                 count += 1;
                 if made_remote {
                     // This upload completed a make_remote: the gate is flipped and the
@@ -339,10 +341,20 @@ pub async fn drain_uploads(
                     stop_admitting = true;
                 }
             }
-            Some(EntryOutcome::NotUploaded) => {}
+            Some(Ok(EntryOutcome::NotUploaded)) => {}
+            Some(Err(error)) => {
+                stop_admitting = true;
+                if drain_error.is_none() {
+                    drain_error = Some(error);
+                }
+            }
             // Nothing left in flight and none admitted this pass: the drain is done.
             None => break,
         }
+    }
+
+    if let Some(error) = drain_error {
+        return Err(error);
     }
 
     Ok(DrainOutcome {
@@ -396,8 +408,10 @@ fn next_ready_entry(
 /// Upload one queued entry: seal its local plaintext, write it to the cloud, and run
 /// the post-upload bookkeeping (pin populate, tombstone cancel, and the atomic
 /// completion commit). Returns what the drain must aggregate — whether the cloud
-/// write landed and whether it completed a make_remote. A single blob's failure is
-/// recorded and isolated here; it never affects another blob's result.
+/// write landed and whether it completed a make_remote. A blob transfer failure is
+/// recorded and isolated here. A post-upload database failure is returned to the
+/// drain after the other already-running transfers finish, because the operation
+/// has not committed and cannot be reported as complete.
 #[allow(clippy::too_many_arguments)]
 async fn upload_entry(
     db: &Database,
@@ -414,7 +428,7 @@ async fn upload_entry(
     blob_decls: Arc<BlobDecls>,
     gate_columns: Arc<HashMap<String, String>>,
     entry: OutboxEntry,
-) -> EntryOutcome {
+) -> Result<EntryOutcome, DbError> {
     // Every row from `get_pending_cloud_uploads` is an `Upload` (the query filters
     // `operation = 'upload'`); destructure the upload-only fields. A `Delete` here
     // would be a broken query invariant, not a skippable row.
@@ -452,51 +466,26 @@ async fn upload_entry(
                     "Upload failed for {} (file_id {file_id}): {msg}",
                     entry.cloud_key
                 );
-                record_failure(db, &entry, file_id, &msg, now, observer).await;
-                return EntryOutcome::NotUploaded;
+                record_failure(db, &entry, file_id, &msg, now, observer).await?;
+                return Ok(EntryOutcome::NotUploaded);
             }
         },
     };
 
-    let expected_hash = match expected_hash {
-        Some(hash) => Some(hash.clone()),
-        None => {
-            let decls = blob_decls.clone();
-            let namespace = namespace.to_string();
-            let file_id = file_id.to_string();
-            let queried_file_id = file_id.clone();
-            match db
-                .call(move |conn| {
-                    decls
-                        .hash_for_blob_in_namespace(conn, &namespace, &queried_file_id)
-                        .map_err(|error| DbError(error.to_string()))
-                })
-                .await
-            {
-                Ok(Some(hash)) => Some(hash),
-                Ok(None) => None,
-                Err(error) => {
-                    let message = format!("failed to read upload content hash: {error}");
-                    record_failure(db, &entry, &file_id, &message, now, observer).await;
-                    return EntryOutcome::NotUploaded;
-                }
-            }
-        }
-    };
     let upload_source = match verified_upload_snapshot(
         store_dir,
         &file_path,
         namespace,
         file_id,
         &entry.id.to_string(),
-        expected_hash.as_deref(),
+        expected_hash,
     )
     .await
     {
         Ok(path) => path,
         Err(message) => {
-            record_failure(db, &entry, file_id, &message, now, observer).await;
-            return EntryOutcome::NotUploaded;
+            record_failure(db, &entry, file_id, &message, now, observer).await?;
+            return Ok(EntryOutcome::NotUploaded);
         }
     };
 
@@ -514,48 +503,62 @@ async fn upload_entry(
     {
         Ok(body) => body,
         Err(msg) => {
-            warn!("Upload failed for {}: {msg}", entry.cloud_key);
-            record_failure(db, &entry, file_id, &msg, now, observer).await;
-            return EntryOutcome::NotUploaded;
+            let message = match crate::local_blob::remove_file(&upload_source).await {
+                Ok(_) => msg,
+                Err(error) => format!(
+                    "{msg}; failed to remove upload snapshot {}: {error}",
+                    upload_source.display()
+                ),
+            };
+            warn!("Upload failed for {}: {message}", entry.cloud_key);
+            record_failure(db, &entry, file_id, &message, now, observer).await?;
+            return Ok(EntryOutcome::NotUploaded);
         }
     };
 
     if let Err(e) =
         upload_with_progress(cloud_home, &entry.cloud_key, file_id, body, observer).await
     {
-        if let Err(error) = crate::local_blob::remove_file(&upload_source).await {
-            warn!(path = %upload_source.display(), %error, "failed to remove failed upload staging file");
-        }
-        let msg = format!("cloud write failed: {e}");
+        let msg = match crate::local_blob::remove_file(&upload_source).await {
+            Ok(_) => format!("cloud write failed: {e}"),
+            Err(error) => format!(
+                "cloud write failed: {e}; failed to remove upload snapshot {}: {error}",
+                upload_source.display()
+            ),
+        };
         warn!("Upload failed for {}: {msg}", entry.cloud_key);
-        record_failure(db, &entry, file_id, &msg, now, observer).await;
-        return EntryOutcome::NotUploaded;
+        record_failure(db, &entry, file_id, &msg, now, observer).await?;
+        return Ok(EntryOutcome::NotUploaded);
     }
 
     // A pinned upload keeps its blob local: stream-copy the source plaintext file
     // into the protected cache folder (`storage/pinned/<id>`), so the blob is
     // budget-exempt and serves from disk with no later cloud round-trip — and a large
-    // pinned blob is never materialized in RAM. Best-effort, like the cache's own
-    // post-populate eviction: the upload has already succeeded and the bytes are in
-    // the cloud, so a populate failure is logged and swallowed (a later read
-    // re-fetches into the cache) rather than failing a completed upload.
+    // pinned blob is never materialized in RAM.
     if *retain_pinned {
         if let Err(e) =
             crate::blob::cache::populate_pinned(store_dir, namespace, file_id, &upload_source).await
         {
-            warn!(
-                "Upload of {} succeeded but pinning it into the local cache (namespace {namespace}) failed (a later read will re-fetch): {e}",
-                entry.cloud_key
-            );
+            let message = match crate::local_blob::remove_file(&upload_source).await {
+                Ok(_) => format!("cloud write completed but retaining its pinned copy failed: {e}"),
+                Err(error) => format!(
+                    "cloud write completed but retaining its pinned copy failed: {e}; \
+                     failed to remove upload snapshot {}: {error}",
+                    upload_source.display()
+                ),
+            };
+            record_failure(db, &entry, file_id, &message, now, observer).await?;
+            return Ok(EntryOutcome::NotUploaded);
         }
     }
 
-    if let Some(obs) = observer {
-        obs.on_blob_uploaded(file_id).await;
-    }
-
     if let Err(error) = crate::local_blob::remove_file(&upload_source).await {
-        warn!(path = %upload_source.display(), %error, "failed to remove completed upload staging file");
+        let message = format!(
+            "cloud write completed but upload snapshot {} could not be removed: {error}",
+            upload_source.display()
+        );
+        record_failure(db, &entry, file_id, &message, now, observer).await?;
+        return Ok(EntryOutcome::NotUploaded);
     }
 
     // The post-upload commit: mint the gate-flip stamp off coven's HLC (the same
@@ -563,7 +566,7 @@ async fn upload_entry(
     // into this cycle's changeset), then in one DB call complete a make_remote
     // (flip), continue, or tombstone an orphan.
     let stamp = hlc.now().to_string();
-    match commit_after_upload(
+    let post_upload = match commit_after_upload(
         db,
         gates,
         blob_decls,
@@ -576,8 +579,21 @@ async fn upload_entry(
     )
     .await
     {
-        Ok(PostUpload::Continued) => EntryOutcome::Uploaded { made_remote: false },
-        Ok(PostUpload::Orphan) => {
+        Ok(post_upload) => post_upload,
+        Err(error) => {
+            let message = format!("post-upload commit failed: {error}");
+            record_failure(db, &entry, file_id, &message, now, observer).await?;
+            return Err(error);
+        }
+    };
+
+    if let Some(obs) = observer {
+        obs.on_blob_uploaded(file_id).await;
+    }
+
+    match post_upload {
+        PostUpload::Continued => Ok(EntryOutcome::Uploaded { made_remote: false }),
+        PostUpload::Orphan => {
             // A cancelled make_remote left this blob uploaded with no intent; it is
             // tombstoned in the commit above. Drop its local cache copy too (a
             // `retain_pinned` upload populated `pinned/`, which is budget-exempt and
@@ -587,12 +603,12 @@ async fn upload_entry(
             {
                 warn!("failed to drop the cache copy of orphaned blob {namespace}/{file_id}: {e}");
             }
-            EntryOutcome::Uploaded { made_remote: false }
+            Ok(EntryOutcome::Uploaded { made_remote: false })
         }
-        Ok(PostUpload::MadeRemote {
+        PostUpload::MadeRemote {
             root_table,
             root_id,
-        }) => {
+        } => {
             // The gate is flipped, the bytes are in the cloud (and pinned cache), and
             // the external ref is dropped in the commit above. A user-provided blob is
             // the user's own file, referenced in place — coven never deletes the user's
@@ -600,18 +616,7 @@ async fn upload_entry(
             if let Some(obs) = observer {
                 obs.on_root_made_remote(&root_table, &root_id).await;
             }
-            EntryOutcome::Uploaded { made_remote: true }
-        }
-        Err(e) => {
-            // The upload landed but the bookkeeping commit failed. The outbox row is
-            // still present (the commit is all-or-nothing), so the next cycle re-runs
-            // the idempotent upload and retries the commit — no half-state. Log and
-            // keep the count.
-            warn!(
-                "post-upload commit for {} failed; will retry next cycle: {e}",
-                entry.cloud_key
-            );
-            EntryOutcome::Uploaded { made_remote: false }
+            Ok(EntryOutcome::Uploaded { made_remote: true })
         }
     }
 }
@@ -784,13 +789,10 @@ fn commit_finish(
 pub(crate) fn finish_outbox_row(
     conn: &Connection,
     id: i64,
-    cloud_key: &str,
-    created_at: &str,
+    _cloud_key: &str,
+    _created_at: &str,
 ) -> Result<(), DbError> {
     conn.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
         .map_err(DbError::from)?;
-    if !crate::sync::cloud_storage::CloudSyncStorage::is_generated_blob_key(cloud_key) {
-        Database::enqueue_legacy_cancel_on(conn, cloud_key, created_at)?;
-    }
     Ok(())
 }

@@ -103,7 +103,7 @@ pub(crate) async fn ensure_publishable_blobs(
                 id: blob.id.clone(),
             })?;
         if !storage
-            .blob_exists_at(
+            .blob_exists(
                 &blob.namespace,
                 &location,
                 &blob.id,

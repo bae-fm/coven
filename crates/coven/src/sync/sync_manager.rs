@@ -456,7 +456,6 @@ impl SyncManager {
             &self.db,
             sync_loop.store_dir(),
             sync_loop.blob_path_scheme(),
-            &sync_loop.self_uploader(),
             sync_loop.hlc(),
             root_table,
             root_id,

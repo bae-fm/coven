@@ -525,10 +525,8 @@ impl CovenHandle {
         Ok(keyring.fingerprint())
     }
 
-    /// Import a master key a host already holds — a pasted restore/invite
-    /// key, or a keyring migrated from elsewhere — and establish it under the
-    /// handle's custody, replacing whatever custody already holds. Accepts
-    /// both the keyring JSON and the legacy 64-hex single-key formats.
+    /// Import serialized keyring JSON a host already holds and establish it
+    /// under the handle's custody, replacing whatever custody already holds.
     /// Returns its fingerprint for the host to record in its own config.
     pub fn import_master_key(&self, serialized: &str) -> Result<String, MasterKeyError> {
         let keyring = MasterKeyring::from_serialized(serialized)?;
@@ -750,27 +748,23 @@ impl CovenHandle {
     /// read key with it. A `Plain` home whose `cloud_path` is absent, or does not
     /// name the blob it carries, is a surfaced error — see
     /// [`CloudSyncStorage::blob_key`].
-    pub fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
-        let active_loop = self
-            .sync_manager()
-            .and_then(|manager| manager.sync_loop_handle());
-        let (scheme, uploader) = match active_loop {
-            Some(sync_loop) => (
-                sync_loop.blob_path_scheme(),
-                Some(sync_loop.self_uploader()),
-            ),
-            None => {
-                let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
-                let uploader = crate::keys::identity_public_key(self.identity_custody.as_ref())
-                    .map_err(|e| StorageError::Storage(format!("read this store's identity: {e}")))?
-                    .map(hex::encode);
-                (scheme, uploader)
-            }
-        };
+    pub async fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
+        let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
+        let location = self
+            .db
+            .blob_location(&blob.namespace, &blob.id)
+            .await
+            .map_err(|error| StorageError::Storage(error.to_string()))?
+            .ok_or_else(|| {
+                StorageError::Parse(format!(
+                    "blob {}/{} has no cloud location",
+                    blob.namespace, blob.id
+                ))
+            })?;
         CloudSyncStorage::blob_key(
             scheme,
             &blob.namespace,
-            uploader.as_deref(),
+            &location,
             &blob.id,
             blob.cloud_path.as_deref(),
         )
@@ -1212,13 +1206,23 @@ mod tests {
         std::fs::write(&source, &plaintext).expect("write source file");
         // {namespace}/{cloud_path} under the plain scheme. The readable path names the blob
         // it carries, which is what keeps a cloud object from ever being rewritten.
-        let cloud_key = "images/cover-cover-1.jpg";
+        let location = crate::sync::test_helpers::test_blob_location("test-uploader", 1000);
+        let cloud_key = CloudSyncStorage::blob_key(
+            BlobPathScheme::Plain,
+            "images",
+            &location,
+            "cover-1",
+            Some("cover-cover-1.jpg"),
+        )
+        .expect("build generated plain cloud key");
+        let expected_hash = crate::blob::content_hash(&plaintext);
         db.enqueue_upload(
             "cover-1",
-            cloud_key,
+            &cloud_key,
             Some(source.to_str().expect("temp source path is valid UTF-8")),
             BlobScope::Master,
             false,
+            &expected_hash,
             "2024-01-01T00:00:00Z",
         )
         .await
@@ -1231,7 +1235,7 @@ mod tests {
             .expect("drain through the handle");
         assert_eq!(outcome.uploaded, 1, "the one queued blob uploaded");
         assert_eq!(
-            home.get(cloud_key).as_deref(),
+            home.get(&cloud_key).as_deref(),
             Some(plaintext.as_slice()),
             "the blob landed in the injected home at its readable key, plaintext at rest",
         );
@@ -1242,6 +1246,8 @@ mod tests {
         // child carrying this id) so the read resolves the blob's locality to Remote
         // and fetches it back out of the home (rather than failing locality resolution).
         plant_blob_row(&db, "cover-1", true, &plaintext).await;
+        crate::sync::test_helpers::record_test_blob_location(&db, "images", "cover-1", &location)
+            .await;
 
         // Read through the handle: a Remote miss resolves back out of the same home.
         let blob = BlobRef {
@@ -1376,9 +1382,13 @@ mod tests {
         .await
         .expect("build cloud storage resolving the cipher from custody");
         let plaintext = b"encrypted-cloud-blob-for-the-read-only-handle".to_vec();
+        let uploader = crate::sync::storage::SyncStorage::own_uploader(&writer_storage)
+            .expect("hashed home has an uploader");
+        let location = crate::sync::test_helpers::test_blob_location(&uploader, 1000);
         crate::sync::storage::SyncStorage::put_blob(
             &writer_storage,
             "images",
+            &location,
             "cover-1",
             BlobScope::Master,
             None,
@@ -1392,9 +1402,8 @@ mod tests {
         // signed-changeset pull to record its author, and the listing scan is gone),
         // so record the writer as its uploader — the read resolves this prefix to
         // fetch it back out of the hashed layout.
-        let uploader = crate::sync::storage::SyncStorage::own_uploader(&writer_storage)
-            .expect("hashed home has an uploader");
-        crate::sync::test_helpers::record_blob_uploader(&db, "images", "cover-1", &uploader).await;
+        crate::sync::test_helpers::record_test_blob_location(&db, "images", "cover-1", &location)
+            .await;
 
         let config_provider: ConfigProvider = {
             let config = config.clone();
@@ -1545,9 +1554,12 @@ mod tests {
             .get_user_pubkey()
             .expect("read this store's identity")
             .expect("this store's identity is established");
-        let cloud_key = StoreDir::uploader_hashed_key("images", &uploader, "cover-1")
-            .expect("build the hashed cloud key");
+        let location = crate::sync::test_helpers::test_blob_location(&uploader, 1000);
+        let cloud_key =
+            StoreDir::generated_blob_key("images", &uploader, "cover-1", &location.generation)
+                .expect("build the generated cloud key");
         let plaintext = b"cover-art-sealed-under-the-established-master-key".to_vec();
+        let expected_hash = crate::blob::content_hash(&plaintext);
         let source = tmp.path().join("cover-source.jpg");
         std::fs::write(&source, &plaintext).expect("write source file");
         db.enqueue_upload(
@@ -1556,6 +1568,7 @@ mod tests {
             Some(source.to_str().expect("temp source path is valid UTF-8")),
             BlobScope::Master,
             false,
+            &expected_hash,
             "2024-01-01T00:00:00Z",
         )
         .await
@@ -1587,7 +1600,8 @@ mod tests {
         // the drain (no signed-changeset pull to record its author), so record
         // this device as its uploader explicitly.
         plant_blob_row(&db, "cover-1", true, &plaintext).await;
-        crate::sync::test_helpers::record_blob_uploader(&db, "images", "cover-1", &uploader).await;
+        crate::sync::test_helpers::record_test_blob_location(&db, "images", "cover-1", &location)
+            .await;
         let blob = BlobRef {
             namespace: "images".to_string(),
             id: "cover-1".to_string(),
@@ -1606,26 +1620,22 @@ mod tests {
         );
     }
 
-    /// `import_master_key` accepts both formats `MasterKeyring::from_serialized`
-    /// does — the legacy 64-hex single key and the keyring JSON — and returns
-    /// the fingerprint of whichever generation it just established.
+    /// `import_master_key` accepts keyring JSON and refuses raw key material.
     #[tokio::test]
-    async fn import_master_key_accepts_legacy_hex_and_keyring_json() {
+    async fn import_master_key_accepts_keyring_json_and_rejects_raw_hex() {
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
         let handle = test_handle("lib-import-master-key", store_dir, db);
 
         let raw_hex = hex::encode([0x22u8; 32]);
-        let hex_fingerprint = handle
+        let fingerprint_before = handle.master_key_fingerprint().unwrap();
+        handle
             .import_master_key(&raw_hex)
-            .expect("import the legacy raw-hex format");
-        assert_eq!(
-            hex_fingerprint,
-            EncryptionService::from_key([0x22u8; 32]).fingerprint(),
-        );
+            .expect_err("raw key material is not serialized keyring JSON");
         assert_eq!(
             handle.master_key_fingerprint().unwrap(),
-            Some(hex_fingerprint),
+            fingerprint_before,
+            "a rejected import must not replace the established keyring",
         );
 
         let keyring = crate::encryption::MasterKeyring::generate();
@@ -1636,7 +1646,7 @@ mod tests {
         assert_eq!(
             handle.master_key_fingerprint().unwrap(),
             Some(json_fingerprint),
-            "the second import replaces the first",
+            "the JSON import replaces the established keyring",
         );
     }
 
@@ -2151,13 +2161,22 @@ mod tests {
         let plaintext = b"encrypted-drain-bytes-after-key-rotation".to_vec();
         let source = tmp.path().join("plain-source.jpg");
         std::fs::write(&source, &plaintext).expect("write source file");
-        let cloud_key = "images/ab/cd/plain-cover";
+        let location = crate::sync::test_helpers::test_blob_location("test-uploader", 1000);
+        let cloud_key = StoreDir::generated_blob_key(
+            "images",
+            &location.uploader,
+            "plain-cover",
+            &location.generation,
+        )
+        .expect("build generated cloud key");
+        let expected_hash = crate::blob::content_hash(&plaintext);
         db.enqueue_upload(
             "plain-cover",
-            cloud_key,
+            &cloud_key,
             Some(source.to_str().expect("temp source path is valid UTF-8")),
             BlobScope::Master,
             false,
+            &expected_hash,
             "2024-01-01T00:00:00Z",
         )
         .await
@@ -2169,7 +2188,7 @@ mod tests {
             .expect("drain through the handle");
         assert_eq!(outcome.uploaded, 1, "the queued blob uploaded");
 
-        let stored = home.get(cloud_key).expect("uploaded cloud object");
+        let stored = home.get(&cloud_key).expect("uploaded cloud object");
         assert_ne!(
             stored.as_slice(),
             plaintext.as_slice(),

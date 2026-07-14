@@ -567,11 +567,7 @@ async fn read_remote_whole(
     // connected — there is no storage to fetch it from, so surface that fault.
     let cache = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
-    let expected_hash = match expected_blob_hash(db, blob).await {
-        Ok(hash) => Some(hash),
-        Err(BlobCacheError::MissingContentHash { .. }) => None,
-        Err(error) => return Err(error),
-    };
+    let expected_hash = expected_blob_hash(db, blob).await?;
     let bytes = fetch_from_cloud(db, storage, blob).await?;
     // Verify the fetched plaintext against the row before caching or returning it —
     // the cheap length check first (the same one the cache-hit
@@ -589,14 +585,11 @@ async fn read_remote_whole(
         });
     }
     let actual_hash = crate::blob::content_hash(&bytes);
-    if expected_hash
-        .as_deref()
-        .is_some_and(|expected_hash| actual_hash != expected_hash)
-    {
+    if actual_hash != expected_hash {
         return Err(BlobCacheError::CloudHashMismatch {
             namespace: blob.namespace.clone(),
             id: blob.id.clone(),
-            expected: expected_hash.unwrap_or_default(),
+            expected: expected_hash,
             actual: actual_hash,
         });
     }
@@ -807,9 +800,9 @@ pub(crate) async fn materialize_remote_blob_to_file(
     let expected_hash = expected_blob_hash(db, blob).await?;
     let location = resolve_blob_location(db, storage, blob).await?;
     storage
-        .read_blob_to_file_at(
+        .read_blob_to_file(
             &blob.namespace,
-            location.as_ref(),
+            &location,
             &blob.id,
             blob.scope.clone(),
             blob.cloud_path.as_deref(),
@@ -1200,11 +1193,7 @@ async fn verified_cached_blob_path(
     blob: &BlobRef,
     expected_size: u64,
 ) -> Result<Option<CachedBlobPath>, BlobCacheError> {
-    let expected_hash = match expected_blob_hash(db, blob).await {
-        Ok(hash) => Some(hash),
-        Err(BlobCacheError::MissingContentHash { .. }) => None,
-        Err(error) => return Err(error),
-    };
+    let expected_hash = expected_blob_hash(db, blob).await?;
     for hit in [
         CachedBlobPath::Pinned(store_dir.pinned_blob_path(&blob.namespace, &blob.id)?),
         CachedBlobPath::Cache(store_dir.cache_blob_path(&blob.namespace, &blob.id)?),
@@ -1226,11 +1215,7 @@ async fn verified_cached_blob_path(
         } else {
             None
         };
-        if size == expected_size
-            && expected_hash
-                .as_deref()
-                .is_none_or(|expected_hash| hash.as_deref() == Some(expected_hash))
-        {
+        if size == expected_size && hash.as_deref() == Some(expected_hash.as_str()) {
             return Ok(Some(hit));
         }
         tracing::warn!(
@@ -1327,9 +1312,9 @@ pub(crate) async fn fetch_from_cloud(
     validate_blob_ref(blob)?;
     let location = resolve_blob_location(db, storage, blob).await?;
     storage
-        .get_blob_at(
+        .get_blob(
             &blob.namespace,
-            location.as_ref(),
+            &location,
             &blob.id,
             blob.scope.clone(),
             blob.cloud_path.as_deref(),
@@ -1344,24 +1329,17 @@ pub(crate) async fn fetch_from_cloud(
 /// tied to the blob's row, never blind-searched:
 /// a miss is a missing dispatch key surfaced loud, not a cue to scan an untrusted
 /// listing (which a member could seed with a same-size decoy under its own prefix).
-/// `None` means a legacy browsable/plain object whose key predates locations.
 pub(crate) async fn resolve_blob_location(
     db: &Database,
-    storage: &dyn SyncStorage,
+    _storage: &dyn SyncStorage,
     blob: &BlobRef,
-) -> Result<Option<crate::blob::CloudBlobLocation>, BlobCacheError> {
+) -> Result<crate::blob::CloudBlobLocation, BlobCacheError> {
     if let Some(location) = db
         .blob_location(&blob.namespace, &blob.id)
         .await
         .map_err(|e| BlobCacheError::Io(e.0))?
     {
-        return Ok(Some(location));
-    }
-    if !matches!(
-        storage.blob_path_scheme(),
-        crate::sync::cloud_storage::BlobPathScheme::Hashed
-    ) {
-        return Ok(None);
+        return Ok(location);
     }
     Err(BlobCacheError::UploaderUnresolved {
         namespace: blob.namespace.clone(),
@@ -1391,9 +1369,9 @@ async fn fetch_range_from_cloud(
     validate_blob_ref(blob)?;
     let location = resolve_blob_location(db, storage, blob).await?;
     storage
-        .read_blob_range_at(
+        .read_blob_range(
             &blob.namespace,
-            location.as_ref(),
+            &location,
             &blob.id,
             blob.scope.clone(),
             blob.cloud_path.as_deref(),

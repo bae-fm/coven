@@ -1,7 +1,7 @@
 //! Restore an existing store from cloud storage.
 //!
-//! Unlike join (which unwraps the encryption key from an invite), restore takes
-//! the encryption key directly from the user — present for an opaque home,
+//! Unlike join (which unwraps the keyring from an invite), restore takes
+//! serialized keyring JSON directly from the user — present for an opaque home,
 //! absent for a browsable one.
 
 use std::sync::Arc;
@@ -168,7 +168,7 @@ async fn build_cloud_home(
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_from_cloud(
     store_id: &str,
-    encryption_key_hex: Option<&str>,
+    serialized_keyring: Option<&str>,
     store_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
@@ -224,15 +224,15 @@ pub async fn restore_from_cloud(
         // same blob keys the source wrote. Parsed once here (not re-parsed
         // inside `bootstrap_and_save_store`) so the cipher and the persisted
         // master key always agree on the same value.
-        let storage = if encryption_key_hex.is_some() {
+        let storage = if serialized_keyring.is_some() {
             HomeStorage::Opaque
         } else {
             HomeStorage::Browsable
         };
-        let master_key: Option<MasterKeyring> = match encryption_key_hex {
-            Some(key_hex) => {
+        let master_key: Option<MasterKeyring> = match serialized_keyring {
+            Some(serialized) => {
                 on_status("Verifying encryption key...");
-                Some(MasterKeyring::from_serialized(key_hex)?)
+                Some(MasterKeyring::from_serialized(serialized)?)
             }
             None => None,
         };

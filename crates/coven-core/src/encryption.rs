@@ -8,7 +8,6 @@ use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracing::info;
 
 /// XChaCha20-Poly1305 nonce size (24 bytes).
 pub const NONCE_SIZE: usize = 24;
@@ -205,11 +204,9 @@ impl MasterKeyring {
             .expect("a MasterKeyring always holds at least one generation")
     }
 
-    /// Parse a stored master keyring. Accepts both the keyring JSON
-    /// [`Self::to_serialized`] produces and the legacy 64-hex single key, since
-    /// this reads values written by installs that predate the keyring format.
+    /// Parse the stored keyring JSON [`Self::to_serialized`] produces.
     pub fn from_serialized(s: &str) -> Result<Self, EncryptionError> {
-        EncryptionService::new(s).map(Self::from)
+        EncryptionService::from_keyring_json(s).map(Self::from)
     }
 
     /// SHA-256 fingerprint of the seal key (the deterministically selected
@@ -265,21 +262,6 @@ impl std::fmt::Debug for EncryptionService {
     }
 }
 impl EncryptionService {
-    /// Create a new encryption service from a hex-encoded key string
-    pub fn new(stored_key: &str) -> Result<Self, EncryptionError> {
-        info!("Loading master key...");
-        match decode_legacy_key(stored_key) {
-            Ok(key) => Ok(EncryptionService::from_key(key)),
-            Err(legacy_error) => {
-                EncryptionService::from_keyring_json(stored_key).map_err(|keyring_error| {
-                    EncryptionError::KeyManagement(format!(
-                        "invalid stored encryption key: {legacy_error}; keyring parse failed: {keyring_error}"
-                    ))
-                })
-            }
-        }
-    }
-
     /// Create a new encryption service from a raw 32-byte key.
     pub fn from_key(key: [u8; 32]) -> Self {
         Self::from_key_at_generation(INITIAL_KEY_GENERATION, key)
@@ -371,19 +353,14 @@ impl EncryptionService {
     }
 
     pub fn from_keyring_payload(plaintext: Vec<u8>) -> Result<Self, EncryptionError> {
-        if plaintext.len() == 32 {
-            let key: [u8; 32] = plaintext.try_into().map_err(|_| {
-                EncryptionError::KeyManagement("unwrapped key is not 32 bytes".to_string())
-            })?;
-            return Ok(EncryptionService::from_key(key));
-        }
         let keyring = String::from_utf8(plaintext).map_err(|e| {
             EncryptionError::KeyManagement(format!("keyring payload is not UTF-8: {e}"))
         })?;
         EncryptionService::from_keyring_json(&keyring)
     }
 
-    fn from_keyring_json(keyring: &str) -> Result<Self, EncryptionError> {
+    /// Parse serialized keyring JSON into an encryption service.
+    pub fn from_keyring_json(keyring: &str) -> Result<Self, EncryptionError> {
         let payload: StoredKeyring = serde_json::from_str(keyring).map_err(|e| {
             EncryptionError::KeyManagement(format!("keyring JSON is malformed: {e}"))
         })?;
@@ -769,13 +746,6 @@ fn split_sealed_app_data(sealed: &[u8]) -> Result<([u8; 8], &[u8]), SealError> {
         .try_into()
         .expect("split_at yields exactly APP_DATA_FINGERPRINT_SIZE bytes");
     Ok((fingerprint, ciphertext))
-}
-
-fn decode_legacy_key(stored_key: &str) -> Result<[u8; 32], String> {
-    hex::decode(stored_key)
-        .map_err(|e| format!("legacy key is not hex: {e}"))?
-        .try_into()
-        .map_err(|bytes: Vec<u8>| format!("legacy key must be 32 bytes, got {}", bytes.len()))
 }
 
 fn derive_key_from(key: &[u8; 32], info: &str) -> [u8; 32] {
@@ -1477,13 +1447,16 @@ mod tests {
     }
 
     #[test]
-    fn master_keyring_from_serialized_accepts_legacy_raw_hex() {
+    fn master_keyring_from_serialized_rejects_raw_hex() {
         let raw_hex = hex::encode(test_key());
-        let keyring = MasterKeyring::from_serialized(&raw_hex).expect("legacy hex parses");
-        assert_eq!(
-            keyring.fingerprint(),
-            EncryptionService::from_key(test_key()).fingerprint(),
-        );
+        MasterKeyring::from_serialized(&raw_hex)
+            .expect_err("a raw key is not the keyring JSON format");
+    }
+
+    #[test]
+    fn encryption_service_from_keyring_payload_rejects_raw_key_bytes() {
+        EncryptionService::from_keyring_payload(test_key().to_vec())
+            .expect_err("raw key bytes are not a serialized keyring");
     }
 
     #[test]

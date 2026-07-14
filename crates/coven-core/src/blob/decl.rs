@@ -841,7 +841,7 @@ fn pk_carrying_cloud_path(
 fn hashed_blob_key_parts(cloud_key: &str) -> Option<(String, String)> {
     // Map a key back to its DB row, which is keyed by namespace + id, not by who
     // uploaded it — so the uploader segment is parsed and dropped.
-    crate::store_dir::StoreDir::parse_uploader_hashed_key(cloud_key)
+    crate::store_dir::StoreDir::parse_generated_blob_key(cloud_key)
         .map(|(namespace, _uploader, id, _generation)| (namespace, id))
 }
 

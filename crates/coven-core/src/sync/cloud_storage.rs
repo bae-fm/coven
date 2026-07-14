@@ -693,52 +693,20 @@ impl CloudSyncStorage {
     pub fn blob_key(
         scheme: BlobPathScheme,
         namespace: &str,
-        uploader: Option<&str>,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<String, StorageError> {
-        let location = uploader.map(crate::blob::CloudBlobLocation::legacy);
-        Self::blob_key_at(scheme, namespace, location.as_ref(), id, cloud_path)
-    }
-
-    pub fn blob_key_at(
-        scheme: BlobPathScheme,
-        namespace: &str,
-        location: Option<&crate::blob::CloudBlobLocation>,
+        location: &crate::blob::CloudBlobLocation,
         id: &str,
         cloud_path: Option<&str>,
     ) -> Result<String, StorageError> {
         match scheme {
             BlobPathScheme::Hashed => {
-                let location = location.ok_or_else(|| {
-                    StorageError::Parse(format!(
-                        "an opaque-home blob requires an uploader for {namespace}/{id}"
-                    ))
-                })?;
                 location.validate().map_err(StorageError::Parse)?;
-                Ok(match &location.generation {
-                    Some(generation) => {
-                        let legacy = crate::store_dir::StoreDir::uploader_hashed_key(
-                            namespace,
-                            &location.uploader,
-                            id,
-                        )?;
-                        let suffix = legacy
-                            .strip_prefix(&format!("{namespace}/{}/", location.uploader))
-                            .ok_or_else(|| {
-                                StorageError::Parse("hashed blob key lost its prefix".to_string())
-                            })?;
-                        format!(
-                            "{namespace}/{}/.coven-generations/{suffix}/{generation}",
-                            location.uploader
-                        )
-                    }
-                    None => crate::store_dir::StoreDir::uploader_hashed_key(
-                        namespace,
-                        &location.uploader,
-                        id,
-                    )?,
-                })
+                crate::store_dir::StoreDir::generated_blob_key(
+                    namespace,
+                    &location.uploader,
+                    id,
+                    &location.generation,
+                )
+                .map_err(StorageError::from)
             }
             BlobPathScheme::Plain => {
                 let path = cloud_path.ok_or_else(|| {
@@ -753,38 +721,13 @@ impl CloudSyncStorage {
                         "cloud_path {path:?} uses coven's reserved .coven-generations prefix"
                     )));
                 }
-                let legacy = format!("{namespace}/{path}");
-                match location.and_then(|location| location.generation.as_deref()) {
-                    Some(generation) => {
-                        let location = location.expect("generation came from a location");
-                        location.validate().map_err(StorageError::Parse)?;
-                        Ok(format!(
-                            "{namespace}/.coven-generations/{}/{generation}/{path}",
-                            location.uploader
-                        ))
-                    }
-                    None => Ok(legacy),
-                }
+                location.validate().map_err(StorageError::Parse)?;
+                Ok(format!(
+                    "{namespace}/.coven-generations/{}/{}/{path}",
+                    location.uploader, location.generation
+                ))
             }
         }
-    }
-
-    pub(crate) fn is_generated_blob_key(cloud_key: &str) -> bool {
-        if crate::store_dir::StoreDir::parse_uploader_hashed_key(cloud_key)
-            .is_some_and(|(_, _, _, generation)| generation.is_some())
-        {
-            return true;
-        }
-        let parts: Vec<_> = cloud_key.split('/').collect();
-        matches!(
-            parts.as_slice(),
-            [namespace, ".coven-generations", uploader, generation, rest @ ..]
-                if !rest.is_empty()
-                    && crate::store_dir::validate_path_token(namespace).is_ok()
-                    && crate::store_dir::validate_path_token(uploader).is_ok()
-                    && !generation.is_empty()
-                    && generation.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        )
     }
 }
 
@@ -1284,60 +1227,26 @@ impl SyncStorage for CloudSyncStorage {
     async fn put_blob(
         &self,
         namespace: &str,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let uploader = self.self_uploader();
-        let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
-        self.write_blob_sealed(&key, scope, data).await
-    }
-
-    async fn put_blob_at(
-        &self,
-        namespace: &str,
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
-        let key = Self::blob_key_at(self.blob_paths, namespace, Some(location), id, cloud_path)?;
+        let key = Self::blob_key(self.blob_paths, namespace, location, id, cloud_path)?;
         self.write_blob_sealed(&key, scope, data).await
     }
 
     async fn put_blob_from_file(
         &self,
         namespace: &str,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_path: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        let uploader = self.self_uploader();
-        let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
-        let cipher = self.cipher_for_seal()?;
-        let body = cipher
-            .open_body(scope, source_path, &self.aad_context(&key))
-            .await
-            .map_err(StorageError::Storage)?;
-        self.home
-            .write(&key, body, &crate::storage::cloud::no_progress())
-            .await?;
-        Ok(())
-    }
-
-    async fn put_blob_from_file_at(
-        &self,
-        namespace: &str,
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_path: &std::path::Path,
     ) -> Result<(), StorageError> {
-        let key = Self::blob_key_at(self.blob_paths, namespace, Some(location), id, cloud_path)?;
+        let key = Self::blob_key(self.blob_paths, namespace, location, id, cloud_path)?;
         let cipher = self.cipher_for_seal()?;
         let body = cipher
             .open_body(scope, source_path, &self.aad_context(&key))
@@ -1352,25 +1261,12 @@ impl SyncStorage for CloudSyncStorage {
     async fn get_blob(
         &self,
         namespace: &str,
-        uploader: Option<&str>,
+        location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
-        let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
-        self.read_blob_sealed(&key, scope, &format!("blob {namespace}/{id}"))
-            .await
-    }
-
-    async fn get_blob_at(
-        &self,
-        namespace: &str,
-        location: Option<&crate::blob::CloudBlobLocation>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-    ) -> Result<Vec<u8>, StorageError> {
-        let key = Self::blob_key_at(self.blob_paths, namespace, location, id, cloud_path)?;
+        let key = Self::blob_key(self.blob_paths, namespace, location, id, cloud_path)?;
         self.read_blob_sealed(&key, scope, &format!("blob {namespace}/{id}"))
             .await
     }
@@ -1378,34 +1274,18 @@ impl SyncStorage for CloudSyncStorage {
     async fn blob_exists(
         &self,
         namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<bool, StorageError> {
-        // Whether an object stands at the key this device would write the blob to, so
-        // it keys under itself. A blob's key names the blob under both schemes — the
-        // hashed key carries its id, and a browsable home's readable path must name it
-        // ([`crate::blob::decl::cloud_path_names_blob`]) — so no two blobs share a key
-        // and the object standing at one is that blob's bytes. Presence IS content.
-        let uploader = self.self_uploader();
-        let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
-        self.home.exists(&key).await.map_err(StorageError::from)
-    }
-
-    async fn blob_exists_at(
-        &self,
-        namespace: &str,
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         cloud_path: Option<&str>,
     ) -> Result<bool, StorageError> {
-        let key = Self::blob_key_at(self.blob_paths, namespace, Some(location), id, cloud_path)?;
+        let key = Self::blob_key(self.blob_paths, namespace, location, id, cloud_path)?;
         self.home.exists(&key).await.map_err(StorageError::from)
     }
 
     async fn read_blob_range(
         &self,
         namespace: &str,
-        uploader: Option<&str>,
+        location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
@@ -1413,37 +1293,7 @@ impl SyncStorage for CloudSyncStorage {
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, StorageError> {
-        // Build the ranged reader over a clone of the shared home and the current
-        // cipher (a snapshot of the lock — a key rotation between reads builds a
-        // fresh reader next call). The reader owns the chunk math and decryption;
-        // this just resolves the key/scope/size it needs. The cipher is cloned out
-        // of the lock so the reader doesn't hold the guard across its awaits.
-        let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
-        let cipher = self.cipher();
-        let aad_context = self.aad_context(&key);
-        let reader = BlobRangeReader::new(
-            self.home.clone(),
-            &cipher,
-            scope,
-            key,
-            source_size,
-            aad_context,
-        );
-        reader.read(offset, len).await
-    }
-
-    async fn read_blob_range_at(
-        &self,
-        namespace: &str,
-        location: Option<&crate::blob::CloudBlobLocation>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        let key = Self::blob_key_at(self.blob_paths, namespace, location, id, cloud_path)?;
+        let key = Self::blob_key(self.blob_paths, namespace, location, id, cloud_path)?;
         let cipher = self.cipher().clone();
         let aad_context = self.aad_context(&key);
         BlobRangeReader::new(
@@ -1461,7 +1311,7 @@ impl SyncStorage for CloudSyncStorage {
     async fn read_blob_to_file(
         &self,
         namespace: &str,
-        uploader: Option<&str>,
+        location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
@@ -1469,52 +1319,7 @@ impl SyncStorage for CloudSyncStorage {
         expected_hash: &str,
         dest: &std::path::Path,
     ) -> Result<(), StorageError> {
-        let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
-        let cipher = self.cipher();
-        let aad_context = self.aad_context(&key);
-        let reader = BlobRangeReader::new(
-            self.home.clone(),
-            &cipher,
-            scope,
-            key.clone(),
-            source_size,
-            aad_context,
-        );
-        // Stream the plaintext through a content hasher; the reader refuses to
-        // signal "done" (so the writer never commits the file) unless the
-        // whole-blob hash matches the row's signed one — a tampered or rolled-back
-        // object aborts before the rename and is not cached.
-        let mut source = HashVerifyingPlaintextReader {
-            reader,
-            offset: 0,
-            remaining: source_size,
-            hasher: crate::blob::ContentHasher::new(),
-            expected_hash: expected_hash.to_string(),
-            key,
-        };
-        let written = crate::local_blob::write_stream_atomic(dest, &mut source)
-            .await
-            .map_err(StorageError::Storage)?;
-        if written != source_size {
-            return Err(StorageError::Storage(format!(
-                "downloaded blob {namespace}/{id} wrote {written} bytes, expected {source_size}"
-            )));
-        }
-        Ok(())
-    }
-
-    async fn read_blob_to_file_at(
-        &self,
-        namespace: &str,
-        location: Option<&crate::blob::CloudBlobLocation>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        expected_hash: &str,
-        dest: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        let key = Self::blob_key_at(self.blob_paths, namespace, location, id, cloud_path)?;
+        let key = Self::blob_key(self.blob_paths, namespace, location, id, cloud_path)?;
         let cipher = self.cipher().clone();
         let reader = BlobRangeReader::new(
             self.home.clone(),
@@ -1550,26 +1355,11 @@ impl SyncStorage for CloudSyncStorage {
     fn blob_cloud_key(
         &self,
         namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<String, StorageError> {
-        Self::blob_key(
-            self.blob_paths,
-            namespace,
-            self.own_uploader().as_deref(),
-            id,
-            cloud_path,
-        )
-    }
-
-    fn blob_cloud_key_at(
-        &self,
-        namespace: &str,
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         cloud_path: Option<&str>,
     ) -> Result<String, StorageError> {
-        Self::blob_key_at(self.blob_paths, namespace, Some(location), id, cloud_path)
+        Self::blob_key(self.blob_paths, namespace, location, id, cloud_path)
     }
 
     fn own_uploader(&self) -> Option<String> {
@@ -1861,8 +1651,12 @@ mod tests {
         BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHomeError, CloudHomeJoinInfo,
         RevokeOutcome,
     };
-    use crate::sync::test_helpers::{open_test_db, TestCustody};
+    use crate::sync::test_helpers::{open_test_db, test_blob_location, TestCustody};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn location(storage: &CloudSyncStorage) -> crate::blob::CloudBlobLocation {
+        test_blob_location(&storage.self_uploader(), 1000)
+    }
 
     /// A committed rotation this device has not adopted survives a restart. A
     /// prior run marks it and persists to `sync_state`; a fresh run restores it
@@ -2062,14 +1856,21 @@ mod tests {
         std::fs::write(&path, &plaintext).unwrap();
 
         storage
-            .put_blob_from_file("audio", "track1", BlobScope::Master, None, &path)
+            .put_blob_from_file(
+                "audio",
+                &location(&storage),
+                "track1",
+                BlobScope::Master,
+                None,
+                &path,
+            )
             .await
             .expect("upload file body");
 
         let key = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
             "audio",
-            Some(&storage.self_uploader()),
+            &location(&storage),
             "track1",
             None,
         )
@@ -2101,6 +1902,7 @@ mod tests {
         storage
             .put_blob(
                 "audio",
+                &location(&storage),
                 "track1",
                 BlobScope::Master,
                 None,
@@ -2114,7 +1916,7 @@ mod tests {
         storage
             .read_blob_to_file(
                 "audio",
-                Some(&storage.self_uploader()),
+                &location(&storage),
                 "track1",
                 BlobScope::Master,
                 None,
@@ -2233,6 +2035,7 @@ mod tests {
         storage
             .put_blob(
                 "images",
+                &location(&storage),
                 "blob-a",
                 BlobScope::Master,
                 None,
@@ -2243,6 +2046,7 @@ mod tests {
         storage
             .put_blob(
                 "images",
+                &location(&storage),
                 "blob-b",
                 BlobScope::Master,
                 None,
@@ -2251,11 +2055,10 @@ mod tests {
             .await
             .expect("put blob b");
 
-        let uploader = storage.self_uploader();
         let key_a = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
             "images",
-            Some(&uploader),
+            &location(&storage),
             "blob-a",
             None,
         )
@@ -2263,7 +2066,7 @@ mod tests {
         let key_b = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
             "images",
-            Some(&uploader),
+            &location(&storage),
             "blob-b",
             None,
         )
@@ -2279,7 +2082,13 @@ mod tests {
 
         assert!(
             storage
-                .get_blob("images", Some(&uploader), "blob-b", BlobScope::Master, None)
+                .get_blob(
+                    "images",
+                    &location(&storage),
+                    "blob-b",
+                    BlobScope::Master,
+                    None
+                )
                 .await
                 .is_err(),
             "a blob substituted at another key must fail authentication",
@@ -2689,14 +2498,20 @@ mod tests {
         // A Master-scoped blob is stored verbatim too (no per-scope key).
         let blob = b"cover-art-plaintext".to_vec();
         storage
-            .put_blob("photos", "p1cover", BlobScope::Master, None, blob.clone())
+            .put_blob(
+                "photos",
+                &location(&storage),
+                "p1cover",
+                BlobScope::Master,
+                None,
+                blob.clone(),
+            )
             .await
             .expect("put_blob");
-        let uploader = storage.self_uploader();
         let hashed = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
             "photos",
-            Some(&uploader),
+            &location(&storage),
             "p1cover",
             None,
         )
@@ -2710,7 +2525,7 @@ mod tests {
             storage
                 .get_blob(
                     "photos",
-                    Some(&uploader),
+                    &location(&storage),
                     "p1cover",
                     BlobScope::Master,
                     None
@@ -2742,6 +2557,7 @@ mod tests {
         storage
             .put_blob(
                 "images",
+                &location(&storage),
                 "cover-row-id",
                 BlobScope::Master,
                 Some(cloud_path),
@@ -2750,17 +2566,23 @@ mod tests {
             .await
             .expect("put_blob plain");
 
-        // It lands at the bare readable key.
+        let readable = CloudSyncStorage::blob_key(
+            BlobPathScheme::Plain,
+            "images",
+            &location(&storage),
+            "cover-row-id",
+            Some(cloud_path),
+        )
+        .unwrap();
         assert!(
-            home.get("images/Artist - Album/cover-cover-row-id.jpg")
-                .is_some(),
+            home.get(&readable).is_some(),
             "blob stored at the readable cloud_path key",
         );
         // The hashed shard key it would otherwise have used does not exist.
         let hashed = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
             "images",
-            Some(&storage.self_uploader()),
+            &location(&storage),
             "cover-row-id",
             None,
         )
@@ -2774,7 +2596,7 @@ mod tests {
         let got = storage
             .get_blob(
                 "images",
-                None,
+                &location(&storage),
                 "cover-row-id",
                 BlobScope::Master,
                 Some(cloud_path),
@@ -2785,67 +2607,35 @@ mod tests {
     }
 
     #[test]
-    fn generated_blob_keys_extend_legacy_layouts_without_changing_legacy_keys() {
-        let legacy = crate::blob::CloudBlobLocation::legacy("aa11");
-        let generated = crate::blob::CloudBlobLocation {
-            uploader: "aa11".to_string(),
-            generation: Some("deadbeef".to_string()),
-            version: Some("0000000001000-0000-test".to_string()),
-        };
+    fn blob_keys_require_the_exact_generated_location() {
+        let generated = test_blob_location("aa11", 1000);
         assert_eq!(
-            CloudSyncStorage::blob_key_at(
+            CloudSyncStorage::blob_key(
                 BlobPathScheme::Hashed,
                 "photos",
-                Some(&legacy),
+                &generated,
                 "aabbccdd",
                 None,
             )
             .unwrap(),
-            "photos/aa11/aa/bb/aabbccdd",
+            format!(
+                "photos/aa11/.coven-generations/aa/bb/aabbccdd/{}",
+                generated.generation
+            ),
         );
         assert_eq!(
-            CloudSyncStorage::blob_key_at(
-                BlobPathScheme::Hashed,
-                "photos",
-                Some(&generated),
-                "aabbccdd",
-                None,
-            )
-            .unwrap(),
-            "photos/aa11/.coven-generations/aa/bb/aabbccdd/deadbeef",
-        );
-        assert_eq!(
-            CloudSyncStorage::blob_key_at(
+            CloudSyncStorage::blob_key(
                 BlobPathScheme::Plain,
                 "photos",
-                Some(&legacy),
+                &generated,
                 "aabbccdd",
                 Some("Artist/cover.jpg"),
             )
             .unwrap(),
-            "photos/Artist/cover.jpg",
-        );
-        assert_eq!(
-            CloudSyncStorage::blob_key_at(
-                BlobPathScheme::Plain,
-                "photos",
-                Some(&generated),
-                "aabbccdd",
-                Some("Artist/cover.jpg"),
-            )
-            .unwrap(),
-            "photos/.coven-generations/aa11/deadbeef/Artist/cover.jpg",
-        );
-        assert!(
-            CloudSyncStorage::blob_key_at(
-                BlobPathScheme::Plain,
-                "photos",
-                Some(&legacy),
-                "aabbccdd",
-                Some(".coven-generations/aa11/deadbeef/file.jpg"),
-            )
-            .is_err(),
-            "the plain layout reserves its generated-object namespace",
+            format!(
+                "photos/.coven-generations/aa11/{}/Artist/cover.jpg",
+                generated.generation
+            ),
         );
     }
 
@@ -2855,8 +2645,14 @@ mod tests {
     #[tokio::test]
     async fn plain_scheme_without_cloud_path_errors() {
         assert!(
-            CloudSyncStorage::blob_key(BlobPathScheme::Plain, "images", None, "id-1", None)
-                .is_err(),
+            CloudSyncStorage::blob_key(
+                BlobPathScheme::Plain,
+                "images",
+                &test_blob_location("aa11", 1000),
+                "id-1",
+                None,
+            )
+            .is_err(),
             "blob_key for a plain home with no cloud_path must error",
         );
 
@@ -2869,7 +2665,14 @@ mod tests {
         );
         assert!(
             storage
-                .put_blob("images", "id-1", BlobScope::Master, None, b"x".to_vec())
+                .put_blob(
+                    "images",
+                    &location(&storage),
+                    "id-1",
+                    BlobScope::Master,
+                    None,
+                    b"x".to_vec()
+                )
                 .await
                 .is_err(),
             "put_blob for a plain home with no cloud_path must error, not silently hash",
@@ -2896,6 +2699,7 @@ mod tests {
         storage
             .put_blob(
                 "audio",
+                &location(&storage),
                 "track1",
                 BlobScope::Master,
                 None,
@@ -2907,7 +2711,7 @@ mod tests {
         let key = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
             "audio",
-            Some(&storage.self_uploader()),
+            &location(&storage),
             "track1",
             None,
         )
@@ -2951,6 +2755,7 @@ mod tests {
         storage
             .put_blob(
                 "audio",
+                &location(&storage),
                 "track1",
                 BlobScope::Master,
                 None,
@@ -2962,7 +2767,7 @@ mod tests {
         let key = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
             "audio",
-            Some(&storage.self_uploader()),
+            &location(&storage),
             "track1",
             None,
         )
@@ -3000,6 +2805,7 @@ mod tests {
         storage
             .put_blob(
                 "audio",
+                &location(&storage),
                 "track1",
                 BlobScope::Derived(scope_id.clone()),
                 None,
@@ -3011,7 +2817,7 @@ mod tests {
         let key = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
             "audio",
-            Some(&storage.self_uploader()),
+            &location(&storage),
             "track1",
             None,
         )
@@ -3063,6 +2869,7 @@ mod tests {
         storage
             .put_blob(
                 "audio",
+                &location(&storage),
                 "track1",
                 BlobScope::Master,
                 None,
@@ -3073,7 +2880,7 @@ mod tests {
         let key = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
             "audio",
-            Some(&storage.self_uploader()),
+            &location(&storage),
             "track1",
             None,
         )

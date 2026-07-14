@@ -29,18 +29,17 @@ macro_rules! coven_tables {
             cloud_outbox,
             "
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    operation TEXT NOT NULL CHECK (operation IN ('upload', 'delete', 'cancel')),
+    operation TEXT NOT NULL CHECK (operation IN ('upload', 'delete')),
     -- The blob's file id, which an upload reports progress under. NULL for a
-    -- delete or legacy-cancel entry, which carries no file id.
+    -- delete entry, which carries no file id.
     file_id TEXT,
     cloud_key TEXT NOT NULL,
     source_path TEXT,
-    -- Author-signed plaintext hash this upload must match. NULL only on rows
-    -- created by versions that predate content-bound uploads.
+    -- Author-signed plaintext hash this upload must match. Required for uploads.
     expected_hash TEXT,
     -- The blob's encryption scope (master / derived / item), serialized so the
     -- async drain resolves it to a key long after the enqueue site is gone.
-    -- NULL for delete and legacy-cancel entries, which touch no encryption key. Local bookkeeping;
+    -- NULL for delete entries, which touch no encryption key. Local bookkeeping;
     -- this table does not sync.
     scope TEXT,
     -- Whether a successful upload should also populate coven's protected cache
@@ -53,6 +52,7 @@ macro_rules! coven_tables {
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     last_attempt_at TEXT,
+    CHECK (operation != 'upload' OR expected_hash IS NOT NULL),
     UNIQUE(operation, cloud_key)
 "
         );
@@ -106,13 +106,12 @@ macro_rules! coven_tables {
     namespace TEXT NOT NULL,
     blob_id   TEXT NOT NULL,
     -- Exact immutable cloud location: member prefix, object generation, and the
-    -- HLC version that orders replacements. Legacy rows have NULL generation and
-    -- version. Recorded only from signed changeset metadata or our own upload;
+    -- HLC version that orders replacements. Recorded only from signed changeset metadata or our own upload;
     -- never inferred by scanning an untrusted listing. Preserved into snapshots
     -- so restored devices inherit the exact location of every active blob.
     uploader  TEXT NOT NULL,
-    generation TEXT,
-    version TEXT,
+    generation TEXT NOT NULL,
+    version TEXT NOT NULL,
     PRIMARY KEY (namespace, blob_id)
 "
         );
@@ -146,26 +145,6 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
     }
 
     coven_tables!(apply_table);
-    let columns = conn
-        .prepare("PRAGMA table_info(blob_uploaders)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if !columns.iter().any(|column| column == "generation") {
-        conn.execute("ALTER TABLE blob_uploaders ADD COLUMN generation TEXT", [])?;
-    }
-    if !columns.iter().any(|column| column == "version") {
-        conn.execute("ALTER TABLE blob_uploaders ADD COLUMN version TEXT", [])?;
-    }
-    let outbox_columns = conn
-        .prepare("PRAGMA table_info(cloud_outbox)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if !outbox_columns
-        .iter()
-        .any(|column| column == "expected_hash")
-    {
-        conn.execute("ALTER TABLE cloud_outbox ADD COLUMN expected_hash TEXT", [])?;
-    }
     Ok(())
 }
 
@@ -225,61 +204,31 @@ mod tests {
         }
     }
 
-    fn blob_uploader_columns(conn: &rusqlite::Connection) -> Vec<String> {
-        conn.prepare("PRAGMA table_info(blob_uploaders)")
-            .unwrap()
-            .query_map([], |row| row.get(1))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-    }
-
     #[test]
-    fn fresh_blob_location_schema_includes_nullable_generation_and_version() {
+    fn fresh_blob_location_schema_requires_generation_version_and_upload_hash() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         apply_coven_schema(&conn).unwrap();
-        assert!(blob_uploader_columns(&conn)
-            .iter()
-            .any(|name| name == "generation"));
-        assert!(blob_uploader_columns(&conn)
-            .iter()
-            .any(|name| name == "version"));
-        conn.execute(
-            "INSERT INTO blob_uploaders (namespace, blob_id, uploader, generation) \
-             VALUES ('photos', 'p1', 'aa11', NULL)",
-            [],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn opening_legacy_blob_uploader_schema_adds_location_columns_without_losing_rows() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE blob_uploaders (\
-                 namespace TEXT NOT NULL, blob_id TEXT NOT NULL, uploader TEXT NOT NULL, \
-                 PRIMARY KEY (namespace, blob_id)\
-             ) STRICT;\
-             INSERT INTO blob_uploaders VALUES ('photos', 'p1', 'aa11');",
-        )
-        .unwrap();
-
-        apply_coven_schema(&conn).unwrap();
-
-        assert!(blob_uploader_columns(&conn)
-            .iter()
-            .any(|name| name == "generation"));
-        assert!(blob_uploader_columns(&conn)
-            .iter()
-            .any(|name| name == "version"));
-        let row: (String, Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT uploader, generation, version FROM blob_uploaders WHERE namespace = 'photos' AND blob_id = 'p1'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
+        let mut stmt = conn.prepare("PRAGMA table_info(blob_uploaders)").unwrap();
+        let not_null = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+            })
+            .unwrap()
+            .collect::<Result<std::collections::HashMap<_, _>, _>>()
             .unwrap();
-        assert_eq!(row, ("aa11".to_string(), None, None));
+        assert_eq!(not_null.get("generation"), Some(&1));
+        assert_eq!(not_null.get("version"), Some(&1));
+        assert!(conn.execute(
+            "INSERT INTO blob_uploaders (namespace, blob_id, uploader) VALUES ('photos', 'p1', 'aa11')",
+            [],
+        ).is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO cloud_outbox (operation, file_id, cloud_key, scope, created_at) \
+             VALUES ('upload', 'p1', 'photos/key', 'master', 'stamp')",
+                [],
+            )
+            .is_err());
     }
 }
 
@@ -331,7 +280,7 @@ pub enum OutboxOperation {
         /// default storage path for `file_id`.
         source_path: Option<String>,
         /// Author-signed plaintext hash this upload must match.
-        expected_hash: Option<String>,
+        expected_hash: String,
         /// The blob's encryption scope, named by the host at enqueue. An upload
         /// always has one — a delete, which touches no key, has none.
         scope: crate::blob::BlobScope,
@@ -347,7 +296,4 @@ pub enum OutboxOperation {
     /// grace has passed, so a peer that still references it isn't stranded. See
     /// [`crate::blob::delete`]. Carries no extra fields.
     Delete,
-    /// Remove a tombstone left by a legacy mutable-key upload. Generated-key
-    /// uploads do not need this because their tombstones name older objects.
-    Cancel,
 }

@@ -14,14 +14,14 @@ use async_trait::async_trait;
 use crate::blob::delete::{
     drain_tombstones, gc_tombstones, BlobTombstoneJson, BLOB_TOMBSTONE_GRACE,
 };
-use crate::blob::{BlobScope, CacheFill, Provenance};
+use crate::blob::{BlobScope, CacheFill, CloudBlobLocation, Provenance};
 use crate::clock::FixedClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo};
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::session::BlobDecl;
@@ -37,6 +37,15 @@ const T0: &str = "2024-06-01T00:00:00Z";
 /// valid token works — the GC's live-row lookup keys off namespace + id, not the
 /// uploader — so a fixed one keeps the keys deterministic.
 const GC_TEST_UPLOADER: &str = "aa11bb22";
+const GC_TEST_GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+fn gc_location(counter: u64) -> CloudBlobLocation {
+    CloudBlobLocation {
+        uploader: GC_TEST_UPLOADER.to_string(),
+        generation: GC_TEST_GENERATION.to_string(),
+        version: format!("{counter:013}-0000-gc"),
+    }
+}
 
 /// A wall-clock instant for the tests, fixed so the grace math is deterministic.
 fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
@@ -570,9 +579,18 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
     use crate::db::OutboxOperation;
 
     let db = open_outbox_db();
-    db.enqueue_upload("f1", "k-up", None, BlobScope::Master, false, T0)
-        .await
-        .expect("enqueue upload");
+    let expected_hash = crate::blob::content_hash(b"upload");
+    db.enqueue_upload(
+        "f1",
+        "k-up",
+        None,
+        BlobScope::Master,
+        false,
+        &expected_hash,
+        T0,
+    )
+    .await
+    .expect("enqueue upload");
     db.enqueue_delete("k-del", T0)
         .await
         .expect("enqueue delete");
@@ -586,7 +604,7 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
             source_path: None,
             scope: BlobScope::Master,
             retain_pinned: false,
-            expected_hash: None,
+            expected_hash,
         },
         "an upload entry carries its scope in the variant"
     );
@@ -906,8 +924,9 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let cloud_key = StoreDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "bloblive")
-        .expect("hashed blob key");
+    let cloud_key =
+        StoreDir::generated_blob_key("photos", GC_TEST_UPLOADER, "bloblive", GC_TEST_GENERATION)
+            .expect("hashed blob key");
 
     exec(
         &db,
@@ -917,6 +936,9 @@ async fn tombstone_gc_cancels_when_a_live_row_still_references_the_blob() {
          VALUES ('bloblive', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
+    db.record_blob_location("photos", "bloblive", &gc_location(1000))
+        .await
+        .unwrap();
     storage
         .write(
             &cloud_key,
@@ -980,9 +1002,24 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
             .with_id_column("blob_id")
             .with_cloud_path_column("cloud_path"),
     );
-    // A browsable home keys a blob at `{namespace}/{cloud_path}` with no uploader segment.
-    let replaced_key = "photos/n1/cover-p1cover.jpg";
-    let live_key = "photos/n1/cover-p2cover.jpg";
+    let replaced_location = gc_location(1000);
+    let live_location = gc_location(2000);
+    let replaced_key = CloudSyncStorage::blob_key(
+        BlobPathScheme::Plain,
+        "photos",
+        &replaced_location,
+        "p1cover",
+        Some("n1/cover-p1cover.jpg"),
+    )
+    .unwrap();
+    let live_key = CloudSyncStorage::blob_key(
+        BlobPathScheme::Plain,
+        "photos",
+        &live_location,
+        "p2cover",
+        Some("n1/cover-p2cover.jpg"),
+    )
+    .unwrap();
 
     // The row has been repointed: it carries the replacement, and its path names it.
     exec(
@@ -994,7 +1031,10 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
          '0000000002000-0000-dev1', '2026-01-01')",
     )
     .await;
-    for key in [replaced_key, live_key] {
+    db.record_blob_location("photos", "p2cover", &live_location)
+        .await
+        .unwrap();
+    for key in [&replaced_key, &live_key] {
         storage
             .write(
                 key,
@@ -1008,9 +1048,9 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
     // The replacement tombstoned the blob it replaced. A tombstone also stands for the
     // live blob's key — a stale one the GC must cancel, not act on.
     let deleted_at = "2024-06-01T00:00:00+00:00";
-    for key in [replaced_key, live_key] {
+    for key in [&replaced_key, &live_key] {
         let tombstone =
-            BlobTombstoneJson::signed("test-lib", key.to_string(), deleted_at.to_string(), &member);
+            BlobTombstoneJson::signed("test-lib", key.clone(), deleted_at.to_string(), &member);
         plant_tombstone(&storage, &tombstone).await;
     }
 
@@ -1030,11 +1070,11 @@ async fn tombstone_gc_reclaims_a_replaced_blob_and_keeps_the_one_that_replaced_i
 
     assert_eq!(reclaimed, 1, "exactly the replaced blob is reclaimed");
     assert!(
-        storage.read(replaced_key).await.is_err(),
+        storage.read(&replaced_key).await.is_err(),
         "the replaced blob's object is collected — no live row names its key",
     );
     assert!(
-        storage.read(live_key).await.is_ok(),
+        storage.read(&live_key).await.is_ok(),
         "the blob the row now holds is protected by the live-row check",
     );
     assert!(
@@ -1062,8 +1102,9 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let cloud_key = StoreDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "bloblive")
-        .expect("hashed blob key");
+    let cloud_key =
+        StoreDir::generated_blob_key("photos", GC_TEST_UPLOADER, "bloblive", GC_TEST_GENERATION)
+            .expect("hashed blob key");
 
     // The peer's still-stale view: the gated root is shared (remote) and the child row
     // that carries the blob is present.
@@ -1075,6 +1116,9 @@ async fn tombstone_within_grace_survives_gc_despite_a_stale_live_row() {
          VALUES ('bloblive', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
     )
     .await;
+    db.record_blob_location("photos", "bloblive", &gc_location(1000))
+        .await
+        .unwrap();
     storage
         .write(
             &cloud_key,
@@ -1169,8 +1213,9 @@ async fn tombstone_gc_skips_when_the_referencing_row_locality_is_unresolved() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let cloud_key = StoreDir::uploader_hashed_key("photos", GC_TEST_UPLOADER, "orphan")
-        .expect("hashed blob key");
+    let cloud_key =
+        StoreDir::generated_blob_key("photos", GC_TEST_UPLOADER, "orphan", GC_TEST_GENERATION)
+            .expect("hashed blob key");
 
     // An orphaned child: it carries the blob but its parent note is absent, so the FK
     // up-walk that resolves locality hits a missing row. Insert it with foreign keys
@@ -1183,6 +1228,9 @@ async fn tombstone_gc_skips_when_the_referencing_row_locality_is_unresolved() {
          PRAGMA foreign_keys=ON",
     )
     .await;
+    db.record_blob_location("photos", "orphan", &gc_location(1000))
+        .await
+        .unwrap();
     storage
         .write(
             &cloud_key,
@@ -1246,10 +1294,15 @@ async fn gc_reclaims_own_prefix_and_leaves_a_foreign_members_blob() {
     // One blob under the member's own prefix, one under the founder's. No live rows
     // reference either (the DB is empty), so both are ripe for reclaim — only the
     // prefix gate decides which the member may delete.
-    let mine = StoreDir::uploader_hashed_key("photos", &pubkey_hex(&member), "mineblob")
-        .expect("own hashed key");
-    let foreign =
-        StoreDir::uploader_hashed_key("photos", &owner, "foreignblob").expect("foreign hashed key");
+    let mine = StoreDir::generated_blob_key(
+        "photos",
+        &pubkey_hex(&member),
+        "mineblob",
+        GC_TEST_GENERATION,
+    )
+    .expect("own hashed key");
+    let foreign = StoreDir::generated_blob_key("photos", &owner, "foreignblob", GC_TEST_GENERATION)
+        .expect("foreign hashed key");
     for key in [&mine, &foreign] {
         storage
             .write(
@@ -1314,8 +1367,13 @@ async fn owner_sweep_reclaims_an_absent_members_blob() {
         CacheFill::CacheEager,
     ));
 
-    let foreign = StoreDir::uploader_hashed_key("photos", &pubkey_hex(&member), "absentblob")
-        .expect("member hashed key");
+    let foreign = StoreDir::generated_blob_key(
+        "photos",
+        &pubkey_hex(&member),
+        "absentblob",
+        GC_TEST_GENERATION,
+    )
+    .expect("member hashed key");
     storage
         .write(
             &foreign,
@@ -1368,8 +1426,12 @@ async fn gc_of_an_old_generation_cannot_delete_a_concurrent_new_generation() {
     let owner = pubkey_hex(&founder);
     let cipher = plaintext_cipher();
 
-    let old_generation = format!("photos/{GC_TEST_UPLOADER}/aa/bb/aabbccdd/generations/aaa1");
-    let new_generation = format!("photos/{GC_TEST_UPLOADER}/aa/bb/aabbccdd/generations/aaa2");
+    let old_generation =
+        StoreDir::generated_blob_key("photos", GC_TEST_UPLOADER, "aabbccdd", GC_TEST_GENERATION)
+            .unwrap();
+    let new_generation =
+        StoreDir::generated_blob_key("photos", GC_TEST_UPLOADER, "aabbccdd", &"b".repeat(64))
+            .unwrap();
     storage
         .write(
             &old_generation,
@@ -1838,10 +1900,11 @@ async fn tombstone_bound_to_a_different_store_is_ignored() {
 /// both for one key.
 #[tokio::test]
 async fn enqueue_upload_and_delete_cancel_each_other_for_a_key() {
+    let expected_hash = crate::blob::content_hash(b"upload");
     // delete then upload → no delete row remains, the upload stands.
     let db = open_outbox_db();
     db.enqueue_delete("k", T0).await.expect("enqueue delete");
-    db.enqueue_upload("f", "k", None, BlobScope::Master, false, T0)
+    db.enqueue_upload("f", "k", None, BlobScope::Master, false, &expected_hash, T0)
         .await
         .expect("enqueue upload");
     assert!(
@@ -1856,7 +1919,7 @@ async fn enqueue_upload_and_delete_cancel_each_other_for_a_key() {
 
     // upload then delete → no upload row remains, the delete stands.
     let db = open_outbox_db();
-    db.enqueue_upload("f", "k", None, BlobScope::Master, false, T0)
+    db.enqueue_upload("f", "k", None, BlobScope::Master, false, &expected_hash, T0)
         .await
         .expect("enqueue upload");
     db.enqueue_delete("k", T0).await.expect("enqueue delete");
@@ -1873,9 +1936,17 @@ async fn enqueue_upload_and_delete_cancel_each_other_for_a_key() {
     // The cancel is key-scoped: a delete for one key doesn't touch an upload for
     // another.
     let db = open_outbox_db();
-    db.enqueue_upload("f", "keep", None, BlobScope::Master, false, T0)
-        .await
-        .expect("enqueue upload");
+    db.enqueue_upload(
+        "f",
+        "keep",
+        None,
+        BlobScope::Master,
+        false,
+        &expected_hash,
+        T0,
+    )
+    .await
+    .expect("enqueue upload");
     db.enqueue_delete("other", T0)
         .await
         .expect("enqueue delete");

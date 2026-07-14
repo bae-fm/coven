@@ -39,8 +39,8 @@ use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::run_test_cycle;
 use crate::sync::test_helpers::{
     append_membership_entry, exec, founder_entry, open_test_db, open_test_db_with_blob, pubkey_hex,
-    publish_membership_chain_head, temp_store_dir, test_migrations, test_synced_tables,
-    test_synced_tables_with_blob, MockSyncStorage,
+    publish_membership_chain_head, record_test_blob_location, temp_store_dir, test_blob_location,
+    test_migrations, test_synced_tables, test_synced_tables_with_blob, MockSyncStorage,
 };
 
 /// A restore code carrying the given `sid`. The provider points at a loopback
@@ -50,7 +50,11 @@ fn restore_code_with_sid(sid: &str) -> String {
     let code = RestoreCode {
         v: crate::sync::restore_code::RESTORE_CODE_VERSION,
         sid: sid.to_string(),
-        ek: Some("aa".repeat(32)),
+        ek: Some(
+            EncryptionService::from_key([0xAA; 32])
+                .to_keyring_string()
+                .unwrap(),
+        ),
         name: "Evil".to_string(),
         provider: CloudHomeJoinInfo::S3 {
             bucket: "bucket".to_string(),
@@ -471,8 +475,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         key_prefix: None,
     };
 
-    let master_key = crate::encryption::MasterKeyring::from_serialized(&"bb".repeat(32))
-        .expect("parse the legacy raw-hex fixture key");
+    let master_key = crate::encryption::MasterKeyring::generate();
     let result = bootstrap_and_save_store(
         &joiner_storage,
         &cipher,
@@ -1002,13 +1005,8 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     // snapshot carries this uploader index forward so the restoring device resolves
     // the blob's prefix from it (there is no listing scan). The cover is keyed under
     // the owner's own uploader segment on the hashed home.
-    crate::sync::test_helpers::record_blob_uploader(
-        &db_owner,
-        "photos",
-        "photo1",
-        &owner_storage.own_uploader().expect("owner uploader"),
-    )
-    .await;
+    let location = test_blob_location(&owner_storage.own_uploader().expect("owner uploader"), 1000);
+    record_test_blob_location(&db_owner, "photos", "photo1", &location).await;
 
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
@@ -1042,6 +1040,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     owner_storage
         .put_blob(
             "photos",
+            &location,
             "photo1",
             crate::blob::BlobScope::Master,
             None,

@@ -42,6 +42,8 @@ pub enum PathTokenError {
     /// The dash-stripped id is too short, or splits a multi-byte char, to take the
     /// two leading byte-pairs the `{ab}/{cd}` partition prefix needs.
     Unindexable,
+    /// A cloud object generation is not exactly 64 lowercase hexadecimal characters.
+    InvalidGeneration,
 }
 
 impl std::fmt::Display for PathTokenError {
@@ -57,6 +59,12 @@ impl std::fmt::Display for PathTokenError {
                 write!(
                     f,
                     "id is too short or misaligned to form a partition prefix"
+                )
+            }
+            PathTokenError::InvalidGeneration => {
+                write!(
+                    f,
+                    "blob generation must be exactly 64 lowercase hexadecimal characters"
                 )
             }
         }
@@ -242,58 +250,62 @@ impl StoreDir {
     }
 
     /// The cloud object key for a Hashed-scheme blob under the device that
-    /// uploaded it: `{namespace}/{uploader}/{ab}/{cd}/{id}`. The `{uploader}`
+    /// uploaded it: `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`. The `{uploader}`
     /// segment is what aligns the blob keyspace to the storage-access rule (a
     /// member writes only under its own public key), so a bucket ACL can scope each
     /// member to `{namespace}/{self}/`. Only the *cloud* key carries it; the local
     /// cache keeps the un-prefixed `{namespace}/{ab}/{cd}/{id}` layout because it is
     /// per-device. `namespace` and `uploader` are validated as single path tokens;
     /// the id must be indexable (see [`Self::id_shard`]).
-    pub fn uploader_hashed_key(
+    pub fn generated_blob_key(
         namespace: &str,
         uploader: &str,
         id: &str,
+        generation: &str,
     ) -> Result<String, PathTokenError> {
         validate_path_token(namespace)?;
         validate_path_token(uploader)?;
-        Ok(format!("{namespace}/{uploader}/{}", Self::id_shard(id)?))
+        if generation.len() != 64
+            || !generation
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(PathTokenError::InvalidGeneration);
+        }
+        Ok(format!(
+            "{namespace}/{uploader}/.coven-generations/{}/{generation}",
+            Self::id_shard(id)?
+        ))
     }
 
-    /// Parse a hashed blob cloud key `{namespace}/{uploader}/{ab}/{cd}/{id}` back
-    /// into `(namespace, uploader, id)`, or `None` when it is not one — a wrong
+    /// Parse a hashed blob cloud key
+    /// `{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}`
+    /// back into `(namespace, uploader, id, generation)`, or `None` when it is not
+    /// one — a wrong
     /// segment count, or a shard that does not rebuild (e.g. a plain
     /// `{namespace}/{cloud_path}` key that happens to have five segments). The
-    /// inverse of [`Self::uploader_hashed_key`], and the single place the layout is
+    /// inverse of [`Self::generated_blob_key`], and the single place the layout is
     /// parsed, shared by the GC, the blob→row lookup, and share authorization.
-    pub fn parse_uploader_hashed_key(
-        cloud_key: &str,
-    ) -> Option<(String, String, String, Option<String>)> {
+    pub fn parse_generated_blob_key(cloud_key: &str) -> Option<(String, String, String, String)> {
         let parts: Vec<_> = cloud_key.split('/').collect();
-        let (namespace, uploader, ab, cd, id, generation) = match parts.as_slice() {
-            [namespace, uploader, ab, cd, id] => (*namespace, *uploader, *ab, *cd, *id, None),
+        let (namespace, uploader, _ab, _cd, id, generation) = match parts.as_slice() {
             [namespace, uploader, ".coven-generations", ab, cd, id, generation]
-                if !generation.is_empty()
+                if generation.len() == 64
                     && generation
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
             {
-                (*namespace, *uploader, *ab, *cd, *id, Some(*generation))
+                (*namespace, *uploader, *ab, *cd, *id, *generation)
             }
             _ => return None,
         };
-        let legacy = Self::uploader_hashed_key(namespace, uploader, id).ok()?;
-        let expected = match generation {
-            Some(generation) => {
-                format!("{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}")
-            }
-            None => legacy,
-        };
+        let expected = Self::generated_blob_key(namespace, uploader, id, generation).ok()?;
         (expected == cloud_key).then(|| {
             (
                 namespace.to_string(),
                 uploader.to_string(),
                 id.to_string(),
-                generation.map(str::to_string),
+                generation.to_string(),
             )
         })
     }
@@ -508,28 +520,20 @@ mod tests {
     }
 
     #[test]
-    fn uploader_hashed_parser_accepts_legacy_and_generated_keys() {
-        let legacy = StoreDir::uploader_hashed_key("photos", "aa11", "aabbccdd").unwrap();
-        let expected = Some((
-            "photos".to_string(),
-            "aa11".to_string(),
-            "aabbccdd".to_string(),
-            None,
-        ));
-        assert_eq!(StoreDir::parse_uploader_hashed_key(&legacy), expected);
+    fn generated_blob_parser_requires_fixed_lowercase_hex_generation() {
+        let generation = "a".repeat(64);
+        let key = StoreDir::generated_blob_key("photos", "aa11", "aabbccdd", &generation).unwrap();
         assert_eq!(
-            StoreDir::parse_uploader_hashed_key(
-                "photos/aa11/.coven-generations/aa/bb/aabbccdd/deadbeef"
-            ),
+            StoreDir::parse_generated_blob_key(&key),
             Some((
                 "photos".to_string(),
                 "aa11".to_string(),
                 "aabbccdd".to_string(),
-                Some("deadbeef".to_string()),
+                generation,
             )),
         );
         assert_eq!(
-            StoreDir::parse_uploader_hashed_key(
+            StoreDir::parse_generated_blob_key(
                 "photos/aa11/.coven-generations/aa/bb/aabbccdd/not-hex"
             ),
             None,

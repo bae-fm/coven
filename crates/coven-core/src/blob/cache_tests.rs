@@ -8,8 +8,8 @@
 //! without a cloud round-trip.
 
 use super::cache::{
-    clear_cache, evict_to_budget, open_blob_stream, pin, read_blob, unpin, write_blob,
-    BlobCacheError,
+    clear_cache, evict_to_budget, materialize_remote_blob_to_file, open_blob_stream, pin,
+    read_blob, unpin, write_blob, BlobCacheError,
 };
 use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
 use crate::database::Database;
@@ -20,7 +20,7 @@ use crate::sync::test_helpers::{
     capture_bytes, open_test_db, open_test_db_schema, open_test_db_with_blob,
     open_test_db_with_user_and_host_blobs, plant_blob_row, plant_blob_row_with_size_hash,
     pull_into, read_test_db, read_test_db_with_download_limit, set_blob_remote, temp_store_dir,
-    test_migrations, MockSyncStorage,
+    test_blob_location, test_blob_location_record, test_migrations, MockSyncStorage,
 };
 
 /// The synthetic test db opens with a single migration, so its
@@ -85,25 +85,36 @@ fn plain_blob_db(decl: BlobDecl) -> Database {
 }
 
 /// Put `bytes` into the mock cloud under the flat `{namespace}/{id}` key the mock's
-/// `get_blob` reads back (master scope, no cloud_path), and record the mock's
-/// uploader for the blob — standing in for the pull that records the changeset
-/// author, so the read resolves the blob's uploader from the index (there is no
-/// listing scan). A cache miss can then fetch it.
+/// `get_blob` reads back (master scope, no cloud_path), and record its exact
+/// generated location. A cache miss can then fetch it.
 async fn put_cloud_blob(
     db: &Database,
     storage: &MockSyncStorage,
     id: &str,
     namespace: &str,
     bytes: &[u8],
-) {
+) -> crate::blob::CloudBlobLocation {
+    let location = test_blob_location(&storage.own_uploader().expect("mock uploader"), 1000);
     storage
-        .put_blob(namespace, id, BlobScope::Master, None, bytes.to_vec())
+        .put_blob(
+            namespace,
+            &location,
+            id,
+            BlobScope::Master,
+            None,
+            bytes.to_vec(),
+        )
         .await
         .expect("put blob in mock cloud");
-    let uploader = storage.own_uploader().expect("mock uploader");
-    db.record_blob_uploader(namespace, id, &uploader)
+    db.record_blob_location(namespace, id, &location)
         .await
-        .expect("record mock uploader");
+        .expect("record mock location");
+    location
+}
+
+async fn delete_cloud_blob(db: &Database, storage: &MockSyncStorage, namespace: &str, id: &str) {
+    let location = db.blob_location(namespace, id).await.unwrap().unwrap();
+    storage.delete_blob_object(namespace, &location, id).await;
 }
 
 /// A second read is a local hit: the first read populates `cache/<id>` from the
@@ -134,7 +145,7 @@ async fn second_read_is_a_local_hit() {
 
     // Delete the cloud copy so a second fetch would fail: the read must be served
     // from the local file, proving the cache hit, not a re-download.
-    storage.delete_blob_object("audio", &blob.id).await;
+    delete_cloud_blob(&db, &storage, "audio", &blob.id).await;
     let second = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("second read is served from the local cache");
@@ -350,8 +361,16 @@ async fn cache_eager_lands_in_cache_on_pull() {
         ],
     )
     .await;
-    put_cloud_blob(&db1, &storage, "ph01abcd", "photos", cover).await;
-    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+    let location = put_cloud_blob(&db1, &storage, "ph01abcd", "photos", cover).await;
+    storage.store_changeset_with_blob_locations(
+        "dev1",
+        1,
+        &cs,
+        SCHEMA_VERSION,
+        vec![test_blob_location_record(
+            "photos", "ph01abcd", location, cover,
+        )],
+    );
 
     // The puller declares the photo a CacheEager blob; the pull writes it into the
     // store dir's evictable cache tree.
@@ -632,7 +651,17 @@ async fn cache_lazy_fetches_on_first_read() {
         ],
     )
     .await;
-    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+    let bytes = b"AUDIO-PAYLOAD".to_vec();
+    let location = put_cloud_blob(&db1, &storage, "aud01234", "audio", &bytes).await;
+    storage.store_changeset_with_blob_locations(
+        "dev1",
+        1,
+        &cs,
+        SCHEMA_VERSION,
+        vec![test_blob_location_record(
+            "audio", "aud01234", location, &bytes,
+        )],
+    );
 
     let db2 = open_test_db_with_blob(BlobDecl::new(
         "audio",
@@ -651,9 +680,7 @@ async fn cache_lazy_fetches_on_first_read() {
         "a CacheLazy blob is not fetched on pull — neither folder holds it",
     );
 
-    // Now put it in the cloud and read it: the first read fetches into the cache.
-    let bytes = b"AUDIO-PAYLOAD".to_vec();
-    put_cloud_blob(&db2, &storage, "aud01234", "audio", &bytes).await;
+    // The first read fetches the already-published bytes into the cache.
     let blob = blob_ref("aud01234", "audio", CacheFill::CacheLazy);
     let got = read_blob(&db2, &ld, Some(&storage), &blob)
         .await
@@ -762,7 +789,7 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
         .cache_blob_path(&blob.namespace, &blob.id)
         .unwrap()
         .exists());
-    storage.delete_blob_object("audio", &blob.id).await;
+    delete_cloud_blob(&db, &storage, "audio", &blob.id).await;
 
     // A window from the middle of the file.
     let (offset, len) = (1234u64, 1000u64);
@@ -890,7 +917,7 @@ async fn full_read_blob_still_populates_the_cache() {
     );
 
     // Cloud copy gone → the second whole-file read must be a local hit.
-    storage.delete_blob_object("audio", &blob.id).await;
+    delete_cloud_blob(&db, &storage, "audio", &blob.id).await;
     let second = read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("second whole-file read is served from the cache");
@@ -943,7 +970,7 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     read_blob(&db, &ld, Some(&storage), &cached)
         .await
         .expect("populate the cache");
-    storage.delete_blob_object("audio", &cached.id).await;
+    delete_cloud_blob(&db, &storage, "audio", &cached.id).await;
     assert!(
         open_blob_stream(
             &db,
@@ -1303,7 +1330,7 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
 #[tokio::test]
 async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_cloud() {
     let db = read_test_db("audio");
-    let (_tmp, ld) = temp_store_dir();
+    let (tmp, ld) = temp_store_dir();
     let blob = blob_ref("rem0dddd", "audio", CacheFill::CacheLazy);
 
     plant_blob_row_with_size_hash(&db, &blob.id, true, 17, None).await;
@@ -1315,7 +1342,7 @@ async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_clou
         .await
         .expect_err("Remote + user-provided read needs cache or cloud");
     assert!(
-        matches!(err, BlobCacheError::NoCloudHome),
+        matches!(err, BlobCacheError::MissingContentHash { .. }),
         "a stale local-store file does not satisfy a Remote + user-provided read: {err:?}",
     );
 
@@ -1323,9 +1350,23 @@ async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_clou
         .await
         .expect_err("Remote + user-provided range read needs cache or cloud");
     assert!(
-        matches!(range_err, BlobCacheError::NoCloudHome),
+        matches!(range_err, BlobCacheError::MissingContentHash { .. }),
         "a stale local-store file does not satisfy a ranged Remote + user-provided read: {range_err:?}",
     );
+
+    let pin_err = pin(&db, &ld, None, std::slice::from_ref(&blob))
+        .await
+        .expect_err("pin requires a signed content hash");
+    assert!(matches!(pin_err, BlobCacheError::MissingContentHash { .. }));
+
+    let materialize_err =
+        materialize_remote_blob_to_file(&db, &ld, None, &blob, &tmp.path().join("materialized"))
+            .await
+            .expect_err("materialization requires a signed content hash");
+    assert!(matches!(
+        materialize_err,
+        BlobCacheError::MissingContentHash { .. }
+    ));
 }
 
 #[tokio::test]
@@ -1369,8 +1410,17 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
         ],
     )
     .await;
-    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
-    put_cloud_blob(&db1, &storage, "lazy0001", "photos", b"LAZY-REMOTE-ROOT").await;
+    let bytes = b"LAZY-REMOTE-ROOT";
+    let location = put_cloud_blob(&db1, &storage, "lazy0001", "photos", bytes).await;
+    storage.store_changeset_with_blob_locations(
+        "dev1",
+        1,
+        &cs,
+        SCHEMA_VERSION,
+        vec![test_blob_location_record(
+            "photos", "lazy0001", location, bytes,
+        )],
+    );
 
     let db2 = remote_root_db(BlobDecl::new(
         "photos",
@@ -1858,8 +1908,17 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
         ],
     )
     .await;
-    put_cloud_blob(&db1, &storage, "mir0aaaa", "photos", &[9u8; 500]).await;
-    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+    let bytes = [9u8; 500];
+    let location = put_cloud_blob(&db1, &storage, "mir0aaaa", "photos", &bytes).await;
+    storage.store_changeset_with_blob_locations(
+        "dev1",
+        1,
+        &cs,
+        SCHEMA_VERSION,
+        vec![test_blob_location_record(
+            "photos", "mir0aaaa", location, &bytes,
+        )],
+    );
 
     let db2 = open_test_db_with_blob(photo_decl());
     let (_tmp, ld) = temp_store_dir();

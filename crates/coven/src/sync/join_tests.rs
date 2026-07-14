@@ -1183,13 +1183,8 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     // A recorded who uploaded the cover when it imported the album. The snapshot
     // carries this uploader index forward (it is member-global, not per-device),
     // so B resolves the blob's prefix from it — there is no listing scan.
-    crate::sync::test_helpers::record_blob_uploader(
-        &db_a,
-        "photos",
-        "photo1",
-        &storage.own_uploader().expect("mock uploader"),
-    )
-    .await;
+    let location = test_blob_location(&storage.own_uploader().expect("mock uploader"), 1000);
+    record_test_blob_location(&db_a, "photos", "photo1", &location).await;
 
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
@@ -1224,6 +1219,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     storage
         .put_blob(
             "photos",
+            &location,
             "photo1",
             crate::blob::BlobScope::Master,
             None,
@@ -1303,13 +1299,8 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
     // A recorded who uploaded the cover when it imported the album. The snapshot
     // carries this uploader index forward (it is member-global, not per-device),
     // so B resolves the blob's prefix from it — there is no listing scan.
-    crate::sync::test_helpers::record_blob_uploader(
-        &db_a,
-        "photos",
-        "photo1",
-        &storage.own_uploader().expect("mock uploader"),
-    )
-    .await;
+    let location = test_blob_location(&storage.own_uploader().expect("mock uploader"), 1000);
+    record_test_blob_location(&db_a, "photos", "photo1", &location).await;
 
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
@@ -1411,13 +1402,8 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
     // A recorded who uploaded the cover when it imported the album. The snapshot
     // carries this uploader index forward (it is member-global, not per-device),
     // so B resolves the blob's prefix from it — there is no listing scan.
-    crate::sync::test_helpers::record_blob_uploader(
-        &db_a,
-        "photos",
-        "photo1",
-        &storage.own_uploader().expect("mock uploader"),
-    )
-    .await;
+    let location = test_blob_location(&storage.own_uploader().expect("mock uploader"), 1000);
+    record_test_blob_location(&db_a, "photos", "photo1", &location).await;
 
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();

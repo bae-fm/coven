@@ -409,13 +409,14 @@ fn clear_local_only_tables(path: &Path, synced: &[SyncedTable]) -> Result<(), Sn
 /// facts recorded from signed changesets or our own upload. A restored device did
 /// not see the changesets that introduced the blobs, so the Owner-signed snapshot
 /// carries their exact read locations instead of forcing a listing search.
-const SNAPSHOT_PRESERVED_NON_SYNCED_TABLE: &str = "blob_uploaders";
+const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: [&str; 2] =
+    ["blob_uploaders", "blob_location_versions"];
 
 /// On the snapshot-copy connection, scope it down to exactly what is eligible to
 /// cross devices, then VACUUM to reclaim the freed pages:
 ///
 /// 1. Table-level: DELETE every user table not in `synced` (except the
-///    [`SNAPSHOT_PRESERVED_NON_SYNCED_TABLE`]) — local-only tables keep their
+///    [`SNAPSHOT_PRESERVED_NON_SYNCED_TABLES`]) — local-only tables keep their
 ///    schema, lose their rows.
 /// 2. Row-level: within the synced tables, DELETE the rows the gate excludes
 ///    (gated-false roots and their FK-descendants), so a private subtree does
@@ -426,7 +427,7 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
         if synced.iter().any(|t| t.name() == table) {
             continue;
         }
-        if table == SNAPSHOT_PRESERVED_NON_SYNCED_TABLE {
+        if SNAPSHOT_PRESERVED_NON_SYNCED_TABLES.contains(&table.as_str()) {
             continue;
         }
         conn.execute_batch(&format!(
@@ -1270,7 +1271,7 @@ pub async fn reconcile_snapshot_blobs(
             info!(total, "snapshot blob reconciliation cancelled");
             return Ok(SnapshotBlobReconcile::Cancelled);
         }
-        if !crate::sync::pull::download_blobs(db, vec![blob], storage, store_dir, &[], None).await {
+        if !crate::sync::pull::download_blobs(db, vec![blob], storage, store_dir, &[]).await {
             all_ok = false;
         }
     }
@@ -1852,8 +1853,10 @@ mod tests {
         exec(
             &db_a,
             &format!(
-                "INSERT INTO cloud_outbox (operation, file_id, cloud_key, scope, created_at) \
-                 VALUES ('upload', 'f1', 'blobs/f1', '{}', '2026-01-01')",
+                "INSERT INTO cloud_outbox \
+                 (operation, file_id, cloud_key, expected_hash, scope, created_at) \
+                 VALUES ('upload', 'f1', 'blobs/f1', '{}', '{}', '2026-01-01')",
+                crate::blob::content_hash(b"queued"),
                 crate::blob::BlobScope::Master.to_outbox_str()
             ),
         );
@@ -1861,6 +1864,21 @@ mod tests {
             &db_a,
             "INSERT INTO local_blob_refs (blob_id, namespace, path, size) \
              VALUES ('f1', 'audio', '/tmp/external/track.flac', 1234)",
+        );
+        let uploader = "a".repeat(64);
+        let generation = "b".repeat(64);
+        let active_version = format!("0000000002000-0000-{uploader}");
+        let deleted_version = format!("0000000003000-0000-{uploader}");
+        exec(
+            &db_a,
+            &format!(
+                "INSERT INTO blob_uploaders \
+                 (namespace, blob_id, uploader, generation, version) VALUES \
+                 ('photos', 'active', '{uploader}', '{generation}', '{active_version}'); \
+                 INSERT INTO blob_location_versions (namespace, blob_id, version) VALUES \
+                 ('photos', 'active', '{active_version}'), \
+                 ('photos', 'deleted', '{deleted_version}')",
+            ),
         );
         // A synced row that SHOULD cross, to prove the snapshot still carries data.
         exec(
@@ -1921,6 +1939,21 @@ mod tests {
                  (cursors/outbox/clock) must never ride a snapshot to a new device",
             );
         }
+        assert_eq!(
+            query_int(&db_b, "SELECT COUNT(*) FROM blob_uploaders"),
+            1,
+            "the active blob's exact location crosses in the snapshot",
+        );
+        assert_eq!(
+            query_int(&db_b, "SELECT COUNT(*) FROM blob_location_versions"),
+            2,
+            "active and deleted location floors cross in the snapshot",
+        );
+        assert!(row_exists(
+            &db_b,
+            "SELECT 1 FROM blob_location_versions WHERE namespace = 'photos' \
+             AND blob_id = 'deleted' AND version LIKE '0000000003000-%'",
+        ));
     }
 
     // ---- push_snapshot tests ----
@@ -1989,17 +2022,23 @@ mod tests {
     async fn insert_snapshot_blob_rows(db: &Database, include_host_blob: bool) {
         crate::sync::test_helpers::exec(
             db,
-            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+            &format!(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
              VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01');
-             INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-             VALUES ('audio1', 'n1', 'audio', 11, '0000000001000-0000-dev1', '2026-01-01')",
+             INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('audio1', 'n1', 'audio', 11, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(b"local audio"),
+            ),
         )
         .await;
         if include_host_blob {
             crate::sync::test_helpers::exec(
                 db,
-                "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at) \
-                 VALUES ('cover1', 'n1', 5, '0000000001000-0000-dev1', '2026-01-01')",
+                &format!(
+                    "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at) \
+                     VALUES ('cover1', 'n1', 5, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+                    crate::blob::content_hash(b"COVER"),
+                ),
             )
             .await;
         }
@@ -2098,17 +2137,20 @@ mod tests {
             .expect("store host-provided cover");
         let snapshot = snapshot_from_blob_db(&db, tmp.path()).await;
         let storage = MockSyncStorage::new();
+        let audio_location =
+            crate::sync::test_helpers::test_blob_location(&storage.own_uploader().unwrap(), 1000);
         storage
             .put_blob(
                 "audio",
+                &audio_location,
                 "audio1",
                 BlobScope::Master,
                 None,
-                b"AUDIO".to_vec(),
+                b"local audio".to_vec(),
             )
             .await
             .expect("plant remote user-provided blob");
-        db.record_blob_uploader("audio", "audio1", &storage.own_uploader().unwrap())
+        db.record_blob_location("audio", "audio1", &audio_location)
             .await
             .unwrap();
         crate::sync::service::upload_snapshot_host_blobs(
@@ -2123,9 +2165,10 @@ mod tests {
         // The upload path records this device as the blob's uploader in the local
         // index, so a later self-read keys it under us without a listing scan.
         assert_eq!(
-            db.blob_uploader("covers", "cover1")
+            db.blob_location("covers", "cover1")
                 .await
-                .expect("read uploader index"),
+                .expect("read blob location")
+                .map(|location| location.uploader),
             storage.own_uploader(),
             "the host-provided upload records this device as the blob's uploader",
         );
@@ -2136,13 +2179,7 @@ mod tests {
             .expect("host cover location recorded");
         assert_eq!(
             storage
-                .get_blob_at(
-                    "covers",
-                    Some(&cover_location),
-                    "cover1",
-                    BlobScope::Master,
-                    None,
-                )
+                .get_blob("covers", &cover_location, "cover1", BlobScope::Master, None,)
                 .await
                 .expect("host cover uploaded"),
             b"COVER",

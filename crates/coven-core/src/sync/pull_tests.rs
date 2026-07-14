@@ -79,9 +79,41 @@ async fn blob_exists_at_recorded_location(
         return false;
     };
     storage
-        .blob_exists_at(namespace, &location, id, cloud_path)
+        .blob_exists(namespace, &location, id, cloud_path)
         .await
         .expect("exists check")
+}
+
+async fn plant_cloud_blob(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    namespace: &str,
+    id: &str,
+    cloud_path: Option<&str>,
+    bytes: Vec<u8>,
+    counter: u64,
+) -> crate::blob::CloudBlobLocation {
+    let location = test_blob_location(
+        &storage
+            .own_uploader()
+            .expect("test storage has an uploader identity"),
+        counter,
+    );
+    storage
+        .put_blob(
+            namespace,
+            &location,
+            id,
+            crate::blob::BlobScope::Master,
+            cloud_path,
+            bytes,
+        )
+        .await
+        .expect("plant cloud blob");
+    db.record_blob_location(namespace, id, &location)
+        .await
+        .expect("record cloud blob location");
+    location
 }
 
 /// The common `note_photos` blob declaration: namespace `"photos"`, master scope,
@@ -1411,17 +1443,28 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 
     // The cover blob is in the cloud (uploaded when the row was first written),
     // keyed `photos/p1ab` master-scoped as the declaration maps it.
-    storage
-        .put_blob(
+    let location = plant_cloud_blob(
+        &db1,
+        &storage,
+        "photos",
+        "p1ab",
+        None,
+        b"PHOTOBYTES".to_vec(),
+        1000,
+    )
+    .await;
+    storage.store_changeset_with_blob_locations(
+        "dev1",
+        1,
+        &cs,
+        SCHEMA_VERSION,
+        vec![test_blob_location_record(
             "photos",
             "p1ab",
-            crate::blob::BlobScope::Master,
-            None,
-            b"PHOTOBYTES".to_vec(),
-        )
-        .await
-        .expect("put_blob");
-    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+            location,
+            b"PHOTOBYTES",
+        )],
+    );
 
     // Destination pulls. A `CacheEager` photo lands in the store dir's evictable
     // cache (`storage/cache/<id>`) on pull — which coven builds from the validated id.
@@ -1434,6 +1477,62 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1ab").expect("cache path"))
         .expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
+}
+
+#[tokio::test]
+async fn stale_same_length_cache_is_replaced_before_the_cursor_advances() {
+    let storage = MockSyncStorage::new();
+    let db1 = open_test_db_with_blob(photo_decl());
+    let current = b"CURRENT-BYTES";
+    let stale = b"STALE--BYTES!";
+    assert_eq!(current.len(), stale.len());
+    let changeset = capture_bytes(
+        &db1,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('stale001', 'n1', 'cover', {}, '{}', \
+                 '0000000001000-0000-dev1', '2026-01-01')",
+                current.len(),
+                crate::blob::content_hash(current),
+            ),
+        ],
+    )
+    .await;
+    let location = plant_cloud_blob(
+        &db1,
+        &storage,
+        "photos",
+        "stale001",
+        None,
+        current.to_vec(),
+        1000,
+    )
+    .await;
+    storage.store_changeset_with_blob_locations(
+        "dev1",
+        1,
+        &changeset,
+        SCHEMA_VERSION,
+        vec![test_blob_location_record(
+            "photos", "stale001", location, current,
+        )],
+    );
+
+    let db2 = open_test_db_with_blob(photo_decl());
+    let (_tmp, store_dir) = temp_store_dir();
+    let cache_path = store_dir.cache_blob_path("photos", "stale001").unwrap();
+    crate::local_blob::write_atomic(&cache_path, stale)
+        .await
+        .unwrap();
+    let (cursors, result) = pull_into(&db2, &storage, "dev2", &store_dir).await;
+
+    assert_eq!(result.changesets_applied, 1);
+    assert!(!result.asset_downloads_failed);
+    assert_eq!(cursors.get("dev1"), Some(&1));
+    assert_eq!(std::fs::read(cache_path).unwrap(), current);
 }
 
 #[tokio::test]
@@ -1631,25 +1730,25 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('audio1', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(b"AUDIO-PAYLOAD"),
+            ),
         ],
     )
     .await;
 
-    storage
-        .put_blob(
-            "audio",
-            "audio1",
-            crate::blob::BlobScope::Master,
-            None,
-            b"AUDIO-PAYLOAD".to_vec(),
-        )
-        .await
-        .expect("plant audio blob before publish");
-    db1.record_blob_uploader("audio", "audio1", &storage.own_uploader().unwrap())
-        .await
-        .unwrap();
+    let audio_location = plant_cloud_blob(
+        &db1,
+        &storage,
+        "audio",
+        "audio1",
+        None,
+        b"AUDIO-PAYLOAD".to_vec(),
+        1000,
+    )
+    .await;
 
     // Drive the real push path. The inline push uploads only host-provided blobs, so
     // the user-provided audio is NOT uploaded here — it goes via the durable outbox in
@@ -1686,7 +1785,7 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         storage
             .get_blob(
                 "audio",
-                None,
+                &audio_location,
                 "audio1",
                 crate::blob::BlobScope::Master,
                 None
@@ -1852,26 +1951,26 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
         Provenance::UserProvided,
         CacheFill::CacheLazy,
     ));
-    storage
-        .put_blob(
-            "audio",
-            "audio1",
-            crate::blob::BlobScope::Master,
-            None,
-            b"AUDIO-PAYLOAD".to_vec(),
-        )
-        .await
-        .expect("plant remote blob");
-    db.record_blob_uploader("audio", "audio1", &storage.own_uploader().unwrap())
-        .await
-        .unwrap();
+    plant_cloud_blob(
+        &db,
+        &storage,
+        "audio",
+        "audio1",
+        None,
+        b"AUDIO-PAYLOAD".to_vec(),
+        1000,
+    )
+    .await;
     let outgoing = capture_bytes(
         &db,
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('audio1', 'n1', 'audio', 13, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(b"AUDIO-PAYLOAD"),
+            ),
         ],
     )
     .await;
@@ -1990,8 +2089,11 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithPhoto', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('p1ab', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('p1ab', 'n1', 'cover', 7, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(b"missing"),
+            ),
         ],
     )
     .await;
@@ -2204,7 +2306,10 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     let hashed = CloudSyncStorage::blob_key(
         BlobPathScheme::Hashed,
         "photos",
-        Some(&storage.self_uploader()),
+        &db1.blob_location("photos", "p1cover")
+            .await
+            .unwrap()
+            .unwrap(),
         "p1cover",
         None,
     )
@@ -3163,10 +3268,10 @@ async fn current_blob_key(
     cloud_path: Option<&str>,
 ) -> String {
     let location = db.blob_location(namespace, id).await.unwrap().unwrap();
-    CloudSyncStorage::blob_key_at(
+    CloudSyncStorage::blob_key(
         storage.blob_path_scheme(),
         namespace,
-        Some(&location),
+        &location,
         id,
         cloud_path,
     )
@@ -3280,9 +3385,10 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // blob — so a later read (after a cache eviction) keys it under A's prefix
     // without a listing scan.
     assert_eq!(
-        db2.blob_uploader("photos", "p1cover")
+        db2.blob_location("photos", "p1cover")
             .await
-            .expect("read uploader index"),
+            .expect("read blob location")
+            .map(|location| location.uploader),
         Some(hex::encode(keypair.public_key())),
         "device B's uploader index names A as the blob's uploader",
     );
@@ -3315,14 +3421,20 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
     .await;
     exec(
         &db1,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('peager01', 'n1', 'cover', 11, '0000000001000-0000-dev1', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('peager01', 'n1', 'cover', 11, '{}', '0000000001000-0000-dev1', '2026-01-01')",
+            crate::blob::content_hash(b"EAGER-BYTES"),
+        ),
     )
     .await;
     exec(
         &db1,
-        "INSERT INTO note_covers (id, note_id, size, _updated_at, created_at) \
-         VALUES ('clazy001', 'n1', 10, '0000000001001-0000-dev1', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at) \
+             VALUES ('clazy001', 'n1', 10, '{}', '0000000001001-0000-dev1', '2026-01-01')",
+            crate::blob::content_hash(b"LAZY-BYTES"),
+        ),
     )
     .await;
     // The host stores both blobs in the local store (their Local home) before the
@@ -3413,17 +3525,28 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
         ],
     )
     .await;
-    storage
-        .put_blob(
+    let location = plant_cloud_blob(
+        &db1,
+        &storage,
+        "photos",
+        "pdel1234",
+        None,
+        b"COVERBYTES".to_vec(),
+        1000,
+    )
+    .await;
+    storage.store_changeset_with_blob_locations(
+        "dev1",
+        1,
+        &cs1,
+        SCHEMA_VERSION,
+        vec![test_blob_location_record(
             "photos",
             "pdel1234",
-            crate::blob::BlobScope::Master,
-            None,
-            b"COVERBYTES".to_vec(),
-        )
-        .await
-        .expect("plant cover");
-    storage.store_changeset("dev1", 1, &cs1, SCHEMA_VERSION);
+            location,
+            b"COVERBYTES",
+        )],
+    );
 
     // dev2 pulls → the CacheEager cover lands in the evictable cache.
     let db2 = open_test_db_with_blob(photo_decl());
@@ -3786,17 +3909,28 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         ],
     )
     .await;
-    storage
-        .put_blob(
+    let shared_location = plant_cloud_blob(
+        &db1,
+        &storage,
+        "photos",
+        "sharedblob",
+        None,
+        b"SHARED-BYTES".to_vec(),
+        1000,
+    )
+    .await;
+    storage.store_changeset_with_blob_locations(
+        "dev1",
+        1,
+        &cs1,
+        SCHEMA_VERSION,
+        vec![test_blob_location_record(
             "photos",
             "sharedblob",
-            crate::blob::BlobScope::Master,
-            None,
-            b"SHARED-BYTES".to_vec(),
-        )
-        .await
-        .expect("plant shared blob");
-    storage.store_changeset("dev1", 1, &cs1, SCHEMA_VERSION);
+            shared_location,
+            b"SHARED-BYTES",
+        )],
+    );
 
     let db2 = open_test_db_with_blob(decl);
     let (_tmp, ld) = temp_store_dir();
@@ -3807,16 +3941,16 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         "the shared CacheEager blob lands in the cache",
     );
 
-    storage
-        .put_blob(
-            "photos",
-            "newblob",
-            crate::blob::BlobScope::Master,
-            None,
-            b"NEW-BYTES".to_vec(),
-        )
-        .await
-        .expect("plant replacement blob");
+    let new_location = plant_cloud_blob(
+        &db1,
+        &storage,
+        "photos",
+        "newblob",
+        None,
+        b"NEW-BYTES".to_vec(),
+        2000,
+    )
+    .await;
     let cs2 = capture_bytes(
         &db1,
         &[&format!(
@@ -3827,7 +3961,18 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         )],
     )
     .await;
-    storage.store_changeset("dev1", 2, &cs2, SCHEMA_VERSION);
+    storage.store_changeset_with_blob_locations(
+        "dev1",
+        2,
+        &cs2,
+        SCHEMA_VERSION,
+        vec![test_blob_location_record(
+            "photos",
+            "newblob",
+            new_location,
+            b"NEW-BYTES",
+        )],
+    );
 
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
@@ -5285,7 +5430,6 @@ mod schema_version_too_old_display {
 /// the write, skip the row, surface it — never write outside, never panic.
 mod blob_path_traversal {
     use super::*;
-    use crate::blob::BlobScope;
 
     /// A blob whose `id` climbs out of the cache directory with `..` must NOT have
     /// its bytes written outside it. coven builds the destination from the id under
@@ -5296,26 +5440,17 @@ mod blob_path_traversal {
     #[tokio::test]
     async fn traversal_id_does_not_write_outside_the_blob_dir() {
         let storage = MockSyncStorage::new();
+        let db1 = open_test_db();
 
         // The attacker's blob bytes, planted in the cloud under the malicious id's
         // flat mock key (the same key the puller's `get_blob` computes for it). No
         // local file is written on the source side, so nothing escapes here.
         let evil_bytes = b"OWNED".to_vec();
-        storage
-            .put_blob(
-                "photos",
-                "x/../../../PWNED",
-                BlobScope::Master,
-                None,
-                evil_bytes,
-            )
-            .await
-            .expect("plant evil blob in the cloud");
+        let location = test_blob_location(&storage.own_uploader().unwrap(), 1000);
 
         // The source's changeset adds a note + a photo row whose id is the
         // traversal string. (The mock stored the blob above; this is the row that
         // references it.)
-        let db1 = open_test_db();
         let cs = capture_bytes(
             &db1,
             &[
@@ -5326,7 +5461,18 @@ mod blob_path_traversal {
             ],
         )
         .await;
-        storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+        storage.store_changeset_with_blob_locations(
+            "dev1",
+            1,
+            &cs,
+            SCHEMA_VERSION,
+            vec![test_blob_location_record(
+                "photos",
+                "x/../../../PWNED",
+                location,
+                &evil_bytes,
+            )],
+        );
 
         // The puller builds the blob's destination from the validated id under its
         // own store dir. `download_blobs` rejects the traversal id (it is not a
@@ -5391,19 +5537,19 @@ mod blob_path_traversal {
     #[tokio::test]
     async fn normal_id_still_writes_under_the_blob_dir() {
         let storage = MockSyncStorage::new();
-
-        storage
-            .put_blob(
-                "photos",
-                "p1ab",
-                BlobScope::Master,
-                None,
-                b"PHOTOBYTES".to_vec(),
-            )
-            .await
-            .expect("plant blob");
-
         let db1 = open_test_db();
+
+        let location = plant_cloud_blob(
+            &db1,
+            &storage,
+            "photos",
+            "p1ab",
+            None,
+            b"PHOTOBYTES".to_vec(),
+            1000,
+        )
+        .await;
+
         let cs = capture_bytes(
             &db1,
             &[
@@ -5417,7 +5563,18 @@ mod blob_path_traversal {
             ],
         )
         .await;
-        storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+        storage.store_changeset_with_blob_locations(
+            "dev1",
+            1,
+            &cs,
+            SCHEMA_VERSION,
+            vec![test_blob_location_record(
+                "photos",
+                "p1ab",
+                location,
+                b"PHOTOBYTES",
+            )],
+        );
 
         let db2 = open_test_db_with_blob(photo_decl());
         let (_t, ld) = temp_store_dir();

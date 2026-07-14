@@ -29,10 +29,8 @@ use crate::sync::storage::{DeviceHead, HeadListing, MinSchemaVersion, StorageErr
 /// In-memory [`MasterKeyCustody`] for tests, with a switch to force `persist`
 /// to fail. The switch models a device whose keyring is momentarily
 /// unwritable, so a test can drive a key adoption into its failure path and then
-/// clear the switch to prove the retry converges. Stores the serialized form
-/// (like the real `Keyring` preset), so `stored_key` reflects exactly what a
-/// caller wrote — a raw-hex seed from [`Self::set_initial_key`] stays raw hex
-/// until a real `persist` call re-serializes it to the keyring JSON format.
+/// clear the switch to prove the retry converges. Stores keyring JSON like the
+/// real `Keyring` preset, so every read exercises the current custody format.
 #[derive(Default)]
 pub struct TestCustody {
     value: Mutex<Option<String>>,
@@ -41,7 +39,8 @@ pub struct TestCustody {
 
 impl TestCustody {
     pub fn set_initial_key(&self, key: [u8; 32]) {
-        *self.value.lock().unwrap() = Some(hex::encode(key));
+        let keyring = MasterKeyring::from(crate::encryption::EncryptionService::from_key(key));
+        *self.value.lock().unwrap() = Some(keyring.to_serialized());
     }
 
     pub fn stored_key(&self) -> Option<String> {
@@ -229,16 +228,39 @@ pub async fn plant_blob_row_with_size_hash(
     .expect("plant blob row");
 }
 
-/// Record `uploader` as the member that uploaded blob `(namespace, id)` — the way
-/// the pull records the signed changeset's author, and the way a snapshot carries
-/// the source's uploader index forward. For tests that seed a Remote blob
-/// directly (no pull, no make_remote) and then read or backfill it, so the read
-/// resolves the blob's prefix from the recorded uploader rather than a listing
-/// scan (which no longer exists).
-pub async fn record_blob_uploader(db: &Database, namespace: &str, id: &str, uploader: &str) {
-    db.record_blob_uploader(namespace, id, uploader)
+/// Build an exact generated cloud location for a test blob.
+pub fn test_blob_location(uploader: &str, counter: u64) -> crate::blob::CloudBlobLocation {
+    crate::blob::CloudBlobLocation::generated(
+        uploader,
+        &format!("{counter:013}-0000-{}", "d".repeat(64)),
+    )
+}
+
+pub fn test_blob_location_record(
+    namespace: &str,
+    blob_id: &str,
+    location: crate::blob::CloudBlobLocation,
+    bytes: &[u8],
+) -> envelope::BlobLocationRecord {
+    envelope::BlobLocationRecord {
+        namespace: namespace.to_string(),
+        blob_id: blob_id.to_string(),
+        location,
+        plaintext_size: bytes.len() as u64,
+        content_hash: crate::blob::content_hash(bytes),
+    }
+}
+
+/// Record the exact generated cloud location a test seeded for a blob.
+pub async fn record_test_blob_location(
+    db: &Database,
+    namespace: &str,
+    id: &str,
+    location: &crate::blob::CloudBlobLocation,
+) {
+    db.record_blob_location(namespace, id, location)
         .await
-        .expect("record blob uploader");
+        .expect("record test blob location");
 }
 
 /// Flip the gate on a blob's planted `notes` root — `shared = remote` for the row
@@ -596,20 +618,6 @@ pub async fn publish_membership_chain_head(
 /// is exactly the readable key production writes; an obfuscated one keys flat by id
 /// as `{namespace}/{id}` (the mock deliberately doesn't shard — a flat id key is
 /// unambiguous for tests and never needs to match production's `{ab}/{cd}` layout).
-fn blob_key(namespace: &str, id: &str, cloud_path: Option<&str>) -> String {
-    match cloud_path {
-        Some(path) => crate::sync::cloud_storage::CloudSyncStorage::blob_key(
-            crate::sync::cloud_storage::BlobPathScheme::Plain,
-            namespace,
-            None,
-            id,
-            Some(path),
-        )
-        .expect("plain blob_key with a cloud_path is always Ok"),
-        None => format!("{namespace}/{id}"),
-    }
-}
-
 struct MembershipHeadReadPause {
     author_pubkey: String,
     snapshot_held: std::sync::Arc<tokio::sync::Notify>,
@@ -622,31 +630,18 @@ fn generated_blob_key(
     id: &str,
     cloud_path: Option<&str>,
 ) -> String {
-    match &location.generation {
-        Some(_) => crate::sync::cloud_storage::CloudSyncStorage::blob_key_at(
-            if cloud_path.is_some() {
-                crate::sync::cloud_storage::BlobPathScheme::Plain
-            } else {
-                crate::sync::cloud_storage::BlobPathScheme::Hashed
-            },
-            namespace,
-            Some(location),
-            id,
-            cloud_path,
-        )
-        .expect("generated test blob location is valid"),
-        None => blob_key(namespace, id, cloud_path),
-    }
-}
-
-fn is_generated_alias(candidate: &str, legacy: &str) -> bool {
-    let Some((namespace, legacy_tail)) = legacy.split_once('/') else {
-        return false;
-    };
-    (candidate.starts_with(&format!("{namespace}/.coven-generations/"))
-        && candidate.ends_with(&format!("/{legacy_tail}")))
-        || (candidate.starts_with(&format!("{namespace}/"))
-            && candidate.contains(&format!("/{legacy_tail}/generations/")))
+    crate::sync::cloud_storage::CloudSyncStorage::blob_key(
+        if cloud_path.is_some() {
+            crate::sync::cloud_storage::BlobPathScheme::Plain
+        } else {
+            crate::sync::cloud_storage::BlobPathScheme::Hashed
+        },
+        namespace,
+        location,
+        id,
+        cloud_path,
+    )
+    .expect("generated test blob location is valid")
 }
 
 /// In-memory mock of SyncStorage for tests.
@@ -969,8 +964,13 @@ impl MockSyncStorage {
     /// `{namespace}/{id}` way [`Self::put_blob`] stores a no-`cloud_path` blob. Lets
     /// a cache test delete the cloud copy after a read populated the local cache, to
     /// prove a second read is served from disk (a re-fetch would now fail).
-    pub async fn delete_blob_object(&self, namespace: &str, id: &str) {
-        let key = blob_key(namespace, id, None);
+    pub async fn delete_blob_object(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+    ) {
+        let key = generated_blob_key(namespace, location, id, None);
         assert!(
             self.objects.lock().unwrap().remove(&key).is_some(),
             "delete_blob_object: no mock cloud blob at {key} to delete (test-setup bug)",
@@ -1047,6 +1047,28 @@ impl MockSyncStorage {
             "2026-02-10T00:00:00Z",
             &self.keypair,
             None,
+            changeset_bytes,
+        );
+        self.store_packed(device_id, seq, packed);
+    }
+
+    pub fn store_changeset_with_blob_locations(
+        &self,
+        device_id: &str,
+        seq: u64,
+        changeset_bytes: &[u8],
+        schema_version: u32,
+        blob_locations: Vec<envelope::BlobLocationRecord>,
+    ) {
+        let packed = envelope::pack_signed_with_blob_locations(
+            device_id,
+            seq,
+            schema_version,
+            "",
+            "2026-02-10T00:00:00Z",
+            &self.keypair,
+            None,
+            blob_locations,
             changeset_bytes,
         );
         self.store_packed(device_id, seq, packed);
@@ -1235,45 +1257,6 @@ impl SyncStorage for MockSyncStorage {
     async fn put_blob(
         &self,
         namespace: &str,
-        id: &str,
-        _scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let call_number = self
-            .blob_put_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        if self
-            .fail_blob_put_on
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == call_number
-        {
-            return Err(StorageError::Storage(format!(
-                "forced blob upload failure for {namespace}/{id}"
-            )));
-        }
-        if self
-            .fail_blob_puts
-            .fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |remaining| remaining.checked_sub(1),
-            )
-            .is_ok()
-        {
-            return Err(StorageError::Storage(format!(
-                "forced blob upload failure for {namespace}/{id}"
-            )));
-        }
-        let key = blob_key(namespace, id, cloud_path);
-        self.objects.lock().unwrap().insert(key, data);
-        Ok(())
-    }
-
-    async fn put_blob_at(
-        &self,
-        namespace: &str,
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         _scope: crate::blob::BlobScope,
@@ -1309,22 +1292,6 @@ impl SyncStorage for MockSyncStorage {
     async fn put_blob_from_file(
         &self,
         namespace: &str,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_path: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        self.blob_put_from_file_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let data = crate::local_blob::read(source_path)
-            .await
-            .map_err(StorageError::Storage)?;
-        self.put_blob(namespace, id, scope, cloud_path, data).await
-    }
-
-    async fn put_blob_from_file_at(
-        &self,
-        namespace: &str,
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
@@ -1336,46 +1303,19 @@ impl SyncStorage for MockSyncStorage {
         let data = crate::local_blob::read(source_path)
             .await
             .map_err(StorageError::Storage)?;
-        self.put_blob_at(namespace, location, id, scope, cloud_path, data)
+        self.put_blob(namespace, location, id, scope, cloud_path, data)
             .await
     }
 
     async fn get_blob(
         &self,
         namespace: &str,
-        _uploader: Option<&str>,
+        location: &crate::blob::CloudBlobLocation,
         id: &str,
         _scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
-        // The mock keys blobs flat by (namespace, id) and ignores the uploader
-        // prefix — the real `{namespace}/{uploader}/…` layout is exercised against
-        // `CloudSyncStorage` over an `InMemoryCloudHome`, where it can be observed.
-        let key = blob_key(namespace, id, cloud_path);
-        let objects = self.objects.lock().unwrap();
-        if let Some(bytes) = objects.get(&key) {
-            return Ok(bytes.clone());
-        }
-        objects
-            .iter()
-            .filter(|(candidate, _)| is_generated_alias(candidate, &key))
-            .max_by_key(|(candidate, _)| *candidate)
-            .map(|(_, bytes)| bytes.clone())
-            .ok_or(StorageError::NotFound(key))
-    }
-
-    async fn get_blob_at(
-        &self,
-        namespace: &str,
-        location: Option<&crate::blob::CloudBlobLocation>,
-        id: &str,
-        _scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-    ) -> Result<Vec<u8>, StorageError> {
-        let key = match location {
-            Some(location) => generated_blob_key(namespace, location, id, cloud_path),
-            None => blob_key(namespace, id, cloud_path),
-        };
+        let key = generated_blob_key(namespace, location, id, cloud_path);
         self.objects
             .lock()
             .unwrap()
@@ -1385,20 +1325,6 @@ impl SyncStorage for MockSyncStorage {
     }
 
     async fn blob_exists(
-        &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<bool, StorageError> {
-        let key = blob_key(namespace, id, cloud_path);
-        let objects = self.objects.lock().unwrap();
-        Ok(objects.contains_key(&key)
-            || objects
-                .keys()
-                .any(|candidate| is_generated_alias(candidate, &key)))
-    }
-
-    async fn blob_exists_at(
         &self,
         namespace: &str,
         location: &crate::blob::CloudBlobLocation,
@@ -1412,47 +1338,7 @@ impl SyncStorage for MockSyncStorage {
     async fn read_blob_range(
         &self,
         namespace: &str,
-        _uploader: Option<&str>,
-        id: &str,
-        _scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        // The mock stores blobs as plaintext (no at-rest cipher in tests), so the
-        // plaintext range is exactly the stored byte range — the same slice the
-        // real `BlobRangeReader` would yield over a `Plaintext` home, which its
-        // own cloud_storage tests exercise against `InMemoryCloudHome` with real
-        // encryption. The bounds checks mirror `BlobRangeReader::read` so a miss
-        // here behaves identically whether the cloud is the mock or a real home.
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        let end = offset.checked_add(len).ok_or_else(|| {
-            StorageError::Storage(format!("blob range overflow: offset={offset}, len={len}"))
-        })?;
-        if end > source_size {
-            return Err(StorageError::Storage(format!(
-                "blob range {offset}..{end} exceeds blob size {source_size}"
-            )));
-        }
-        let stored = self
-            .get_blob(
-                namespace,
-                None,
-                id,
-                crate::blob::BlobScope::Master,
-                cloud_path,
-            )
-            .await?;
-        Ok(stored[offset as usize..end as usize].to_vec())
-    }
-
-    async fn read_blob_range_at(
-        &self,
-        namespace: &str,
-        location: Option<&crate::blob::CloudBlobLocation>,
+        location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
@@ -1472,7 +1358,7 @@ impl SyncStorage for MockSyncStorage {
             )));
         }
         let stored = self
-            .get_blob_at(namespace, location, id, scope, cloud_path)
+            .get_blob(namespace, location, id, scope, cloud_path)
             .await?;
         Ok(stored[offset as usize..end as usize].to_vec())
     }
@@ -1480,7 +1366,7 @@ impl SyncStorage for MockSyncStorage {
     async fn read_blob_to_file(
         &self,
         namespace: &str,
-        uploader: Option<&str>,
+        location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
@@ -1490,9 +1376,6 @@ impl SyncStorage for MockSyncStorage {
     ) -> Result<(), StorageError> {
         self.blob_read_to_file_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // Concurrency probe: when armed, record the peak in-flight count and gather on
-        // the barrier so a fixed number of fetches must run at once to proceed. Clone
-        // the Arc out of the lock first so the guard isn't held across the await.
         let barrier = self.read_to_file_barrier.lock().unwrap().clone();
         if let Some(barrier) = barrier {
             let inflight = self
@@ -1507,58 +1390,6 @@ impl SyncStorage for MockSyncStorage {
         }
         let bytes = self
             .read_blob_range(
-                namespace,
-                uploader,
-                id,
-                scope,
-                cloud_path,
-                source_size,
-                0,
-                source_size,
-            )
-            .await?;
-        // Verify the content hash before committing the file, the same authority
-        // the real `CloudSyncStorage` streaming download enforces — so a
-        // mock-served blob that does not match its row's hash is refused, not
-        // cached.
-        let actual = crate::blob::content_hash(&bytes);
-        if actual != expected_hash {
-            return Err(StorageError::Storage(format!(
-                "blob {namespace}/{id} content hash mismatch: expected {expected_hash}, got {actual}"
-            )));
-        }
-        crate::local_blob::write_atomic(dest, &bytes)
-            .await
-            .map_err(StorageError::Storage)
-    }
-
-    async fn read_blob_to_file_at(
-        &self,
-        namespace: &str,
-        location: Option<&crate::blob::CloudBlobLocation>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        expected_hash: &str,
-        dest: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        self.blob_read_to_file_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let barrier = self.read_to_file_barrier.lock().unwrap().clone();
-        if let Some(barrier) = barrier {
-            let inflight = self
-                .read_to_file_inflight
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1;
-            self.read_to_file_max_inflight
-                .fetch_max(inflight, std::sync::atomic::Ordering::SeqCst);
-            barrier.wait().await;
-            self.read_to_file_inflight
-                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        let bytes = self
-            .read_blob_range_at(
                 namespace,
                 location,
                 id,
@@ -1585,17 +1416,6 @@ impl SyncStorage for MockSyncStorage {
     }
 
     fn blob_cloud_key(
-        &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<String, StorageError> {
-        // The mock keys objects flatly (namespace/cloud_path or namespace/id),
-        // regardless of the scheme it reports.
-        Ok(blob_key(namespace, id, cloud_path))
-    }
-
-    fn blob_cloud_key_at(
         &self,
         namespace: &str,
         location: &crate::blob::CloudBlobLocation,
@@ -2004,14 +1824,9 @@ impl CloudHome for MockSyncStorage {
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         let objects = self.objects.lock().unwrap();
-        if let Some(bytes) = objects.get(key) {
-            return Ok(bytes.clone());
-        }
         objects
-            .iter()
-            .filter(|(candidate, _)| is_generated_alias(candidate, key))
-            .max_by_key(|(candidate, _)| *candidate)
-            .map(|(_, bytes)| bytes.clone())
+            .get(key)
+            .cloned()
             .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
     }
 
@@ -2036,10 +1851,7 @@ impl CloudHome for MockSyncStorage {
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
         let objects = self.objects.lock().unwrap();
-        Ok(objects.contains_key(key)
-            || objects
-                .keys()
-                .any(|candidate| is_generated_alias(candidate, key)))
+        Ok(objects.contains_key(key))
     }
 
     async fn grant_access(

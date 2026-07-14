@@ -232,7 +232,7 @@ async fn losing_stale_update_does_not_replace_the_active_blob_location() {
     use std::sync::Arc;
 
     use crate::blob::{CacheFill, CloudBlobLocation, Provenance};
-    use crate::sync::apply::resolve_and_apply_changeset_with_schema;
+    use crate::sync::apply::{resolve_and_apply_changeset_with_schema, BlobLocationAssignment};
     use crate::sync::conflict::TableSchema;
     use crate::sync::session::BlobDecl;
 
@@ -281,7 +281,14 @@ async fn losing_stale_update_does_not_replace_the_active_blob_location() {
                 &stale,
                 schema,
                 receiver_wall_ms,
-                &[("photos".to_string(), "p1".to_string(), applied_incoming)],
+                &[BlobLocationAssignment {
+                    table: "note_photos".to_string(),
+                    pk: "p1".to_string(),
+                    row_version: "0000000002000-0000-s".to_string(),
+                    namespace: "photos".to_string(),
+                    blob_id: "p1".to_string(),
+                    location: applied_incoming,
+                }],
             )
             .map(|_| ())
             .map_err(|error| crate::database::DbError(error.to_string()))

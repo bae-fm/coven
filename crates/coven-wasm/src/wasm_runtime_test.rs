@@ -148,8 +148,8 @@ async fn runtime_drives_two_devices_to_convergence() {
     // Nudge A to push now and B to pull now, so we do not wait out the initial
     // delay for the first cycles. The bounded wait below tolerates any ordering:
     // if B pulls before A has pushed, B's next idle tick pulls the row.
-    runtime_a.trigger();
-    runtime_b.trigger();
+    runtime_a.sync_now();
+    runtime_b.sync_now();
 
     // Bounded convergence wait: poll B for the row, sleeping a short interval
     // between checks, up to a few seconds total. Several idle ticks (50 ms each)

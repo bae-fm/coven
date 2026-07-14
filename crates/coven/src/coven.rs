@@ -1603,6 +1603,7 @@ mod tests {
         let (_tmp, handle) = open_remote_root_files_handle();
         let expected = b"remote-root-host-provided-staging-bytes".to_vec();
         let bytes = expected.clone();
+        let hash = coven_core::blob::content_hash(&expected);
 
         let blob = handle
             .write(
@@ -1615,12 +1616,13 @@ mod tests {
                 },
                 move |sql| {
                     sql.tx().execute(
-                        "INSERT INTO files (id, blob_id, size, _updated_at) \
-                         VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
                         params![
                             "file-remote-root",
                             "rrhpaaaa",
                             bytes.len() as i64,
+                            hash,
                             sql.stamp()
                         ],
                     )?;
@@ -2658,6 +2660,7 @@ mod tests {
             .expect("open writer");
 
         let bytes = b"read-only-handle-serves-these-blob-bytes".to_vec();
+        let hash = coven_core::blob::content_hash(&bytes);
         writer
             .write(
                 {
@@ -2671,9 +2674,9 @@ mod tests {
                     let len = bytes.len() as i64;
                     move |sql| {
                         sql.tx().execute(
-                            "INSERT INTO files (id, blob_id, size, _updated_at) \
-                             VALUES (?1, ?2, ?3, ?4)",
-                            params!["file-ro", "roblob01", len, sql.stamp()],
+                            "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            params!["file-ro", "roblob01", len, hash, sql.stamp()],
                         )?;
                         Ok(())
                     }

@@ -111,53 +111,37 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudBlobLocation {
     pub uploader: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generation: Option<String>,
+    pub generation: String,
     /// Causal order of this location assignment. Kept separate from the fixed-size
     /// object token so location arbitration does not depend on decoding a path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
+    pub version: String,
 }
 
 impl CloudBlobLocation {
-    pub fn legacy(uploader: impl Into<String>) -> Self {
-        Self {
-            uploader: uploader.into(),
-            generation: None,
-            version: None,
-        }
-    }
-
     pub fn generated(uploader: impl Into<String>, stamp: &str) -> Self {
         Self {
             uploader: uploader.into(),
-            generation: Some(hex::encode(Sha256::digest(stamp.as_bytes()))),
-            version: Some(stamp.to_string()),
+            generation: hex::encode(Sha256::digest(stamp.as_bytes())),
+            version: stamp.to_string(),
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
         crate::store_dir::validate_path_token(&self.uploader).map_err(|error| error.to_string())?;
-        if let Some(generation) = &self.generation {
-            crate::store_dir::validate_path_token(generation).map_err(|error| error.to_string())?;
-            if generation.is_empty()
-                || !generation
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            {
-                return Err("blob generation must be non-empty lowercase hexadecimal".to_string());
-            }
+        crate::store_dir::validate_path_token(&self.generation)
+            .map_err(|error| error.to_string())?;
+        if self.generation.len() != 64
+            || !self
+                .generation
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(
+                "blob generation must be exactly 64 lowercase hexadecimal characters".to_string(),
+            );
         }
-        match (&self.generation, &self.version) {
-            (None, Some(_)) => {
-                return Err("legacy blob locations cannot carry a version".to_string())
-            }
-            (Some(_), Some(version)) => {
-                if crate::sync::hlc::Timestamp::parse(version).is_none() {
-                    return Err("blob location version must be an HLC timestamp".to_string());
-                }
-            }
-            (Some(_), None) | (None, None) => {}
+        if crate::sync::hlc::Timestamp::parse(&self.version).is_none() {
+            return Err("blob location version must be an HLC timestamp".to_string());
         }
         Ok(())
     }
@@ -169,10 +153,30 @@ mod cloud_blob_location_tests {
 
     #[test]
     fn generated_location_uses_a_fixed_length_object_token() {
-        let stamp = format!("0000000001000-0000-{}", "device".repeat(10_000));
+        let stamp = format!("0000000001000-0000-{}", "d".repeat(64));
         let location = CloudBlobLocation::generated("aa11", &stamp);
 
-        assert_eq!(location.generation.as_deref().unwrap().len(), 64);
+        assert_eq!(location.generation.len(), 64);
+        location.validate().expect("generated location is valid");
+    }
+
+    #[test]
+    fn location_rejects_missing_or_malformed_current_fields() {
+        let missing_generation = serde_json::json!({
+            "uploader": "aa11",
+            "version": format!("0000000001000-0000-{}", "d".repeat(64)),
+        });
+        assert!(serde_json::from_value::<CloudBlobLocation>(missing_generation).is_err());
+
+        for generation in ["a".repeat(63), "a".repeat(65), "A".repeat(64)] {
+            let location: CloudBlobLocation = serde_json::from_value(serde_json::json!({
+                "uploader": "aa11",
+                "generation": generation,
+                "version": format!("0000000001000-0000-{}", "d".repeat(64)),
+            }))
+            .unwrap();
+            assert!(location.validate().is_err());
+        }
     }
 }
 

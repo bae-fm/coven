@@ -1038,7 +1038,11 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     );
     assert_eq!(
         ks.stored_key(),
-        Some(hex::encode(old_key)),
+        Some(
+            EncryptionService::from_key(old_key)
+                .to_keyring_string()
+                .unwrap()
+        ),
         "the failed adoption did not persist a new key",
     );
 

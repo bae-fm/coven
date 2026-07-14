@@ -264,9 +264,14 @@ async fn truncated_cached_blob_refetches_instead_of_serving_short_bytes() {
         "wasm-blob-torn",
         UserKeypair::generate(),
     );
+    let uploader = storage_b
+        .own_uploader()
+        .expect("hashed home has an uploader");
+    let location = crate::sync::test_helpers::test_blob_location(&uploader, 1000);
     storage_b
         .put_blob(
             "photos",
+            &location,
             "photo-torn",
             BlobScope::Master,
             None,
@@ -275,13 +280,9 @@ async fn truncated_cached_blob_refetches_instead_of_serving_short_bytes() {
         .await
         .expect("seed cloud blob");
 
-    // The blob was seeded straight into the cloud (no signed-changeset pull to record
-    // its author, and the listing scan is gone), so record B as its uploader — the
-    // refetch resolves this prefix to read it back out of the hashed layout.
-    let uploader = storage_b
-        .own_uploader()
-        .expect("hashed home has an uploader");
-    crate::sync::test_helpers::record_blob_uploader(&db_b, "photos", "photo-torn", &uploader).await;
+    db_b.record_blob_location("photos", "photo-torn", &location)
+        .await
+        .expect("record exact cloud location");
 
     let cache_path = lib_b
         .cache_blob_path("photos", "photo-torn")

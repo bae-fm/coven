@@ -61,9 +61,9 @@ els.form.addEventListener("submit", (event) => {
     store_id: form.get("store_id").trim(),
     // The simplest first config: a browsable home — a plaintext bucket with
     // readable blob paths. Switch to `storage: "opaque"` (and supply an
-    // `encryption_key_hex`) for an end-to-end encrypted home; see the README.
+    // `encryption_keyring_json`) for an end-to-end encrypted home; see the README.
     storage: "browsable",
-    encryption_key_hex: null,
+    encryption_keyring_json: null,
     device_id: deviceId,
   };
   worker.postMessage({ type: "open", config });

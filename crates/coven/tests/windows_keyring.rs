@@ -32,7 +32,7 @@ fn windows_credential_manager_round_trip() {
         "no entry written yet"
     );
 
-    let value = "aa".repeat(32); // 64 hex chars, well under the 2560-byte blob cap
+    let value = coven::MasterKeyring::generate().to_serialized();
     keys.0
         .set_encryption_key(&value)
         .expect("write encryption key");

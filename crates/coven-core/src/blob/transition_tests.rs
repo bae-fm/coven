@@ -37,8 +37,8 @@ use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     host_exec as exec, open_test_db, open_test_db_schema, open_test_db_with_blob,
-    open_test_db_with_user_and_host_blobs, query_text, row_exists, temp_store_dir, test_migrations,
-    MockSyncStorage,
+    open_test_db_with_user_and_host_blobs, query_text, row_exists, temp_store_dir,
+    test_blob_location, test_migrations, MockSyncStorage,
 };
 
 /// The uploader these browsable-home tests pass to the make_remote/cancel paths.
@@ -304,9 +304,11 @@ async fn seed_remote_release(
     bytes: &[u8],
 ) {
     seed_release_rows(db, note_id, photo_id, cloud_path, 1, bytes).await;
+    let location = test_blob_location(&storage.own_uploader().expect("mock uploader"), 1000);
     storage
         .put_blob(
             "photos",
+            &location,
             photo_id,
             BlobScope::Master,
             Some(cloud_path),
@@ -317,10 +319,9 @@ async fn seed_remote_release(
     // Record who uploaded it — the pull that introduced the row would record the
     // changeset author; here the row is seeded directly, so record the mock's
     // uploader so the read resolves the blob's prefix without a listing scan.
-    let uploader = storage.own_uploader().expect("mock uploader");
-    db.record_blob_uploader("photos", photo_id, &uploader)
+    db.record_blob_location("photos", photo_id, &location)
         .await
-        .expect("record seeded blob uploader");
+        .expect("record seeded blob location");
 }
 
 async fn shared_flag(db: &Database, note_id: &str) -> i64 {
@@ -353,6 +354,27 @@ async fn pending_deletes(db: &Database) -> Vec<String> {
         .into_iter()
         .map(|e| e.cloud_key)
         .collect()
+}
+
+async fn recorded_blob_key(
+    db: &Database,
+    namespace: &str,
+    blob_id: &str,
+    cloud_path: &str,
+) -> String {
+    let location = db
+        .blob_location(namespace, blob_id)
+        .await
+        .expect("read blob location")
+        .expect("blob location is recorded");
+    CloudSyncStorage::blob_key(
+        BlobPathScheme::Plain,
+        namespace,
+        &location,
+        blob_id,
+        Some(cloud_path),
+    )
+    .expect("generated blob key")
 }
 
 async fn has_intent(db: &Database, root_table: &str, root_id: &str) -> bool {
@@ -550,6 +572,24 @@ async fn upload_source_path(db: &Database, id: &str) -> Option<String> {
     .unwrap()
 }
 
+async fn upload_cloud_key(db: &Database, id: &str) -> String {
+    use rusqlite::OptionalExtension;
+    let id = id.to_string();
+    db.call(move |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT cloud_key FROM cloud_outbox \
+                 WHERE operation = 'upload' AND file_id = ?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .expect("pending upload has an exact cloud key"))
+    })
+    .await
+    .unwrap()
+}
+
 /// A second make_remote on the same still-Local root, before any cycle drains the
 /// first one's queued upload, must carry its new pin choice through to the queued
 /// blob: the enqueue upserts the row's `retain_pinned` rather than leaving the stale
@@ -683,7 +723,10 @@ async fn re_enqueue_updates_the_pending_upload_source_path() {
         "the drain read the re-registered path and completed the make_remote",
     );
     assert!(
-        storage.exists("photos/cv/photoaaa.jpg").await.unwrap(),
+        storage
+            .exists(&recorded_blob_key(&db, "photos", "photoaaa", "cv/photoaaa.jpg",).await)
+            .await
+            .unwrap(),
         "the blob uploaded from the new path",
     );
 }
@@ -709,6 +752,7 @@ async fn queue_stuck_upload(db: &Database, file_id: &str, cloud_key: &str) {
         Some("/nonexistent"),
         BlobScope::Master,
         false,
+        &crate::blob::content_hash(b"unavailable"),
         "0000000001000-0000-A",
     )
     .await
@@ -762,9 +806,11 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
         ),
     )
     .await;
+    let location = test_blob_location(&storage.own_uploader().expect("mock uploader"), 1000);
     storage
         .put_blob(
             "photos",
+            &location,
             "photoaaa",
             BlobScope::Master,
             Some("cv/photoaaa.jpg"),
@@ -772,8 +818,7 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
         )
         .await
         .expect("seed cloud photo");
-    let uploader = storage.own_uploader().expect("mock uploader");
-    db.record_blob_uploader("photos", "photoaaa", &uploader)
+    db.record_blob_location("photos", "photoaaa", &location)
         .await
         .expect("record photo uploader");
 
@@ -784,7 +829,8 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
     // and a stuck user upload that keeps the pre-capture completion path skipping this
     // root. Then the host adds a cover (host-provided) under the already-shared root.
     insert_intent(&db, "notes", "n1", true).await;
-    queue_stuck_upload(&db, "photoaaa", "photos/cv/photoaaa.jpg").await;
+    let photo_key = recorded_blob_key(&db, "photos", "photoaaa", "cv/photoaaa.jpg").await;
+    queue_stuck_upload(&db, "photoaaa", &photo_key).await;
     exec(
         &db,
         &format!(
@@ -810,7 +856,7 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
 
     assert!(
         storage
-            .exists("covers/cv/cover-coveraaa.jpg")
+            .exists(&recorded_blob_key(&db, "covers", "coveraaa", "cv/cover-coveraaa.jpg",).await)
             .await
             .unwrap(),
         "the inline push uploaded the cover before the pull failed",
@@ -880,28 +926,26 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
         "completion deleted the make_remote intent",
     );
     assert!(
-        storage.exists("photos/cv/photoaaa.jpg").await.unwrap(),
+        storage
+            .exists(&recorded_blob_key(&db, "photos", "photoaaa", "cv/photoaaa.jpg",).await)
+            .await
+            .unwrap(),
         "the published blob exists in cloud",
     );
 
-    cancel_make_remote(
-        &db,
-        &lib,
-        BlobPathScheme::Plain,
-        SELF_UPLOADER,
-        &hlc,
-        "notes",
-        "n1",
-    )
-    .await
-    .expect("cancel after completion");
+    cancel_make_remote(&db, &lib, BlobPathScheme::Plain, &hlc, "notes", "n1")
+        .await
+        .expect("cancel after completion");
 
     assert!(
         pending_deletes(&db).await.is_empty(),
         "a cancel racing after completion must not tombstone published blobs",
     );
     assert!(
-        storage.exists("photos/cv/photoaaa.jpg").await.unwrap(),
+        storage
+            .exists(&recorded_blob_key(&db, "photos", "photoaaa", "cv/photoaaa.jpg",).await)
+            .await
+            .unwrap(),
         "the cloud blob remains present",
     );
 }
@@ -947,6 +991,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
     let recorder = Recorder::default();
+    let photo_key = recorded_blob_key(&db_a, "photos", "photoaaa", "cv/photoaaa.jpg").await;
     make_local(
         &db_a,
         &storage,
@@ -980,7 +1025,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     );
     assert_eq!(
         pending_deletes(&db_a).await,
-        vec!["photos/cv/photoaaa.jpg".to_string()],
+        vec![photo_key.clone()],
         "the cloud blob's delete is enqueued in the same commit as the flip",
     );
     assert_eq!(
@@ -998,7 +1043,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     assert!(
         storage
-            .exists("blob_tombstones/photos/cv/photoaaa.jpg")
+            .exists(&format!("blob_tombstones/{photo_key}"))
             .await
             .unwrap(),
         "the cloud blob is tombstoned",
@@ -1090,7 +1135,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     assert_eq!(shared_flag(&db_a, "n1").await, 1, "the release is Remote");
     assert!(
         storage
-            .exists("covers/cv/cover-coveraaa.jpg")
+            .exists(&recorded_blob_key(&db_a, "covers", "coveraaa", "cv/cover-coveraaa.jpg",).await)
             .await
             .unwrap(),
         "the host-provided cover is uploaded to the cloud",
@@ -1145,24 +1190,26 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         "B's cover bytes match",
     );
 
-    let photo_key = CloudSyncStorage::blob_key_at(
+    let photo_key = CloudSyncStorage::blob_key(
         BlobPathScheme::Plain,
         "photos",
-        db_a.blob_location("photos", "photoaaa")
+        &db_a
+            .blob_location("photos", "photoaaa")
             .await
             .unwrap()
-            .as_ref(),
+            .unwrap(),
         "photoaaa",
         Some("cv/photoaaa.jpg"),
     )
     .unwrap();
-    let cover_key = CloudSyncStorage::blob_key_at(
+    let cover_key = CloudSyncStorage::blob_key(
         BlobPathScheme::Plain,
         "covers",
-        db_a.blob_location("covers", "coveraaa")
+        &db_a
+            .blob_location("covers", "coveraaa")
             .await
             .unwrap()
-            .as_ref(),
+            .unwrap(),
         "coveraaa",
         Some("cv/cover-coveraaa.jpg"),
     )
@@ -1294,10 +1341,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     );
     assert_eq!(pending_uploads(&db_a).await, 0);
     assert!(
-        !storage
-            .exists("covers/cv/host-coverhost.jpg")
-            .await
-            .unwrap(),
+        storage.list("covers/").await.unwrap().is_empty(),
         "the host-provided blob is not published before the cycle uploads it"
     );
 
@@ -1310,7 +1354,9 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
     );
     assert!(
         storage
-            .exists("covers/cv/host-coverhost.jpg")
+            .exists(
+                &recorded_blob_key(&db_a, "covers", "coverhost", "cv/host-coverhost.jpg",).await
+            )
             .await
             .unwrap(),
         "inline push uploads the host-provided blob"
@@ -1483,8 +1529,14 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "the dropped cover is not pinned",
     );
     assert!(
-        storage.exists("covers/cv/cover-pin.jpg").await.unwrap()
-            && storage.exists("covers/cv/cover-drop.jpg").await.unwrap(),
+        storage
+            .exists(&recorded_blob_key(&db, "covers", "cover-pin", "cv/cover-pin.jpg").await)
+            .await
+            .unwrap()
+            && storage
+                .exists(&recorded_blob_key(&db, "covers", "cover-drop", "cv/cover-drop.jpg").await,)
+                .await
+                .unwrap(),
         "both covers are published to the cloud",
     );
 }
@@ -1617,7 +1669,10 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     assert!(
         storage
-            .exists("covers/cv/remote-root-coverrrr.jpg")
+            .exists(
+                &recorded_blob_key(&db_a, "covers", "coverrrr", "cv/remote-root-coverrrr.jpg",)
+                    .await
+            )
             .await
             .unwrap(),
         "the host-provided blob is uploaded before the row changeset is pushed"
@@ -1704,9 +1759,11 @@ async fn make_local_rejects_remote_root() {
          VALUES ('coverrrr', 'n-remote-root', 'cover', '0000000001000-0000-A', '2026-01-01', 'cv/remote-root-coverrrr.jpg')",
     )
     .await;
+    let location = test_blob_location(&storage.own_uploader().unwrap(), 1000);
     storage
         .put_blob(
             "covers",
+            &location,
             "coverrrr",
             BlobScope::Master,
             Some("cv/remote-root-coverrrr.jpg"),
@@ -1714,6 +1771,9 @@ async fn make_local_rejects_remote_root() {
         )
         .await
         .expect("seed remote blob");
+    db.record_blob_location("covers", "coverrrr", &location)
+        .await
+        .unwrap();
     let dest: HashMap<String, PathBuf> =
         [("coverrrr".to_string(), tmp.path().join("dest/coverrrr.jpg"))].into();
     let (_cancel_tx, cancel) = watch::channel(false);
@@ -1748,7 +1808,6 @@ async fn cancel_make_remote_rejects_remote_root() {
         &db,
         &lib,
         BlobPathScheme::Plain,
-        SELF_UPLOADER,
         &hlc,
         "notes",
         "n-remote-root",
@@ -2060,49 +2119,34 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
         0,
         "not flipped — photobbb never uploaded"
     );
+    let uploaded_key = recorded_blob_key(&db, "photos", "photoaaa", "cv/photoaaa.jpg").await;
+    let pending_key = upload_cloud_key(&db, "photobbb").await;
     assert!(
-        storage.exists("photos/cv/photoaaa.jpg").await.unwrap(),
+        storage.exists(&uploaded_key).await.unwrap(),
         "photoaaa is in the cloud"
     );
     assert!(
         has_intent(&db, "notes", "n1").await,
         "the make_remote is still in flight"
     );
-    let uploaded_key = CloudSyncStorage::blob_key_at(
-        BlobPathScheme::Plain,
-        "photos",
-        db.blob_location("photos", "photoaaa")
-            .await
-            .unwrap()
-            .as_ref(),
-        "photoaaa",
-        Some("cv/photoaaa.jpg"),
-    )
-    .unwrap();
-
     // Cancel: the gate stays off, photoaaa (already uploaded) is tombstoned and its pinned
     // copy dropped, photobbb's pending upload is removed, the intent is cleared.
-    cancel_make_remote(
-        &db,
-        &lib,
-        BlobPathScheme::Plain,
-        SELF_UPLOADER,
-        &hlc,
-        "notes",
-        "n1",
-    )
-    .await
-    .expect("cancel make_remote");
+    cancel_make_remote(&db, &lib, BlobPathScheme::Plain, &hlc, "notes", "n1")
+        .await
+        .expect("cancel make_remote");
     assert_eq!(shared_flag(&db, "n1").await, 0, "the release stays Local");
     assert!(
         !has_intent(&db, "notes", "n1").await,
         "the intent is cleared"
     );
     assert_eq!(pending_uploads(&db).await, 0, "no uploads remain");
+    let mut deletes = pending_deletes(&db).await;
+    deletes.sort();
+    let mut expected_deletes = vec![uploaded_key, pending_key];
+    expected_deletes.sort();
     assert_eq!(
-        pending_deletes(&db).await,
-        vec![uploaded_key],
-        "the already-uploaded orphan is tombstoned",
+        deletes, expected_deletes,
+        "every upload key owned by the cancelled operation is tombstoned",
     );
     assert!(
         !lib.pinned_blob_path("photos", "photoaaa").unwrap().exists(),
@@ -2130,14 +2174,24 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
         b"orphan-bytes",
     )
     .await;
+    let orphan_location = test_blob_location(&storage.own_uploader().unwrap(), 1000);
+    let orphan_key = CloudSyncStorage::blob_key(
+        BlobPathScheme::Plain,
+        "photos",
+        &orphan_location,
+        "photoaaa",
+        Some("cv/photoaaa.jpg"),
+    )
+    .unwrap();
     // Enqueue the upload with NO intent (models a make_remote whose intent + pending row
     // were cancelled, but this blob was already in flight in the drain).
     db.enqueue_upload(
         "photoaaa",
-        "photos/cv/photoaaa.jpg",
+        &orphan_key,
         Some(src.to_str().unwrap()),
         BlobScope::Master,
         true,
+        &crate::blob::content_hash(b"orphan-bytes"),
         "0000000001000-0000-A",
     )
     .await
@@ -2160,7 +2214,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
     assert_eq!(shared_flag(&db, "n1").await, 0, "no intent ⇒ no flip");
     assert_eq!(
         pending_deletes(&db).await,
-        vec!["photos/cv/photoaaa.jpg".to_string()],
+        vec![orphan_key],
         "the orphan blob is tombstoned",
     );
     assert!(
@@ -2258,11 +2312,16 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
         "no external ref"
     );
     assert!(pending_deletes(&db).await.is_empty(), "no tombstone queued");
+    let location = db
+        .blob_location("photos", "photoaaa")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         storage
             .get_blob(
                 "photos",
-                None,
+                &location,
                 "photoaaa",
                 BlobScope::Master,
                 Some("cv/photoaaa.jpg")
@@ -2345,6 +2404,65 @@ async fn make_local_db_commit_failure_removes_materialized_files_before_retry() 
 }
 
 #[tokio::test]
+async fn make_local_db_commit_failure_removes_host_local_store_file() {
+    let storage = MockSyncStorage::new();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(cover_decl());
+    let (_tmp, lib) = temp_store_dir();
+    let bytes = b"managed-cover".to_vec();
+    seed_release_rows(&db, "n1", "coveraaa", "cv/coveraaa.jpg", 1, &bytes).await;
+    let location = test_blob_location(&storage.own_uploader().unwrap(), 1000);
+    storage
+        .put_blob(
+            "covers",
+            &location,
+            "coveraaa",
+            BlobScope::Master,
+            Some("cv/coveraaa.jpg"),
+            bytes,
+        )
+        .await
+        .unwrap();
+    db.record_blob_location("covers", "coveraaa", &location)
+        .await
+        .unwrap();
+    db.call(|conn| {
+        conn.execute_batch(
+            "CREATE TRIGGER reject_host_make_local \
+             BEFORE UPDATE OF shared ON notes \
+             BEGIN SELECT RAISE(ABORT, 'forced make_local commit failure'); END;",
+        )
+        .map_err(crate::database::DbError::from)
+    })
+    .await
+    .unwrap();
+
+    let (_cancel_tx, cancel) = watch::channel(false);
+    let error = make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        "notes",
+        "n1",
+        &HashMap::new(),
+        &cancel,
+    )
+    .await
+    .expect_err("database commit failure aborts host make_local");
+
+    assert!(matches!(
+        error,
+        crate::blob::transition::MakeLocalError::Db(_)
+    ));
+    assert!(!lib.local_blob_path("covers", "coveraaa").unwrap().exists());
+    assert_eq!(shared_flag(&db, "n1").await, 1);
+    assert!(pending_deletes(&db).await.is_empty());
+}
+
+#[tokio::test]
 async fn make_local_refuses_to_replace_an_existing_destination() {
     let storage = MockSyncStorage::new();
     let hlc = Hlc::new("A".to_string());
@@ -2380,10 +2498,15 @@ async fn make_local_refuses_to_replace_an_existing_destination() {
     assert_eq!(shared_flag(&db, "n1").await, 1);
     assert!(db.external_blob("photoaaa").await.unwrap().is_none());
     assert!(pending_deletes(&db).await.is_empty());
+    let location = db
+        .blob_location("photos", "photoaaa")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(storage
         .get_blob(
             "photos",
-            None,
+            &location,
             "photoaaa",
             BlobScope::Master,
             Some("cv/photoaaa.jpg")
@@ -2411,9 +2534,11 @@ async fn make_local_rolls_back_when_two_blobs_share_a_destination() {
         ),
     )
     .await;
+    let second_location = test_blob_location(&storage.own_uploader().unwrap(), 1001);
     storage
         .put_blob(
             "photos",
+            &second_location,
             "photobbb",
             BlobScope::Master,
             Some("cv/photobbb.jpg"),
@@ -2421,7 +2546,7 @@ async fn make_local_rolls_back_when_two_blobs_share_a_destination() {
         )
         .await
         .unwrap();
-    db.record_blob_uploader("photos", "photobbb", &storage.own_uploader().unwrap())
+    db.record_blob_location("photos", "photobbb", &second_location)
         .await
         .unwrap();
 
@@ -2454,10 +2579,15 @@ async fn make_local_rolls_back_when_two_blobs_share_a_destination() {
     assert!(!destination.exists());
     assert_eq!(shared_flag(&db, "n1").await, 1);
     assert!(pending_deletes(&db).await.is_empty());
+    let first_location = db
+        .blob_location("photos", "photoaaa")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(storage
         .get_blob(
             "photos",
-            None,
+            &first_location,
             "photoaaa",
             BlobScope::Master,
             Some("cv/photoaaa.jpg")
@@ -2467,7 +2597,7 @@ async fn make_local_rolls_back_when_two_blobs_share_a_destination() {
     assert!(storage
         .get_blob(
             "photos",
-            None,
+            &second_location,
             "photobbb",
             BlobScope::Master,
             Some("cv/photobbb.jpg")
@@ -2526,11 +2656,16 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
         "no external ref registered"
     );
     assert!(pending_deletes(&db).await.is_empty(), "no tombstone queued");
+    let location = db
+        .blob_location("photos", "photoaaa")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         storage
             .get_blob(
                 "photos",
-                None,
+                &location,
                 "photoaaa",
                 BlobScope::Master,
                 Some("cv/photoaaa.jpg")
@@ -2642,6 +2777,7 @@ async fn make_local_abort_then_retry_converges() {
 
     let dest_path = tmp.path().join("dest/photoaaa.jpg");
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
+    let photo_key = recorded_blob_key(&db, "photos", "photoaaa", "cv/photoaaa.jpg").await;
 
     // First attempt is cancelled before the commit (the "crash"): still Remote.
     let (_cancel_tx, cancelled) = watch::channel(true);
@@ -2688,10 +2824,7 @@ async fn make_local_abort_then_retry_converges() {
     .expect("retry make_local");
     assert_eq!(shared_flag(&db, "n1").await, 0, "converged to Local");
     assert_eq!(std::fs::read(&dest_path).unwrap(), bytes);
-    assert_eq!(
-        pending_deletes(&db).await,
-        vec!["photos/cv/photoaaa.jpg".to_string()],
-    );
+    assert_eq!(pending_deletes(&db).await, vec![photo_key],);
 }
 
 // ===========================================================================
@@ -2738,10 +2871,10 @@ async fn round_trip_make_remote_make_local_make_remote() {
         .await
         .unwrap()
         .unwrap();
-    let first_key = CloudSyncStorage::blob_key_at(
+    let first_key = CloudSyncStorage::blob_key(
         BlobPathScheme::Plain,
         "photos",
-        Some(&first_location),
+        &first_location,
         "photoaaa",
         Some("cv/photoaaa.jpg"),
     )
@@ -2814,9 +2947,9 @@ async fn round_trip_make_remote_make_local_make_remote() {
     );
     assert!(
         storage
-            .get_blob_at(
+            .get_blob(
                 "photos",
-                Some(&second_location),
+                &second_location,
                 "photoaaa",
                 BlobScope::Master,
                 Some("cv/photoaaa.jpg")

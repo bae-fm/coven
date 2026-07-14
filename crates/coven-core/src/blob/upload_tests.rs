@@ -96,21 +96,27 @@ async fn insert_upload(
     attempt_count: i64,
     last_attempt_at: Option<String>,
 ) {
+    let expected_hash = source_path
+        .as_deref()
+        .and_then(|path| std::fs::read(path).ok())
+        .map(|bytes| crate::blob::content_hash(&bytes))
+        .unwrap_or_else(|| crate::blob::content_hash(b"missing-source"));
     let (file_id, cloud_key) = (file_id.to_string(), cloud_key.to_string());
     let scope = crate::blob::BlobScope::Master.to_outbox_str();
     db.call(move |conn| {
         conn.execute(
             &format!(
                 "INSERT INTO cloud_outbox \
-                 (id, operation, file_id, cloud_key, source_path, scope, created_at, \
+                 (id, operation, file_id, cloud_key, source_path, expected_hash, scope, created_at, \
                   attempt_count, last_attempt_at) \
-                 VALUES (?1, 'upload', ?2, ?3, ?4, '{scope}', '2024-01-01T00:00:00Z', ?5, ?6)"
+                 VALUES (?1, 'upload', ?2, ?3, ?4, ?5, '{scope}', '2024-01-01T00:00:00Z', ?6, ?7)"
             ),
             rusqlite::params![
                 id,
                 file_id,
                 cloud_key,
                 source_path,
+                expected_hash,
                 attempt_count,
                 last_attempt_at
             ],
@@ -417,43 +423,6 @@ async fn bad_item_does_not_block_good_later_item() {
     assert!(get_upload(&db, 2).await.is_none(), "uploaded entry removed");
 }
 
-#[tokio::test]
-async fn successful_retry_of_a_legacy_upload_durably_cancels_its_tombstone() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = write_temp_file(tmp.path(), "legacy.bin", b"legacy-bytes");
-    let db = open_outbox_db();
-    let key = "photos/uploader/aa/bb/legacy-id";
-    insert_upload(&db, 1, "legacy-id", key, Some(path), 0, None).await;
-    let cloud = InMemoryCloudHome::new();
-
-    let outcome = run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        None,
-    )
-    .await
-    .expect("drain legacy upload");
-
-    assert_eq!(outcome.uploaded, 1);
-    assert!(get_upload(&db, 1).await.is_none());
-    let durable_cancel = db
-        .call(|conn| {
-            conn.query_row(
-                "SELECT cloud_key FROM cloud_outbox WHERE operation = 'cancel'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(DbError::from)
-        })
-        .await
-        .expect("read durable cancel");
-    assert_eq!(durable_cancel.as_deref(), Some(key));
-}
-
 /// While this device has not adopted a store-key rotation the cloud has already
 /// committed, the drain refuses to seal any entry rather than sealing it under
 /// the superseded generation: no object reaches the cloud, and the entry stays
@@ -664,6 +633,106 @@ async fn observer_fires_started_then_failed_on_failure() {
     }
 }
 
+#[tokio::test]
+async fn upload_failure_recording_failure_fails_the_drain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
+    let db = open_outbox_db();
+    insert_upload(&db, 1, "fid", "k1", Some(path), 0, None).await;
+    db.call(|conn| {
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_upload_failure_record \
+             BEFORE UPDATE OF attempt_count, last_error, last_attempt_at ON cloud_outbox BEGIN \
+             SELECT RAISE(ABORT, 'forced upload failure recording failure'); END;",
+        )
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("install upload failure recording trigger");
+
+    let result = run_drain(
+        &db,
+        &FailingCloudHome::new(),
+        &enc(),
+        &StoreDir::new(tmp.path()),
+        &fixed_clock(T0),
+        None,
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("failure-recording error must fail the drain"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("forced upload failure recording failure"),
+        "the drain surfaces the bookkeeping failure: {error}",
+    );
+    assert_eq!(
+        get_upload(&db, 1).await.unwrap().0,
+        0,
+        "the failed update leaves the original queue row intact",
+    );
+}
+
+#[tokio::test]
+async fn post_upload_commit_failure_fails_the_drain_without_reporting_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
+    let db = open_outbox_db();
+    insert_upload(&db, 1, "fid", "k1", Some(path), 0, None).await;
+    db.call(|conn| {
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_upload_finish \
+             BEFORE DELETE ON cloud_outbox WHEN OLD.id = 1 BEGIN \
+             SELECT RAISE(ABORT, 'forced post-upload commit failure'); END;",
+        )
+        .map_err(DbError::from)
+    })
+    .await
+    .expect("install post-upload commit failure trigger");
+    let cloud = InMemoryCloudHome::new();
+    let observer = RecordingObserver::new();
+
+    let result = run_drain(
+        &db,
+        &cloud,
+        &enc(),
+        &StoreDir::new(tmp.path()),
+        &fixed_clock(T0),
+        Some(&observer),
+    )
+    .await;
+    let error = match result {
+        Ok(_) => panic!("post-upload commit failure must fail the drain"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("forced post-upload commit failure"),
+        "the drain surfaces the commit failure: {error}",
+    );
+    assert!(
+        cloud.get("k1").is_some(),
+        "the idempotent cloud write landed"
+    );
+    assert!(
+        get_upload(&db, 1).await.is_some(),
+        "the atomic commit leaves the upload queued",
+    );
+    assert!(
+        !observer
+            .events()
+            .iter()
+            .any(|event| matches!(event, ObsEvent::Uploaded(_))),
+        "a failed commit cannot notify upload success",
+    );
+}
+
 /// A slow, chunked upload reports mid-file progress: the coalescing ticker
 /// forwards an advancing byte count to the observer between Started and Uploaded,
 /// and the final forwarded value equals the total.
@@ -745,7 +814,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             None,
             crate::blob::BlobScope::Master,
             false,
-            None,
+            &crate::blob::content_hash(b"rollback"),
             T0,
         )?;
         tx.rollback().map_err(DbError::from)
@@ -763,7 +832,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             Some("/tmp/source.flac"),
             crate::blob::BlobScope::Derived("rel-1".to_string()),
             false,
-            None,
+            &crate::blob::content_hash(b"commit"),
             T0,
         )?;
         tx.commit().map_err(DbError::from)
@@ -804,6 +873,7 @@ async fn pinned_upload_populates_the_protected_cache_folder() {
         Some(source.as_str()),
         crate::blob::BlobScope::Master,
         true, // retain_pinned
+        &crate::blob::content_hash(plaintext),
         T0,
     )
     .await
@@ -861,6 +931,7 @@ async fn unpinned_upload_populates_nothing_on_write() {
         Some(source.as_str()),
         crate::blob::BlobScope::Master,
         false, // retain_pinned
+        &crate::blob::content_hash(plaintext),
         T0,
     )
     .await
@@ -885,14 +956,14 @@ async fn unpinned_upload_populates_nothing_on_write() {
     );
 }
 
-/// A pin populate that fails does NOT fail the upload: the upload already
-/// succeeded and the bytes are in the cloud, so a populate failure is logged and
-/// swallowed (a later read re-fetches into the cache). Here the protected folder is
+/// A pin populate failure keeps the operation queued and records the failure. The
+/// cloud write is idempotent, so retrying the complete operation cannot lose data.
+/// Here the protected folder is
 /// blocked by planting a FILE where the blob's shard directory must go, so the
 /// atomic write into `storage/pinned/<id>` can't create its parent — yet the drain
-/// still reports the upload done and clears the queue entry.
+/// reports the upload incomplete and retains the queue entry.
 #[tokio::test]
-async fn a_failed_pin_populate_does_not_fail_the_upload() {
+async fn a_failed_pin_populate_keeps_the_upload_queued() {
     let tmp = tempfile::tempdir().unwrap();
     let plaintext = b"PIN-FAILS-BUT-UPLOAD-OK";
     let source = write_temp_file(tmp.path(), "track.flac", plaintext);
@@ -919,6 +990,7 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
         Some(source.as_str()),
         crate::blob::BlobScope::Master,
         true, // retain_pinned — but the populate will fail
+        &crate::blob::content_hash(plaintext),
         T0,
     )
     .await
@@ -927,16 +999,14 @@ async fn a_failed_pin_populate_does_not_fail_the_upload() {
     let cloud = InMemoryCloudHome::new();
     let n = run_drain(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
         .await
-        .expect("the drain succeeds despite the populate failure")
+        .expect("the drain records the populate failure")
         .uploaded;
 
-    // The upload counted, the blob reached the cloud, and the queue entry was
-    // cleared — the failed populate rolled none of that back.
-    assert_eq!(n, 1, "the upload succeeds even though pinning failed");
+    assert_eq!(n, 0, "the operation is not reported complete");
     assert!(cloud.get(cloud_key).is_some(), "the blob reached the cloud");
     assert!(
-        get_upload(&db, 1).await.is_none(),
-        "the completed upload's queue entry was removed",
+        get_upload(&db, 1).await.is_some(),
+        "the upload remains queued until its pinned copy is durable",
     );
     // The pin did not land (its parent couldn't be created).
     assert!(

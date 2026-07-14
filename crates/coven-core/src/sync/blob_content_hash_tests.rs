@@ -33,7 +33,9 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::session::BlobDecl;
 use crate::sync::storage::SyncStorage;
-use crate::sync::test_helpers::{open_test_db_with_blob, plant_blob_row, temp_store_dir};
+use crate::sync::test_helpers::{
+    open_test_db_with_blob, plant_blob_row, temp_store_dir, test_blob_location,
+};
 
 const STORE_ID: &str = "lib-content-hash-test";
 const STORE_KEY: [u8; 32] = [7u8; 32];
@@ -93,6 +95,8 @@ async fn a_planted_blob_under_another_uploader_is_not_served() {
     let home = InMemoryCloudHome::new();
     let owner_storage = member_storage(&home, &owner);
     let attacker_storage = member_storage(&home, &attacker);
+    let owner_location = test_blob_location(&owner_pk, 1002);
+    let attacker_location = test_blob_location(&attacker_pk, 1001);
 
     // A's real bytes for X, under A's prefix.
     let real = b"THE-OWNERS-REAL-BLOB".to_vec();
@@ -102,11 +106,25 @@ async fn a_planted_blob_under_another_uploader_is_not_served() {
     assert_ne!(real, planted);
 
     owner_storage
-        .put_blob("photos", BLOB_ID, BlobScope::Master, None, real.clone())
+        .put_blob(
+            "photos",
+            &owner_location,
+            BLOB_ID,
+            BlobScope::Master,
+            None,
+            real.clone(),
+        )
         .await
         .expect("owner uploads its real blob under its own prefix");
     attacker_storage
-        .put_blob("photos", BLOB_ID, BlobScope::Master, None, planted.clone())
+        .put_blob(
+            "photos",
+            &attacker_location,
+            BLOB_ID,
+            BlobScope::Master,
+            None,
+            planted.clone(),
+        )
         .await
         .expect("attacker plants a same-size blob under its own prefix");
 
@@ -132,7 +150,7 @@ async fn a_planted_blob_under_another_uploader_is_not_served() {
     //    poisoned resolution could produce), the row's content hash refuses the
     //    attacker's bytes: they are the same size and validly sealed, but they are
     //    not what A signed.
-    db.record_blob_uploader("photos", BLOB_ID, &attacker_pk)
+    db.record_blob_location("photos", BLOB_ID, &attacker_location)
         .await
         .unwrap();
     let refused = read_blob(&db, &ld, Some(&attacker_storage), &photo_ref())
@@ -153,7 +171,7 @@ async fn a_planted_blob_under_another_uploader_is_not_served() {
     );
 
     // 3. Pointed at A's real prefix, the read serves A's bytes and they verify.
-    db.record_blob_uploader("photos", BLOB_ID, &owner_pk)
+    db.record_blob_location("photos", BLOB_ID, &owner_location)
         .await
         .unwrap();
     let served = read_blob(&db, &ld, Some(&owner_storage), &photo_ref())
@@ -173,6 +191,7 @@ async fn a_rolled_back_blob_version_is_refused() {
 
     let home = InMemoryCloudHome::new();
     let owner_storage = member_storage(&home, &owner);
+    let owner_location = test_blob_location(&owner_pk, 1000);
 
     // Version 2 is the current content the row commits to; version 1 is a prior
     // same-size version the provider rolls the object back to.
@@ -185,13 +204,20 @@ async fn a_rolled_back_blob_version_is_refused() {
     let db = photo_db();
     let (_tmp, ld) = temp_store_dir();
     plant_blob_row(&db, BLOB_ID, true, &v2).await;
-    db.record_blob_uploader("photos", BLOB_ID, &owner_pk)
+    db.record_blob_location("photos", BLOB_ID, &owner_location)
         .await
         .unwrap();
 
     // The provider serves the rolled-back v1 at the object's key.
     owner_storage
-        .put_blob("photos", BLOB_ID, BlobScope::Master, None, v1.clone())
+        .put_blob(
+            "photos",
+            &owner_location,
+            BLOB_ID,
+            BlobScope::Master,
+            None,
+            v1.clone(),
+        )
         .await
         .expect("provider serves the prior version");
 
@@ -215,7 +241,14 @@ async fn a_rolled_back_blob_version_is_refused() {
     // Once the object is restored to v2, the read verifies and serves it — the
     // round-trip: import (hash on the row) → seal → download → hash-verify.
     owner_storage
-        .put_blob("photos", BLOB_ID, BlobScope::Master, None, v2.clone())
+        .put_blob(
+            "photos",
+            &owner_location,
+            BLOB_ID,
+            BlobScope::Master,
+            None,
+            v2.clone(),
+        )
         .await
         .expect("restore the current version");
     let served = read_blob(&db, &ld, Some(&owner_storage), &photo_ref())

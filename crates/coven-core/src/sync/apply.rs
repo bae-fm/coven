@@ -50,6 +50,16 @@ pub struct ApplyResult {
     pub constraint_conflict_tables: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct BlobLocationAssignment {
+    pub table: String,
+    pub pk: String,
+    pub row_version: String,
+    pub namespace: String,
+    pub blob_id: String,
+    pub location: crate::blob::CloudBlobLocation,
+}
+
 /// Apply `bytes` to `conn`, resolving conflicts (premerge + row arbitration),
 /// building the [`TableSchema`] from `tables` once. A convenience wrapper over
 /// [`resolve_and_apply_changeset_with_schema`] for callers that apply a single
@@ -87,19 +97,15 @@ pub fn resolve_and_apply_changeset(
 /// without re-deriving it per call. `receiver_wall_ms` is the receiver's current
 /// wall-clock millis, read once by the caller and moved into the closure to bound
 /// a grossly-future incoming `_updated_at` (see [`arbitrate_row_conflict`]).
-/// `blob_uploads` records, atomically with the applied rows, which device uploaded
-/// each blob the changeset references (`(namespace, blob_id, location)`): the read
-/// dispatch later keys a blob at that exact immutable object. Writing it inside
-/// this transaction is what keeps the index consistent with the rows that reference
-/// the blobs — a committed row always has its uploader recorded, never a later
-/// repair. Callers with no blobs to record (a test, a snapshot round-trip) pass an
-/// empty slice.
-pub fn resolve_and_apply_changeset_with_schema(
+/// `blob_uploads` binds each exact immutable location to the signed row version
+/// that references it. After conflict resolution, only a winning row version may
+/// record its location. Callers with no blobs to record pass an empty slice.
+pub(crate) fn resolve_and_apply_changeset_with_schema(
     conn: &Connection,
     bytes: &[u8],
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
-    blob_uploads: &[(String, String, crate::blob::CloudBlobLocation)],
+    blob_uploads: &[BlobLocationAssignment],
 ) -> Result<ApplyResult, DbError> {
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
     let result = resolve_and_apply_changeset_with_schema_on(
@@ -126,7 +132,7 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on(
     bytes: &[u8],
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
-    blob_uploads: &[(String, String, crate::blob::CloudBlobLocation)],
+    blob_uploads: &[BlobLocationAssignment],
 ) -> Result<ApplyResult, DbError> {
     validate_changeset_tables(bytes, &schema)?;
     let fk_flag = Arc::new(AtomicBool::new(false));
@@ -187,12 +193,25 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on(
     .map_err(DbError::from)?;
     let had_fk_violations = fk_flag.load(Ordering::Relaxed);
     if !had_fk_violations {
-        // Record the uploader of each blob these rows introduce on the caller's
-        // transaction, so a committed blob-bearing row always carries its
-        // location. The caller rolls these records back with the rows on any
-        // rejected apply; a deferred retry re-records the same fact idempotently.
-        for (namespace, blob_id, location) in blob_uploads {
-            crate::database::Database::record_blob_location_on(conn, namespace, blob_id, location)?;
+        // Record only locations whose exact signed row version won conflict
+        // resolution. This is in the same transaction as the row apply.
+        for assignment in blob_uploads {
+            let sql = format!(
+                "SELECT _updated_at FROM {} WHERE id = ?1",
+                quote_ident(&assignment.table)
+            );
+            let current_version = conn
+                .query_row(&sql, [&assignment.pk], |row| row.get::<_, String>(0))
+                .optional()
+                .map_err(DbError::from)?;
+            if current_version.as_deref() == Some(assignment.row_version.as_str()) {
+                crate::database::Database::record_blob_location_on(
+                    conn,
+                    &assignment.namespace,
+                    &assignment.blob_id,
+                    &assignment.location,
+                )?;
+            }
         }
     }
 

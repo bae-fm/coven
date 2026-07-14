@@ -252,10 +252,10 @@ async fn root_refs(
 /// Shared by the make_remote, cancel, and make_local paths.
 fn cloud_key_for_location(
     scheme: BlobPathScheme,
-    location: Option<&crate::blob::CloudBlobLocation>,
+    location: &crate::blob::CloudBlobLocation,
     blob: &BlobRef,
 ) -> Result<String, String> {
-    CloudSyncStorage::blob_key_at(
+    CloudSyncStorage::blob_key(
         scheme,
         &blob.namespace,
         location,
@@ -310,7 +310,7 @@ pub async fn make_remote(
     let mut locations = Vec::new();
     for blob in &refs {
         let location = match db.blob_location(&blob.namespace, &blob.id).await? {
-            Some(existing) if existing.version.is_some() => existing,
+            Some(existing) => existing,
             _ => generated_location.clone(),
         };
         locations.push((blob.namespace.clone(), blob.id.clone(), location));
@@ -380,7 +380,7 @@ pub async fn make_remote(
                     "make_remote did not assign a blob location".to_string(),
                 )
             })?;
-        let cloud_key = cloud_key_for_location(scheme, Some(&location), blob)
+        let cloud_key = cloud_key_for_location(scheme, &location, blob)
             .map_err(|e| MakeRemoteError::CloudKey(blob.id.clone(), e))?;
         let source = ext.path.to_str().ok_or_else(|| MakeRemoteError::Source {
             blob_id: blob.id.clone(),
@@ -428,7 +428,7 @@ pub async fn make_remote(
                         Some(source),
                         scope.clone(),
                         pin,
-                        Some(expected_hash),
+                        expected_hash,
                         &created_at,
                     )?;
                 }
@@ -458,24 +458,13 @@ pub async fn make_remote(
 /// Scoped to the user-provided blobs a make_remote enqueues — never a host-provided
 /// blob, whose cloud copy (if any) this transition did not create via the outbox.
 ///
-/// A blob still in flight when this runs keeps its outbox row (the drain removes it
-/// only on success); the drain's completion check then finds an upload for a root
-/// with no intent and tombstones that orphan. So this handles the
-/// already-uploaded-by-cancel-time blobs, and the drain handles the in-flight one —
-/// every uploaded blob ends up tombstoned.
-///
-/// The one residual window: a crash between an in-flight upload landing and the
-/// drain's orphan tombstone leaves that cloud blob un-tombstoned — the same
-/// network→DB-commit boundary every upload has, and the orphan is overwritten by any
-/// later re-make_remote of the same key. Tombstoning every blob here unconditionally
-/// would close it but write spurious tombstones for blobs that were never uploaded
-/// (a large release's worth on an early cancel), so the pending/uploaded split is the
-/// deliberate, cheaper trade.
+/// Cancellation removes each upload row and enqueues a deletion for its exact
+/// immutable key in the same transaction. An upload already in flight may still
+/// finish its cloud write, but the durable deletion remains and condemns that key.
 pub async fn cancel_make_remote(
     db: &Database,
     store_dir: &StoreDir,
     scheme: BlobPathScheme,
-    _self_uploader: &str,
     hlc: &Hlc,
     root_table: &str,
     root_id: &str,
@@ -499,7 +488,7 @@ pub async fn cancel_make_remote(
                     "make_remote intent has no recorded blob location".to_string(),
                 )
             })?;
-        let cloud_key = cloud_key_for_location(scheme, Some(&location), blob)
+        let cloud_key = cloud_key_for_location(scheme, &location, blob)
             .map_err(|e| MakeRemoteError::CloudKey(blob.id.clone(), e))?;
         keyed.push((blob.id.clone(), blob.namespace.clone(), cloud_key));
     }
@@ -516,27 +505,8 @@ pub async fn cancel_make_remote(
             }
             let mut dropped = Vec::new();
             for (id, namespace, cloud_key) in &keyed {
-                let still_pending: bool = tx
-                    .query_row(
-                        "SELECT 1 FROM cloud_outbox WHERE operation = 'upload' AND file_id = ?1",
-                        [id],
-                        |_| Ok(()),
-                    )
-                    .optional()
-                    .map_err(DbError::from)?
-                    .is_some();
-                if still_pending {
-                    // Not yet uploaded: drop its queued upload, nothing in the cloud.
-                    tx.execute(
-                        "DELETE FROM cloud_outbox WHERE operation = 'upload' AND file_id = ?1",
-                        [id],
-                    )
-                    .map_err(DbError::from)?;
-                } else {
-                    // Already uploaded: tombstone the cloud blob and drop its cache.
-                    Database::enqueue_delete_on(&tx, cloud_key, &now)?;
-                    dropped.push((id.clone(), namespace.clone()));
-                }
+                Database::enqueue_delete_on(&tx, cloud_key, &now)?;
+                dropped.push((id.clone(), namespace.clone()));
                 Database::clear_blob_location_on(&tx, namespace, id, &now)?;
             }
             Database::delete_make_remote_intent_on(&tx, &root_table_owned, &root_id_owned)?;
@@ -640,8 +610,11 @@ mod tests {
             (4, "delete", "blob-a", "key-a-delete"),
         ] {
             conn.execute(
-                "INSERT INTO cloud_outbox (id, operation, file_id, cloud_key, scope, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, 'master', '2024-01-01T00:00:00Z')",
+                "INSERT INTO cloud_outbox \
+                 (id, operation, file_id, cloud_key, expected_hash, scope, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, \
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', \
+                 'master', '2024-01-01T00:00:00Z')",
                 (id, operation, file_id, cloud_key),
             )
             .expect("insert outbox row");
@@ -943,7 +916,7 @@ async fn materialize_blobs(
         let location = crate::blob::cache::resolve_blob_location(db, storage, blob)
             .await
             .map_err(|e| MakeLocalError::CloudKey(blob.id.clone(), e.to_string()))?;
-        let cloud_key = cloud_key_for_location(scheme, location.as_ref(), blob)
+        let cloud_key = cloud_key_for_location(scheme, &location, blob)
             .map_err(|e| MakeLocalError::CloudKey(blob.id.clone(), e))?;
 
         // Where the blob's bytes go is its provenance's Local home: a user-provided
@@ -1048,6 +1021,7 @@ async fn materialize_blobs(
                 )
                 .await
                 .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+                written.push(WrittenFile::LocalStore(store_path.clone()));
                 verify_durable(&store_path, size).await.map_err(|detail| {
                     MakeLocalError::Write {
                         blob_id: blob.id.clone(),
@@ -1055,7 +1029,6 @@ async fn materialize_blobs(
                         detail,
                     }
                 })?;
-                written.push(WrittenFile::LocalStore(store_path));
                 Materialized {
                     blob: blob.clone(),
                     dest: None,

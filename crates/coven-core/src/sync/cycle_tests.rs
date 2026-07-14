@@ -94,7 +94,7 @@ async fn blob_exists_at_recorded_location(
         return false;
     };
     storage
-        .blob_exists_at(namespace, &location, id, None)
+        .blob_exists(namespace, &location, id, None)
         .await
         .expect("exists check")
 }
@@ -109,6 +109,7 @@ async fn seed_pending_upload(db: &Database) {
         Some("/nonexistent/f1"),
         BlobScope::Master,
         false,
+        &crate::blob::content_hash(b"missing"),
         T0,
     )
     .await
@@ -290,8 +291,11 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('cover1', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('cover1', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
+            crate::blob::content_hash(b"cover"),
+        ),
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
@@ -344,8 +348,11 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('cover1', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('cover1', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
+            crate::blob::content_hash(b"cover"),
+        ),
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
@@ -922,18 +929,6 @@ impl SyncStorage for HostWriteInjector {
     async fn put_blob(
         &self,
         namespace: &str,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .put_blob(namespace, id, scope, cloud_path, data)
-            .await
-    }
-    async fn put_blob_at(
-        &self,
-        namespace: &str,
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
@@ -941,24 +936,12 @@ impl SyncStorage for HostWriteInjector {
         data: Vec<u8>,
     ) -> Result<(), StorageError> {
         self.inner
-            .put_blob_at(namespace, location, id, scope, cloud_path, data)
+            .put_blob(namespace, location, id, scope, cloud_path, data)
             .await
     }
     async fn put_blob_from_file(
         &self,
         namespace: &str,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_path: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .put_blob_from_file(namespace, id, scope, cloud_path, source_path)
-            .await
-    }
-    async fn put_blob_from_file_at(
-        &self,
-        namespace: &str,
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
@@ -966,42 +949,22 @@ impl SyncStorage for HostWriteInjector {
         source_path: &std::path::Path,
     ) -> Result<(), StorageError> {
         self.inner
-            .put_blob_from_file_at(namespace, location, id, scope, cloud_path, source_path)
+            .put_blob_from_file(namespace, location, id, scope, cloud_path, source_path)
             .await
     }
     async fn get_blob(
         &self,
         namespace: &str,
-        uploader: Option<&str>,
+        location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError> {
         self.inner
-            .get_blob(namespace, uploader, id, scope, cloud_path)
-            .await
-    }
-    async fn get_blob_at(
-        &self,
-        namespace: &str,
-        location: Option<&crate::blob::CloudBlobLocation>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.inner
-            .get_blob_at(namespace, location, id, scope, cloud_path)
+            .get_blob(namespace, location, id, scope, cloud_path)
             .await
     }
     async fn blob_exists(
-        &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<bool, StorageError> {
-        self.inner.blob_exists(namespace, id, cloud_path).await
-    }
-    async fn blob_exists_at(
         &self,
         namespace: &str,
         location: &crate::blob::CloudBlobLocation,
@@ -1009,13 +972,13 @@ impl SyncStorage for HostWriteInjector {
         cloud_path: Option<&str>,
     ) -> Result<bool, StorageError> {
         self.inner
-            .blob_exists_at(namespace, location, id, cloud_path)
+            .blob_exists(namespace, location, id, cloud_path)
             .await
     }
     async fn read_blob_range(
         &self,
         namespace: &str,
-        uploader: Option<&str>,
+        location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
@@ -1025,30 +988,6 @@ impl SyncStorage for HostWriteInjector {
     ) -> Result<Vec<u8>, StorageError> {
         self.inner
             .read_blob_range(
-                namespace,
-                uploader,
-                id,
-                scope,
-                cloud_path,
-                source_size,
-                offset,
-                len,
-            )
-            .await
-    }
-    async fn read_blob_range_at(
-        &self,
-        namespace: &str,
-        location: Option<&crate::blob::CloudBlobLocation>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.inner
-            .read_blob_range_at(
                 namespace,
                 location,
                 id,
@@ -1063,7 +1002,7 @@ impl SyncStorage for HostWriteInjector {
     async fn read_blob_to_file(
         &self,
         namespace: &str,
-        uploader: Option<&str>,
+        location: &crate::blob::CloudBlobLocation,
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
@@ -1073,30 +1012,6 @@ impl SyncStorage for HostWriteInjector {
     ) -> Result<(), StorageError> {
         self.inner
             .read_blob_to_file(
-                namespace,
-                uploader,
-                id,
-                scope,
-                cloud_path,
-                source_size,
-                expected_hash,
-                dest,
-            )
-            .await
-    }
-    async fn read_blob_to_file_at(
-        &self,
-        namespace: &str,
-        location: Option<&crate::blob::CloudBlobLocation>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        expected_hash: &str,
-        dest: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .read_blob_to_file_at(
                 namespace,
                 location,
                 id,
@@ -1114,20 +1029,12 @@ impl SyncStorage for HostWriteInjector {
     fn blob_cloud_key(
         &self,
         namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<String, crate::sync::storage::StorageError> {
-        self.inner.blob_cloud_key(namespace, id, cloud_path)
-    }
-    fn blob_cloud_key_at(
-        &self,
-        namespace: &str,
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         cloud_path: Option<&str>,
     ) -> Result<String, crate::sync::storage::StorageError> {
         self.inner
-            .blob_cloud_key_at(namespace, location, id, cloud_path)
+            .blob_cloud_key(namespace, location, id, cloud_path)
     }
     fn own_uploader(&self) -> Option<String> {
         self.inner.own_uploader()
@@ -1412,8 +1319,11 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('hponly', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('hponly', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
+            crate::blob::content_hash(b"cover"),
+        ),
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
@@ -1496,8 +1406,11 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('hponly', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('hponly', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
+            crate::blob::content_hash(b"cover"),
+        ),
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
@@ -1577,8 +1490,11 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('hponly', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('hponly', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
+            crate::blob::content_hash(b"cover"),
+        ),
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "hponly", b"cover")
@@ -1682,10 +1598,14 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('firstblob', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01'); \
-         INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('secondblob', 'n1', 'cover', 6, '0000000001001-0000-M', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('firstblob', 'n1', 'cover', 5, '{}', '0000000001000-0000-M', '2026-01-01'); \
+             INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('secondblob', 'n1', 'cover', 6, '{}', '0000000001001-0000-M', '2026-01-01')",
+            crate::blob::content_hash(b"first"),
+            crate::blob::content_hash(b"second"),
+        ),
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "firstblob", b"first")
@@ -1757,9 +1677,11 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         Provenance::HostProvided,
         CacheFill::CacheLazy,
     ));
+    let location = test_blob_location(&storage.own_uploader().unwrap(), 1000);
     storage
         .put_blob(
             "photos",
+            &location,
             "remoteonly",
             crate::blob::BlobScope::Master,
             None,
@@ -1767,7 +1689,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         )
         .await
         .expect("plant remote blob");
-    db.record_blob_uploader("photos", "remoteonly", &storage.own_uploader().unwrap())
+    db.record_blob_location("photos", "remoteonly", &location)
         .await
         .unwrap();
     host_exec(
@@ -1778,8 +1700,11 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('remoteonly', 'n1', 'cover', 15, '0000000001000-0000-M', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('remoteonly', 'n1', 'cover', 15, '{}', '0000000001000-0000-M', '2026-01-01')",
+            crate::blob::content_hash(b"already durable"),
+        ),
     )
     .await;
 
@@ -1817,8 +1742,11 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
-         VALUES ('lazyblob', 'n1', 'cover', 4, '0000000001000-0000-M', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('lazyblob', 'n1', 'cover', 4, '{}', '0000000001000-0000-M', '2026-01-01')",
+            crate::blob::content_hash(b"lazy"),
+        ),
     )
     .await;
     crate::blob::local_files::store(&ld, "photos", "lazyblob", b"lazy")
@@ -2225,9 +2153,11 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
         Provenance::UserProvided,
         CacheFill::CacheLazy,
     ));
+    let location = test_blob_location(&storage.own_uploader().unwrap(), 1000);
     storage
         .put_blob(
             "audio",
+            &location,
             "audio1",
             crate::blob::BlobScope::Master,
             None,
@@ -2235,7 +2165,7 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
         )
         .await
         .expect("plant remote user-provided blob");
-    db.record_blob_uploader("audio", "audio1", &storage.own_uploader().unwrap())
+    db.record_blob_location("audio", "audio1", &location)
         .await
         .unwrap();
     host_exec(
@@ -2246,8 +2176,11 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
     .await;
     host_exec(
         &db,
-        "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-M', '2026-01-01')",
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at) \
+             VALUES ('audio1', 'n1', 'audio', 5, '{}', '0000000001000-0000-M', '2026-01-01')",
+            crate::blob::content_hash(b"AUDIO"),
+        ),
     )
     .await;
 
@@ -2262,7 +2195,9 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
         "the failed publish did not write the changeset"
     );
 
-    storage.delete_blob_object("audio", "audio1").await;
+    storage
+        .delete_blob_object("audio", &location, "audio1")
+        .await;
     let retry = run_single_sync_cycle(
         &storage,
         "test-lib",

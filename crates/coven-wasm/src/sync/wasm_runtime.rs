@@ -170,17 +170,11 @@ impl WasmSyncRuntime {
     }
 
     /// Wake the loop to run a cycle immediately. Collapses with any pending wake.
-    /// A trigger fired while the loop is between waits is held as one stored permit
-    /// and consumed at the next wait, so it is never lost; a trigger fired after
-    /// `stop()` is harmless (the loop has exited).
-    pub fn trigger(&self) {
-        self.wake.notify_one();
-    }
-
-    /// Alias for [`trigger`](Self::trigger), matching the host-facing "sync now"
-    /// verb the facade exposes.
+    /// A request made while the loop is between waits is held as one stored permit
+    /// and consumed at the next wait, so it is never lost; a request made after
+    /// `stop()` is harmless because the loop has exited.
     pub fn sync_now(&self) {
-        self.trigger();
+        self.wake.notify_one();
     }
 
     /// Stop the loop after the in-flight cycle. Sets the run flag false and wakes

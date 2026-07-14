@@ -17,13 +17,11 @@ pub struct BlobLocationRecord {
     /// The plaintext byte length signed by the changeset author. An UPDATE omits
     /// an unchanged size column, and a pulling device may not have the row yet if
     /// another device stream creates it later in the same pull.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plaintext_size: Option<u64>,
+    pub plaintext_size: u64,
     /// The content hash paired with `plaintext_size`. This is carried for the
     /// same ordering case and pins the fetched bytes without consulting local
     /// state that may describe a concurrent version of the row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,7 +43,6 @@ pub struct ChangesetEnvelope {
     /// changeset accepted by an initialized session names its write grant.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub membership_grant: Option<MembershipCoord>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blob_locations: Vec<BlobLocationRecord>,
     /// Hex-encoded detached Ed25519 signature over the envelope metadata and
     /// changeset bytes (see `signing_payload`). None for unsigned.
@@ -69,20 +66,6 @@ struct SignedEnvelopeFields<'a> {
     blob_locations: &'a [BlobLocationRecord],
 }
 
-/// The canonical signed fields used before blob locations were added. Verification
-/// retains this shape for envelopes whose decoded location list is empty, so stored
-/// signed changesets remain readable.
-#[derive(Serialize)]
-struct LegacySignedEnvelopeFields<'a> {
-    device_id: &'a str,
-    seq: u64,
-    schema_version: u32,
-    message: &'a str,
-    timestamp: &'a str,
-    changeset_size: usize,
-    membership_grant: Option<&'a MembershipCoord>,
-}
-
 /// Canonical bytes a changeset signature covers: the authorization-relevant
 /// envelope metadata followed by the changeset payload. Binding the metadata --
 /// not just the payload -- means a signed changeset can't be re-stamped with a
@@ -97,22 +80,6 @@ fn signing_payload(env: &ChangesetEnvelope, changeset_bytes: &[u8]) -> Vec<u8> {
         changeset_size: env.changeset_size,
         membership_grant: env.membership_grant.as_ref(),
         blob_locations: &env.blob_locations,
-    };
-    let mut payload = serde_json::to_vec(&fields).expect("signed fields serialization cannot fail");
-    payload.push(0);
-    payload.extend_from_slice(changeset_bytes);
-    payload
-}
-
-fn legacy_signing_payload(env: &ChangesetEnvelope, changeset_bytes: &[u8]) -> Vec<u8> {
-    let fields = LegacySignedEnvelopeFields {
-        device_id: &env.device_id,
-        seq: env.seq,
-        schema_version: env.schema_version,
-        message: &env.message,
-        timestamp: &env.timestamp,
-        changeset_size: env.changeset_size,
-        membership_grant: env.membership_grant.as_ref(),
     };
     let mut payload = serde_json::to_vec(&fields).expect("signed fields serialization cannot fail");
     payload.push(0);
@@ -145,12 +112,6 @@ pub fn verify_changeset_signature(env: &ChangesetEnvelope, changeset_bytes: &[u8
         (None, None) => true,
         (Some(pk_hex), Some(sig_hex)) => {
             keys::verify_signature_hex(pk_hex, sig_hex, &signing_payload(env, changeset_bytes))
-                || (env.blob_locations.is_empty()
-                    && keys::verify_signature_hex(
-                        pk_hex,
-                        sig_hex,
-                        &legacy_signing_payload(env, changeset_bytes),
-                    ))
         }
         (Some(_), None) | (None, Some(_)) => false,
     }
@@ -413,18 +374,18 @@ mod tests {
             namespace: "photos".to_string(),
             blob_id: "p1".to_string(),
             location: crate::blob::CloudBlobLocation::generated("aa11", "stamp"),
-            plaintext_size: Some(42),
-            content_hash: Some("abcd".to_string()),
+            plaintext_size: 42,
+            content_hash: "abcd".to_string(),
         });
         sign_envelope(&mut with_location, &keypair, changeset_bytes);
         assert!(verify_changeset_signature(&with_location, changeset_bytes));
         let mut changed_generation = with_location.clone();
-        changed_generation.blob_locations[0].location.generation = Some("deadbeef".to_string());
+        changed_generation.blob_locations[0].location.generation = "deadbeef".to_string();
         assert!(!verify_changeset_signature(
             &changed_generation,
             changeset_bytes
         ));
-        with_location.blob_locations[0].content_hash = Some("dcba".to_string());
+        with_location.blob_locations[0].content_hash = "dcba".to_string();
         assert!(!verify_changeset_signature(&with_location, changeset_bytes));
 
         // The authorizing membership position is bound too: re-stamping the grant
@@ -463,13 +424,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_signed_envelope_without_blob_locations_still_verifies() {
+    fn signed_envelope_without_blob_locations_is_rejected() {
         let keypair = UserKeypair::generate();
-        let changeset = b"legacy changeset";
+        let changeset = b"current changeset";
         let mut env = test_envelope();
         env.changeset_size = changeset.len();
-        let (author, signature) =
-            keys::sign_hex(&keypair, &legacy_signing_payload(&env, changeset));
+        let (author, signature) = keys::sign_hex(&keypair, &signing_payload(&env, changeset));
         env.author_pubkey = Some(author);
         env.signature = Some(signature);
 
@@ -478,9 +438,6 @@ mod tests {
         let mut packed = serde_json::to_vec(&json).unwrap();
         packed.push(0);
         packed.extend_from_slice(changeset);
-        let (decoded, decoded_changeset) = unpack(&packed).unwrap();
-
-        assert!(decoded.blob_locations.is_empty());
-        assert!(verify_changeset_signature(&decoded, &decoded_changeset));
+        assert!(unpack(&packed).is_err());
     }
 }
