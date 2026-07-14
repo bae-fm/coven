@@ -20,32 +20,20 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, error, info, warn};
 
 use crate::blob::{BlobRef, CacheFill, Provenance};
-use crate::database::Database;
+use crate::database::{
+    Database, StoreBatchBlobDisposition, StoreBatchBlobDrop, StoreBatchCompletion,
+    StoreBatchLocalCleanup, StoreBlobManifest, StoreBlobManifestEntry,
+    StoreConsumedMakeRemoteIntent,
+};
 use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
 use crate::sync::session::SyncedTable;
 
-use super::envelope;
-use super::gate;
 use super::membership::{MembershipChain, MembershipCoord};
 use super::publish_blobs::{
     ensure_publishable_blobs, publish_blobs_from_changes, PublishBlobError,
 };
-use super::pull::{self, PullResult};
-use super::push::OutgoingChangeset;
 use super::storage::SyncStorage;
-
-/// Everything the caller needs after the gate + push-prep + pull steps.
-pub struct SyncResult {
-    /// The outgoing changeset bytes (if any local changes survived the gate).
-    /// The caller is responsible for pushing this to the storage.
-    pub outgoing: Option<OutgoingChangeset>,
-    /// Pull results (how many incoming changesets were applied).
-    pub pull: PullResult,
-    /// The durable cursor vector after pull, returned for this device's signed
-    /// acknowledgement and other cycle reporting.
-    pub updated_cursors: HashMap<String, u64>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeferredLocalBlobDisposition {
@@ -60,6 +48,108 @@ pub struct DeferredLocalBlobDrop {
     pub id: String,
     pub size: u64,
     pub disposition: DeferredLocalBlobDisposition,
+}
+
+pub(crate) struct PreparedStorePayload {
+    pub blob_manifest: StoreBlobManifest,
+    pub local_cleanup: StoreBatchLocalCleanup,
+    pub completion: StoreBatchCompletion,
+    pub membership_grant: Option<MembershipCoord>,
+}
+
+/// Upload the blobs referenced by exact staged package bytes and persist every
+/// fact needed to retry their publication without re-deriving it from later rows.
+pub(crate) async fn prepare_store_payload(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    changeset: &[u8],
+    keypair: &UserKeypair,
+    store_dir: &StoreDir,
+    membership_chain: Option<&MembershipChain>,
+    cancel: Option<&HostUploadCloud<'_>>,
+) -> Result<PreparedStorePayload, SyncCycleError> {
+    let changes = crate::changeset::walk(changeset).map_err(SyncCycleError::AssetScan)?;
+    let blob_decls = db.blob_decls();
+    let publish_blobs = publish_blobs_from_changes(&blob_decls, &changes)?;
+    let host_blobs = crate::sync::pull::host_provided_blobs(&blob_decls, &changes)
+        .map_err(|error| SyncCycleError::AssetScan(error.to_string()))?;
+    let make_remote_intents = make_remote_intents_for_blobs(db, &host_blobs).await?;
+    let mut drops = Vec::new();
+    let mut consumed = HashSet::new();
+    for blob in host_blobs {
+        let intent = make_remote_intents.get(&(blob.namespace.clone(), blob.id.clone()));
+        let retain_pinned = intent.is_some_and(|intent| intent.retain_pinned);
+        let uploaded = upload_host_provided_blob(db, storage, store_dir, &blob, cancel).await?;
+        if let Some(intent) = intent {
+            consumed.insert((intent.root_table.clone(), intent.root_id.clone()));
+        }
+        if let Some(drop) =
+            uploaded.deferred_local_blob_drop(local_blob_disposition(&blob, retain_pinned))
+        {
+            drops.push(store_blob_drop(drop));
+        }
+    }
+    ensure_publishable_blobs(db, storage, &publish_blobs)
+        .await
+        .map_err(SyncCycleError::from)?;
+
+    let mut manifest = Vec::with_capacity(publish_blobs.len());
+    for blob in publish_blobs {
+        let blob = with_row_cloud_path(db, &blob).await?;
+        manifest.push(store_blob_manifest_entry(blob));
+    }
+    manifest.sort_by(|left, right| (&left.namespace, &left.id).cmp(&(&right.namespace, &right.id)));
+    let mut consumed: Vec<_> = consumed
+        .into_iter()
+        .map(|(root_table, root_id)| StoreConsumedMakeRemoteIntent {
+            root_table,
+            root_id,
+        })
+        .collect();
+    consumed.sort_by(|left, right| {
+        (&left.root_table, &left.root_id).cmp(&(&right.root_table, &right.root_id))
+    });
+
+    Ok(PreparedStorePayload {
+        blob_manifest: StoreBlobManifest { blobs: manifest },
+        local_cleanup: StoreBatchLocalCleanup { drops },
+        completion: StoreBatchCompletion {
+            consumed_make_remote_intents: consumed,
+        },
+        membership_grant: resolve_write_grant(membership_chain, keypair),
+    })
+}
+
+fn store_blob_manifest_entry(blob: BlobRef) -> StoreBlobManifestEntry {
+    StoreBlobManifestEntry {
+        namespace: blob.namespace,
+        id: blob.id,
+        scope: blob.scope.to_outbox_str(),
+        cloud_path: blob.cloud_path,
+        provenance: match blob.provenance {
+            Provenance::UserProvided => "user_provided",
+            Provenance::HostProvided => "host_provided",
+        }
+        .to_string(),
+        fill: match blob.fill {
+            CacheFill::CacheEager => "cache_eager",
+            CacheFill::CacheLazy => "cache_lazy",
+        }
+        .to_string(),
+    }
+}
+
+fn store_blob_drop(drop: DeferredLocalBlobDrop) -> StoreBatchBlobDrop {
+    StoreBatchBlobDrop {
+        namespace: drop.namespace,
+        id: drop.id,
+        size: drop.size,
+        disposition: match drop.disposition {
+            DeferredLocalBlobDisposition::Drop => StoreBatchBlobDisposition::Drop,
+            DeferredLocalBlobDisposition::Cache => StoreBatchBlobDisposition::Cache,
+            DeferredLocalBlobDisposition::Pin => StoreBatchBlobDisposition::Pin,
+        },
+    }
 }
 
 pub async fn complete_host_provided_make_remotes(
@@ -119,173 +209,6 @@ pub(super) async fn upload_snapshot_host_blobs(
             .await?;
     }
     Ok(())
-}
-
-/// Gate the captured `outgoing` changeset, prepare its push envelope, and
-/// pull remote changes.
-///
-/// `outgoing` is the changeset the caller drained from the pending-changeset
-/// journal. The apply inside `pull` is a plain connection write (never journaled),
-/// so applied rows are not recorded as this device's own outgoing changes, while
-/// host writes during the network steps journal normally.
-pub async fn sync(
-    device_id: &str,
-    db: &Database,
-    tables: &[SyncedTable],
-    outgoing: Vec<u8>,
-    local_seq: u64,
-    storage: &dyn SyncStorage,
-    timestamp: &str,
-    message: &str,
-    keypair: &UserKeypair,
-    store_dir: &StoreDir,
-    membership_chain: Option<&MembershipChain>,
-    owner_pubkey: Option<&str>,
-    cancel: Option<&HostUploadCloud<'_>>,
-    seal_paused: bool,
-) -> Result<SyncResult, SyncCycleError> {
-    // Step 2: apply row-level sync gating. Cut gated-false rows (and their
-    // FK-descendants) so they stay local; re-emit a root's full subtree when
-    // its gate flips false→true. Runs on the owned connection (gating reads
-    // current row state from the live tables). Done before the blob scan so blob
-    // upload sees the gated set, not the cut rows.
-    let outgoing_cs: Option<Vec<u8>> = if outgoing.is_empty() {
-        None
-    } else {
-        let gates = db.gates();
-        let gated = db
-            .call(move |conn| {
-                gate::gate_outbound(conn, &outgoing, &gates)
-                    .map_err(|e| crate::database::DbError(format!("gate outbound: {e}")))
-            })
-            .await
-            .map_err(|e| SyncCycleError::Gate(e.0))?;
-        if gated.is_empty() {
-            None
-        } else {
-            Some(gated)
-        }
-    };
-
-    // Step 3: upload the HOST-PROVIDED blobs the outgoing changeset references,
-    // before the envelope, so pullers can fetch them as soon as they see the
-    // change. coven owns a host-provided blob's bytes (in its local store while
-    // Local, or its cache once moved), so it can upload one inline as its row
-    // reaches a changeset — whether the row is ungated or just re-emitted by a
-    // make_remote gate flip. The pull's blob-before-row invariant needs the blob
-    // in the cloud first, and this path uploads in the same cycle. A
-    // user-provided blob is the user's own file, uploaded only via the durable
-    // outbox (make_remote, which reads the user's path), so it is intentionally
-    // NOT uploaded here.
-    //
-    // The plaintext is read from the host-provided Local home — coven's local
-    // store, where the host stored the blob when it wrote the row — falling back
-    // to the cache (a prior cycle that uploaded but crashed before the move). A
-    // blob absent from both means its row is not ready to publish — a missing
-    // blob would make pullers 404 on it permanently (the seq advances; the row is
-    // never a fresh INSERT again) — so the cycle aborts rather than skipping the
-    // upload. After a successful upload the outgoing changeset carries the
-    // local-store cleanup that runs only after the changeset is published.
-    let mut deferred_local_blob_drops = Vec::new();
-    let mut consumed_intents: HashSet<(String, String)> = HashSet::new();
-    // A committed store-key rotation this device has not adopted pauses sealing:
-    // skip the inline host-provided blob uploads (and the publishability check) so
-    // nothing is sealed under a superseded generation. The changeset built below
-    // stays queued — the caller does not push it while a rotation is pending — and
-    // its host blobs upload on the first cycle after adoption. Same gate the blob
-    // drain, tombstone drain, and changeset-push paths use in the cycle.
-    if let Some(cs) = outgoing_cs.as_ref().filter(|_| !seal_paused) {
-        let changes = crate::changeset::walk(cs).map_err(SyncCycleError::AssetScan)?;
-        let blob_decls = db.blob_decls();
-        let publish_blobs = publish_blobs_from_changes(&blob_decls, &changes)?;
-        let host_blobs = crate::sync::pull::host_provided_blobs(&blob_decls, &changes)
-            .map_err(|e| SyncCycleError::AssetScan(e.to_string()))?;
-        let make_remote_intents = make_remote_intents_for_blobs(db, &host_blobs).await?;
-        for blob in host_blobs {
-            let intent = make_remote_intents.get(&(blob.namespace.clone(), blob.id.clone()));
-            let retain_pinned = intent.is_some_and(|intent| intent.retain_pinned);
-            let uploaded = upload_host_provided_blob(db, storage, store_dir, &blob, cancel).await?;
-            if let Some(intent) = intent {
-                consumed_intents.insert((intent.root_table.clone(), intent.root_id.clone()));
-            }
-
-            // The blob is now Remote, so its local-store copy (its Local home)
-            // must not stay there — a Remote blob's bytes in the local store
-            // would read as Local. What happens to that copy is a CacheFill
-            // policy, not a provenance one: `CacheEager` warms the cache so the
-            // first read is a local hit (move the copy into the evictable cache);
-            // `CacheLazy` drops it, since the cloud has the bytes and a later read
-            // fetches them. Reached only on a successful upload, so the bytes are
-            // durably in the cloud before we touch the local copy. A copy already
-            // in the cache (crash-recovery fallback) needs neither.
-            if let Some(deferred) =
-                uploaded.deferred_local_blob_drop(local_blob_disposition(&blob, retain_pinned))
-            {
-                deferred_local_blob_drops.push(deferred);
-            }
-        }
-        ensure_publishable_blobs(db, storage, &publish_blobs)
-            .await
-            .map_err(SyncCycleError::from)?;
-    }
-
-    // Bind the outgoing changeset to the membership entry that authorizes us
-    // to write. A puller that has not yet seen that entry (membership entries
-    // and changesets are separate, unordered object streams) fetches it by
-    // this coordinate to resolve the gap, instead of judging us non-member and
-    // skipping the changeset forever. Only needed when we actually publish.
-    let membership_grant = match &outgoing_cs {
-        Some(_) => resolve_write_grant(membership_chain, keypair),
-        None => None,
-    };
-
-    let outgoing = outgoing_cs.map(|cs| {
-        let next_seq = local_seq + 1;
-        let packed = envelope::pack_signed(
-            device_id,
-            next_seq,
-            db.schema_version(),
-            message,
-            timestamp,
-            keypair,
-            membership_grant,
-            &cs,
-        );
-        OutgoingChangeset {
-            packed,
-            seq: next_seq,
-            deferred_local_blob_drops,
-            consumed_make_remote_intents: consumed_intents.into_iter().collect(),
-        }
-    });
-
-    // Step 4 + 5: pull incoming changesets and apply them (the pull disables
-    // capture around only each apply, so applied rows are not echoed).
-    let (updated_cursors, pull_result) = pull::pull_changes(
-        db,
-        tables,
-        storage,
-        device_id,
-        store_dir,
-        membership_chain.cloned(),
-        owner_pubkey.map(str::to_string),
-    )
-    .await
-    .map_err(SyncCycleError::Pull)?;
-
-    if pull_result.changesets_applied > 0 {
-        info!(
-            applied = pull_result.changesets_applied,
-            devices = pull_result.devices_pulled,
-            "pull complete"
-        );
-    }
-
-    Ok(SyncResult {
-        outgoing,
-        pull: pull_result,
-        updated_cursors,
-    })
 }
 
 /// The storage coordinate of the membership entry that authorizes this device
@@ -832,7 +755,6 @@ async fn make_remote_intents_for_blobs(
 #[derive(Debug)]
 pub enum SyncCycleError {
     Gate(String),
-    Pull(pull::PullError),
     AssetScan(String),
     AssetUpload(String),
     /// An outgoing changeset references a blob whose local file is missing, so the
@@ -844,7 +766,6 @@ impl std::fmt::Display for SyncCycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SyncCycleError::Gate(e) => write!(f, "gate error: {e}"),
-            SyncCycleError::Pull(e) => write!(f, "pull error: {e}"),
             SyncCycleError::AssetScan(e) => write!(f, "asset scan error: {e}"),
             SyncCycleError::AssetUpload(e) => write!(f, "asset upload error: {e}"),
             SyncCycleError::BlobMissing(e) => write!(f, "blob missing: {e}"),
@@ -860,9 +781,7 @@ impl From<PublishBlobError> for SyncCycleError {
             PublishBlobError::LocalUserProvided { .. } | PublishBlobError::MissingRemote { .. } => {
                 SyncCycleError::BlobMissing(e.to_string())
             }
-            PublishBlobError::PackedChangeset(_) | PublishBlobError::ChangesetScan(_) => {
-                SyncCycleError::AssetScan(e.to_string())
-            }
+            PublishBlobError::ChangesetScan(_) => SyncCycleError::AssetScan(e.to_string()),
             PublishBlobError::ExternalLookup { .. } | PublishBlobError::RemoteCheck { .. } => {
                 SyncCycleError::AssetUpload(e.to_string())
             }

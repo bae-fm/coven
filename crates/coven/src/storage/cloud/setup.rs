@@ -263,6 +263,8 @@ pub fn generate_restore_code(
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
     identity_custody: &dyn DeviceIdentityCustody,
+    genesis_hash: crate::sync::store_commit::ObjectHash,
+    founder_pubkey: String,
     membership_floor: Vec<crate::sync::membership::MembershipCoord>,
 ) -> Result<String, SetupError> {
     use crate::storage::cloud::CloudHomeJoinInfo;
@@ -386,6 +388,8 @@ pub fn generate_restore_code(
         name: config.store_name.clone(),
         provider,
         sk: hex::encode(keypair.to_keypair_bytes()),
+        genesis_hash,
+        founder_pubkey,
         membership_floor,
     };
 
@@ -485,7 +489,10 @@ pub(crate) fn create_sync_storage_with_home(
         BlobPathScheme::for_storage(config.cloud_home.storage),
         config.store_id.clone(),
         keypair,
-    ))
+    )
+    .with_copy_ids(std::sync::Arc::new(
+        crate::storage::cloud::RandomCopyIdGenerator,
+    )))
 }
 
 /// Cloud provider setup error.
@@ -500,6 +507,19 @@ mod tests {
     use crate::storage::cloud::CloudHomeJoinInfo;
     use crate::store_dir::StoreDir;
     use crate::sync::restore_code::decode_restore_code;
+
+    fn membership_floor(author_pubkey: String) -> Vec<crate::sync::membership::MembershipCoord> {
+        vec![crate::sync::membership::MembershipCoord {
+            author_pubkey,
+            author_owner_grant: crate::sync::membership::OwnerGrantId(
+                crate::sync::store_commit::ObjectHash::digest(b"restore test owner grant"),
+            ),
+            seq: 1,
+            entry_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"restore test founder entry",
+            ),
+        }]
+    }
 
     /// A CloudKit config with `storage: Browsable` so the test exercises only
     /// the CloudKit provider arm, never the opaque-home encryption-key read
@@ -545,7 +565,9 @@ mod tests {
             &key_service,
             custody.as_ref(),
             identity_custody.as_ref(),
-            Vec::new(),
+            crate::sync::store_commit::ObjectHash::digest(b"restore test genesis"),
+            hex::encode([7u8; 32]),
+            membership_floor(hex::encode([7u8; 32])),
         )
         .expect_err("a share-joined CloudKit config must not generate a restore code");
         let message = err.to_string();
@@ -575,7 +597,9 @@ mod tests {
             &key_service,
             custody.as_ref(),
             identity_custody.as_ref(),
-            Vec::new(),
+            crate::sync::store_commit::ObjectHash::digest(b"restore test genesis"),
+            hex::encode([7u8; 32]),
+            membership_floor(hex::encode([7u8; 32])),
         )
         .expect("a private CloudKit config generates a restore code");
         let decoded = decode_restore_code(&code).expect("generated code decodes");

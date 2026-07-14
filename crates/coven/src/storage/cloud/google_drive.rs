@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use super::http::{self, ensure_ok, ok_json, NotFound};
+use super::http::{self, ensure_ok, ok_bytes, ok_json, NotFound};
 use super::key_encoding::{decode_listed_key, encode_key};
 use super::oauth_rest::{
     rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
@@ -17,8 +17,9 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
 use super::{
-    sharing, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, RevokeOutcome,
+    sharing, AppendedListing, AppendedObject, BlobBody, BoxPartSink, CloudAccessOutcome,
+    CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo, ListingCoverage, RevokeOutcome,
+    UploadProgress,
 };
 use crate::clock::ClockRef;
 use crate::keys::StoreKeys;
@@ -407,6 +408,173 @@ impl GoogleDriveCloudHome {
                     "resumable session {key}: no Location header returned"
                 ))
             })
+    }
+
+    /// Create a complete file in one multipart/related request. Drive does not
+    /// expose the file until this request has accepted both metadata and media.
+    async fn append_small_media(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        use sha2::{Digest, Sha256};
+
+        let encoded = encode_key(key);
+        let boundary = format!(
+            "coven-append-{}",
+            hex::encode(Sha256::digest(key.as_bytes()))
+        );
+        let metadata = serde_json::json!({
+            "name": encoded,
+            "parents": [self.folder_id],
+        })
+        .to_string();
+        let mut body = Vec::with_capacity(metadata.len() + data.len() + boundary.len() * 3 + 128);
+        body.extend_from_slice(format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes());
+        body.extend_from_slice(&data);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let resp = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .post(format!(
+                        "{}/files?uploadType=multipart&fields=id",
+                        UPLOAD_API
+                    ))
+                    .bearer_auth(token)
+                    .header(
+                        "Content-Type",
+                        format!("multipart/related; boundary={boundary}"),
+                    )
+                    .body(body.clone())
+            })
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(classify_write_error(
+                status,
+                &http::body_text(resp).await,
+                key,
+                "append",
+            ));
+        }
+        let response = resp.text().await.map_err(|error| {
+            CloudHomeError::Transport(format!("append {key}: read response: {error}"))
+        })?;
+        let file_id = parse_create_file_id(&response, key)?;
+        Ok(AppendedObject::from_provider(key.to_string(), file_id))
+    }
+
+    /// Create a metadata-only staging file whose name cannot match a Store
+    /// protocol listing. The completed resumable upload is renamed afterward.
+    async fn create_append_staging(&self, key: &str) -> Result<String, CloudHomeError> {
+        use sha2::{Digest, Sha256};
+
+        let staging_name = encode_key(&format!(
+            "__coven_append_staging__/{}",
+            hex::encode(Sha256::digest(key.as_bytes()))
+        ));
+        let metadata = serde_json::json!({
+            "name": staging_name,
+            "parents": [self.folder_id],
+        });
+        let resp = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .post(format!("{DRIVE_API}/files?fields=id"))
+                    .bearer_auth(token)
+                    .json(&metadata)
+            })
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(classify_write_error(
+                status,
+                &http::body_text(resp).await,
+                key,
+                "append staging create",
+            ));
+        }
+        let response = resp.text().await.map_err(|error| {
+            CloudHomeError::Transport(format!(
+                "append staging create {key}: read response: {error}"
+            ))
+        })?;
+        parse_create_file_id(&response, key)
+    }
+
+    async fn publish_append_staging(&self, key: &str, file_id: &str) -> Result<(), CloudHomeError> {
+        let body = serde_json::json!({ "name": encode_key(key) });
+        let resp = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .patch(format!("{DRIVE_API}/files/{file_id}"))
+                    .bearer_auth(token)
+                    .json(&body)
+            })
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(classify_write_error(
+                status,
+                &http::body_text(resp).await,
+                key,
+                "append publish",
+            ))
+        }
+    }
+
+    async fn list_appended_objects(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<AppendedObject>, CloudHomeError> {
+        let query = list_file_query(&self.folder_id, prefix);
+        let mut page_token: Option<String> = None;
+        let mut objects = Vec::new();
+        loop {
+            let page = page_token.clone();
+            let resp = self
+                .session
+                .api_call(|token| {
+                    let mut request = self
+                        .client()
+                        .get(format!("{DRIVE_API}/files"))
+                        .bearer_auth(token)
+                        .query(&[
+                            ("q", query.as_str()),
+                            ("fields", "nextPageToken,files(id,name)"),
+                            ("pageSize", "1000"),
+                        ]);
+                    if let Some(ref page) = page {
+                        request = request.query(&[("pageToken", page.as_str())]);
+                    }
+                    request
+                })
+                .await?;
+            let resp = ensure_ok(resp, "list appended files", NotFound::Status).await?;
+            let json: serde_json::Value = ok_json(resp, "parse appended file list").await?;
+            for file in json["files"].as_array().into_iter().flatten() {
+                let (Some(id), Some(name)) = (file["id"].as_str(), file["name"].as_str()) else {
+                    continue;
+                };
+                let Some(logical_key) = decode_listed_key("Google Drive", name) else {
+                    continue;
+                };
+                if logical_key.starts_with(prefix) {
+                    objects.push(AppendedObject::from_provider(logical_key, id.to_string()));
+                }
+            }
+            match json["nextPageToken"].as_str() {
+                Some(token) => page_token = Some(token.to_string()),
+                None => break,
+            }
+        }
+        Ok(objects)
     }
 }
 
@@ -820,6 +988,127 @@ impl CloudHome for GoogleDriveCloudHome {
         GDRIVE_SIMPLE_UPLOAD_MAX as u64
     }
 
+    async fn append_object(
+        &self,
+        full_logical_key: &str,
+        mut body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        if body.len() <= self.multipart_threshold() {
+            let bytes = body.collect().await?;
+            let length = bytes.len() as u64;
+            let object = self.append_small_media(full_logical_key, bytes).await?;
+            progress(length);
+            return Ok(object);
+        }
+
+        let file_id = self.create_append_staging(full_logical_key).await?;
+        let session_url = match self
+            .open_resumable_update_session(full_logical_key, &file_id)
+            .await
+        {
+            Ok(session_url) => session_url,
+            Err(cause) => {
+                return Err(rollback_created_multipart(
+                    full_logical_key,
+                    Some(file_id),
+                    cause,
+                    |id| async move { self.delete_created_file(full_logical_key, &id).await },
+                )
+                .await);
+            }
+        };
+        let key = full_logical_key.to_string();
+        let classify = Box::new(move |status, response: &str| {
+            classify_write_error(status, response, &key, "append")
+        });
+        let mut sink = RangePutSink::new(
+            self.client().clone(),
+            session_url,
+            308,
+            body.len(),
+            GDRIVE_CHUNK_SIZE,
+            full_logical_key.to_string(),
+            classify,
+        );
+        let total = body.len();
+        let mut offset = 0u64;
+        loop {
+            let part = match body.next_part(GDRIVE_CHUNK_SIZE).await {
+                Ok(Some(part)) => part,
+                Ok(None) => break,
+                Err(cause) => {
+                    return Err(rollback_created_multipart(
+                        full_logical_key,
+                        Some(file_id),
+                        cause,
+                        |id| async move { self.delete_created_file(full_logical_key, &id).await },
+                    )
+                    .await);
+                }
+            };
+            let length = part.len() as u64;
+            let is_last = offset + length >= total;
+            if let Err(cause) = super::PartSink::send_part(&mut sink, part, offset, is_last).await {
+                return Err(rollback_created_multipart(
+                    full_logical_key,
+                    Some(file_id),
+                    cause,
+                    |id| async move { self.delete_created_file(full_logical_key, &id).await },
+                )
+                .await);
+            }
+            offset += length;
+            progress(offset);
+        }
+        super::PartSink::finish(Box::new(sink)).await?;
+
+        // The staging name is outside every Store protocol prefix. Only this
+        // rename makes the completely uploaded body discoverable.
+        self.publish_append_staging(full_logical_key, &file_id)
+            .await?;
+        Ok(AppendedObject::from_provider(
+            full_logical_key.to_string(),
+            file_id,
+        ))
+    }
+
+    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        Ok(AppendedListing {
+            objects: self.list_appended_objects(prefix).await?,
+            coverage: ListingCoverage::BestEffort,
+        })
+    }
+
+    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        let file_id = object.opaque_provider_id().to_string();
+        let response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .get(format!("{DRIVE_API}/files/{file_id}"))
+                    .bearer_auth(token)
+                    .query(&[("alt", "media")])
+            })
+            .await?;
+        let response = ensure_ok(
+            response,
+            &format!("read appended {}", object.logical_key()),
+            NotFound::Status,
+        )
+        .await?;
+        ok_bytes(
+            response,
+            &format!("read appended body for {}", object.logical_key()),
+        )
+        .await
+    }
+
+    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        self.delete_created_file(object.logical_key(), object.opaque_provider_id())
+            .await
+    }
+
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         rest_read(self, key).await
     }
@@ -842,57 +1131,119 @@ impl CloudHome for GoogleDriveCloudHome {
         Ok(self.find_file_id(&encode_key(key)).await?.is_some())
     }
 
-    async fn grant_access(
+    async fn set_access(
         &self,
-        grant: CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        let email = grant.require_provider_email("Google Drive")?;
-        // Share the folder with the member's Google account.
-        let permission = serde_json::json!({
-            "type": "user",
-            "role": "writer",
-            "emailAddress": email,
-        });
-        let resp = self
-            .session
-            .api_call(|token| {
-                self.client()
-                    .post(format!(
-                        "{}/files/{}/permissions",
-                        DRIVE_API, self.folder_id
-                    ))
-                    .bearer_auth(token)
-                    .json(&permission)
-            })
-            .await?;
-        ensure_ok(resp, &format!("grant access to {email}"), NotFound::Status).await?;
-        Ok(CloudHomeJoinInfo::GoogleDrive {
-            folder_id: self.folder_id.clone(),
-        })
-    }
-
-    async fn revoke_access(
-        &self,
-        revoke: CloudAccessRevoke,
-    ) -> Result<RevokeOutcome, CloudHomeError> {
-        let email = revoke.require_provider_email("Google Drive")?;
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
+        let email = desired.require_provider_email("Google Drive")?;
         let list_url = format!(
-            "{}/files/{}/permissions?fields=permissions(id,emailAddress),nextPageToken",
+            "{}/files/{}/permissions?fields=permissions(id,emailAddress,role),nextPageToken",
             DRIVE_API, self.folder_id
         );
-        let list_url_for_next = list_url.clone();
-        let folder_id = self.folder_id.clone();
-        sharing::revoke_by_email(
-            &self.session,
-            email,
-            &list_url,
-            "permissions",
-            |p| p["emailAddress"].as_str().map(String::from),
-            |perm_id| format!("{}/files/{}/permissions/{}", DRIVE_API, folder_id, perm_id),
-            move |page| drive_permissions_next_page_url(&list_url_for_next, page),
-        )
-        .await?;
-        Ok(RevokeOutcome::Revoked)
+        match desired {
+            CloudAccessState::Present { .. } => {
+                let list_url_for_next = list_url.clone();
+                let current = sharing::permission_by_email(
+                    &self.session,
+                    email,
+                    &list_url,
+                    "permissions",
+                    &|permission| permission["emailAddress"].as_str().map(String::from),
+                    &move |page| drive_permissions_next_page_url(&list_url_for_next, page),
+                )
+                .await?;
+                if current
+                    .as_ref()
+                    .is_some_and(|permission| permission["role"].as_str() == Some("writer"))
+                {
+                    return Ok(CloudAccessOutcome::Present(
+                        CloudHomeJoinInfo::GoogleDrive {
+                            folder_id: self.folder_id.clone(),
+                        },
+                    ));
+                }
+                if current.is_some() {
+                    let next_base = list_url.clone();
+                    let folder_id = self.folder_id.clone();
+                    sharing::ensure_absent_by_email(
+                        &self.session,
+                        email,
+                        &list_url,
+                        "permissions",
+                        |permission| permission["emailAddress"].as_str().map(String::from),
+                        |permission_id| {
+                            format!(
+                                "{}/files/{}/permissions/{}",
+                                DRIVE_API, folder_id, permission_id
+                            )
+                        },
+                        move |page| drive_permissions_next_page_url(&next_base, page),
+                    )
+                    .await?;
+                }
+                let permission = serde_json::json!({
+                    "type": "user",
+                    "role": "writer",
+                    "emailAddress": email,
+                });
+                let resp = self
+                    .session
+                    .api_call(|token| {
+                        self.client()
+                            .post(format!(
+                                "{}/files/{}/permissions",
+                                DRIVE_API, self.folder_id
+                            ))
+                            .bearer_auth(token)
+                            .json(&permission)
+                    })
+                    .await?;
+                ensure_ok(resp, &format!("grant access to {email}"), NotFound::Status).await?;
+                let next_base = list_url.clone();
+                let verified = sharing::permission_by_email(
+                    &self.session,
+                    email,
+                    &list_url,
+                    "permissions",
+                    &|permission| permission["emailAddress"].as_str().map(String::from),
+                    &move |page| drive_permissions_next_page_url(&next_base, page),
+                )
+                .await?;
+                if verified
+                    .as_ref()
+                    .is_none_or(|permission| permission["role"].as_str() != Some("writer"))
+                {
+                    return Err(CloudHomeError::Transport(format!(
+                        "writer permission for {email} is not visible after creation"
+                    )));
+                }
+                Ok(CloudAccessOutcome::Present(
+                    CloudHomeJoinInfo::GoogleDrive {
+                        folder_id: self.folder_id.clone(),
+                    },
+                ))
+            }
+            CloudAccessState::Absent { .. } => {
+                let next_base = list_url.clone();
+                let folder_id = self.folder_id.clone();
+                sharing::ensure_absent_by_email(
+                    &self.session,
+                    email,
+                    &list_url,
+                    "permissions",
+                    |permission| permission["emailAddress"].as_str().map(String::from),
+                    |permission_id| {
+                        format!(
+                            "{}/files/{}/permissions/{}",
+                            DRIVE_API, folder_id, permission_id
+                        )
+                    },
+                    move |page| drive_permissions_next_page_url(&next_base, page),
+                )
+                .await?;
+                Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
+            }
+        }
     }
 }
 
@@ -1050,17 +1401,17 @@ mod tests {
 
     #[test]
     fn parse_list_page_skips_malformed_flat_names() {
-        let valid = encode_key("changes/dev1/1.enc");
-        let other_prefix = encode_key("heads/dev1.json.enc");
+        let valid = encode_key("objects/dev1/1.enc");
+        let other_prefix = encode_key("snapshots/dev1.json.enc");
         let body = format!(
             r#"{{"files":[{{"name":"{valid}"}},{{"name":"not-hex"}},{{"name":"{other_prefix}"}}]}}"#
         );
 
         let page = home()
-            .parse_list_page(&body, "changes/")
+            .parse_list_page(&body, "objects/")
             .expect("parse list page");
 
-        assert_eq!(page.keys, vec!["changes/dev1/1.enc"]);
+        assert_eq!(page.keys, vec!["objects/dev1/1.enc"]);
     }
 
     #[test]

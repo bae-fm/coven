@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
+use crate::database::Database;
 use crate::encryption::{EncryptionError, MasterKeyring};
 use crate::identity_custody::IdentityCustody;
 use crate::join_code::InviteCode;
@@ -21,7 +22,7 @@ use crate::store_dir::{StoreDir, StoreLayout};
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::invite::{unwrap_store_keyring, InviteError};
 use crate::sync::membership::MembershipCoord;
-use crate::sync::pull::{pull_changes, PullError};
+use crate::sync::pull::PullError;
 use crate::sync::session::SyncedTable;
 use crate::sync::snapshot::{bootstrap_from_snapshot, BootstrapResult, SnapshotError};
 use crate::sync::storage::SyncStorage;
@@ -43,6 +44,10 @@ pub enum BootstrapError {
     Snapshot(#[from] SnapshotError),
     #[error("pull: {0}")]
     Pull(#[from] PullError),
+    #[error("Store pull: {0}")]
+    StorePull(#[from] crate::sync::store_pull::StorePullError),
+    #[error("Store device registration: {0}")]
+    StoreRegistration(#[from] crate::sync::store_registration::StoreRegistrationError),
     #[error("storage: {0}")]
     Storage(#[from] crate::sync::storage::StorageError),
     #[error("config: {0}")]
@@ -84,6 +89,17 @@ pub enum BootstrapError {
         cleanup: String,
         cause: Box<BootstrapError>,
     },
+    #[error("bootstrap failed and its Store device retirement could not be published: {rollback} (bootstrap error: {cause})")]
+    RegistrationRollback {
+        rollback: String,
+        cause: Box<BootstrapError>,
+    },
+}
+
+impl BootstrapError {
+    fn preserves_registration_rollback(&self) -> bool {
+        matches!(self, Self::RegistrationRollback { .. })
+    }
 }
 
 /// Undo everything a bootstrap attempt may have durably written (see
@@ -101,6 +117,9 @@ pub(crate) fn cleanup_after_bootstrap_failure(
     identity_custody: &dyn DeviceIdentityCustody,
     cause: BootstrapError,
 ) -> BootstrapError {
+    if cause.preserves_registration_rollback() {
+        return cause;
+    }
     let failures = remove_bootstrap_residue(store_dir, store_keys, custody, identity_custody);
     if failures.is_empty() {
         cause
@@ -168,17 +187,9 @@ fn remove_bootstrap_residue(
 /// leftovers would collide), so it surfaces as
 /// [`BootstrapError::TornBootstrapCleanup`] rather than a silent proceed.
 ///
-/// The bootstrap head/ack a torn attempt may have published
-/// ([`CloudSyncStorage::publish_bootstrap_reader`], which runs before the pull)
-/// are *not* deleted here: every guard site runs before the cloud home is built
-/// — the store key is unwrapped later, from the invite or restore code — so no
-/// storage handle exists to delete them through, and threading one this far up
-/// just for this would be ceremony. Leaving them is exactly the disposition
-/// `publish_bootstrap_reader` already documents for a hard crash: a stale ack
-/// (keyed by the abandoned attempt's device id, which the retry does not reuse)
-/// pins reclamation at its bootstrap cursors — storage growth, the safe
-/// direction, never a stranded reader — and an owner can delete a dead device's
-/// head/ack.
+/// Cloud protocol state is append-only. A retry reuses the pending join identity
+/// or the identity carried by the restore code, so it verifies and continues the
+/// same signed registration chain instead of deleting published objects.
 pub(crate) fn refuse_completed_or_clear_torn_store(
     store_dir: &StoreDir,
     store_keys: &StoreKeys,
@@ -195,9 +206,8 @@ pub(crate) fn refuse_completed_or_clear_torn_store(
             store_dir = %store_dir.display(),
             "clearing a torn bootstrap: a store directory with no saved config, left by a join or restore a crash interrupted before completion"
         );
-        // The directory and keyring entries are this retry's to clear; the
-        // head/ack this attempt may have published are left in place (see the
-        // fn doc — no storage handle is built at the guard).
+        // The directory and keyring entries are this retry's to clear. Immutable
+        // Store objects remain in cloud storage and are verified on reuse.
         let failures = remove_bootstrap_residue(store_dir, store_keys, custody, identity_custody);
         if !failures.is_empty() {
             return Err(BootstrapError::TornBootstrapCleanup {
@@ -237,21 +247,26 @@ pub(crate) enum BootstrapContext<'a> {
         owner_pubkey: &'a str,
         keypair: &'a UserKeypair,
     },
-    /// Restore adopts the owner from the chain founder.
-    Restore { keypair: &'a UserKeypair },
+    Restore {
+        founder_pubkey: &'a str,
+        keypair: &'a UserKeypair,
+    },
 }
 
 impl BootstrapContext<'_> {
-    fn owner_pubkey(&self) -> Option<&str> {
+    fn owner_pubkey(&self) -> &str {
         match self {
-            BootstrapContext::Join { owner_pubkey, .. } => Some(*owner_pubkey),
-            BootstrapContext::Restore { .. } => None,
+            BootstrapContext::Join { owner_pubkey, .. }
+            | BootstrapContext::Restore {
+                founder_pubkey: owner_pubkey,
+                ..
+            } => owner_pubkey,
         }
     }
 
     fn keypair(&self) -> &UserKeypair {
         match self {
-            BootstrapContext::Join { keypair, .. } | BootstrapContext::Restore { keypair } => {
+            BootstrapContext::Join { keypair, .. } | BootstrapContext::Restore { keypair, .. } => {
                 keypair
             }
         }
@@ -481,7 +496,6 @@ pub async fn join_from_invite_code(
             identity_custody.clone(),
             cloud_home,
             ids.as_ref(),
-            clock.as_ref(),
             &on_status,
             cancel,
         )
@@ -521,7 +535,6 @@ pub(crate) async fn join_store(
     identity_custody: Arc<dyn DeviceIdentityCustody>,
     cloud_home: Box<dyn CloudHome>,
     ids: &dyn crate::id_provider::IdProvider,
-    clock: &dyn crate::clock::Clock,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
@@ -578,6 +591,7 @@ pub(crate) async fn join_store(
             &user_keypair,
             &code.store_id,
             &code.owner_pubkey,
+            &code.membership_floor,
         )
         .await?;
         let master_key = MasterKeyring::from(encryption.clone());
@@ -598,7 +612,10 @@ pub(crate) async fn join_store(
             blob_paths,
             code.store_id.clone(),
             user_keypair.clone(),
-        );
+        )
+        .with_copy_ids(std::sync::Arc::new(
+            crate::storage::cloud::RandomCopyIdGenerator,
+        ));
 
         // Create the store directory under `stores/`, named by the invite's id
         // (its non-existence was checked up front, so this create and the
@@ -613,6 +630,7 @@ pub(crate) async fn join_store(
             &store_dir,
             &code.store_id,
             &device_id,
+            code.genesis_hash,
             BootstrapContext::Join {
                 owner_pubkey: &code.owner_pubkey,
                 keypair: &user_keypair,
@@ -625,7 +643,6 @@ pub(crate) async fn join_store(
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
-            clock,
             &on_status,
             cancel,
         )
@@ -669,6 +686,7 @@ pub(crate) async fn bootstrap_and_save_store(
     store_dir: &StoreDir,
     store_id: &str,
     device_id: &str,
+    genesis_hash: crate::sync::store_commit::ObjectHash,
     context: BootstrapContext<'_>,
     membership_floor: &[MembershipCoord],
     synced_tables: &[SyncedTable],
@@ -678,7 +696,6 @@ pub(crate) async fn bootstrap_and_save_store(
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
     identity_custody: &dyn DeviceIdentityCustody,
-    clock: &dyn crate::clock::Clock,
     on_status: &impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
@@ -699,32 +716,21 @@ pub(crate) async fn bootstrap_and_save_store(
     let bootstrap_result = bootstrap_from_snapshot(
         bucket_dyn,
         store_id,
+        genesis_hash,
         owner_pubkey,
+        membership_floor,
         binary_schema_version,
         &db_path,
     )
     .await?;
 
     info!(
-        "Bootstrapped from snapshot ({} device cursors)",
-        bootstrap_result.cursor_count()
+        "Bootstrapped from snapshot ({} device coverage entries)",
+        bootstrap_result.coverage_count()
     );
 
-    // Everything from the reader publish through the config save is one unit: if
-    // any step fails, delete the head/ack this bootstrap published so a
-    // never-completed join leaves no reader pinning a peer's reclamation. The
-    // reader must be visible before the pull and before the store commits (see
-    // `publish_bootstrap_reader`), so it is the first step inside the unit; the
-    // delete tolerates a partial publish and is idempotent.
     let committed = async {
-        // Publish this device's head (seq 0) and ack (seeded at the snapshot
-        // cursors) so a peer's changeset reclamation sees this reader and pins
-        // every floor at what it still needs to pull.
-        bootstrap_result
-            .publish_reader(storage, device_id, &clock.now().to_rfc3339())
-            .await?;
-
-        // Step 6: Pull changesets since the snapshot.
+        // Pull Store commits beyond the snapshot coverage.
         error_if_cancelled(cancel)?;
         on_status("Applying recent changes...");
         let changesets_applied = open_db_and_pull(
@@ -734,6 +740,7 @@ pub(crate) async fn bootstrap_and_save_store(
             migrations,
             device_id,
             owner_pubkey,
+            Some(context.keypair()),
             membership_floor,
             bucket_dyn,
             bootstrap_result,
@@ -746,13 +753,13 @@ pub(crate) async fn bootstrap_and_save_store(
             info!("Applied {changesets_applied} changesets since snapshot");
         }
 
-        // Step 7: Persist the master key via custody.
+        // Persist the master key via custody.
         on_status("Saving configuration...");
         if let Some(keyring) = master_key {
             custody.persist(keyring)?;
         }
 
-        // Step 8: Save cloud credentials to keyring.
+        // Save cloud credentials to keyring.
         if let Some(credentials) = derive_credentials(join_info) {
             key_service.set_cloud_home_credentials(&credentials)?;
         }
@@ -768,7 +775,7 @@ pub(crate) async fn bootstrap_and_save_store(
         // bootstrap reader the same as any other.
         crate::keys::import_identity(identity_custody, &context.keypair().to_keypair_bytes())?;
 
-        // Step 9: Create and save config — the last durable write and the
+        // Create and save config — the last durable write and the
         // store's completion marker.
         let config = build_config(
             store_id, device_id, store_dir, store_name, join_info, cipher,
@@ -780,13 +787,51 @@ pub(crate) async fn bootstrap_and_save_store(
 
     match committed {
         Ok(config) => Ok(config),
-        Err(e) => {
-            if let Err(cleanup) = storage.delete_bootstrap_reader(device_id).await {
-                warn!("failed to delete bootstrap head/ack after a failed join: {cleanup}");
+        Err(cause) => {
+            match finish_failed_bootstrap_registration_rollback(
+                &db_path,
+                synced_tables,
+                migrations,
+                device_id,
+                storage,
+                context.keypair(),
+            )
+            .await
+            {
+                Ok(()) => Err(cause),
+                Err(rollback) => Err(BootstrapError::RegistrationRollback {
+                    rollback,
+                    cause: Box::new(cause),
+                }),
             }
-            Err(e)
         }
     }
+}
+
+pub(crate) async fn finish_failed_bootstrap_registration_rollback(
+    db_path: &Path,
+    synced_tables: &[SyncedTable],
+    migrations: &[Migration],
+    device_id: &str,
+    storage: &dyn SyncStorage,
+    signer: &UserKeypair,
+) -> Result<(), String> {
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let (db, _stamper) = Database::open(
+        db_path,
+        synced_tables.to_vec(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        device_id.to_string(),
+        migrations,
+    )
+    .map_err(|error| format!("open durable registration rollback outbox: {error}"))?;
+    crate::sync::store_registration::retire_registration(&db, storage, signer)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Open a [`crate::database::Database`] over the bootstrapped db file and pull changesets since
@@ -800,7 +845,8 @@ pub(crate) async fn open_db_and_pull(
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     device_id: &str,
-    owner_pubkey: Option<&str>,
+    owner_pubkey: &str,
+    registration_signer: Option<&UserKeypair>,
     membership_floor: &[MembershipCoord],
     storage: &dyn SyncStorage,
     bootstrap: BootstrapResult,
@@ -834,22 +880,18 @@ pub(crate) async fn open_db_and_pull(
             BootstrapError::Database(format!("Failed to seed membership head watermark: {e}"))
         })?;
 
-    // Pin the store owner from the invite BEFORE the pull below loads and anchors
-    // the membership chain (issue #102). The pull then refuses a chain whose founder
-    // isn't this owner, so a tampered chain can't be adopted during join. `None`
-    // means restore or a pre-initialization test; restore pins the chain founder
-    // below after loading membership entries from the bootstrapped storage.
-    if let Some(owner) = owner_pubkey {
-        db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner)
-            .await
-            .map_err(|e| BootstrapError::Database(format!("Failed to pin store owner: {e}")))?;
-    }
+    db.set_protocol_state(
+        crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+        owner_pubkey,
+    )
+    .await
+    .map_err(|e| BootstrapError::Database(format!("Failed to pin store owner: {e}")))?;
 
     // Download the blob files the snapshot's rows reference: the snapshot carried
-    // the catalog rows but no blob files, and the pull starts past its cursors so
-    // it never re-walks the INSERTs that first carried them. Missing eager blobs
-    // abort the bootstrap before the store is saved. Cancellation is checked
-    // between blobs inside the reconcile, surfacing as `Cancelled` here.
+    // the catalog rows but no blob files, and the pull starts past its signed
+    // coverage, so it never re-walks the INSERTs that first carried them. Missing
+    // eager blobs abort the bootstrap before the store is saved. Cancellation is
+    // checked between blobs inside the reconcile, surfacing as `Cancelled` here.
     match crate::sync::snapshot::reconcile_snapshot_blobs(
         &db,
         db_path,
@@ -878,68 +920,50 @@ pub(crate) async fn open_db_and_pull(
     error_if_cancelled(cancel)?;
 
     // Pull over the synced set coven owns, not the raw host list — one source of
-    // truth. Load and anchor the
-    // membership chain first (join is a standalone, non-cycle pull), against the
-    // owner just pinned above; restore hasn't pinned yet, so it loads the chain
-    // best-effort and pins from the founder below.
+    // truth. Load and anchor the membership chain first (join is a standalone,
+    // non-cycle pull), against the owner pinned above. Restore has not pinned an
+    // owner yet, so it anchors the chain at its signed founder below.
     let membership = crate::sync::pull::load_cycle_membership(storage, &db)
         .await
         .map_err(BootstrapError::Pull)?;
-    let (_, pull_result) = pull_changes(
+    if let Some(signer) = registration_signer {
+        let signer_pubkey = crate::keys::public_key_hex(signer);
+        let authorized = membership.chain.as_ref().is_some_and(|chain| {
+            chain
+                .current_members()
+                .iter()
+                .any(|(pubkey, _)| pubkey == &signer_pubkey)
+        });
+        if !authorized {
+            return Err(BootstrapError::Membership(format!(
+                "Store device registration author {signer_pubkey} is not an active member"
+            )));
+        }
+        crate::sync::store_registration::ensure_active_registration(&db, storage, signer).await?;
+    }
+    let genesis_hash = db
+        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+        .await
+        .map_err(|error| BootstrapError::Database(error.to_string()))?
+        .ok_or_else(|| BootstrapError::Database("protocol genesis hash is absent".to_string()))?
+        .parse()
+        .map_err(|error| BootstrapError::Database(format!("protocol genesis hash: {error}")))?;
+    let pull_result = crate::sync::store_pull::pull_store_commits(
         &db,
         db.synced_tables(),
         storage,
+        genesis_hash,
         device_id,
         store_dir,
-        membership.chain,
-        membership.pinned_owner,
+        membership.chain.as_ref(),
     )
-    .await
-    .map_err(BootstrapError::Pull)?;
+    .await?;
 
-    // Restore passes no owner (it recovers an existing store this device may not
-    // have founded): adopt the owner from the chain's founder now, before the first
-    // sync connect anchors the chain. Without this the connect would find a chain
-    // founded by another key with no owner pinned and refuse it as foreign. This is
-    // trust-on-first-use, acceptable for restore because the restore code carries
-    // the bucket's own credentials — whoever holds it already controls the bucket.
-    // Join already pinned its owner from the invite, so it skips this.
-    if owner_pubkey.is_none() {
-        let entries = storage.list_membership_entries().await.map_err(|e| {
-            BootstrapError::Membership(format!(
-                "restore: failed to list membership to pin owner: {e}"
-            ))
-        })?;
-        // An empty listing represents a pre-initialization or legacy bootstrap —
-        // there is nothing to pin. A non-empty one must load and pin, or fail the
-        // restore loudly so it can be retried as a unit; leaving the owner unpinned
-        // and deferring to the first sync connect would be a silent self-heal.
-        if !entries.is_empty() {
-            let chain = crate::sync::membership_ops::download_chain(storage, &entries)
-                .await
-                .map_err(|e| {
-                    BootstrapError::Membership(format!(
-                        "restore: failed to load chain to pin owner: {e}"
-                    ))
-                })?;
-            // A validated chain always has a founder (validation rejects an empty
-            // chain), so this is defensive — but fail loud rather than skip the pin.
-            let founder = chain.founder_pubkey().ok_or_else(|| {
-                BootstrapError::Membership(
-                    "restore: loaded chain has no founder to pin".to_string(),
-                )
-            })?;
-            db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, founder)
-                .await
-                .map_err(|e| BootstrapError::Database(format!("Failed to pin store owner: {e}")))?;
-        }
-    }
-
-    // Bootstrap installed the snapshot's cursor vector before pulling anything
-    // above it, and each higher cursor committed with its rows. Record the remaining
+    // Bootstrap installed the snapshot's position vector before pulling anything
+    // above it, and each higher position committed with its rows. Record the remaining
     // bootstrap marker so the first real cycle treats this device as a joiner,
     // not a brand-new store that should publish an initial snapshot.
-    db.set_sync_state("snapshot_seq", "0")
+    db.set_protocol_state("snapshot_seq", "0")
         .await
         .map_err(|e| BootstrapError::Database(format!("Failed to persist snapshot_seq: {e}")))?;
 

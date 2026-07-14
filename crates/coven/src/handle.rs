@@ -953,6 +953,7 @@ mod tests {
 
     struct TestCloudKitOps {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
+        shares: Mutex<HashMap<String, CloudKitShare>>,
     }
 
     /// A ready-to-use custody for tests that build a [`CovenHandle`] directly
@@ -1069,6 +1070,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 store: Mutex::new(HashMap::new()),
+                shares: Mutex::new(HashMap::new()),
             }
         }
     }
@@ -1128,14 +1130,27 @@ mod tests {
         }
 
         fn grant_share(&self, member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError> {
-            Ok(CloudKitShare {
+            let share = CloudKitShare {
                 share_url: format!("coven-test-share-{member_pubkey}"),
                 owner_name: "owner".to_string(),
                 zone_name: "zone".to_string(),
-            })
+            };
+            self.shares
+                .lock()
+                .unwrap()
+                .insert(member_pubkey.to_string(), share.clone());
+            Ok(share)
         }
 
-        fn revoke_share(&self, _member_pubkey: &str) -> Result<(), CloudHomeError> {
+        fn share_for_member(
+            &self,
+            member_pubkey: &str,
+        ) -> Result<Option<CloudKitShare>, CloudHomeError> {
+            Ok(self.shares.lock().unwrap().get(member_pubkey).cloned())
+        }
+
+        fn revoke_share(&self, member_pubkey: &str) -> Result<(), CloudHomeError> {
+            self.shares.lock().unwrap().remove(member_pubkey);
             Ok(())
         }
 

@@ -36,9 +36,9 @@ use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    host_exec as exec, open_test_db, open_test_db_schema, open_test_db_with_blob,
-    open_test_db_with_user_and_host_blobs, query_text, row_exists, temp_store_dir, test_migrations,
-    MockSyncStorage,
+    bind_mock_store_protocol, host_exec as exec, open_test_db, open_test_db_schema,
+    open_test_db_with_blob, open_test_db_with_user_and_host_blobs, query_text, row_exists,
+    temp_store_dir, test_migrations, MockSyncStorage,
 };
 
 /// The uploader these browsable-home tests pass to the make_remote/cancel paths.
@@ -159,6 +159,7 @@ async fn run_cycle(
     lib: &StoreDir,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> SyncCycleResult {
+    bind_mock_store_protocol(db, storage, device).await;
     // A fresh gate each call: none of these transition tests exercise a rotation
     // this device can't adopt.
     let pending_rotation = PendingRotation::none();
@@ -193,6 +194,7 @@ async fn try_run_cycle(
     kp: &UserKeypair,
     lib: &StoreDir,
 ) -> Result<SyncCycleResult, String> {
+    bind_mock_store_protocol(db, storage, device).await;
     let pending_rotation = PendingRotation::none();
     run_single_sync_cycle(
         storage,
@@ -799,12 +801,10 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
         .await
         .expect("store host-provided cover");
 
-    // The cycle fails at the pull: a schema floor above this device's version. The
-    // inline push has already uploaded the cover and consumed the intent in memory.
-    storage
-        .set_min_schema_version(db.schema_version() + 1)
-        .await
-        .expect("set schema floor");
+    // The cycle fails while appending the exact staged Store package. Payload
+    // preparation has already uploaded the cover, while completion remains
+    // durable in the staged batch until its head is published.
+    storage.fail_next_changeset_puts(1);
     let failed = try_run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib).await;
     assert!(failed.is_err(), "the cycle fails at the pull");
 
@@ -824,12 +824,8 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
         "the pin disposition was not recorded, so nothing pinned the cover yet",
     );
 
-    // Retry with the floor lifted: the cycle completes, records the pin disposition in
-    // the same transaction it consumes the intent, and the drain applies the pin.
-    storage
-        .set_min_schema_version(db.schema_version())
-        .await
-        .expect("lift schema floor");
+    // Retry publishes the exact staged batch, records the pin disposition in
+    // the same transaction it consumes the intent, and applies it.
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
     assert!(
@@ -923,15 +919,15 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     let bytes = b"MANAGED-PHOTO-going-back-local".to_vec();
 
     seed_remote_release(&storage, &db_a, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
-    // B is a known peer (it has a head) that has not acked yet, so A's snapshot
+    // B is a registered reader that has not acknowledged A yet, so A's snapshot
     // cycle keeps A's release changeset for B to pull — reclamation is paused until
     // every current device acks. Without a peer head A would be single-device and
     // the snapshot-covered changeset would be reclaimed, leaving nothing for B's
     // incremental pull.
-    storage
-        .put_head("B", 0, "2024-01-01T00:00:00Z")
+    bind_mock_store_protocol(&db_b, &storage, "B").await;
+    crate::sync::store_registration::ensure_active_registration(&db_b, &storage, &kp_a)
         .await
-        .expect("seed peer head");
+        .expect("register peer reader");
 
     // A pushes the Remote release; B pulls it.
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
@@ -1396,7 +1392,8 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     // The crash: the changeset push fails, so the gate flip commits (with its
     // disposition intent) but the drain that applies the disposition never runs.
     storage.fail_next_changeset_puts(1);
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
+    let failed = try_run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib).await;
+    assert!(failed.is_err(), "the Store package append fails");
 
     assert_eq!(
         shared_flag(&db, "n-pin").await,
@@ -1411,7 +1408,8 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     assert!(
         row_exists(
             &db,
-            "SELECT 1 FROM published_blob_drop_intents WHERE blob_id = 'cover-pin'",
+            "SELECT 1 FROM outbound_store_batches \
+             WHERE local_cleanup_metadata LIKE '%cover-pin%'",
         )
         .await,
         "the pin disposition is committed durably with the flip, not applied in memory",
@@ -1487,7 +1485,15 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     crate::local_blob::write_atomic(&pinned, &bytes)
         .await
         .unwrap();
-    db.set_sync_state("local_seq", "1").await.unwrap();
+    exec(
+        &db,
+        &format!(
+            "INSERT INTO materialized_commits (device_id, seq, commit_hash) \
+             VALUES ('A', 1, '{}')",
+            "00".repeat(32),
+        ),
+    )
+    .await;
     insert_published_drop_intent(&db, 1, "covers", "cov-pin", bytes.len() as u64, "pin").await;
 
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
@@ -1518,7 +1524,15 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     crate::local_blob::write_atomic(&cached, &bytes)
         .await
         .unwrap();
-    db.set_sync_state("local_seq", "1").await.unwrap();
+    exec(
+        &db,
+        &format!(
+            "INSERT INTO materialized_commits (device_id, seq, commit_hash) \
+             VALUES ('A', 1, '{}')",
+            "00".repeat(32),
+        ),
+    )
+    .await;
     insert_published_drop_intent(&db, 1, "covers", "cov-cache", bytes.len() as u64, "cache").await;
 
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
@@ -1542,7 +1556,7 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
     let db = open_test_db();
     let (_tmp, lib) = temp_store_dir();
 
-    db.set_sync_state("local_seq", "1").await.unwrap();
+    db.set_protocol_state("local_seq", "1").await.unwrap();
     insert_published_drop_intent(&db, 1, "covers", "cov-lost", 7, "pin").await;
 
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
@@ -1586,10 +1600,12 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         .await
         .expect("store host-provided blob");
 
-    storage
-        .put_head("B", 0, "2024-01-01T00:00:00Z")
+    let db_b = remote_root_db(cover_decl());
+    let (_tmp_b, lib_b) = temp_store_dir();
+    bind_mock_store_protocol(&db_b, &storage, "B").await;
+    crate::sync::store_registration::ensure_active_registration(&db_b, &storage, &kp_a)
         .await
-        .expect("seed peer head");
+        .expect("register peer reader");
     run_cycle(&storage, "A", &hlc_a, &db_a, &enc, &kp_a, &lib_a, None).await;
     assert!(
         storage
@@ -1599,8 +1615,6 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         "the host-provided blob is uploaded before the row changeset is pushed"
     );
 
-    let db_b = remote_root_db(cover_decl());
-    let (_tmp_b, lib_b) = temp_store_dir();
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &lib_b).await;
     assert!(
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n-remote-root'").await,

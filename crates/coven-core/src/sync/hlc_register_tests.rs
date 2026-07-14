@@ -3,7 +3,7 @@
 //! Unlike the self-tests in `hlc.rs` (which prove the clock is a correct clock),
 //! these assert an *external* outcome of wiring the clock to the data plane: they
 //! fail if `_updated_at` is wall-clock-stamped, if the clock regresses across a
-//! restart, or if revocation depended on an author-supplied envelope timestamp
+//! restart, or if revocation depended on an author-supplied transport timestamp
 //! rather than current write-capable membership. They drive a real
 //! [`crate::database::Database`] (with an injected, wall-clock-controlled `Hlc`)
 //! so the register lives where production puts it: inside the owned connection.
@@ -15,41 +15,32 @@ use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::cycle::run_single_sync_cycle;
-use crate::sync::envelope::{self, ChangesetEnvelope};
 use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
-use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
-use crate::sync::pull::pull_changes;
+use crate::sync::membership::{MemberRole, MembershipChain};
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version.
 const SCHEMA_VERSION: u32 = 1;
 use crate::sync::test_helpers::*;
 
-/// Store a changeset signed by `author` into the mock storage, stamping the
-/// envelope timestamp with `env_ts`. Mirrors the real publish path (sign then
-/// pack) so pull's signature + membership checks see a genuine envelope.
+/// Store an immutable Store commit signed by `author` into the mock storage.
 fn store_signed_changeset(
     storage: &MockSyncStorage,
     device_id: &str,
     seq: u64,
     changeset_bytes: &[u8],
     author: &UserKeypair,
-    env_ts: &str,
+    _transport_timestamp: &str,
 ) {
-    let mut env = ChangesetEnvelope {
-        device_id: device_id.to_string(),
+    storage.store_changeset_signed_as(
+        device_id,
         seq,
-        schema_version: SCHEMA_VERSION,
-        message: String::new(),
-        timestamp: env_ts.to_string(),
-        changeset_size: changeset_bytes.len(),
-        author_pubkey: None,
-        membership_grant: None,
-        signature: None,
-    };
-    envelope::sign_envelope(&mut env, author, changeset_bytes);
-    let packed = envelope::pack(&env, changeset_bytes);
-    storage.put_changeset_packed(device_id, seq, packed);
+        changeset_bytes,
+        SCHEMA_VERSION,
+        None,
+        author,
+        author,
+    );
 }
 
 /// The causality-under-skew guarantee, driven through the real sync cycle.
@@ -59,7 +50,7 @@ fn store_signed_changeset(
 /// behind A's*. A plain wall-clock `_updated_at` would let A win here.
 ///
 /// The cycle is the unit under test: its advance source must be the max
-/// applied-row `_updated_at`, not the envelope/head timestamp (which the HLC
+/// applied-row `_updated_at`, not a transport/head timestamp (which the HLC
 /// cannot parse).
 #[tokio::test]
 async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
@@ -90,6 +81,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         [3u8; 32],
     )));
     let keypair = UserKeypair::generate();
+    bind_mock_store_protocol(&db_b, &storage, "dev-b").await;
 
     let result = run_single_sync_cycle(
         &storage,
@@ -137,18 +129,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     storage.store_changeset("dev-b", 1, &cs_b, SCHEMA_VERSION);
 
     // A pulls B's edit; B wins on LWW because b_stamp > a_stamp.
-    pull_changes(
-        &db_a,
-        &test_synced_tables(),
-        &storage,
-        "dev-a",
-        &temp_store_dir().1,
-        // Exercise pull directly before membership initialization.
-        None,
-        None,
-    )
-    .await
-    .expect("pull into A");
+    pull_into(&db_a, &storage, "dev-a", &temp_store_dir().1).await;
     assert_eq!(
         query_text(&db_a, "SELECT title FROM notes WHERE id = 'n1'").await,
         "B wrote this",
@@ -163,7 +144,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
 /// clock far behind A's, the pull's per-changeset advance is the only thing that
 /// can lift B's next stamp above A's applied row.
 ///
-/// The unit under test is `pull_changes` (its row-and-cursor commit advances the
+/// The unit under test is `pull_changes` (its row-and-position commit advances the
 /// register): after it applies A's changeset, B's shared clock — which the
 /// host write path stamps off — must already outrank A's row, with no cycle
 /// wrapping the pull.
@@ -188,21 +169,10 @@ async fn pull_advances_register_as_each_changeset_applies() {
     .await;
     storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
 
-    // B pulls A's changeset directly through `pull_changes` — no cycle wraps it, so
+    // B pulls A's Store commit directly — no cycle wraps it, so
     // the only advance that can fire is the per-changeset one.
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
-    let (_cursors, result) = pull_changes(
-        &db_b,
-        &test_synced_tables(),
-        &storage,
-        "dev-b",
-        &temp_store_dir().1,
-        // Exercise pull directly before membership initialization.
-        None,
-        None,
-    )
-    .await
-    .expect("pull into B");
+    let (_positions, result) = pull_into(&db_b, &storage, "dev-b", &temp_store_dir().1).await;
     assert_eq!(result.changesets_applied, 1, "B must apply A's changeset");
 
     // A host write on B now mints off the shared clock the pull advanced. It must
@@ -244,16 +214,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let pull_storage = storage.clone();
     let pull_store_dir = store_dir.clone();
     let pull = tokio::spawn(async move {
-        pull_changes(
-            &pull_db,
-            pull_db.synced_tables(),
-            pull_storage.as_ref(),
-            "dev-b",
-            &pull_store_dir,
-            None,
-            None,
-        )
-        .await
+        pull_into(&pull_db, pull_storage.as_ref(), "dev-b", &pull_store_dir).await
     });
 
     commit_reached.notified().await;
@@ -283,10 +244,15 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
          {remote_stamp}",
     );
     assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'remote-boundary'").await);
+    let expected_position = storage.store_commit_position("dev-a", 1);
     assert_eq!(
-        target.get_all_sync_cursors().await.unwrap().get("dev-a"),
-        Some(&1),
-        "cancellation after the commit leaves its row and cursor durable",
+        target
+            .materialized_frontier()
+            .await
+            .expect("read materialized frontier")
+            .get("dev-a"),
+        Some(&expected_position),
+        "cancellation after the commit leaves its row and position durable",
     );
 }
 
@@ -320,42 +286,40 @@ fn reconstructed_clock_does_not_regress_below_persisted_high_water() {
 }
 
 /// Revocation is enforced by current membership, not by when a changeset claims
-/// to have been authored. A removed member signs a changeset whose envelope
+/// to have been authored. A removed member signs a changeset whose transport
 /// timestamp falls between their Add and Remove entries; pull must still reject it
 /// because the author lacks an exact current membership grant. Pull examines every
 /// verified head so a newly-added member's stream is not lost before its grant is
-/// discovered, then rejects this envelope against the current chain and advances
+/// discovered, then rejects this commit against the current chain and advances
 /// past it. Authorization is keyed on current membership rather than the
-/// author-supplied envelope timestamp.
+/// author-supplied transport timestamp.
 #[tokio::test]
 async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
-    // The mock signs the head it publishes for `member-device` with the member's
-    // own keypair, the way a real device signs its own head.
-    let storage = MockSyncStorage::with_keypair(member.clone());
+    let storage = MockSyncStorage::with_keypair(owner.clone());
 
     let owner_pk = pubkey_hex(&owner);
     let mut chain = MembershipChain::new();
-    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    let founder = storage.protocol_genesis().founder.clone();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "0000000002000-0000-owner",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "0000000002000-0000-owner".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
-    let remove_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Remove,
-        &member,
-        MemberRole::Member,
-        "0000000004000-0000-owner",
-    );
+    let remove_member = chain
+        .signed_remove_member(
+            &owner,
+            pubkey_hex(&member),
+            "0000000004000-0000-owner".to_string(),
+        )
+        .expect("active Owner removes membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
     assert!(
@@ -363,7 +327,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         "removed member must not be a current writer",
     );
 
-    // Member signs a changeset with an in-window envelope timestamp (t=3000).
+    // Member signs a changeset with an in-window transport timestamp (t=3000).
     let db1 = open_test_db();
     let cs = capture_bytes(
         &db1,
@@ -383,20 +347,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     );
 
     let db2 = open_test_db();
-    let membership = crate::sync::pull::load_cycle_membership(&storage, &db2)
-        .await
-        .expect("load cycle membership");
-    let (updated, result) = pull_changes(
-        &db2,
-        &test_synced_tables(),
-        &storage,
-        "dev2",
-        &temp_store_dir().1,
-        membership.chain,
-        membership.pinned_owner,
-    )
-    .await
-    .expect("pull");
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(
         result.changesets_applied, 0,
@@ -404,10 +355,10 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     );
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     // Every verified head is examined so a newly-added member stream cannot be
-    // discarded before its grant is discovered. This envelope lacks an exact
-    // current grant, so it is rejected without applying its row and the cursor
-    // advances past the examined position.
-    assert_eq!(updated.get("member-device"), Some(&1));
+    // discarded before its grant is discovered. This commit lacks an exact
+    // current grant, so it is held without applying its row or advancing the
+    // durable materialization frontier.
+    assert_eq!(updated.get("member-device"), None);
 }
 
 /// `Database::open` seeds the register from the persisted high-water mark, so the
@@ -419,7 +370,7 @@ async fn register_seeds_from_persisted_high_water() {
     let high = "9999999999000-0007-dev-a";
     let db = open_test_db_with_hlc(Arc::new(Hlc::new("dev-a".into())), move |conn| {
         conn.execute(
-            "INSERT INTO sync_state (key, value) VALUES (?1, ?2)",
+            "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
             (HIGHWATER_STATE_KEY, high),
         )
         .map(|_| ())
@@ -621,7 +572,7 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
     storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
 
     // B pulls A's changeset.
-    let (_cursors, _result) = pull_into(&db_b, &storage, "dev-b", &temp_store_dir().1).await;
+    let (_positions, _result) = pull_into(&db_b, &storage, "dev-b", &temp_store_dir().1).await;
 
     // (a) LWW: the grossly-future row must NOT win — B's honest local edit stands.
     assert_eq!(
@@ -680,7 +631,7 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     .await;
     storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
 
-    let (_cursors, _result) = pull_into(&db_b, &storage, "dev-b", &temp_store_dir().1).await;
+    let (_positions, _result) = pull_into(&db_b, &storage, "dev-b", &temp_store_dir().1).await;
 
     // A's causally-later (within-allowance) edit wins.
     assert_eq!(
@@ -706,21 +657,21 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
 /// holds any change a failed cycle didn't manage to push — so there is no
 /// cross-call capture state a mid-cycle abort could strand.
 ///
-/// We force the failure by blocking every `INSERT` into `sync_state` with a
+/// We force the failure by blocking every `INSERT` into `protocol_state` with a
 /// trigger that `RAISE(ABORT)`s. The cycle's top-of-cycle reads (plain `SELECT`s)
 /// still succeed, but the first bookkeeping persist fails, so the cycle returns
 /// `Err`. A subsequent host write must still journal into the next drained
 /// changeset.
 #[tokio::test]
 async fn cycle_error_mid_cycle_still_captures_host_writes() {
-    // A db whose `sync_state` rejects every INSERT, so a `set_sync_state` inside
+    // A db whose `protocol_state` rejects every INSERT, so a `set_protocol_state` inside
     // the cycle fails. Reads (the seed scan, the cycle's top-of-cycle loads) are
     // SELECTs and remain fine.
     let migrations = vec![crate::migration::Migration::run(1, "test-schema", |conn| {
         create_synced_schema(conn)?;
         conn.execute_batch(
-            "CREATE TRIGGER block_sync_state_insert BEFORE INSERT ON sync_state \
-             BEGIN SELECT RAISE(ABORT, 'forced set_sync_state failure'); END;",
+            "CREATE TRIGGER block_protocol_state_insert BEFORE INSERT ON protocol_state \
+             BEGIN SELECT RAISE(ABORT, 'forced set_protocol_state failure'); END;",
         )
         .map_err(crate::database::DbError::from)
     })];
@@ -732,10 +683,10 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         "dev-self".to_string(),
         &migrations,
     )
-    .expect("open db with sync_state-blocking trigger");
+    .expect("open db with protocol_state-blocking trigger");
 
     // A journaled local insert so the cycle has an outgoing changeset to stage —
-    // the `set_sync_state("staged_seq", ...)` that stages it is what the trigger
+    // the `set_protocol_state("staged_seq", ...)` that stages it is what the trigger
     // aborts. (Even with no outgoing, the unconditional HLC high-water persist would
     // abort; either way the cycle fails after the write has journaled.)
     host_exec(
@@ -772,7 +723,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
 
     assert!(
         result.is_err(),
-        "the blocked set_sync_state must make the cycle fail mid-span"
+        "the blocked set_protocol_state must make the cycle fail mid-span"
     );
 
     // Capture must still be live despite the mid-cycle failure: a fresh host write

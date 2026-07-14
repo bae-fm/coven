@@ -17,8 +17,12 @@ use serde::{Deserialize, Serialize};
 use crate::code_envelope::{self, EnvelopeError};
 use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::sync::membership::MembershipCoord;
+#[cfg(test)]
+use crate::sync::membership::OwnerGrantId;
+#[cfg(test)]
+use crate::sync::store_commit::ObjectHash;
 
-pub const RESTORE_CODE_VERSION: u8 = 2;
+pub const RESTORE_CODE_VERSION: u8 = 3;
 
 /// Everything needed to restore a store from cloud storage.
 ///
@@ -47,15 +51,15 @@ pub struct RestoreCode {
     pub provider: CloudHomeJoinInfo,
     /// Ed25519 signing key, hex-encoded, 64 bytes. Required.
     pub sk: String,
+    pub genesis_hash: super::store_commit::ObjectHash,
+    pub founder_pubkey: String,
     /// Every author's membership-head coordinate at mint time
     /// ([`MembershipChain::author_heads`](crate::sync::membership::MembershipChain::author_heads)),
     /// non-empty for every initialized store, including a browsable one. The
     /// restorer seeds its per-author head watermark from this before its first sync
     /// cycle, so a storage provider serving an older, otherwise validly signed
     /// membership state is refused as a regression rather than accepted for
-    /// having no watermark yet. The decoder requires the field but accepts an
-    /// empty vector; an empty floor seeds no watermark and provides no rollback
-    /// protection.
+    /// having no watermark yet. Decode requires a non-empty, well-formed floor.
     pub membership_floor: Vec<MembershipCoord>,
 }
 
@@ -70,6 +74,8 @@ impl std::fmt::Debug for RestoreCode {
             .field("name", &self.name)
             .field("provider", &self.provider)
             .field("sk", &"<redacted>")
+            .field("genesis_hash", &self.genesis_hash)
+            .field("founder_pubkey", &self.founder_pubkey)
             .field("membership_floor", &self.membership_floor)
             .finish()
     }
@@ -105,6 +111,12 @@ pub enum RestoreCodeError {
     InvalidEncryptionKey(String),
     #[error("The signing key in this restore code is invalid. Regenerate it on the source device. ({0})")]
     InvalidSigningKey(String),
+    #[error("The founder key in this restore code is invalid. Regenerate it on the source device. ({0})")]
+    InvalidFounderKey(String),
+    #[error("The restore code has no membership floor. Regenerate it on the source device.")]
+    EmptyMembershipFloor,
+    #[error("The membership floor in this restore code is invalid. Regenerate it on the source device. ({0})")]
+    InvalidMembershipFloor(String),
     /// A CloudKit share is a zone shared *to* this device by another owner;
     /// restore recovers *your own* zone, so a restore code can never carry
     /// one. Rejected at decode rather than reaching provider setup.
@@ -156,6 +168,13 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
             .map_err(|e| RestoreCodeError::InvalidEncryptionKey(e.to_string()))?;
     }
     decode_hex_bytes("signing key", &code.sk, 64).map_err(RestoreCodeError::InvalidSigningKey)?;
+    decode_hex_bytes("founder public key", &code.founder_pubkey, 32)
+        .map_err(RestoreCodeError::InvalidFounderKey)?;
+    if code.membership_floor.is_empty() {
+        return Err(RestoreCodeError::EmptyMembershipFloor);
+    }
+    super::membership_ops::membership_floor_by_grant(&code.membership_floor)
+        .map_err(RestoreCodeError::InvalidMembershipFloor)?;
     Ok(code)
 }
 
@@ -228,7 +247,9 @@ mod tests {
     fn test_membership_floor() -> Vec<MembershipCoord> {
         vec![MembershipCoord {
             author_pubkey: hex::encode([0xCDu8; 32]),
+            author_owner_grant: OwnerGrantId(ObjectHash::digest(b"test owner grant")),
             seq: 1,
+            entry_hash: ObjectHash::digest(b"test membership entry"),
         }]
     }
 
@@ -247,6 +268,8 @@ mod tests {
                 secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
             },
             sk: test_sk(),
+            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         }
     }
@@ -293,6 +316,8 @@ mod tests {
             name: "CloudKit Store".to_string(),
             provider: CloudHomeJoinInfo::CloudKit,
             sk: test_sk(),
+            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
         let encoded = encode_restore_code(&code);
@@ -312,6 +337,8 @@ mod tests {
                 folder_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs".to_string(),
             },
             sk: test_sk(),
+            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
@@ -334,6 +361,8 @@ mod tests {
                 folder_path: "/Apps/your-app/My Store".to_string(),
             },
             sk: test_sk(),
+            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
@@ -357,6 +386,8 @@ mod tests {
                 folder_id: "folder-id-456".to_string(),
             },
             sk: test_sk(),
+            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
         let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
@@ -387,6 +418,8 @@ mod tests {
                 zone_name: "zone".to_string(),
             },
             sk: test_sk(),
+            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
         let encoded = encode_restore_code(&code);
@@ -474,6 +507,8 @@ mod tests {
                 secret_key: "sk-cred".to_string(),
             },
             sk: test_sk(),
+            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
         let json = serde_json::to_string(&code).unwrap();
@@ -502,6 +537,8 @@ mod tests {
                 secret_key: "sk-cred".to_string(),
             },
             sk: test_sk(),
+            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
         let json = serde_json::to_string(&code).unwrap();
@@ -632,6 +669,16 @@ mod tests {
         assert!(matches!(
             decode_restore_code(&encoded),
             Err(RestoreCodeError::InvalidJson(_))
+        ));
+    }
+
+    #[test]
+    fn empty_membership_floor_is_refused_at_decode() {
+        let mut code = sample_s3_code();
+        code.membership_floor.clear();
+        assert!(matches!(
+            decode_restore_code(&encode_restore_code(&code)),
+            Err(RestoreCodeError::EmptyMembershipFloor)
         ));
     }
 

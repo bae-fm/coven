@@ -17,7 +17,7 @@ use crate::clock::{Clock, FixedClock};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::storage::cloud::{CloudHome, CloudHomeError};
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::hlc::Hlc;
@@ -250,16 +250,10 @@ impl CloudHome for FailingCloudHome {
     async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
-    async fn grant_access(
+    async fn set_access(
         &self,
-        _grant: crate::storage::cloud::CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn revoke_access(
-        &self,
-        _revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
+        _desired: crate::storage::cloud::CloudAccessState,
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
 }
@@ -342,16 +336,10 @@ impl CloudHome for SlowChunkedCloudHome {
     async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
-    async fn grant_access(
+    async fn set_access(
         &self,
-        _grant: crate::storage::cloud::CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn revoke_access(
-        &self,
-        _revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
+        _desired: crate::storage::cloud::CloudAccessState,
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
 }
@@ -987,16 +975,10 @@ impl CloudHome for BarrierCloudHome {
     async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
-    async fn grant_access(
+    async fn set_access(
         &self,
-        _grant: crate::storage::cloud::CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn revoke_access(
-        &self,
-        _revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
+        _desired: crate::storage::cloud::CloudAccessState,
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
         unimplemented!("not exercised by drain_uploads")
     }
 }

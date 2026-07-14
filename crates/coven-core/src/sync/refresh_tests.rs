@@ -24,14 +24,14 @@ use crate::sync::invite::{
     revoke_member, signed_wrapped_key_for_test, signed_wrapped_keyring_for_test,
     unwrap_store_keyring_for_owners_with_activation,
 };
-use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipCoord};
+use crate::sync::membership::{MemberRole, MembershipChain, MembershipCoord};
 use crate::sync::membership_ops::{
     load_anchored_chain, remove_member, MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
 };
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    bootstrap_chain, capture_bytes, make_linked_entry, open_test_db, pubkey_hex, temp_store_dir,
-    MockSyncStorage, TestCustody,
+    bind_mock_store_protocol, bootstrap_chain, capture_bytes, open_test_db, pubkey_hex,
+    temp_store_dir, MockSyncStorage, TestCustody,
 };
 
 const LIB_ID: &str = "lib-refresh-test";
@@ -46,7 +46,7 @@ async fn upload_chain(storage: &MockSyncStorage, chain: &MembershipChain, signer
         let seq = next.entry(entry.author_pubkey.clone()).or_insert(0);
         *seq += 1;
         storage
-            .put_membership_entry(
+            .append_membership_entry_bytes(
                 &entry.author_pubkey,
                 *seq,
                 serde_json::to_vec(entry).expect("serialize entry"),
@@ -57,20 +57,6 @@ async fn upload_chain(storage: &MockSyncStorage, chain: &MembershipChain, signer
     crate::sync::membership_ops::publish_membership_head(storage, chain, signer)
         .await
         .expect("publish membership head");
-}
-
-fn add_linked_entry(
-    chain: &mut MembershipChain,
-    author: &UserKeypair,
-    action: MembershipAction,
-    subject: &UserKeypair,
-    role: MemberRole,
-    timestamp: &str,
-) {
-    let entry = make_linked_entry(chain, author, action, subject, role, timestamp);
-    chain
-        .add_entry(entry)
-        .expect("valid linked membership entry");
 }
 
 /// Run one real sync cycle for `device_id` over an encrypted home, with the mock
@@ -86,6 +72,7 @@ async fn run_cycle(
     ld: &StoreDir,
     custody: Option<&dyn MasterKeyCustody>,
 ) -> Result<super::cycle::SyncCycleResult, String> {
+    bind_mock_store_protocol(db, storage, device_id).await;
     let hlc = Hlc::new(device_id.to_string());
     run_single_sync_cycle(
         storage,
@@ -124,27 +111,41 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let owner_pk = pubkey_hex(&owner);
     let old_key: [u8; 32] = [11u8; 32];
 
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // Chain: owner founds, adds B and the victim as members.
-    let mut chain = bootstrap_chain(&owner);
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &device_b,
-        MemberRole::Member,
-        "0000000002000-0000-A",
-    );
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &victim,
-        MemberRole::Member,
-        "0000000003000-0000-A",
-    );
+    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&device_b),
+                None,
+                MemberRole::Member,
+                "0000000002000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&victim),
+                None,
+                MemberRole::Member,
+                "0000000003000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
     upload_chain(&storage, &chain, &owner).await;
+    let db = open_test_db();
+    let listed = storage.discover_membership_entries().await;
+    crate::sync::membership_ops::load_and_persist_owner_anchor(&storage, &listed, &owner_pk, &db)
+        .await
+        .unwrap()
+        .unwrap();
 
     // The owner wraps the OLD key for B (what B adopted at join), signed by the
     // owner B pins, so B's refresh can authenticate it.
@@ -159,7 +160,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     // B's local state: pinned owner + its keyring holds the OLD key + its live
     // cipher is the OLD key. This is the just-joined steady state.
     let db_b = open_test_db();
-    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
     let ks_b = TestCustody::default();
@@ -192,7 +193,6 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         &storage,
         &storage,
         &mut chain,
-        storage.list_membership_entries().await.unwrap(),
         &owner,
         &pubkey_hex(&victim),
         LIB_ID,
@@ -241,7 +241,8 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 
     // And the rotated key B now holds is exactly the one the owner re-wrapped for
     // it — i.e. B can independently unwrap keys/{A}/{B} to the same bytes.
-    let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+    let visible_entries =
+        membership_coords(&storage, &storage.discover_membership_entries().await).await;
     let reunwrapped = unwrap_store_keyring_for_owners_with_activation(
         &storage,
         &device_b,
@@ -276,28 +277,40 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
     // The cloud is the owner's, so a changeset it serves is authored by a member
     // the pull will authorize against the chain.
     let storage = MockSyncStorage::with_keypair(owner.clone());
-    let mut chain = bootstrap_chain(&owner);
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &device_b,
-        MemberRole::Member,
-        "0000000002000-0000-A",
-    );
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &victim,
-        MemberRole::Member,
-        "0000000003000-0000-A",
-    );
+    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&device_b),
+                None,
+                MemberRole::Member,
+                "0000000002000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&victim),
+                None,
+                MemberRole::Member,
+                "0000000003000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
     upload_chain(&storage, &chain, &owner).await;
 
     let activation = MembershipCoord {
         author_pubkey: owner_pk.clone(),
+        author_owner_grant: chain
+            .active_owner_grant(&owner_pk)
+            .expect("founder Owner grant"),
         seq: 4,
+        entry_hash: crate::sync::store_commit::ObjectHash::digest(b"pending removal"),
     };
     let pending_keyring = EncryptionService::from_key(old_key)
         .with_appended_generation(2, rotated_key)
@@ -317,7 +330,7 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         .unwrap();
 
     let db_b = open_test_db();
-    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -332,20 +345,13 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         ],
     )
     .await;
-    let packed = crate::sync::envelope::pack_signed(
+    storage.store_changeset_with_grant(
         "owner-device",
         1,
-        db_b.schema_version(),
-        "",
-        "2026-02-10T00:00:00Z",
-        &owner,
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 1,
-        }),
         &peer_cs,
+        db_b.schema_version(),
+        chain.write_grant_coord(&owner_pk),
     );
-    storage.put_changeset_packed("owner-device", 1, packed);
 
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
@@ -380,7 +386,7 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         "the inactive key must not replace the live cipher",
     );
     assert_eq!(
-        db_b.get_sync_state(PENDING_ROTATION_STATE_KEY)
+        db_b.get_protocol_state(PENDING_ROTATION_STATE_KEY)
             .await
             .unwrap(),
         Some("2".to_string()),
@@ -396,24 +402,32 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     let owner_pk = pubkey_hex(&owner);
     let old_key: [u8; 32] = [12u8; 32];
 
-    let storage = MockSyncStorage::new();
-    let mut chain = bootstrap_chain(&owner);
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &device_b,
-        MemberRole::Member,
-        "0000000002000-0000-A",
-    );
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &victim,
-        MemberRole::Member,
-        "0000000003000-0000-A",
-    );
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&device_b),
+                None,
+                MemberRole::Member,
+                "0000000002000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&victim),
+                None,
+                MemberRole::Member,
+                "0000000003000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
     upload_chain(&storage, &chain, &owner).await;
 
     let b_x = device_b.to_x25519_public_key();
@@ -429,7 +443,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .unwrap();
 
     let db_b = open_test_db();
-    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
     let ks_b = TestCustody::default();
@@ -441,7 +455,6 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         &storage,
         &storage,
         &mut chain,
-        storage.list_membership_entries().await.unwrap(),
         &owner,
         &pubkey_hex(&victim),
         LIB_ID,
@@ -503,16 +516,20 @@ async fn same_generation_wrapped_key_is_not_adopted() {
     let current_key: [u8; 32] = [13u8; 32];
     let replacement_key: [u8; 32] = [14u8; 32];
 
-    let storage = MockSyncStorage::new();
-    let mut chain = bootstrap_chain(&owner);
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &device_b,
-        MemberRole::Member,
-        "0000000002000-0000-A",
-    );
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&device_b),
+                None,
+                MemberRole::Member,
+                "0000000002000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
     upload_chain(&storage, &chain, &owner).await;
 
     let b_x = device_b.to_x25519_public_key();
@@ -533,7 +550,7 @@ async fn same_generation_wrapped_key_is_not_adopted() {
         .unwrap();
 
     let db_b = open_test_db();
-    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
     let ks_b = TestCustody::default();
@@ -572,36 +589,48 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let founder_pk = pubkey_hex(&founder);
     let old_key: [u8; 32] = [15u8; 32];
 
-    let storage = MockSyncStorage::new();
-    let mut chain = bootstrap_chain(&founder);
-    add_linked_entry(
-        &mut chain,
-        &founder,
-        MembershipAction::Add,
-        &second_owner,
-        MemberRole::Owner,
-        "0000000002000-0000-A",
-    );
-    add_linked_entry(
-        &mut chain,
-        &founder,
-        MembershipAction::Add,
-        &device_b,
-        MemberRole::Member,
-        "0000000003000-0000-A",
-    );
-    add_linked_entry(
-        &mut chain,
-        &founder,
-        MembershipAction::Add,
-        &victim,
-        MemberRole::Member,
-        "0000000004000-0000-A",
-    );
+    let storage = MockSyncStorage::with_keypair(founder.clone());
+    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    {
+        let entry = chain
+            .signed_set_member(
+                &founder,
+                pubkey_hex(&second_owner),
+                None,
+                MemberRole::Owner,
+                "0000000002000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
+    {
+        let entry = chain
+            .signed_set_member(
+                &founder,
+                pubkey_hex(&device_b),
+                None,
+                MemberRole::Member,
+                "0000000003000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
+    {
+        let entry = chain
+            .signed_set_member(
+                &founder,
+                pubkey_hex(&victim),
+                None,
+                MemberRole::Member,
+                "0000000004000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
     upload_chain(&storage, &chain, &founder).await;
 
     let db_b = open_test_db();
-    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
+    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
         .await
         .unwrap();
     let ks_b = TestCustody::default();
@@ -613,7 +642,6 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         &storage,
         &storage,
         &mut chain,
-        storage.list_membership_entries().await.unwrap(),
         &second_owner,
         &pubkey_hex(&victim),
         LIB_ID,
@@ -648,32 +676,42 @@ async fn removed_owner_key_is_not_adopted() {
     let current_key: [u8; 32] = [16u8; 32];
     let removed_owner_key: [u8; 32] = [17u8; 32];
 
-    let storage = MockSyncStorage::new();
-    let mut chain = bootstrap_chain(&founder);
-    add_linked_entry(
-        &mut chain,
-        &founder,
-        MembershipAction::Add,
-        &second_owner,
-        MemberRole::Owner,
-        "0000000002000-0000-A",
-    );
-    add_linked_entry(
-        &mut chain,
-        &founder,
-        MembershipAction::Add,
-        &device_b,
-        MemberRole::Member,
-        "0000000003000-0000-A",
-    );
-    add_linked_entry(
-        &mut chain,
-        &second_owner,
-        MembershipAction::Remove,
-        &founder,
-        MemberRole::Owner,
-        "0000000004000-0000-B",
-    );
+    let storage = MockSyncStorage::with_keypair(founder.clone());
+    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    {
+        let entry = chain
+            .signed_set_member(
+                &founder,
+                pubkey_hex(&second_owner),
+                None,
+                MemberRole::Owner,
+                "0000000002000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
+    {
+        let entry = chain
+            .signed_set_member(
+                &founder,
+                pubkey_hex(&device_b),
+                None,
+                MemberRole::Member,
+                "0000000003000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
+    {
+        let entry = chain
+            .signed_remove_member(
+                &second_owner,
+                pubkey_hex(&founder),
+                "0000000004000-0000-B".to_string(),
+            )
+            .expect("active Owner removes membership grant");
+        chain.add_entry(entry).expect("valid membership removal");
+    }
     upload_chain(&storage, &chain, &second_owner).await;
 
     let b_x = device_b.to_x25519_public_key();
@@ -698,7 +736,7 @@ async fn removed_owner_key_is_not_adopted() {
         .unwrap();
 
     let db_b = open_test_db();
-    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
+    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
         .await
         .unwrap();
     let ks_b = TestCustody::default();
@@ -745,18 +783,22 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     let owner_pk = pubkey_hex(&owner);
     let real_key: [u8; 32] = [22u8; 32];
 
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // Chain: owner founds + adds B.
-    let mut chain = bootstrap_chain(&owner);
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &device_b,
-        MemberRole::Member,
-        "0000000002000-0000-A",
-    );
+    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&device_b),
+                None,
+                MemberRole::Member,
+                "0000000002000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
     upload_chain(&storage, &chain, &owner).await;
 
     // The attacker forges B's wrapped key: a key THEY chose, sealed to B's real
@@ -773,7 +815,7 @@ async fn refresh_rejects_a_forged_wrapped_key() {
 
     // B holds its real key (live + keyring) and pins the owner.
     let db_b = open_test_db();
-    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
     let ks_b = TestCustody::default();
@@ -823,23 +865,27 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let owner_pk = pubkey_hex(&owner);
     let key: [u8; 32] = [44u8; 32];
 
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // A real owner-anchored chain exists, but listing it is made to fail this cycle.
-    let mut chain = bootstrap_chain(&owner);
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &device_b,
-        MemberRole::Member,
-        "0000000002000-0000-A",
-    );
+    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&device_b),
+                None,
+                MemberRole::Member,
+                "0000000002000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
     upload_chain(&storage, &chain, &owner).await;
     storage.fail_membership_listing();
 
     let db_b = open_test_db();
-    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
     let ks_b = TestCustody::default();
@@ -866,14 +912,11 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
 
 /// The raw 32-byte key inside an `Encrypted` cipher (panics on a plaintext cipher —
 /// these tests only ever build encrypted ones).
-fn membership_coords(entry_keys: &[(String, u64)]) -> Vec<MembershipCoord> {
-    entry_keys
-        .iter()
-        .map(|(author_pubkey, seq)| MembershipCoord {
-            author_pubkey: author_pubkey.clone(),
-            seq: *seq,
-        })
-        .collect()
+async fn membership_coords(
+    _storage: &MockSyncStorage,
+    entry_keys: &[MembershipCoord],
+) -> Vec<MembershipCoord> {
+    entry_keys.to_vec()
 }
 
 /// One sync cycle lists the membership chain exactly once. The chain is loaded and
@@ -892,18 +935,22 @@ async fn one_cycle_lists_membership_once() {
     let owner_pk = pubkey_hex(&owner);
     let key: [u8; 32] = [7u8; 32];
 
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // Chain: owner founds and adds B as a Member.
-    let mut chain = bootstrap_chain(&owner);
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &device_b,
-        MemberRole::Member,
-        "0000000002000-0000-A",
-    );
+    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&device_b),
+                None,
+                MemberRole::Member,
+                "0000000002000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
     upload_chain(&storage, &chain, &owner).await;
 
     // B's steady state: owner pinned + an encrypted cipher on the shared key, so the
@@ -911,7 +958,7 @@ async fn one_cycle_lists_membership_once() {
     // short-circuiting as a plaintext no-op. B is a Member, so it authors no
     // snapshot — whose reclaim would be a separate, out-of-scope membership read.
     let db_b = open_test_db();
-    db_b.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
     let ks_b = TestCustody::default();
@@ -969,19 +1016,30 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     let owner_pk = pubkey_hex(&owner);
     let old_key: [u8; 32] = [11u8; 32];
 
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_store_and_keypair(LIB_ID, owner.clone());
 
     // Chain: owner founds and adds the member.
-    let mut chain = bootstrap_chain(&owner);
-    add_linked_entry(
-        &mut chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "0000000002000-0000-A",
-    );
+    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    {
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&member),
+                None,
+                MemberRole::Member,
+                "0000000002000-0000-A".to_string(),
+            )
+            .expect("active Owner signs membership grant");
+        chain.add_entry(entry).expect("valid membership grant");
+    }
     upload_chain(&storage, &chain, &owner).await;
+
+    let db = open_test_db();
+    let listed = storage.discover_membership_entries().await;
+    crate::sync::membership_ops::load_and_persist_owner_anchor(&storage, &listed, &owner_pk, &db)
+        .await
+        .unwrap()
+        .unwrap();
 
     // This device's steady state: keyring and live cipher hold the pre-rotation key.
     let ks = TestCustody::default();
@@ -1004,6 +1062,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         &ks,
         &cipher,
         &pending_rotation,
+        &db,
     )
     .await
     .expect_err("local adoption fails while the keyring is unwritable");
@@ -1017,7 +1076,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
 
     // The cloud rotation committed: the member is durably removed from the
     // committed chain even though this device could not adopt the new key.
-    let entries = storage.list_membership_entries().await.unwrap();
+    let entries = storage.discover_membership_entries().await;
     let committed = load_anchored_chain(&storage, &entries, Some(&owner_pk), None)
         .await
         .expect("committed chain loads");
@@ -1057,7 +1116,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     // the rotated key from its own `keys/{owner}/{owner}` wrap, no retry needed.
     {
         let db = open_test_db();
-        db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
             .await
             .unwrap();
         let ks_refresh = TestCustody::default();
@@ -1100,6 +1159,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
         &ks,
         &cipher,
         &pending_rotation,
+        &db,
     )
     .await
     .expect("retrying the removal converges");

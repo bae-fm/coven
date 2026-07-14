@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use rusqlite::OptionalExtension;
 
 use crate::blob::{local_files, CacheFill, Provenance};
@@ -16,54 +17,145 @@ use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::cycle;
-use crate::sync::envelope;
-use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain, MembershipCoord};
+use crate::sync::membership::{founder_entry, MemberRole, MembershipChain, MembershipCoord};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
-use crate::sync::pull::{HeldChangesetReason, PullError};
+use crate::sync::pull::PullError;
+use crate::sync::store_commit::StoreDeviceHead;
+use crate::sync::store_pull::{
+    HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason, StorePullError,
+};
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version; a newer peer's changeset or floor uses `SCHEMA_VERSION + 1`.
 const SCHEMA_VERSION: u32 = 1;
-use crate::sync::service::{self, SyncCycleError};
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
-/// Drive `service::sync` the way the cycle does: load the cycle's membership chain
-/// once and hand it in. Test call sites pass the same positional args they always
-/// did — this is the non-cycle standalone entry that loads the membership itself.
-async fn sync_for_test(
+#[async_trait]
+trait TestStoreStorage: SyncStorage {
+    async fn bind_for_test_publish(
+        &self,
+        db: &crate::database::Database,
+        device_id: &str,
+        keypair: &UserKeypair,
+    ) -> Result<(), String>;
+}
+
+#[async_trait]
+impl TestStoreStorage for MockSyncStorage {
+    async fn bind_for_test_publish(
+        &self,
+        db: &crate::database::Database,
+        device_id: &str,
+        _keypair: &UserKeypair,
+    ) -> Result<(), String> {
+        bind_mock_store_protocol(db, self, device_id).await;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TestStoreStorage for CloudSyncStorage {
+    async fn bind_for_test_publish(
+        &self,
+        db: &crate::database::Database,
+        device_id: &str,
+        keypair: &UserKeypair,
+    ) -> Result<(), String> {
+        if db
+            .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            let genesis = crate::sync::store_genesis::create_store(
+                db,
+                self,
+                self.store_id(),
+                "0000000000001-0000-test-publish",
+                keypair,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            crate::sync::cycle::ensure_owner_anchored_chain(self, db, &genesis, keypair).await?;
+        }
+        db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn cloud_test_storage(
+    home: std::sync::Arc<dyn CloudHome>,
+    cipher: CloudCipher,
+    blob_paths: BlobPathScheme,
+    store_id: &str,
+    keypair: UserKeypair,
+) -> CloudSyncStorage {
+    CloudSyncStorage::new(home, cipher, blob_paths, store_id, keypair).with_copy_ids(
+        std::sync::Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
+    )
+}
+
+/// Stage and publish exact package bytes through the durable Store outbox.
+async fn sync_for_test<S: TestStoreStorage>(
     device_id: &str,
     db: &crate::database::Database,
     tables: &[SyncedTable],
     outgoing: Vec<u8>,
     local_seq: u64,
-    storage: &dyn SyncStorage,
+    storage: &S,
     timestamp: &str,
     message: &str,
     keypair: &UserKeypair,
     store_dir: &crate::store_dir::StoreDir,
-) -> Result<service::SyncResult, SyncCycleError> {
+) -> Result<Option<crate::sync::store_commit::CommitPosition>, String> {
+    let configured_tables: Vec<_> = db.synced_tables().iter().map(SyncedTable::name).collect();
+    let supplied_tables: Vec<_> = tables.iter().map(SyncedTable::name).collect();
+    assert_eq!(configured_tables, supplied_tables);
+    assert!(
+        message.is_empty(),
+        "Store commits carry no arbitrary message"
+    );
+    storage
+        .bind_for_test_publish(db, device_id, keypair)
+        .await?;
+    let before = db
+        .latest_local_store_position()
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        before.as_ref().map_or(0, |position| position.seq),
+        local_seq
+    );
+    db.enqueue_store_changeset_for_test(outgoing)
+        .await
+        .map_err(|error| error.to_string())?;
     let membership = crate::sync::pull::load_cycle_membership(storage, db)
         .await
-        .map_err(SyncCycleError::Pull)?;
-    service::sync(
-        device_id,
+        .map_err(|error| error.to_string())?;
+    let staged = crate::sync::store_outbound::stage_pending_store_batch(
         db,
-        tables,
-        outgoing,
-        local_seq,
         storage,
+        device_id,
         timestamp,
-        message,
         keypair,
         store_dir,
         membership.chain.as_ref(),
-        membership.pinned_owner.as_deref(),
         None,
-        false,
     )
     .await
+    .map_err(|error| error.to_string())?;
+    if !staged {
+        return Ok(None);
+    }
+    crate::sync::store_outbound::drain_outbound_store_batches(db, storage)
+        .await
+        .map_err(|error| error.to_string())?;
+    db.latest_local_store_position()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// The common `note_photos` blob declaration: namespace `"photos"`, master scope,
@@ -142,6 +234,82 @@ async fn store_local(ld: &crate::store_dir::StoreDir, id: &str, bytes: &[u8]) {
         .expect("store host-provided blob in the local store");
 }
 
+async fn remove_protocol_prefix(storage: &MockSyncStorage, prefix: &str) {
+    let listing = storage
+        .list_protocol_objects(prefix)
+        .await
+        .expect("list protocol candidates for removal");
+    assert!(
+        !listing.objects.is_empty(),
+        "protocol removal prefix {prefix:?} must name at least one candidate",
+    );
+    for object in listing.objects {
+        storage
+            .delete_protocol_object(&object)
+            .await
+            .expect("remove protocol candidate");
+    }
+}
+
+async fn materialized_sequences(db: &crate::database::Database) -> HashMap<String, u64> {
+    db.materialized_frontier()
+        .await
+        .expect("read materialized Store frontier")
+        .into_iter()
+        .map(|(device_id, position)| (device_id, position.seq))
+        .collect()
+}
+
+fn constraint_conflicts(
+    result: &crate::sync::store_pull::StorePullResult,
+) -> Vec<&HeldStorePosition> {
+    result
+        .held_positions
+        .iter()
+        .filter(|held| matches!(held.reason, HeldStorePositionReason::ConstraintConflict(_)))
+        .collect()
+}
+
+fn newer_schema_positions(
+    result: &crate::sync::store_pull::StorePullResult,
+) -> Vec<&HeldStorePosition> {
+    result
+        .held_positions
+        .iter()
+        .filter(|held| matches!(held.reason, HeldStorePositionReason::NewerSchema { .. }))
+        .collect()
+}
+
+fn unauthorized_positions(
+    result: &crate::sync::store_pull::StorePullResult,
+) -> Vec<&HeldStorePosition> {
+    result
+        .held_positions
+        .iter()
+        .filter(|held| held.reason == HeldStorePositionReason::Unauthorized)
+        .collect()
+}
+
+fn invalid_changeset_positions(
+    result: &crate::sync::store_pull::StorePullResult,
+) -> Vec<&HeldStorePosition> {
+    result
+        .held_positions
+        .iter()
+        .filter(|held| matches!(held.reason, HeldStorePositionReason::InvalidChangeset(_)))
+        .collect()
+}
+
+fn membership_coord(chain: &MembershipChain, author_pubkey: &str, seq: u64) -> MembershipCoord {
+    let entry = chain
+        .entries()
+        .iter()
+        .filter(|entry| entry.author_pubkey == author_pubkey)
+        .nth(usize::try_from(seq - 1).expect("membership sequence fits usize"))
+        .unwrap_or_else(|| panic!("missing membership coordinate {author_pubkey}/{seq}"));
+    entry.coord()
+}
+
 #[tokio::test]
 async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
     let storage = MockSyncStorage::new();
@@ -166,9 +334,9 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(updated.get("dev1"), Some(&1));
     assert_eq!(
-        db2.get_all_sync_cursors().await.unwrap().get("dev1"),
+        materialized_sequences(&db2).await.get("dev1"),
         Some(&1),
-        "the row and its durable cursor commit in the pull that applies it",
+        "the row and its durable position commit in the pull that applies it",
     );
     assert_eq!(
         query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'").await,
@@ -181,7 +349,7 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
 }
 
 #[tokio::test]
-async fn cursor_write_failure_rolls_back_the_remote_rows() {
+async fn position_write_failure_rolls_back_the_remote_rows() {
     let storage = MockSyncStorage::new();
     let source = open_test_db();
     let changeset = capture_bytes(
@@ -197,29 +365,24 @@ async fn cursor_write_failure_rolls_back_the_remote_rows() {
     let target = open_test_db();
     exec(
         &target,
-        "CREATE TRIGGER reject_cursor_insert BEFORE INSERT ON sync_cursors \
-         BEGIN SELECT RAISE(ABORT, 'injected cursor write failure'); END;",
+        "CREATE TRIGGER reject_materialized_insert BEFORE INSERT ON materialized_commits \
+         BEGIN SELECT RAISE(ABORT, 'injected materialized-position write failure'); END;",
     )
     .await;
     let (_tmp, store_dir) = temp_store_dir();
-    let (updated, result) = pull_into(&target, &storage, "dev2", &store_dir).await;
-
-    assert_eq!(updated.get("dev1"), None);
-    assert_eq!(result.changesets_applied, 0);
-    assert_eq!(result.held_changesets.len(), 1);
-    assert!(matches!(
-        result.held_changesets[0].reason,
-        HeldChangesetReason::ApplyFailed { .. }
-    ));
+    let error = pull_into_result(&target, &storage, "dev2", &store_dir)
+        .await
+        .expect_err("materialized-position failure aborts the pull");
+    assert!(matches!(error, StorePullError::Database(_)));
     assert!(
         !row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await,
-        "the row cannot commit when its cursor write fails",
+        "the row cannot commit when its position write fails",
     );
-    assert!(target.get_all_sync_cursors().await.unwrap().is_empty());
+    assert!(materialized_sequences(&target).await.is_empty());
 }
 
 #[tokio::test]
-async fn ordinary_pull_starts_from_its_durable_cursor() {
+async fn ordinary_pull_starts_from_its_durable_position() {
     let storage = MockSyncStorage::new();
     let source = open_test_db();
     let changeset = capture_bytes(
@@ -239,11 +402,8 @@ async fn ordinary_pull_starts_from_its_durable_cursor() {
 
     assert_eq!(updated.get("dev1"), Some(&1));
     assert_eq!(result.changesets_applied, 1);
-    assert!(result.held_changesets.is_empty());
-    assert_eq!(
-        target.get_all_sync_cursors().await.unwrap().get("dev1"),
-        Some(&1),
-    );
+    assert!(result.held_positions.is_empty());
+    assert_eq!(materialized_sequences(&target).await.get("dev1"), Some(&1),);
     assert!(
         row_exists(&target, "SELECT 1 FROM notes WHERE id = 'stale-row'").await,
         "ordinary pull derives coverage from durable rows, not caller input",
@@ -251,14 +411,14 @@ async fn ordinary_pull_starts_from_its_durable_cursor() {
 }
 
 #[tokio::test]
-async fn ordinary_pull_uses_its_durable_cursor_on_every_call() {
+async fn ordinary_pull_uses_its_durable_position_on_every_call() {
     let storage = MockSyncStorage::new();
     let source = open_test_db();
     let first = capture_bytes(
         &source,
         &[
             "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('cursor-row', 'One', NULL, \
+             VALUES ('position-row', 'One', NULL, \
                      '0000000001000-0000-dev1', '2026-01-01')",
         ],
     )
@@ -266,7 +426,7 @@ async fn ordinary_pull_uses_its_durable_cursor_on_every_call() {
     let second = capture_bytes(
         &source,
         &["UPDATE notes SET title = 'Two', \
-             _updated_at = '0000000002000-0000-dev1' WHERE id = 'cursor-row'"],
+             _updated_at = '0000000002000-0000-dev1' WHERE id = 'position-row'"],
     )
     .await;
     storage.store_changeset("dev1", 1, &first, SCHEMA_VERSION);
@@ -279,16 +439,16 @@ async fn ordinary_pull_uses_its_durable_cursor_on_every_call() {
     let (updated, result) = pull_into(&target, &storage, "dev2", &store_dir).await;
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(result.held_changesets.is_empty());
+    assert!(result.held_positions.is_empty());
     assert_eq!(updated.get("dev1"), Some(&2));
     assert_eq!(
-        query_text(&target, "SELECT title FROM notes WHERE id = 'cursor-row'").await,
+        query_text(&target, "SELECT title FROM notes WHERE id = 'position-row'").await,
         "Two",
     );
 }
 
 #[tokio::test]
-async fn ordinary_pull_applies_the_change_immediately_after_its_durable_cursor() {
+async fn ordinary_pull_applies_the_change_immediately_after_its_durable_position() {
     let storage = MockSyncStorage::new();
     let source = open_test_db();
     let first = capture_bytes(
@@ -317,37 +477,50 @@ async fn ordinary_pull_applies_the_change_immediately_after_its_durable_cursor()
 
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(updated.get("dev1"), Some(&2));
-    assert_eq!(
-        target.get_all_sync_cursors().await.unwrap().get("dev1"),
-        Some(&2),
-    );
+    assert_eq!(materialized_sequences(&target).await.get("dev1"), Some(&2),);
 }
 
 #[tokio::test]
-async fn invalid_durable_cursor_values_are_rejected_at_the_database_boundary() {
+async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() {
     let target = open_test_db();
-    exec(
-        &target,
-        "INSERT INTO sync_cursors (device_id, last_seq) VALUES ('bad-device', -1)",
-    )
-    .await;
-
-    assert!(target.get_all_sync_cursors().await.is_err());
+    let invalid_insert = target
+        .call(|conn| {
+            conn.execute(
+                "INSERT INTO materialized_commits (device_id, seq, commit_hash) \
+                 VALUES ('bad-device', -1, \
+                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+                [],
+            )
+            .map(|_| ())
+            .map_err(crate::database::DbError::from)
+        })
+        .await;
+    assert!(invalid_insert.is_err());
+    assert!(target.materialized_frontier().await.unwrap().is_empty());
+    let overflow = std::collections::BTreeMap::from([(
+        "overflow-device".to_string(),
+        crate::sync::store_commit::CommitPosition {
+            seq: u64::MAX,
+            commit_hash: crate::sync::store_commit::ObjectHash::digest(b"overflow"),
+        },
+    )]);
     assert!(target
-        .advance_sync_cursor("bad-device", 0, 1)
+        .install_bootstrap_state(
+            &overflow,
+            crate::sync::store_commit::ObjectHash::digest(b"snapshot"),
+            crate::sync::store_commit::ObjectHash::digest(b"genesis"),
+        )
         .await
         .is_err());
-    assert!(
-        crate::database::Database::validate_sync_cursors(&HashMap::from([(
-            "overflow-device".to_string(),
-            u64::MAX,
-        )]))
-        .is_err()
-    );
+    assert!(target
+        .snapshot_coverage_frontier()
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
-async fn empty_changeset_advances_the_durable_cursor() {
+async fn empty_package_materializes_its_exact_commit_position() {
     let storage = MockSyncStorage::new();
     storage.store_changeset("dev1", 1, &[], SCHEMA_VERSION);
     let target = open_test_db();
@@ -355,16 +528,13 @@ async fn empty_changeset_advances_the_durable_cursor() {
 
     let (updated, result) = pull_into(&target, &storage, "dev2", &store_dir).await;
 
-    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.changesets_applied, 1);
     assert_eq!(updated.get("dev1"), Some(&1));
-    assert_eq!(
-        target.get_all_sync_cursors().await.unwrap().get("dev1"),
-        Some(&1),
-    );
+    assert_eq!(materialized_sequences(&target).await.get("dev1"), Some(&1),);
 }
 
 #[tokio::test]
-async fn host_write_after_remote_apply_observes_the_matching_cursor() {
+async fn host_write_after_remote_apply_observes_the_matching_position() {
     let storage = MockSyncStorage::new();
     let source = open_test_db();
     let changeset = capture_bytes(
@@ -392,9 +562,9 @@ async fn host_write_after_remote_apply_observes_the_matching_cursor() {
                         |row| row.get(0),
                     )
                     .map_err(crate::database::DbError::from)?;
-                let cursor: Option<u64> = tx
+                let materialized: Option<u64> = tx
                     .query_row(
-                        "SELECT last_seq FROM sync_cursors WHERE device_id = 'dev1'",
+                        "SELECT seq FROM materialized_commits WHERE device_id = 'dev1'",
                         [],
                         |row| row.get::<_, i64>(0).map(|seq| seq as u64),
                     )
@@ -402,9 +572,9 @@ async fn host_write_after_remote_apply_observes_the_matching_cursor() {
                     .map_err(crate::database::DbError::from)?;
                 assert!(remote_row, "the host transaction observes the remote row");
                 assert_eq!(
-                    cursor,
+                    materialized,
                     Some(1),
-                    "the same database cut observes the row's materialized cursor",
+                    "the same database cut observes the row's materialized position",
                 );
                 tx.execute(
                     "INSERT INTO notes \
@@ -424,8 +594,8 @@ async fn host_write_after_remote_apply_observes_the_matching_cursor() {
 }
 
 /// A changeset whose object was reclaimed (deleted as superseded) past this
-/// device's cursor surfaces a `MissingChangeset` held reason and holds the
-/// cursor at the gap — the host reports reclaimed history rather than a generic
+/// device's position surfaces a `MissingChangeset` held reason and holds the
+/// position at the gap — the host reports reclaimed history rather than a generic
 /// stall, and the device stream never advances over a changeset it did not apply.
 #[tokio::test]
 async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
@@ -445,29 +615,41 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     )
     .await;
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
-    storage
-        .delete_changeset("dev1", 1)
-        .await
-        .expect("reclaim the changeset object");
+    let commit = crate::sync::store_objects::load_commit_slot(
+        &storage,
+        storage.protocol_genesis_hash(),
+        "dev1",
+        1,
+    )
+    .await
+    .expect("load Store commit")
+    .expect("Store commit exists");
+    remove_protocol_prefix(&storage, &format!("{}/", commit.value.package.object_key)).await;
 
     let db2 = open_test_db();
     let (_tmp, ld) = temp_store_dir();
     let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 0);
-    assert_eq!(result.held_changesets.len(), 1);
-    assert_eq!(result.held_changesets[0].device_id, "dev1");
-    assert_eq!(result.held_changesets[0].seq, 1);
+    assert_eq!(result.held_positions.len(), 1);
+    assert!(matches!(
+        &result.held_positions[0].coordinate,
+        HeldStoreCoordinate::Package {
+            device_id,
+            seq: 1,
+            ..
+        } if device_id == "dev1"
+    ));
     assert_eq!(
-        result.held_changesets[0].reason,
-        HeldChangesetReason::MissingChangeset,
+        result.held_positions[0].reason,
+        HeldStorePositionReason::MissingPackage,
     );
-    // The cursor holds at the gap: dev1 never advances over the unapplied seq.
+    // The position holds at the gap: dev1 never advances over the unapplied seq.
     assert_eq!(updated.get("dev1").copied().unwrap_or(0), 0);
 }
 
 #[tokio::test]
-async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_cursor() {
+async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
     let storage = MockSyncStorage::new();
 
     let db1 = unique_note_db();
@@ -494,15 +676,24 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_cursor() {
     let (_tmp, ld) = temp_store_dir();
     let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
-    assert_eq!(result.constraint_conflicts.len(), 1);
-    assert_eq!(result.constraint_conflicts[0].device_id, "dev1");
-    assert_eq!(result.constraint_conflicts[0].seq, 1);
-    assert_eq!(result.constraint_conflicts[0].table, "unique_notes");
+    let conflicts = constraint_conflicts(&result);
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(
+        conflicts[0].coordinate,
+        HeldStoreCoordinate::Commit {
+            device_id: "dev1".to_string(),
+            position: storage.store_commit_position("dev1", 1),
+        }
+    );
+    assert_eq!(
+        conflicts[0].reason,
+        HeldStorePositionReason::ConstraintConflict(vec!["unique_notes".to_string()])
+    );
     assert_eq!(updated.get("dev1"), None);
     assert_eq!(
-        db2.get_all_sync_cursors().await.unwrap().get("dev1"),
+        materialized_sequences(&db2).await.get("dev1"),
         None,
-        "a rejected changeset has no durable cursor",
+        "a rejected changeset has no durable position",
     );
     assert!(row_exists(&db2, "SELECT 1 FROM unique_notes WHERE id = 'local'").await);
     assert!(!row_exists(&db2, "SELECT 1 FROM unique_notes WHERE id = 'remote'").await);
@@ -558,13 +749,14 @@ async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_viola
     let (updated, result) = pull_into(&target, &storage, "dev2", &store_dir).await;
 
     assert_eq!(result.changesets_applied, 0);
-    assert_eq!(result.constraint_conflicts.len(), 1);
-    assert_eq!(result.constraint_conflicts[0].table, "constraint_items");
-    assert_eq!(updated.get("dev1"), None);
+    let conflicts = constraint_conflicts(&result);
+    assert_eq!(conflicts.len(), 1);
     assert_eq!(
-        target.get_all_sync_cursors().await.unwrap().get("dev1"),
-        None
+        conflicts[0].reason,
+        HeldStorePositionReason::ConstraintConflict(vec!["constraint_items".to_string()])
     );
+    assert_eq!(updated.get("dev1"), None);
+    assert_eq!(materialized_sequences(&target).await.get("dev1"), None);
     assert!(
         !row_exists(
             &target,
@@ -631,7 +823,7 @@ async fn fk_violation_still_retries_and_resolves() {
     assert_eq!(updated.get("dev-child"), Some(&1));
     assert_eq!(updated.get("dev-parent"), Some(&1));
     assert_eq!(result.changesets_applied, 2);
-    assert!(result.constraint_conflicts.is_empty());
+    assert!(constraint_conflicts(&result).is_empty());
     assert_eq!(
         query_text(&target, "SELECT tag FROM note_tags WHERE id = 't1'").await,
         "green"
@@ -657,11 +849,11 @@ async fn pull_skips_changeset_from_newer_schema() {
     let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
-    assert_eq!(result.skipped_schema, 1);
-    // The cursor must NOT advance past a genuine newer-schema changeset: it
+    assert_eq!(newer_schema_positions(&result).len(), 1);
+    // The position must NOT advance past a genuine newer-schema changeset: it
     // becomes applicable once this app updates, and an already-running device
     // never re-bootstraps, so advancing would strand its rows forever. Leaving
-    // the cursor put re-fetches seq 1 after the upgrade.
+    // the position put re-fetches seq 1 after the upgrade.
     assert_eq!(updated.get("dev1"), None);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
 }
@@ -689,40 +881,49 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as("dev1", 1, &cs, SCHEMA_VERSION + 1, None, &forger, &forger);
+    let commit = crate::sync::store_objects::load_commit_slot(
+        &storage,
+        storage.protocol_genesis_hash(),
         "dev1",
         1,
-        SCHEMA_VERSION + 1,
-        "",
-        "2026-03-01T00:01:00Z",
-        &forger,
-        None,
-        &cs,
-    );
-    // Corrupt the signature: a well-formed but never-verifying 64-byte Ed25519
-    // signature, leaving the rest of the envelope (including the newer
-    // schema_version) intact so the object reaches the signature and schema gates.
-    let (mut env, changeset_bytes) = envelope::unpack(&packed).unwrap();
-    env.signature = Some("0".repeat(128));
-    storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &changeset_bytes));
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let prefix =
+        crate::sync::store_commit::commit_semantic_prefix("dev1", 1, commit.value.commit_hash());
+    remove_protocol_prefix(&storage, &format!("{prefix}/")).await;
+    let mut forged: serde_json::Value = serde_json::from_slice(&commit.bytes).unwrap();
+    forged["signature"] = serde_json::Value::String("0".repeat(128));
+    storage
+        .append_protocol_object(&prefix, ".json", serde_json::to_vec(&forged).unwrap())
+        .await
+        .unwrap();
 
     let db2 = open_test_db();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
-
-    // Reported as tamper, not routine version skew: skipped_schema untouched.
-    assert_eq!(result.skipped_schema, 0);
-    assert_eq!(result.invalid_signatures.len(), 1);
-    assert_eq!(result.invalid_signatures[0].device_id, "dev1");
-    assert_eq!(result.invalid_signatures[0].seq, 1);
-    assert_eq!(result.changesets_applied, 0);
+    let (_, result) = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1)
+        .await
+        .expect("a forged Store commit is held before schema classification");
+    assert_eq!(result.held_positions.len(), 1);
+    assert_eq!(
+        result.held_positions[0],
+        HeldStorePosition {
+            coordinate: HeldStoreCoordinate::Commit {
+                device_id: "dev1".to_string(),
+                position: commit.value.position(),
+            },
+            reason: HeldStorePositionReason::InvalidSignature,
+        }
+    );
+    assert!(newer_schema_positions(&result).is_empty());
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    // The cursor holds at the tampered object, the same as any invalid signature.
-    assert_eq!(updated.get("dev1"), None);
+    assert_eq!(materialized_sequences(&db2).await.get("dev1"), None);
 }
 
 /// A genuine newer-schema changeset is signed, so verifying the signature before
 /// the schema gate does not change its handling: it still verifies, still counts
-/// as a schema skip, still holds the cursor, and applies once the local schema
+/// as a schema skip, still holds the position, and applies once the local schema
 /// catches up. The reorder rejects only forgeries, never an authentic upgrade.
 #[tokio::test]
 async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
@@ -738,24 +939,13 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
-        "dev1",
-        1,
-        SCHEMA_VERSION + 1,
-        "",
-        "2026-03-01T00:01:00Z",
-        &author,
-        None,
-        &cs,
-    );
-    storage.put_changeset_packed("dev1", 1, packed);
-    storage.publish_head_as("dev1", 1, &author);
+    storage.store_changeset_signed_as("dev1", 1, &cs, SCHEMA_VERSION + 1, None, &author, &author);
 
     let db2 = open_test_db();
     let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
-    assert_eq!(result.skipped_schema, 1);
-    assert!(result.invalid_signatures.is_empty());
+    assert_eq!(newer_schema_positions(&result).len(), 1);
+    assert!(invalid_changeset_positions(&result).is_empty());
     assert_eq!(result.changesets_applied, 0);
     // Held, not advanced: it becomes applicable once this app upgrades.
     assert_eq!(updated.get("dev1"), None);
@@ -765,7 +955,7 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
 /// The pull gate compares an incoming changeset's `schema_version` against the
 /// opened db's [`Database::schema_version`], not a hand-bumped constant: a peer at
 /// version N applies a changeset stamped N and skips one stamped N+1 without
-/// advancing its cursor. The peer's own version is derived from the db, so this
+/// advancing its position. The peer's own version is derived from the db, so this
 /// fails if the gate stops tracking the schema that actually exists on disk. (The
 /// push side — that an *outgoing* changeset is stamped with the db's version — is
 /// covered by `push_stamps_the_dbs_schema_version`, which drives the real producer.)
@@ -787,7 +977,7 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
     .await;
     storage.store_changeset("dev1", 1, &cs1, n);
 
-    // seq 2 stamped one above the peer's schema version: skipped, cursor held.
+    // seq 2 stamped one above the peer's schema version: skipped, position held.
     let cs2 = capture_bytes(
         &db1,
         &[
@@ -808,16 +998,17 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
 
     assert_eq!(
         result.changesets_applied, 1,
-        "the N-stamped changeset applies"
+        "the N-stamped changeset applies",
     );
     assert_eq!(
-        result.skipped_schema, 1,
+        newer_schema_positions(&result).len(),
+        1,
         "the N+1-stamped changeset is skipped"
     );
     assert_eq!(
         updated.get("dev1"),
         Some(&1),
-        "cursor stops at the applied seq, never past the skipped one"
+        "position stops at the applied seq, never past the skipped one"
     );
     assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n2'").await);
@@ -862,12 +1053,20 @@ async fn push_stamps_the_dbs_schema_version() {
     .await
     .expect("sync push");
 
-    let packed = result.outgoing.expect("an outgoing changeset").packed;
-    let (env, _changeset) = envelope::unpack(&packed).expect("unpack outgoing envelope");
+    let position = result.expect("an outgoing Store commit");
+    let commit = crate::sync::store_objects::load_commit_slot(
+        &storage,
+        storage.protocol_genesis_hash(),
+        "dev1",
+        position.seq,
+    )
+    .await
+    .expect("load Store commit")
+    .expect("Store commit slot");
     assert_eq!(
-        env.schema_version,
+        commit.value.package.schema_version,
         db1.schema_version(),
-        "the outgoing changeset is stamped with the db's applied schema version",
+        "the outgoing Store package is stamped with the database schema version",
     );
 }
 
@@ -912,7 +1111,7 @@ async fn sync_reuses_opened_schema_models() {
 }
 
 #[tokio::test]
-async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
+async fn pull_does_not_advance_position_past_a_blob_failed_changeset() {
     let storage = MockSyncStorage::new();
 
     // Source dev1: seq 1 references a photo blob; seq 2 is a plain note.
@@ -949,23 +1148,23 @@ async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
         result.asset_downloads_failed,
         "seq 1's blob download must fail"
     );
-    // The cursor must NOT jump to 2 past the blob-failed seq 1 — otherwise seq 1's
+    // The position must NOT jump to 2 past the blob-failed seq 1 — otherwise seq 1's
     // blob would never be re-fetched. It stays before seq 1 so the next cycle
     // resumes there.
     assert_ne!(
         updated.get("dev1"),
         Some(&2),
-        "cursor must not advance past the blob-failed seq",
+        "position must not advance past the blob-failed seq",
     );
     assert_eq!(
         updated.get("dev1"),
         None,
-        "cursor stays before the blob-failed seq 1",
+        "position stays before the blob-failed seq 1",
     );
     // The blob-bearing row must NOT have been applied: with download-before-apply
     // (#111), seq 1's failed blob means seq 1 is skipped whole -- "row present,
     // blob missing" never exists. (Before #111 the row was applied and only the
-    // cursor held back, so n1 was visible with no photo file on disk.)
+    // position held back, so n1 was visible with no photo file on disk.)
     assert!(
         !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "seq 1's row must not be applied when its blob download fails",
@@ -980,19 +1179,13 @@ async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
 
 /// A changeset whose envelope `changeset_size` disagrees with the actual trailing
 /// bytes is corrupt or tampered: it must be rejected, not applied. The size is one
-/// of the fields the signature covers, so a signed changeset whose bytes were
-/// altered after signing surfaces here (and at the signature check); an unsigned
-/// one is caught by this gate alone. Either way the bytes failed their own
-/// integrity check and the row must never land. The cursor is held back so the
-/// next cycle re-examines the same object instead of suppressing the seq.
+/// The Store package descriptor signs both byte length and content hash. Bytes
+/// that do not match that descriptor are an immutable object collision.
 #[tokio::test]
 async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     let author = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(author.clone());
 
-    // A real changeset from dev1, packed into an envelope whose `changeset_size`
-    // is deliberately wrong (one byte short of the actual payload), as a truncated
-    // or tampered download would be.
     let db1 = open_test_db();
     let cs = capture_bytes(
         &db1,
@@ -1002,62 +1195,58 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         ],
     )
     .await;
-    let mut env = envelope::ChangesetEnvelope {
-        device_id: "dev1".to_string(),
-        seq: 1,
-        schema_version: SCHEMA_VERSION,
-        message: String::new(),
-        timestamp: "2026-02-10T00:00:00Z".to_string(),
-        // The lie: the envelope claims one fewer byte than the payload carries.
-        changeset_size: cs.len() - 1,
-        author_pubkey: None,
-        membership_grant: None,
-        signature: None,
-    };
-    envelope::sign_envelope(&mut env, &author, &cs);
-    storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &cs));
+    storage.store_changeset_signed_as("dev1", 1, &cs, SCHEMA_VERSION, None, &author, &author);
+    let commit = crate::sync::store_objects::load_commit_slot(
+        &storage,
+        storage.protocol_genesis_hash(),
+        "dev1",
+        1,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    remove_protocol_prefix(&storage, &format!("{}/", commit.value.package.object_key)).await;
+    storage
+        .append_protocol_object(
+            &commit.value.package.object_key,
+            ".pkg",
+            cs[..cs.len() - 1].to_vec(),
+        )
+        .await
+        .unwrap();
 
     let db2 = open_test_db();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
-
-    assert_eq!(result.changesets_applied, 0);
+    let (_, result) = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1)
+        .await
+        .expect("a Store package that differs from its descriptor is held");
+    assert_eq!(result.held_positions.len(), 1);
+    assert!(matches!(
+        &result.held_positions[0],
+        HeldStorePosition {
+            coordinate: HeldStoreCoordinate::Package {
+                device_id,
+                seq: 1,
+                package_hash,
+            },
+            reason: HeldStorePositionReason::InvalidObject(detail),
+        } if device_id == "dev1"
+            && *package_hash == commit.value.package.content_hash
+            && detail.contains("Store package length")
+    ));
     assert!(
         !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "a size-mismatched changeset must not be applied",
     );
-    assert_eq!(
-        updated.get("dev1"),
-        None,
-        "cursor holds at the size-mismatched changeset",
-    );
-    assert_eq!(result.held_changesets.len(), 1);
-    assert_eq!(result.held_changesets[0].device_id, "dev1");
-    assert_eq!(result.held_changesets[0].seq, 1);
-    assert_eq!(
-        result.held_changesets[0].reason,
-        HeldChangesetReason::SizeMismatch {
-            expected: cs.len() - 1,
-            actual: cs.len(),
-        }
-    );
+    assert_eq!(materialized_sequences(&db2).await.get("dev1"), None);
 }
 
-/// The changeset signature covers the envelope's self-declared position
-/// (`device_id`, `seq`). A member holding the store key can decrypt a peer's
-/// changeset and re-seal the identical bytes under the authenticated data for a
-/// different storage key — the victim's own signature still authorizes the
-/// content. If the puller trusted the signature without binding it to the
-/// location it fetched from, it would apply the relocated changeset in the new
-/// slot (replaying rows that may have been deleted since, with no last-writer
-/// opponent to lose to) and, by advancing the cursor, suppress the real occupant
-/// of that slot. The puller must instead hold the cursor and surface the
-/// relocation as tamper.
+/// A Store commit is signed for one exact sequence. Copying its bytes beneath a
+/// different immutable slot is an object collision and cannot materialize rows.
 #[tokio::test]
-async fn a_changeset_replayed_at_another_seq_is_held_not_applied() {
+async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
     let storage = MockSyncStorage::new();
     let victim = UserKeypair::generate();
 
-    // The victim authors a valid, signed changeset for its own position (dev, 5).
     let src = open_test_db();
     let cs = capture_bytes(
         &src,
@@ -1067,67 +1256,69 @@ async fn a_changeset_replayed_at_another_seq_is_held_not_applied() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as("dev", 1, &cs, SCHEMA_VERSION, None, &victim, &victim);
+    let commit = crate::sync::store_objects::load_commit_slot(
+        &storage,
+        storage.protocol_genesis_hash(),
         "dev",
-        5,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:05:00Z",
-        &victim,
-        None,
-        &cs,
-    );
-
-    // A member re-seals those exact bytes at (dev, 9). In the mock the sealed
-    // object is the packed envelope itself, so relocating is writing the same
-    // bytes under the new key; the envelope still declares its authored position
-    // (dev, 5). The head advances to 9.
-    storage.put_changeset_packed("dev", 9, packed);
-
-    // The reader has already applied this device's stream through seq 8, so its
-    // pull legitimately begins at the relocated object's slot, seq 9.
-    let db2 = open_test_db();
-    exec(
-        &db2,
-        "INSERT INTO sync_cursors (device_id, last_seq) VALUES ('dev', 8)",
+        1,
     )
-    .await;
+    .await
+    .unwrap()
+    .unwrap();
+    remove_protocol_prefix(&storage, "store-v1/heads/dev/").await;
+    let relocated_position = crate::sync::store_commit::CommitPosition {
+        seq: 2,
+        commit_hash: commit.value.commit_hash(),
+    };
+    let relocated_commit_prefix =
+        crate::sync::store_commit::commit_semantic_prefix("dev", 2, relocated_position.commit_hash);
+    storage
+        .append_protocol_object(&relocated_commit_prefix, ".json", commit.bytes)
+        .await
+        .unwrap();
+    let relocated_head = StoreDeviceHead::signed(
+        storage.protocol_genesis_hash(),
+        "dev".to_string(),
+        Some(relocated_position.clone()),
+        "2026-03-01T00:05:00Z".to_string(),
+        &victim,
+    )
+    .unwrap();
+    storage
+        .append_protocol_object(
+            &crate::sync::store_commit::head_semantic_prefix("dev", 2, relocated_head.head_hash()),
+            ".json",
+            relocated_head.to_bytes(),
+        )
+        .await
+        .unwrap();
 
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
-
-    // The relocated seq-5 content is not applied at seq 9, the cursor holds at 8
-    // (never advances past the tampered slot), and the relocation is surfaced.
-    assert_eq!(result.changesets_applied, 0);
+    let db2 = open_test_db();
+    let (_, result) = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1)
+        .await
+        .expect("a relocated Store commit is held");
+    assert_eq!(result.held_positions.len(), 1);
+    assert!(matches!(
+        &result.held_positions[0],
+        HeldStorePosition {
+            coordinate: HeldStoreCoordinate::Commit { device_id, position },
+            reason: HeldStorePositionReason::WrongSlot(_),
+        } if device_id == "dev" && *position == relocated_position
+    ));
     assert!(
         !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
-        "a changeset relocated to another seq must not be applied",
+        "a Store commit relocated to another sequence must not be applied",
     );
-    assert_eq!(
-        updated.get("dev"),
-        Some(&8),
-        "cursor holds at the tampered slot, does not advance past it",
-    );
-    assert_eq!(result.held_changesets.len(), 1);
-    assert_eq!(result.held_changesets[0].device_id, "dev");
-    assert_eq!(result.held_changesets[0].seq, 9);
-    assert_eq!(
-        result.held_changesets[0].reason,
-        HeldChangesetReason::PositionMismatch {
-            declared_device_id: "dev".to_string(),
-            declared_seq: 5,
-        }
-    );
+    assert_eq!(materialized_sequences(&db2).await.get("dev"), None);
 }
 
-/// The position the signature covers includes the device prefix, not only the
-/// seq: an object authentic for one device's stream, relocated under another
-/// device's prefix, is held rather than applied. Same binding, other coordinate.
+/// The signed Store slot includes the device id as well as the sequence.
 #[tokio::test]
-async fn a_changeset_relocated_to_another_device_is_held() {
+async fn a_store_commit_relocated_to_another_device_is_rejected() {
     let storage = MockSyncStorage::new();
     let victim = UserKeypair::generate();
 
-    // The victim authors a valid, signed changeset for (devVictim, 1).
     let src = open_test_db();
     let cs = capture_bytes(
         &src,
@@ -1137,44 +1328,67 @@ async fn a_changeset_relocated_to_another_device_is_held() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as("devVictim", 1, &cs, SCHEMA_VERSION, None, &victim, &victim);
+    let commit = crate::sync::store_objects::load_commit_slot(
+        &storage,
+        storage.protocol_genesis_hash(),
         "devVictim",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:01:00Z",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    remove_protocol_prefix(&storage, "store-v1/heads/devVictim/").await;
+    storage
+        .append_protocol_object(
+            &crate::sync::store_commit::commit_semantic_prefix(
+                "devAttacker",
+                1,
+                commit.value.commit_hash(),
+            ),
+            ".json",
+            commit.bytes,
+        )
+        .await
+        .unwrap();
+    let relocated_head = StoreDeviceHead::signed(
+        storage.protocol_genesis_hash(),
+        "devAttacker".to_string(),
+        Some(commit.value.position()),
+        "2026-03-01T00:01:00Z".to_string(),
         &victim,
-        None,
-        &cs,
-    );
-
-    // A member writes those exact bytes under a different device's prefix. The
-    // envelope still declares device_id "devVictim".
-    storage.put_changeset_packed("devAttacker", 1, packed);
+    )
+    .unwrap();
+    storage
+        .append_protocol_object(
+            &crate::sync::store_commit::head_semantic_prefix(
+                "devAttacker",
+                1,
+                relocated_head.head_hash(),
+            ),
+            ".json",
+            relocated_head.to_bytes(),
+        )
+        .await
+        .unwrap();
 
     let db2 = open_test_db();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
-
-    assert_eq!(result.changesets_applied, 0);
+    let (_, result) = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1)
+        .await
+        .expect("a relocated Store commit is held");
+    assert_eq!(result.held_positions.len(), 1);
+    assert!(matches!(
+        &result.held_positions[0],
+        HeldStorePosition {
+            coordinate: HeldStoreCoordinate::Commit { device_id, position },
+            reason: HeldStorePositionReason::WrongSlot(_),
+        } if device_id == "devAttacker" && *position == commit.value.position()
+    ));
     assert!(
         !row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await,
-        "a changeset relocated to another device must not be applied",
+        "a Store commit relocated to another device must not be applied",
     );
-    assert_eq!(
-        updated.get("devAttacker"),
-        None,
-        "cursor holds at the relocated slot",
-    );
-    assert_eq!(result.held_changesets.len(), 1);
-    assert_eq!(result.held_changesets[0].device_id, "devAttacker");
-    assert_eq!(result.held_changesets[0].seq, 1);
-    assert_eq!(
-        result.held_changesets[0].reason,
-        HeldChangesetReason::PositionMismatch {
-            declared_device_id: "devVictim".to_string(),
-            declared_seq: 1,
-        }
-    );
+    assert_eq!(materialized_sequences(&db2).await.get("devAttacker"), None);
 }
 
 /// A signed changeset sitting at the exact position its envelope declares is
@@ -1194,18 +1408,7 @@ async fn a_changeset_at_its_own_position_still_applies() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
-        "dev",
-        1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:01:00Z",
-        &author,
-        None,
-        &cs,
-    );
-    storage.put_changeset_packed("dev", 1, packed);
-    storage.publish_head_as("dev", 1, &author);
+    storage.store_changeset_signed_as("dev", 1, &cs, SCHEMA_VERSION, None, &author, &author);
 
     let db2 = open_test_db();
     let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
@@ -1213,11 +1416,11 @@ async fn a_changeset_at_its_own_position_still_applies() {
     assert_eq!(result.changesets_applied, 1);
     assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert_eq!(updated.get("dev"), Some(&1));
-    assert!(result.held_changesets.is_empty());
+    assert!(result.held_positions.is_empty());
 }
 
 #[tokio::test]
-async fn apply_failure_isolates_to_one_device() {
+async fn corrupt_local_register_fails_without_materializing_the_remote_commit() {
     let storage = MockSyncStorage::new();
 
     let good_source = open_test_db();
@@ -1258,35 +1461,33 @@ async fn apply_failure_isolates_to_one_device() {
     )
     .await;
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into_result(&target, &storage, "devTarget", &ld)
+    let error = pull_into_result(&target, &storage, "devTarget", &ld)
         .await
-        .expect("pull isolates apply failure");
+        .expect_err("an invalid local register must fail loudly");
 
+    assert!(matches!(error, StorePullError::Database(_)));
     assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n-good'").await);
-    assert_eq!(updated.get("devA"), Some(&1));
     assert_eq!(
-        updated.get("devB"),
-        None,
-        "the failed device cursor is held",
+        materialized_sequences(&target).await.get("devA"),
+        Some(&1),
+        "the independent commit completed before the corrupt local register was read",
     );
-    assert_eq!(result.held_changesets.len(), 1);
-    assert_eq!(result.held_changesets[0].device_id, "devB");
-    assert_eq!(result.held_changesets[0].seq, 1);
-    assert!(matches!(
-        result.held_changesets[0].reason,
-        HeldChangesetReason::ApplyFailed { .. }
-    ));
-    assert_eq!(result.changesets_applied, 1);
+    assert_eq!(
+        materialized_sequences(&target).await.get("devB"),
+        None,
+        "the failing commit never materializes",
+    );
+    assert_eq!(
+        query_text(&target, "SELECT title FROM notes WHERE id = 'n-bad'").await,
+        "Local",
+        "the failing commit rolls back its row mutation",
+    );
 }
 
-/// An object at `changes/{device}/{seq}` that decrypts but whose bytes are not a
-/// valid envelope (here: no null separator between the JSON and the changeset)
-/// holds only its own device's cursor. A second device's changesets still apply,
-/// and the malformed object surfaces as a held changeset naming the device and
-/// seq. Before this, an unpack failure propagated out and failed the whole pull
-/// every cycle, permanently stopping sync for every member.
+/// A signed Store commit whose package is not a SQLite changeset holds only its
+/// own chain. An independent device's valid commit still materializes.
 #[tokio::test]
-async fn malformed_envelope_isolates_to_one_device() {
+async fn malformed_store_package_isolates_to_one_device() {
     let storage = MockSyncStorage::new();
 
     let good_source = open_test_db();
@@ -1300,51 +1501,71 @@ async fn malformed_envelope_isolates_to_one_device() {
     .await;
     storage.store_changeset("devA", 1, &good_cs, SCHEMA_VERSION);
 
-    // devB's seq 1 is bytes with no null separator, so `envelope::unpack` fails.
-    storage.put_changeset_packed("devB", 1, b"not a valid envelope".to_vec());
+    storage.store_changeset("devB", 1, b"not a SQLite changeset", SCHEMA_VERSION);
 
     let target = open_test_db();
     let (_tmp, ld) = temp_store_dir();
     let (updated, result) = pull_into_result(&target, &storage, "devTarget", &ld)
         .await
-        .expect("a malformed envelope must not fail the whole pull");
+        .expect("a malformed Store package must not fail the whole pull");
 
     assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n-good'").await);
     assert_eq!(updated.get("devA"), Some(&1));
     assert_eq!(
         updated.get("devB"),
         None,
-        "the malformed device's cursor is held",
+        "the malformed device's position is not materialized",
     );
     assert_eq!(result.changesets_applied, 1);
-    assert_eq!(result.held_changesets.len(), 1);
-    assert_eq!(result.held_changesets[0].device_id, "devB");
-    assert_eq!(result.held_changesets[0].seq, 1);
+    assert_eq!(result.held_positions.len(), 1);
     assert!(matches!(
-        result.held_changesets[0].reason,
-        HeldChangesetReason::MalformedEnvelope { .. }
+        &result.held_positions[0].coordinate,
+        HeldStoreCoordinate::Commit {
+            device_id,
+            position,
+        } if device_id == "devB" && position.seq == 1
+    ));
+    assert!(matches!(
+        result.held_positions[0].reason,
+        HeldStorePositionReason::InvalidChangeset(_)
     ));
 }
 
-/// The malformed-envelope hold is a bounded stall, not a permanent skip: once a
-/// valid object is re-pushed at the same seq, the next cycle resumes that
-/// device's stream from where the cursor was held.
+/// Repair replaces every bad physical object in the held slot before publishing
+/// one valid immutable package, commit, and head for that sequence.
 #[tokio::test]
-async fn re_pushed_valid_envelope_resumes_the_held_device() {
+async fn repaired_store_slot_resumes_the_held_device() {
     let storage = MockSyncStorage::new();
 
-    storage.put_changeset_packed("dev1", 1, b"not a valid envelope".to_vec());
+    storage.store_changeset("dev1", 1, b"not a SQLite changeset", SCHEMA_VERSION);
 
     let db2 = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    let (held_cursors, first) = pull_into_result(&db2, &storage, "dev2", &ld)
+    let (held_positions, first) = pull_into_result(&db2, &storage, "dev2", &ld)
         .await
-        .expect("a malformed envelope must not fail the whole pull");
+        .expect("a malformed Store package must not fail the whole pull");
     assert_eq!(first.changesets_applied, 0);
-    assert_eq!(held_cursors.get("dev1"), None);
-    assert_eq!(first.held_changesets.len(), 1);
+    assert_eq!(held_positions.get("dev1"), None);
+    assert_eq!(first.held_positions.len(), 1);
 
-    // The device re-pushes a valid changeset at the held seq.
+    let bad_commit = crate::sync::store_objects::load_commit_slot(
+        &storage,
+        storage.protocol_genesis_hash(),
+        "dev1",
+        1,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    remove_protocol_prefix(&storage, "store-v1/heads/dev1/").await;
+    remove_protocol_prefix(&storage, "store-v1/commits/dev1/1/").await;
+    remove_protocol_prefix(
+        &storage,
+        &format!("{}/", bad_commit.value.package.object_key),
+    )
+    .await;
+
+    // The repaired slot publishes one valid Store state at the held sequence.
     let source = open_test_db();
     let cs = capture_bytes(
         &source,
@@ -1361,7 +1582,7 @@ async fn re_pushed_valid_envelope_resumes_the_held_device() {
         .expect("resume pull");
     assert_eq!(second.changesets_applied, 1);
     assert_eq!(updated.get("dev1"), Some(&1));
-    assert!(second.held_changesets.is_empty());
+    assert!(second.held_positions.is_empty());
     assert_eq!(
         query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'").await,
         "Recovered"
@@ -1464,7 +1685,7 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     )
     .await
     .expect("sync update");
-    let outgoing = result.outgoing.expect("outgoing update");
+    assert!(result.is_some(), "the update publishes a Store commit");
     assert!(
         storage.exists("photos/newaaaa").await.unwrap(),
         "push uploads the UPDATE's new blob id"
@@ -1473,17 +1694,6 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
         !storage.exists("photos/oldaaaa").await.unwrap(),
         "push must not upload the UPDATE's old blob id"
     );
-
-    cycle::push_changeset(
-        &storage,
-        &db1,
-        "dev1",
-        outgoing.seq,
-        outgoing.packed,
-        "2026-01-01T00:00:00Z",
-    )
-    .await
-    .expect("publish update");
 
     let db2 = open_test_db_with_blob(decl);
     let (_tmp2, ld2) = temp_store_dir();
@@ -1646,17 +1856,7 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     )
     .await
     .expect("sync");
-    let outgoing = result.outgoing.expect("outgoing changeset");
-    cycle::push_changeset(
-        &storage,
-        &db1,
-        "dev1",
-        outgoing.seq,
-        outgoing.packed,
-        "2026-01-01T00:00:00Z",
-    )
-    .await
-    .expect("push_changeset");
+    assert!(result.is_some(), "the audio row publishes a Store commit");
 
     // The user-provided blob was NOT uploaded by the inline push.
     assert_eq!(
@@ -1683,7 +1883,7 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     let (_t, ld) = temp_store_dir();
     let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
-    // The row applied and the cursor advanced — the CacheLazy blob never blocks the
+    // The row applied and the position advanced — the CacheLazy blob never blocks the
     // apply, and its absence is not a download failure.
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
@@ -1750,17 +1950,16 @@ async fn user_provided_blob_with_external_ref_aborts_before_changeset_publish() 
     };
 
     assert!(
-        matches!(err, SyncCycleError::BlobMissing(_)),
-        "local user-provided blob must fail as BlobMissing: {err:?}",
+        err.contains("local") && err.contains("audio/audio1"),
+        "the error must name the local user-provided blob: {err}",
     );
     assert!(
-        storage
-            .list_heads()
+        crate::sync::store_objects::list_visible_heads(&storage, storage.protocol_genesis_hash(),)
             .await
-            .expect("list heads")
+            .expect("list Store heads")
             .heads
             .is_empty(),
-        "sync returned no outgoing changeset for a caller to publish"
+        "failed publish created no Store head",
     );
 }
 
@@ -1807,17 +2006,16 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
     };
 
     assert!(
-        matches!(err, SyncCycleError::BlobMissing(_)),
-        "missing remote user-provided blob must fail as BlobMissing: {err:?}",
+        err.contains("audio/audio1") && err.contains("absent"),
+        "the error must name the absent remote blob: {err}",
     );
     assert!(
-        storage
-            .list_heads()
+        crate::sync::store_objects::list_visible_heads(&storage, storage.protocol_genesis_hash(),)
             .await
-            .expect("list heads")
+            .expect("list Store heads")
             .heads
             .is_empty(),
-        "sync returned no outgoing changeset for a caller to publish"
+        "failed publish created no Store head",
     );
 }
 
@@ -1869,20 +2067,21 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
     )
     .await
     .expect("remote user-provided blob is publishable");
-    let outgoing = result.outgoing.expect("outgoing changeset");
-    cycle::push_changeset(
-        &storage,
-        &db,
-        "dev1",
-        outgoing.seq,
-        outgoing.packed,
-        "2026-01-01T00:00:00Z",
-    )
-    .await
-    .expect("push changeset");
+    assert!(
+        result.is_some(),
+        "the remote blob row publishes a Store commit"
+    );
 
     assert_eq!(
-        storage.list_heads().await.expect("list heads").heads[0].seq,
+        crate::sync::store_objects::list_visible_heads(&storage, storage.protocol_genesis_hash())
+            .await
+            .expect("list Store heads")
+            .heads[0]
+            .value
+            .position
+            .as_ref()
+            .expect("active Store head")
+            .seq,
         1,
         "publish advances the head after the remote blob exists",
     );
@@ -1927,20 +2126,18 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
     )
     .await
     .expect("delete does not require the removed blob to exist remotely");
-    let outgoing = result.outgoing.expect("outgoing delete changeset");
-    cycle::push_changeset(
-        &storage,
-        &db,
-        "dev1",
-        outgoing.seq,
-        outgoing.packed,
-        "2026-01-01T00:00:00Z",
-    )
-    .await
-    .expect("push delete changeset");
+    assert!(result.is_some(), "the delete publishes a Store commit");
 
     assert_eq!(
-        storage.list_heads().await.expect("list heads").heads[0].seq,
+        crate::sync::store_objects::list_visible_heads(&storage, storage.protocol_genesis_hash())
+            .await
+            .expect("list Store heads")
+            .heads[0]
+            .value
+            .position
+            .as_ref()
+            .expect("active Store head")
+            .seq,
         1,
         "delete publishes even when the removed blob is absent remotely",
     );
@@ -1985,11 +2182,11 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
         &ld1,
     )
     .await;
-    // `SyncResult` is not Debug; inspect only the error side for the assert message.
     let err = result.err();
     assert!(
-        matches!(err, Some(SyncCycleError::BlobMissing(_))),
-        "an unstaged blob must abort the cycle, got {err:?}",
+        err.as_deref()
+            .is_some_and(|error| error.contains("p1ab") && error.contains("blob missing")),
+        "an unstaged blob must abort Store publication, got {err:?}",
     );
 }
 
@@ -2009,7 +2206,7 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
 async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the_upload() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -2093,7 +2290,7 @@ fn readable_photo_decl() -> BlobDecl {
 #[tokio::test]
 async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::from_key([5u8; 32])),
         BlobPathScheme::Plain,
@@ -2139,17 +2336,10 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     )
     .await
     .expect("sync");
-    let outgoing = result.outgoing.expect("outgoing changeset");
-    cycle::push_changeset(
-        &storage,
-        &db1,
-        "dev1",
-        outgoing.seq,
-        outgoing.packed,
-        "2026-01-01T00:00:00Z",
-    )
-    .await
-    .expect("push_changeset");
+    assert!(
+        result.is_some(),
+        "the readable blob row publishes a Store commit"
+    );
 
     // The blob lands at the readable key, not the hashed shard.
     assert!(
@@ -2181,7 +2371,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     // pulls and downloads the cover from the readable key.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
+    let (_updated, result) = pull_cloud_into(&db2, &db1, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
@@ -2202,7 +2392,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
 async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -2247,8 +2437,7 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
         &ld,
     )
     .await
-    .err()
-    .expect("a cloud path that does not name its blob must fail the cycle");
+    .expect_err("a cloud path that does not name its blob must fail the cycle");
 
     let message = err.to_string();
     assert!(
@@ -2279,7 +2468,7 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
     // choice), so the test reads the cloud object back as plaintext.
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -2323,7 +2512,7 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
     // replaced blob when the new one arrives.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    pull_into(&db2, &storage, "dev2", &ld2).await;
+    pull_cloud_into(&db2, &db1, &storage, "dev2", &ld2).await;
 
     // Replace the cover: a new blob, whose bytes the host stages in the local store,
     // carried by a fresh row whose readable path names it; the replaced row and its local
@@ -2363,7 +2552,7 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
 
     // Device B pulls the replacement. Its download verifies the object against the new
     // row's content hash, so an object holding the replaced bytes would fail the pull.
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
+    let (_updated, result) = pull_cloud_into(&db2, &db1, &storage, "dev2", &ld2).await;
 
     assert!(
         !result.asset_downloads_failed,
@@ -2394,7 +2583,7 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
 async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -2431,7 +2620,7 @@ async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
 
     let db_b = open_test_db_with_blob(replaceable_photo_decl());
     let (_tb, ld_b) = temp_store_dir();
-    pull_into(&db_b, &storage, "dev2", &ld_b).await;
+    pull_cloud_into(&db_b, &db_a, &storage, "dev2", &ld_b).await;
 
     // Both devices repoint `ph1` before seeing the other's change — the same row, two new
     // blobs. Each blob id is fresh, so each path names a different blob and keys a
@@ -2488,7 +2677,7 @@ async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
     // already overwritten, and no retry would ever resolve it.
     let db_c = open_test_db_with_blob(replaceable_photo_decl());
     let (_tc, ld_c) = temp_store_dir();
-    let (_updated, result) = pull_into(&db_c, &storage, "dev3", &ld_c).await;
+    let (_updated, result) = pull_cloud_into(&db_c, &db_a, &storage, "dev3", &ld_c).await;
     assert!(
         !result.asset_downloads_failed,
         "every row the third device applies names an object that holds its bytes",
@@ -2535,7 +2724,7 @@ async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
 async fn plain_scheme_a_changeset_older_than_a_replacement_still_finds_its_blob() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -2595,7 +2784,7 @@ async fn plain_scheme_a_changeset_older_than_a_replacement_still_finds_its_blob(
     // row names the replaced blob. Its bytes are still at their own key.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
+    let (_positions, result) = pull_cloud_into(&db2, &db1, &storage, "dev2", &ld2).await;
 
     assert!(
         !result.asset_downloads_failed,
@@ -2641,7 +2830,7 @@ fn write_once_photo_decl() -> BlobDecl {
 async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -2683,7 +2872,7 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     // A peer pulls it off that readable key and verifies it against the row's hash.
     let db2 = open_test_db_with_blob(write_once_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
+    let (_positions, result) = pull_cloud_into(&db2, &db1, &storage, "dev2", &ld2).await;
     assert!(!result.asset_downloads_failed);
     assert_eq!(result.changesets_applied, 1);
     let cached = std::fs::read(
@@ -2708,7 +2897,7 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
 async fn plain_scheme_repointing_a_write_once_row_is_refused() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -2768,8 +2957,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
         &ld,
     )
     .await
-    .err()
-    .expect("repointing a write-once row must fail the cycle");
+    .expect_err("repointing a write-once row must fail the cycle");
 
     let message = err.to_string();
     assert!(
@@ -2807,7 +2995,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     // choice), so the test reads the cloud object back as plaintext.
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -2851,7 +3039,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     // replaced blob when the new one arrives.
     let db2 = open_test_db_with_blob(replaceable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    pull_into(&db2, &storage, "dev2", &ld2).await;
+    pull_cloud_into(&db2, &db1, &storage, "dev2", &ld2).await;
 
     // Repoint the row at a new blob: same primary key, new blob id, and the cloud path
     // moves with it because it names the blob. The replaced blob's local copy goes away.
@@ -2885,7 +3073,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
 
     // Device B pulls the repointing. Its download verifies the object against the new
     // row's content hash, so serving it the replaced bytes would fail the pull outright.
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
+    let (_updated, result) = pull_cloud_into(&db2, &db1, &storage, "dev2", &ld2).await;
 
     assert!(
         !result.asset_downloads_failed,
@@ -2919,7 +3107,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
 async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -2979,8 +3167,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
         &ld1,
     )
     .await
-    .err()
-    .expect("a repointing that holds its cloud path must fail the cycle");
+    .expect_err("a repointing that holds its cloud path must fail the cycle");
 
     let message = err.to_string();
     assert!(
@@ -2996,7 +3183,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
 
 /// Push one cycle's captured changeset the way the sync loop does: `service::sync`
 /// prepares (and uploads the host-provided blobs of) the gated changeset, then
-/// `push_changeset` publishes it, as `device`.
+/// publishes the resulting immutable Store objects, as `device`.
 async fn push_cycle_as(
     device: &str,
     db: &crate::database::Database,
@@ -3021,17 +3208,7 @@ async fn push_cycle_as(
     )
     .await
     .expect("sync");
-    let outgoing = result.outgoing.expect("outgoing changeset");
-    cycle::push_changeset(
-        storage,
-        db,
-        device,
-        outgoing.seq,
-        outgoing.packed,
-        "2026-01-01T00:00:00Z",
-    )
-    .await
-    .expect("push_changeset");
+    assert!(result.is_some(), "the captured rows publish a Store commit");
 }
 
 /// [`push_cycle_as`] for the single-device tests, which all push as `dev1`.
@@ -3062,7 +3239,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // the same keypair the push signs with — its public key is the `{uploader}`
     // prefix the blob lands under and the author peers resolve it by.
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
         BlobPathScheme::Hashed,
@@ -3109,17 +3286,10 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     )
     .await
     .expect("sync");
-    let outgoing = result.outgoing.expect("outgoing changeset");
-    cycle::push_changeset(
-        &storage,
-        &db1,
-        "dev1",
-        outgoing.seq,
-        outgoing.packed,
-        "2026-01-01T00:00:00Z",
-    )
-    .await
-    .expect("push_changeset");
+    assert!(
+        result.is_some(),
+        "the encrypted blob row publishes a Store commit"
+    );
 
     // At rest the cover photo is ciphertext, not the source bytes.
     let blob_key = CloudSyncStorage::blob_key(
@@ -3143,7 +3313,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // Device B: a fresh DB and its own store dir, same cloud + key + declaration.
     let db2 = open_test_db_with_blob(decl());
     let (_t, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
+    let (updated, result) = pull_cloud_into(&db2, &db1, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
@@ -3222,6 +3392,7 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
     let cipher = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [31u8; 32],
     )));
+    bind_mock_store_protocol(&db1, &storage, "dev1").await;
     cycle::run_single_sync_cycle(
         &storage,
         "test-lib",
@@ -3339,7 +3510,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     // dev1 deletes the cover row; dev2 pulls the DELETE.
     let cs2 = capture_bytes(&db1, &["DELETE FROM note_photos WHERE id = 'pdel1234'"]).await;
     storage.store_changeset("dev1", 2, &cs2, SCHEMA_VERSION);
-    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld).await;
+    let (_positions, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1, "the DELETE changeset applied");
     assert!(
@@ -3350,7 +3521,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
 }
 
 #[tokio::test]
-async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
+async fn local_blob_cleanup_intent_survives_restart_after_position_commit() {
     let storage = MockSyncStorage::new();
     let cleanup_decl = || BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy);
     let source = open_test_db_with_blob(cleanup_decl());
@@ -3391,9 +3562,9 @@ async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
     assert!(first.local_blob_cleanup_pending);
     assert_eq!(updated.get("dev1"), Some(&1));
     assert_eq!(
-        target.get_all_sync_cursors().await.unwrap().get("dev1"),
+        materialized_sequences(&target).await.get("dev1"),
         Some(&1),
-        "filesystem cleanup does not hold the materialized cursor",
+        "filesystem cleanup does not hold the materialized position",
     );
     assert!(!row_exists(&target, "SELECT 1 FROM note_photos WHERE id = 'cleanup01'").await);
     let pending_before_restart: i64 = target
@@ -3414,7 +3585,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
 
     let restarted = open_blob_test_db_at(&database_path, cleanup_decl());
     assert_eq!(
-        restarted.get_all_sync_cursors().await.unwrap().get("dev1"),
+        materialized_sequences(&restarted).await.get("dev1"),
         Some(&1),
     );
     let (_updated, second) = pull_into(&restarted, &storage, "dev2", &store_dir).await;
@@ -3702,7 +3873,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
 
     let db2 = open_test_db_with_blob(decl);
     let (_tmp, ld) = temp_store_dir();
-    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld).await;
+    let (_positions, result) = pull_into(&db2, &storage, "dev2", &ld).await;
     assert_eq!(result.changesets_applied, 1);
     assert!(
         ld.cache_blob_path("photos", "sharedblob").unwrap().exists(),
@@ -3753,17 +3924,12 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
 }
 
 #[tokio::test]
-async fn pull_rejects_unsigned_changeset_when_chain_exists() {
-    // A membership chain exists. Coven always signs its changesets, so an
-    // unsigned one here is forged; a chained store must reject it. The mock
-    // signs the head it publishes for dev1 with the founder's keypair (a current
-    // member), so the head passes its authorization check and pull goes on to
-    // examine — and reject — the unsigned changeset behind it.
+async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
     let founder = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(founder.clone());
     let founder_pk = hex::encode(founder.public_key());
 
-    let entry = founder_entry(&founder, "2026-03-01T00:00:00Z");
+    let entry = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &founder_pk, 1, entry).await;
     publish_membership_chain_head(&storage, &chain, &founder).await;
@@ -3777,26 +3943,51 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
         ],
     )
     .await;
-    storage.store_unsigned_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+    storage.store_changeset_with_grant(
+        "dev1",
+        1,
+        &cs,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &founder_pk, 1)),
+    );
+    let commit = crate::sync::store_objects::load_commit_slot(
+        &storage,
+        storage.protocol_genesis_hash(),
+        "dev1",
+        1,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let prefix =
+        crate::sync::store_commit::commit_semantic_prefix("dev1", 1, commit.value.commit_hash());
+    remove_protocol_prefix(&storage, &format!("{prefix}/")).await;
+    let mut unsigned: serde_json::Value = serde_json::from_slice(&commit.bytes).unwrap();
+    unsigned
+        .as_object_mut()
+        .expect("Store commit is a JSON object")
+        .remove("signature");
+    storage
+        .append_protocol_object(&prefix, ".json", serde_json::to_vec(&unsigned).unwrap())
+        .await
+        .unwrap();
 
     let db2 = open_test_db();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
-
-    assert_eq!(result.changesets_applied, 0);
+    let (_, result) = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1)
+        .await
+        .expect("a Store commit without its required signature is held");
+    assert_eq!(result.held_positions.len(), 1);
+    assert!(matches!(
+        &result.held_positions[0],
+        HeldStorePosition {
+            coordinate: HeldStoreCoordinate::Commit { device_id, position },
+            reason: HeldStorePositionReason::InvalidObject(detail),
+        } if device_id == "dev1"
+            && *position == commit.value.position()
+            && detail.contains("missing field `signature`")
+    ));
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    // An unsigned changeset carries no grant coordinate, so it is genuinely
-    // unauthorized (nothing can authorize it) — not a can't-authorize-yet lag. It
-    // is surfaced as a rejected-unauthorized changeset, and the cursor advances
-    // past it so the device isn't stuck refetching it.
-    assert_eq!(result.rejected_unauthorized.len(), 1);
-    assert_eq!(result.rejected_unauthorized[0].device_id, "dev1");
-    assert_eq!(result.rejected_unauthorized[0].seq, 1);
-    assert_eq!(result.rejected_unauthorized[0].author, None);
-    assert_eq!(updated.get("dev1"), Some(&1));
-    assert_eq!(
-        db2.get_all_sync_cursors().await.unwrap().get("dev1"),
-        Some(&1),
-    );
+    assert_eq!(materialized_sequences(&db2).await.get("dev1"), None,);
 }
 
 /// Owner anchoring (issue #95/#102): a puller with a pinned owner refuses a chain
@@ -3809,7 +4000,7 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
     // The attacker wiped membership/* and refounded themselves as Owner.
     let attacker = UserKeypair::generate();
     let attacker_pk = hex::encode(attacker.public_key());
-    let forged = founder_entry(&attacker, "2026-03-01T00:00:00Z");
+    let forged = founder_entry("test-store", &attacker, "2026-03-01T00:00:00Z");
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &attacker_pk, 1, forged).await;
     publish_membership_chain_head(&storage, &chain, &attacker).await;
@@ -3817,13 +4008,13 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
     // The puller has the real owner pinned (a different key).
     let owner = UserKeypair::generate();
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
         .await
         .unwrap();
 
     let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
-        matches!(result, Err(PullError::MembershipTampered(_))),
+        matches!(result, Err(StorePullError::Membership(_))),
         "a chain founded by a non-owner must be refused, got {:?}",
         result.map(|_| ()),
     );
@@ -3838,13 +4029,13 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
 
     let owner = UserKeypair::generate();
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
         .await
         .unwrap();
 
     let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
-        matches!(result, Err(PullError::MembershipTampered(_))),
+        matches!(result, Err(StorePullError::Membership(_))),
         "an empty chain with a pinned owner must be refused, got {:?}",
         result.map(|_| ()),
     );
@@ -3865,43 +4056,44 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
     let founder_pubkey = hex::encode(founder.public_key());
     let second_owner_pubkey = hex::encode(second_owner.public_key());
     let removed_member_pubkey = hex::encode(removed_member.public_key());
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(founder.clone());
     let db = open_test_db();
     if pin_owner {
-        db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &founder_pubkey)
+        db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &founder_pubkey)
             .await
             .unwrap();
     }
 
     let mut chain = MembershipChain::new();
-    let founder_entry = founder_entry(&founder, "2026-03-01T00:00:00Z");
+    let founder_entry = storage.protocol_genesis().founder;
     append_membership_entry(&storage, &mut chain, &founder_pubkey, 1, founder_entry).await;
-    let add_owner = make_linked_entry(
-        &chain,
-        &founder,
-        MembershipAction::Add,
-        &second_owner,
-        MemberRole::Owner,
-        "2026-03-01T00:01:00Z",
-    );
+    let add_owner = chain
+        .signed_set_member(
+            &founder,
+            pubkey_hex(&second_owner),
+            None,
+            MemberRole::Owner,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &founder_pubkey, 2, add_owner).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &founder,
-        MembershipAction::Add,
-        &removed_member,
-        MemberRole::Member,
-        "2026-03-01T00:02:00Z",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &founder,
+            pubkey_hex(&removed_member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:02:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &founder_pubkey, 3, add_member).await;
-    let remove_member = make_linked_entry(
-        &chain,
-        &second_owner,
-        MembershipAction::Remove,
-        &removed_member,
-        MemberRole::Member,
-        "2026-03-01T00:03:00Z",
-    );
+    let remove_member = chain
+        .signed_remove_member(
+            &second_owner,
+            pubkey_hex(&removed_member),
+            "2026-03-01T00:03:00Z".to_string(),
+        )
+        .expect("active Owner removes membership grant");
     append_membership_entry(&storage, &mut chain, &second_owner_pubkey, 1, remove_member).await;
     publish_membership_chain_head(&storage, &chain, &founder).await;
     publish_membership_chain_head(&storage, &chain, &second_owner).await;
@@ -3990,26 +4182,27 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
     let storage = MockSyncStorage::with_keypair(owner.clone());
     let target = open_test_db();
     target
-        .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pubkey)
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pubkey)
         .await
         .unwrap();
 
     let mut chain = MembershipChain::new();
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     append_membership_entry(&storage, &mut chain, &owner_pubkey, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
     let cycle_membership = crate::sync::pull::load_cycle_membership(&storage, &target)
         .await
         .expect("load founder at cycle start");
 
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:01:00Z",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pubkey, 2, add_member).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
     storage.hide_membership_from_listing(&owner_pubkey, 1);
@@ -4024,37 +4217,37 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devM",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:02:00Z",
-        &member,
-        Some(MembershipCoord {
-            author_pubkey: owner_pubkey.clone(),
-            seq: 2,
-        }),
         &changeset,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pubkey, 2)),
+        &member,
+        &member,
     );
-    storage.put_changeset_packed("devM", 1, packed);
-    storage.publish_head_as("devM", 1, &member);
 
     let (_tmp, store_dir) = temp_store_dir();
-    let (updated, result) = crate::sync::pull::pull_changes(
+    bind_mock_store_protocol(&target, &storage, "dev2").await;
+    let result = crate::sync::store_pull::pull_store_commits(
         &target,
         target.synced_tables(),
         &storage,
+        storage.protocol_genesis_hash(),
         "dev2",
         &store_dir,
-        cycle_membership.chain,
-        cycle_membership.pinned_owner,
+        cycle_membership.chain.as_ref(),
     )
     .await
     .expect("pull with an empty mid-cycle membership LIST");
+    let updated: HashMap<_, _> = result
+        .frontier
+        .iter()
+        .map(|(device_id, position)| (device_id.clone(), position.seq))
+        .collect();
 
     assert_eq!(result.changesets_applied, 1);
-    assert!(result.rejected_unauthorized.is_empty());
+    assert!(unauthorized_positions(&result).is_empty());
     assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert_eq!(updated.get("devM"), Some(&1));
 }
@@ -4073,7 +4266,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
 
     // A founder entry + a changeset the owner authored: without the fail-closed
     // guard the cycle would (fail to list, drop to chain=None, then) apply this.
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = founder_entry("test-store", &owner, "2026-03-01T00:00:00Z");
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4089,7 +4282,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
     storage.store_changeset(&owner_pk, 1, &cs, SCHEMA_VERSION);
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -4099,7 +4292,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
 
     let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
-        matches!(result, Err(PullError::Storage(_))),
+        matches!(result, Err(StorePullError::Membership(_))),
         "a membership-list failure on an owner-pinned store must abort the cycle, got {:?}",
         result.map(|_| ()),
     );
@@ -4120,7 +4313,7 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
     // and passes the head-authorization check.
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4135,24 +4328,18 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devOwner",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:00:00Z",
-        &owner,
-        // The founder entry at (owner, 1) is what authorizes the owner to write.
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 1,
-        }),
         &cs,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pk, 1)),
+        &owner,
+        &owner,
     );
-    storage.put_changeset_packed("devOwner", 1, packed);
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -4172,7 +4359,7 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
     let owner_pk = hex::encode(owner.public_key());
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4186,29 +4373,27 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devOwner",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:01:00Z",
-        &owner,
-        None,
         &changeset,
+        SCHEMA_VERSION,
+        None,
+        &owner,
+        &owner,
     );
-    storage.put_changeset_packed("devOwner", 1, packed);
 
     let target = open_test_db();
     target
-        .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
     let (updated, result) = pull_into(&target, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
-    assert_eq!(result.rejected_unauthorized.len(), 1);
+    assert_eq!(unauthorized_positions(&result).len(), 1);
     assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(updated.get("devOwner"), Some(&1));
+    assert_eq!(updated.get("devOwner"), None);
 }
 
 /// A signed device head commits a stream to one member identity. An authentic
@@ -4221,17 +4406,18 @@ async fn pull_rejects_a_changeset_whose_signer_differs_from_the_device_head() {
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:01:00Z",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
@@ -4244,41 +4430,41 @@ async fn pull_rejects_a_changeset_whose_signer_differs_from_the_device_head() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devOwner",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:02:00Z",
-        &member,
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 2,
-        }),
         &changeset,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pk, 2)),
+        &member,
+        &owner,
     );
-    // `put_changeset_packed` advances the stream head with the mock's owner key,
-    // while the envelope above is signed by the member.
-    storage.put_changeset_packed("devOwner", 1, packed);
 
     let target = open_test_db();
     target
-        .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let (updated, result) = pull_into(&target, &storage, "dev2", &temp_store_dir().1).await;
+    let (_, result) = pull_into_result(&target, &storage, "dev2", &temp_store_dir().1)
+        .await
+        .expect("a head signer mismatch holds only that device");
 
-    assert_eq!(result.changesets_applied, 0);
-    assert_eq!(result.rejected_unauthorized.len(), 1);
+    assert!(result.held_positions.iter().any(|held| matches!(
+        (&held.coordinate, &held.reason),
+        (
+            HeldStoreCoordinate::Head { device_id, .. },
+            HeldStorePositionReason::HeadAuthorMismatch { .. }
+        ) if device_id == "devOwner"
+    )));
     assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(updated.get("devOwner"), Some(&1));
+    assert_eq!(materialized_sequences(&target).await.get("devOwner"), None);
 }
 
 /// Issue #84 — the membership-propagation lag, the core bug. A member's signed
 /// changeset is pulled BEFORE the LIST that rebuilds the chain shows the Add that
 /// authorizes them (membership entries and changesets are separate, unordered
 /// object streams). The cycle-start chain does not authorize the member, so the
-/// old code skipped the changeset and advanced the cursor — losing it forever.
+/// old code skipped the changeset and advanced the position — losing it forever.
 /// Now the changeset carries the coordinate of its authorizing entry; a direct,
 /// read-after-write-consistent GET resolves that entry even though the LIST lags,
 /// and the changeset applies. It must NOT be lost.
@@ -4293,17 +4479,18 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // Founder at (owner, 1); the owner adds the member as a Member at (owner, 2).
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:01:00Z",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
     // ...but the LIST hasn't caught up to the member's Add yet. A keyed GET of
@@ -4321,24 +4508,18 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devM",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:02:00Z",
-        &member,
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 2,
-        }),
         &cs,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pk, 2)),
+        &member,
+        &member,
     );
-    storage.put_changeset_packed("devM", 1, packed);
-    storage.publish_head_as("devM", 1, &member);
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -4347,7 +4528,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     // The lagging entry was fetched by coordinate and the changeset applied — not
     // dropped as non-member, and not surfaced as a rejection.
     assert_eq!(result.changesets_applied, 1);
-    assert!(result.rejected_unauthorized.is_empty());
+    assert!(unauthorized_positions(&result).is_empty());
     assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert_eq!(updated.get("devM"), Some(&1));
 }
@@ -4355,7 +4536,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
 /// Issue #84 — the other side of the split: a genuinely unauthorized changeset
 /// (here authored by a key that is NOT in the chain at all, with a grant
 /// coordinate that resolves to an entry that doesn't authorize it) is judged
-/// against the exact entry it names, found wanting, and SKIPPED — cursor advanced
+/// against the exact entry it names, found wanting, and SKIPPED — position advanced
 /// so the device isn't stuck — and surfaced for a UI warning. The grant points at
 /// the founder entry (owner, 1), which authorizes the owner, not the outsider, so
 /// merging it still leaves the outsider unauthorized.
@@ -4368,7 +4549,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     // pull reaches the changeset-level judgment.
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4385,49 +4566,42 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devX",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:02:00Z",
-        &outsider,
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 1,
-        }),
         &cs,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pk, 1)),
+        &outsider,
+        &outsider,
     );
-    storage.put_changeset_packed("devX", 1, packed);
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
     let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
-    // Nothing applied; the changeset is surfaced as rejected-unauthorized and the
-    // cursor advances past it (the device must not stall on forged content).
+    // Nothing applies and the durable frontier remains before the forged commit.
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(result.rejected_unauthorized.len(), 1);
-    assert_eq!(result.rejected_unauthorized[0].device_id, "devX");
-    assert_eq!(result.rejected_unauthorized[0].seq, 1);
+    let unauthorized = unauthorized_positions(&result);
+    assert_eq!(unauthorized.len(), 1);
     assert_eq!(
-        result.rejected_unauthorized[0].author,
-        Some(hex::encode(outsider.public_key()))
+        unauthorized[0].coordinate,
+        HeldStoreCoordinate::Commit {
+            device_id: "devX".to_string(),
+            position: storage.store_commit_position("devX", 1),
+        }
     );
-    assert_eq!(updated.get("devX"), Some(&1));
-    assert_eq!(
-        db2.get_all_sync_cursors().await.unwrap().get("devX"),
-        Some(&1),
-    );
+    assert_eq!(updated.get("devX"), None);
+    assert_eq!(materialized_sequences(&db2).await.get("devX"), None,);
 }
 
 /// Issue #86 — a changeset whose signature does not verify (forged or corrupt in
 /// transit) is rejected, logged at error, and surfaced as `invalid_signatures` so
-/// the host can warn; the cursor holds at it. The signature check runs before the
+/// the host can warn; the position holds at it. The signature check runs before the
 /// authorization judgment, so a corrupt signature is reported as an invalid
 /// signature, not as unauthorized.
 #[tokio::test]
@@ -4436,7 +4610,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     let owner_pk = hex::encode(owner.public_key());
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4453,50 +4627,66 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "dev1",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:02:00Z",
-        &owner,
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 1,
-        }),
         &cs,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pk, 1)),
+        &owner,
+        &owner,
     );
-    // Corrupt the signature: an all-zero 64-byte Ed25519 signature is well-formed
-    // but never verifies. Repack without re-signing so the envelope is otherwise
-    // intact (the changeset_size still matches, so this reaches the signature check
-    // rather than failing envelope parsing).
-    let (mut env, changeset_bytes) = envelope::unpack(&packed).unwrap();
-    env.signature = Some("0".repeat(128));
-    storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &changeset_bytes));
-
-    let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    let commit = crate::sync::store_objects::load_commit_slot(
+        &storage,
+        storage.protocol_genesis_hash(),
+        "dev1",
+        1,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let prefix =
+        crate::sync::store_commit::commit_semantic_prefix("dev1", 1, commit.value.commit_hash());
+    remove_protocol_prefix(&storage, &format!("{prefix}/")).await;
+    let mut forged: serde_json::Value = serde_json::from_slice(&commit.bytes).unwrap();
+    forged["signature"] = serde_json::Value::String("0".repeat(128));
+    storage
+        .append_protocol_object(&prefix, ".json", serde_json::to_vec(&forged).unwrap())
         .await
         .unwrap();
 
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
+    let db2 = open_test_db();
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+
+    let (_, result) = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1)
+        .await
+        .expect("a Store commit with an invalid signature is held");
 
     // Nothing applied; surfaced as an invalid signature (NOT unauthorized) and the
-    // cursor holds at the bad object.
-    assert_eq!(result.changesets_applied, 0);
+    // position holds at the bad object.
+    assert_eq!(result.held_positions.len(), 1);
+    assert_eq!(
+        result.held_positions[0],
+        HeldStorePosition {
+            coordinate: HeldStoreCoordinate::Commit {
+                device_id: "dev1".to_string(),
+                position: commit.value.position(),
+            },
+            reason: HeldStorePositionReason::InvalidSignature,
+        }
+    );
+    assert!(unauthorized_positions(&result).is_empty());
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert!(result.rejected_unauthorized.is_empty());
-    assert_eq!(result.invalid_signatures.len(), 1);
-    assert_eq!(result.invalid_signatures[0].device_id, "dev1");
-    assert_eq!(result.invalid_signatures[0].seq, 1);
-    assert_eq!(updated.get("dev1"), None);
+    assert_eq!(materialized_sequences(&db2).await.get("dev1"), None);
 }
 
 /// Issue #84 — a removed member's changeset is skipped, not applied. The owner
 /// added the member at (owner, 2) then removed them at (owner, 3); the member's
 /// changeset names its (still-valid-looking) Add grant (owner, 2), but the puller
 /// already holds the Remove, so merging the grant into the full chain still leaves
-/// the author unauthorized. Surfaced and cursor-advanced, like any forged write.
+/// the author unauthorized. Surfaced and position-advanced, like any forged write.
 #[tokio::test]
 async fn pull_skips_a_removed_members_changeset() {
     let owner = UserKeypair::generate();
@@ -4504,26 +4694,26 @@ async fn pull_skips_a_removed_members_changeset() {
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:01:00Z",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
-    let remove_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Remove,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:03:00Z",
-    );
+    let remove_member = chain
+        .signed_remove_member(
+            &owner,
+            pubkey_hex(&member),
+            "2026-03-01T00:03:00Z".to_string(),
+        )
+        .expect("active Owner removes membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
@@ -4537,24 +4727,18 @@ async fn pull_skips_a_removed_members_changeset() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devM",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:04:00Z",
-        &member,
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 2,
-        }),
         &cs,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pk, 2)),
+        &member,
+        &member,
     );
-    storage.put_changeset_packed("devM", 1, packed);
-    storage.publish_head_as("devM", 1, &member);
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -4562,12 +4746,8 @@ async fn pull_skips_a_removed_members_changeset() {
 
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(result.rejected_unauthorized.len(), 1);
-    assert_eq!(
-        result.rejected_unauthorized[0].author,
-        Some(hex::encode(member.public_key()))
-    );
-    assert_eq!(updated.get("devM"), Some(&1));
+    assert_eq!(unauthorized_positions(&result).len(), 1);
+    assert_eq!(updated.get("devM"), None);
 }
 
 /// A hash-linked membership chain detects a missing MIDDLE entry via `prev_hash`,
@@ -4588,26 +4768,26 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:01:00Z",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
-    let remove_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Remove,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:03:00Z",
-    );
+    let remove_member = chain
+        .signed_remove_member(
+            &owner,
+            pubkey_hex(&member),
+            "2026-03-01T00:03:00Z".to_string(),
+        )
+        .expect("active Owner removes membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
@@ -4627,40 +4807,30 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devM",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:04:00Z",
-        &member,
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 2,
-        }),
         &cs,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pk, 2)),
+        &member,
+        &member,
     );
-    storage.put_changeset_packed("devM", 1, packed);
-    storage.publish_head_as("devM", 1, &member);
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
     let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     // Not applied: the removed member is not re-admitted by the lagging listing.
-    // Surfaced as rejected-unauthorized and the cursor advances so the device is
+    // Surfaced as rejected-unauthorized and the position advances so the device is
     // not stuck on it.
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(result.rejected_unauthorized.len(), 1);
-    assert_eq!(
-        result.rejected_unauthorized[0].author,
-        Some(hex::encode(member.public_key()))
-    );
-    assert_eq!(updated.get("devM"), Some(&1));
+    assert_eq!(unauthorized_positions(&result).len(), 1);
+    assert_eq!(updated.get("devM"), None);
 }
 
 /// A membership entry is not authoritative until its author publishes a signed
@@ -4676,18 +4846,19 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     // The owner publishes a head covering only the founder entry (seq 1) before
     // adding the member, so the Add at seq 2 is uploaded but no head certifies it
     // yet — genuinely uncommitted, not just list-lagging.
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:01:00Z",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
 
     // The member authors a signed changeset, stamping the grant coordinate of the
@@ -4701,24 +4872,18 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devM",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:02:00Z",
-        &member,
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 2,
-        }),
         &cs,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pk, 2)),
+        &member,
+        &member,
     );
-    storage.put_changeset_packed("devM", 1, packed);
-    storage.publish_head_as("devM", 1, &member);
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -4727,9 +4892,9 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     // The Add is visible by keyed GET but absent from the signed committed prefix.
     assert_eq!(storage.membership_list_count(), 2);
     assert_eq!(result.changesets_applied, 0);
-    assert_eq!(result.rejected_unauthorized.len(), 1);
+    assert_eq!(unauthorized_positions(&result).len(), 1);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(updated.get("devM"), Some(&1));
+    assert_eq!(updated.get("devM"), None);
 }
 
 #[tokio::test]
@@ -4740,26 +4905,34 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
     let relocated_author = hex::encode(UserKeypair::generate().public_key());
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:01:00Z",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
 
     let grant_bytes = storage
-        .get_membership_entry(&owner_pk, 2)
+        .read_membership_entry_bytes(&owner_pk, 2)
         .await
         .expect("owner's uncommitted grant");
+    let owner_grant = membership_coord(&chain, &owner_pk, 2);
+    let relocated_prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
+        &relocated_author,
+        &owner_grant.author_owner_grant,
+        2,
+        owner_grant.entry_hash,
+    );
     storage
-        .put_membership_entry(&relocated_author, 2, grant_bytes)
+        .append_protocol_object(&relocated_prefix, ".json", grant_bytes)
         .await
         .expect("relocate the grant to another author's coordinate");
 
@@ -4772,40 +4945,38 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devM",
         1,
+        &changeset,
         SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:02:00Z",
-        &member,
         Some(MembershipCoord {
             author_pubkey: relocated_author,
+            author_owner_grant: owner_grant.author_owner_grant,
             seq: 2,
+            entry_hash: owner_grant.entry_hash,
         }),
-        &changeset,
+        &member,
+        &member,
     );
-    storage.put_changeset_packed("devM", 1, packed);
-    storage.publish_head_as("devM", 1, &member);
 
     let target = open_test_db();
     target
-        .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let (updated, result) = pull_into(&target, &storage, "dev2", &temp_store_dir().1).await;
+    let result = pull_into_result(&target, &storage, "dev2", &temp_store_dir().1).await;
 
-    assert_eq!(result.changesets_applied, 0);
-    assert_eq!(result.rejected_unauthorized.len(), 1);
+    assert!(matches!(result, Err(StorePullError::Membership(_))));
     assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(updated.get("devM"), Some(&1));
+    assert_eq!(materialized_sequences(&target).await.get("devM"), None);
 }
 
-/// A storage read failure while resolving a grant leaves the cursor at the
+/// A storage read failure while resolving a grant leaves the position at the
 /// undecided changeset. The pull must not replace an unavailable committed-chain
 /// read with a bare keyed entry.
 #[tokio::test]
-async fn pull_holds_the_cursor_when_the_mid_cycle_membership_list_fails() {
+async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
@@ -4814,18 +4985,19 @@ async fn pull_holds_the_cursor_when_the_mid_cycle_membership_list_fails() {
     // The owner publishes a head covering only the founder entry (seq 1) before
     // adding the member, so the Add at seq 2 is uploaded but no head certifies it
     // yet — genuinely uncommitted, not just list-lagging.
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:01:00Z",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
 
     // Only the SECOND `list_membership_entries` call fails: the first (cycle
@@ -4843,35 +5015,30 @@ async fn pull_holds_the_cursor_when_the_mid_cycle_membership_list_fails() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devM",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:02:00Z",
-        &member,
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 2,
-        }),
         &cs,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pk, 2)),
+        &member,
+        &member,
     );
-    storage.put_changeset_packed("devM", 1, packed);
-    storage.publish_head_as("devM", 1, &member);
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
+    let error = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1)
+        .await
+        .expect_err("a failed membership reload must abort Store pull");
 
-    // The failed read leaves authorization undecided and the cursor unchanged.
+    // The failed read leaves authorization undecided and the position unchanged.
     assert_eq!(storage.membership_list_count(), 2);
-    assert_eq!(result.changesets_applied, 0);
-    assert!(result.rejected_unauthorized.is_empty());
+    assert!(matches!(error, StorePullError::Membership(_)));
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(updated.get("devM"), None);
+    assert_eq!(materialized_sequences(&db2).await.get("devM"), None);
 }
 
 /// Cycle start and the mid-cycle reload now share the same head-committed,
@@ -4890,31 +5057,31 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:01:00Z",
-    );
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "2026-03-01T00:01:00Z".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member.clone()).await;
-    let remove_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Remove,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:03:00Z",
-    );
+    let remove_member = chain
+        .signed_remove_member(
+            &owner,
+            pubkey_hex(&member),
+            "2026-03-01T00:03:00Z".to_string(),
+        )
+        .expect("active Owner removes membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -4924,15 +5091,22 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
 
     // A stale replica serves the head from before the Remove (seq 2, signed over
     // the Add's tip hash).
-    let stale = AuthorHead::signed(2, entry_hash(&add_member), &owner);
+    let stale = AuthorHead::signed(
+        "test-store".to_string(),
+        add_member.author_owner_grant.clone(),
+        2,
+        entry_hash(&add_member),
+        &owner,
+    );
+    storage.remove_membership_head(&owner_pk);
     storage
-        .put_membership_head(&owner_pk, serde_json::to_vec(&stale).unwrap())
+        .append_membership_head_bytes(&owner_pk, serde_json::to_vec(&stale).unwrap())
         .await
         .unwrap();
 
     let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
-        matches!(result, Err(PullError::MembershipTampered(_))),
+        matches!(result, Err(StorePullError::Membership(_))),
         "a head regressing below the accepted watermark must be refused, got {:?}",
         result.map(|_| ()),
     );
@@ -4948,10 +5122,10 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
 
     // A non-empty listing whose entry won't validate (broken founder signature).
     let attacker = UserKeypair::generate();
-    let mut bad = founder_entry(&attacker, "2026-03-01T00:00:00Z");
+    let mut bad = founder_entry("test-store", &attacker, "2026-03-01T00:00:00Z");
     bad.signature = "00".to_string();
     storage
-        .put_membership_entry(
+        .append_membership_entry_bytes(
             &hex::encode(attacker.public_key()),
             1,
             serde_json::to_vec(&bad).unwrap(),
@@ -4961,13 +5135,13 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
 
     let owner = UserKeypair::generate();
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &hex::encode(owner.public_key()))
         .await
         .unwrap();
 
     let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
-        matches!(result, Err(PullError::MembershipTampered(_))),
+        matches!(result, Err(StorePullError::Membership(_))),
         "a malformed chain on a pinned-owner store must be refused, got {:?}",
         result.map(|_| ()),
     );
@@ -4976,17 +5150,16 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
 /// A verified head whose signer is not a current member is examined so a newly
 /// added member can resolve a committed grant that appeared after cycle start.
 /// When the envelope's named grant does not authorize the signer, the changeset
-/// is rejected and the cursor advances instead of holding on attacker content.
+/// is rejected and the position advances instead of holding on attacker content.
 #[tokio::test]
 async fn pull_rejects_a_stream_authored_by_a_non_member() {
     // The mock signs every head it publishes with `outsider`, who is not in the
     // chain — so the head it writes for `dev1` fails the membership check.
-    let outsider = UserKeypair::generate();
-    let storage = MockSyncStorage::with_keypair(outsider);
-
     let owner = UserKeypair::generate();
+    let outsider = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
     let owner_pk = hex::encode(owner.public_key());
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -5002,10 +5175,10 @@ async fn pull_rejects_a_stream_authored_by_a_non_member() {
         ],
     )
     .await;
-    storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
+    storage.store_changeset_signed_as("dev1", 1, &cs, SCHEMA_VERSION, None, &outsider, &outsider);
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -5013,9 +5186,9 @@ async fn pull_rejects_a_stream_authored_by_a_non_member() {
 
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(result.rejected_unauthorized.len(), 1);
-    assert_eq!(updated.get("dev1"), Some(&1));
-    assert!(result.remote_heads.iter().any(|h| h.device_id == "dev1"));
+    assert_eq!(unauthorized_positions(&result).len(), 1);
+    assert_eq!(updated.get("dev1"), None);
+    assert!(result.visible_heads.iter().any(|h| h.device_id == "dev1"));
 }
 
 /// The honored case: a head authored by a current member (here a second device
@@ -5028,7 +5201,7 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
     // owner-signed — a current member.
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let founder = storage.protocol_genesis().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -5042,24 +5215,18 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
         ],
     )
     .await;
-    let packed = envelope::pack_signed(
+    storage.store_changeset_signed_as(
         "devA",
         1,
-        SCHEMA_VERSION,
-        "",
-        "2026-03-01T00:00:00Z",
-        &owner,
-        // The founder entry at (owner, 1) is what authorizes the owner to write.
-        Some(MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 1,
-        }),
         &cs,
+        SCHEMA_VERSION,
+        Some(membership_coord(&chain, &owner_pk, 1)),
+        &owner,
+        &owner,
     );
-    storage.put_changeset_packed("devA", 1, packed);
 
     let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
 
@@ -5068,113 +5235,6 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
     assert_eq!(result.changesets_applied, 1);
     assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert_eq!(updated.get("devA"), Some(&1));
-}
-
-/// A `min_schema_version` floor signed by a non-owner is ignored: it must NOT trip
-/// `SchemaVersionTooOld` even when its version exceeds ours. The floor is an
-/// owner-only control; a Member- or Follower-signed (or bucket-planted) one is a
-/// freeze attempt.
-#[tokio::test]
-async fn pull_ignores_min_schema_version_from_a_non_owner() {
-    let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key());
-    let member = UserKeypair::generate();
-
-    // The mock signs the floor with `member` (a current member, but not an owner).
-    let storage = MockSyncStorage::with_keypair(member.clone());
-
-    // Chain: owner founds, then adds `member` as a Member.
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    let mut chain = MembershipChain::new();
-    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "2026-03-01T00:01:00Z",
-    );
-    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
-    publish_membership_chain_head(&storage, &chain, &owner).await;
-
-    // A member-signed floor above our version.
-    storage
-        .set_min_schema_version(SCHEMA_VERSION + 1)
-        .await
-        .unwrap();
-
-    let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-        .await
-        .unwrap();
-
-    // The pull must succeed (the non-owner floor is ignored), not error with
-    // SchemaVersionTooOld.
-    let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
-    assert!(
-        result.is_ok(),
-        "a non-owner floor must be ignored, not trip SchemaVersionTooOld; got {:?}",
-        result.map(|_| ()),
-    );
-}
-
-/// A `min_schema_version` floor signed by a current owner IS honored: a version
-/// above ours trips `SchemaVersionTooOld`, the same refuse-to-sync the owner
-/// intends after a breaking migration.
-#[tokio::test]
-async fn pull_honors_min_schema_version_from_a_current_owner() {
-    let owner = UserKeypair::generate();
-    let owner_pk = hex::encode(owner.public_key());
-    // The mock is the owner's device, so the floor it sets is owner-signed.
-    let storage = MockSyncStorage::with_keypair(owner.clone());
-
-    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
-    let mut chain = MembershipChain::new();
-    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    publish_membership_chain_head(&storage, &chain, &owner).await;
-
-    storage
-        .set_min_schema_version(SCHEMA_VERSION + 1)
-        .await
-        .unwrap();
-
-    let db2 = open_test_db();
-    db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-        .await
-        .unwrap();
-
-    let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
-    assert!(
-        matches!(
-            result,
-            Err(PullError::SchemaVersionTooOld {
-                min_version,
-                ..
-            }) if min_version == SCHEMA_VERSION + 1
-        ),
-        "an owner-signed floor above our version must trip SchemaVersionTooOld; got {:?}",
-        result.map(|_| ()),
-    );
-}
-
-mod schema_version_too_old_display {
-    use crate::sync::pull::PullError;
-
-    #[test]
-    fn names_app_and_versions_and_recovery() {
-        let err = PullError::SchemaVersionTooOld {
-            local_version: 3,
-            min_version: 5,
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Update the app"),
-            "missing recovery verb: {msg}"
-        );
-        assert!(msg.contains("v5"), "missing required version: {msg}");
-        assert!(msg.contains("v3"), "missing current version: {msg}");
-    }
 }
 
 /// A pulled blob's `id` is the primary key of a row authored by any write-capable
@@ -5239,20 +5299,20 @@ mod blob_path_traversal {
         let (_t, ld) = temp_store_dir();
         let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
-        // It is bad data, so the row that carries it is not applied and the cursor
+        // It is bad data, so the row that carries it is not applied and the position
         // does not advance — the same posture as any other failed-blob changeset.
         assert!(
             result.asset_downloads_failed,
             "a refused blob fails the changeset's downloads",
         );
         assert_eq!(result.changesets_applied, 0, "the bad row is not applied");
-        assert_eq!(updated.get("dev1"), None, "the cursor is held for retry");
+        assert_eq!(updated.get("dev1"), None, "the position is held for retry");
     }
 
     /// A blob id too short to form the `{ab}/{cd}` partition prefix (the
     /// dash-stripped id is under four chars, or splits a multi-byte char) cannot
     /// index the prefix's byte slice, so the path builder refuses it. End to end
-    /// it is bad data: the row does not apply and the cursor holds. (The slice
+    /// it is bad data: the row does not apply and the position holds. (The slice
     /// itself is proven non-panicking by the `hashed_path` unit tests in
     /// `store_dir`.)
     #[tokio::test]
@@ -5284,7 +5344,7 @@ mod blob_path_traversal {
             "an unindexable blob id fails the changeset's downloads instead of panicking",
         );
         assert_eq!(result.changesets_applied, 0, "the bad row is not applied");
-        assert_eq!(updated.get("dev1"), None, "the cursor is held for retry");
+        assert_eq!(updated.get("dev1"), None, "the position is held for retry");
     }
 
     /// A normal blob id still round-trips: the boundary check rejects only ids that
@@ -5337,34 +5397,21 @@ mod blob_path_traversal {
     }
 }
 
-/// Deterministic repro (ignored) — the NOTFOUND→OMIT causal-ordering divergence.
+/// Dependency-ready pull applies a causal UPDATE only after its INSERT.
 ///
 /// A device that applies an UPDATE of a row before that row's INSERT (authored by
 /// another device) hits `SQLITE_CHANGESET_NOTFOUND`, which the apply reads as "the row
 /// was deleted locally, delete wins" and OMITs — dropping the UPDATE and advancing the
-/// cursor. That device converges to the bare INSERT while the authors converge to the
-/// UPDATE: permanent divergence, decided by the order `list_heads()` happened to return
-/// (it is not a causally-consistent snapshot). The same OMIT is also wrong after a
-/// DELETE, which coven leaves no durable tombstone for, so absence cannot be told apart
-/// from not-yet-inserted.
-///
-/// The repro forces the bad order: `sort_listings` makes head order lexicographic and
-/// the updater's device id (`dev-a`) sorts before the inserter's (`dev-z`), so the third
-/// device processes the UPDATE stream first every run. It asserts the correct converged
-/// title, which fails today.
-///
-/// Ignored because the fix belongs in circles' `BatchCommit` + audience-mirror apply
-/// model, not a standalone apply-path change that model would tear out. Un-ignore when
-/// that lands. See `plans/notfound-omit-for-circles.md`.
+/// The updater's commit captures the inserter's exact position. Reversed head discovery
+/// therefore holds the UPDATE until the INSERT is durable, independent of listing order.
 #[tokio::test]
-#[ignore = "NOTFOUND→OMIT causal-ordering divergence: an UPDATE applied before its INSERT (or after a tombstoneless DELETE) is dropped as a local delete and diverges permanently. Fix lands with circles' BatchCommit/mirror apply model — see plans/notfound-omit-for-circles.md"]
 async fn update_applied_before_its_insert_diverges_notfound_omit() {
     let home = InMemoryCloudHome::new();
     // Force a deterministic cross-device apply order so the bug reproduces every run —
     // a real bucket LIST is unordered, which is why the live test raced ~50/50.
     home.sort_listings();
     let keypair = UserKeypair::generate();
-    let storage = CloudSyncStorage::new(
+    let storage = cloud_test_storage(
         std::sync::Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -5392,7 +5439,7 @@ async fn update_applied_before_its_insert_diverges_notfound_omit() {
 
     let db_upd = open_test_db();
     let (_tu, ld_upd) = temp_store_dir();
-    pull_into(&db_upd, &storage, "dev-a", &ld_upd).await;
+    pull_cloud_into(&db_upd, &db_ins, &storage, "dev-a", &ld_upd).await;
     let update = capture_bytes(
         &db_upd,
         &[
@@ -5408,7 +5455,7 @@ async fn update_applied_before_its_insert_diverges_notfound_omit() {
 
     let db_c = open_test_db();
     let (_tc, ld_c) = temp_store_dir();
-    pull_into(&db_c, &storage, "dev-c", &ld_c).await;
+    pull_cloud_into(&db_c, &db_ins, &storage, "dev-c", &ld_c).await;
 
     assert_eq!(
         query_text(&db_c, "SELECT title FROM notes WHERE id = 'n1'").await,

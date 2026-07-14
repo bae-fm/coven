@@ -1,6 +1,6 @@
 //! Headless wasm proof that coven's sync engine runs on wasm32: a row written on
 //! one `Database` crosses to a second `Database` through the real engine —
-//! capture, changeset push, pull, and apply — over a shared in-memory cloud.
+//! capture, Store commit publication, pull, and apply — over a shared in-memory cloud.
 //!
 //! Two `:memory:` `Database`s stand in for two devices; each wraps the SAME
 //! backing `InMemoryCloudHome` in its own `CloudSyncStorage`, so they read
@@ -22,8 +22,10 @@ use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::storage::cloud::SequentialCopyIdGenerator;
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use crate::sync::cycle::StoreInitialization;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -50,6 +52,7 @@ fn open_device(device_id: &str) -> Database {
 /// with plain blob paths. Two of these built over clones of one
 /// `InMemoryCloudHome` are two devices on one bucket.
 fn storage_for(cloud: &InMemoryCloudHome, identity: &UserKeypair) -> CloudSyncStorage {
+    let copy_source = crate::keys::public_key_hex(identity);
     CloudSyncStorage::new(
         std::sync::Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
@@ -57,20 +60,19 @@ fn storage_for(cloud: &InMemoryCloudHome, identity: &UserKeypair) -> CloudSyncSt
         "wasm-sync-test",
         identity.clone(),
     )
+    .with_copy_ids(std::sync::Arc::new(SequentialCopyIdGenerator::new(
+        &copy_source,
+    )))
 }
 
 /// Run one full sync cycle for `device_id` against `storage`. No cloud home and no
-/// observer: this engine test pushes/pulls changesets only, not the blob outbox.
-async fn run_cycle(storage: CloudSyncStorage, db: &Database) {
-    db.set_sync_state("snapshot_seq", "0")
-        .await
-        .expect("seed snapshot floor for changeset-only wasm test");
-    // A store dir that never touches disk: this test pushes/pulls changesets, so
-    // the only fs touch the cycle attempts is best-effort changeset staging, which
-    // logs and continues on failure. No blobs, no snapshot bytes are read back.
+/// observer: this engine test publishes and pulls Store commits without blobs.
+async fn run_cycle(storage: CloudSyncStorage, db: &Database, initialization: StoreInitialization) {
+    // No blobs or snapshot images are created, so the cycle does not access this
+    // browser-only placeholder directory.
     let store_dir = StoreDir::new(std::path::Path::new("/coven-wasm-sync-test"));
 
-    let components = crate::sync::cycle::init_sync_over_storage(db, storage)
+    let components = crate::sync::cycle::init_sync_over_storage(db, storage, initialization)
         .await
         .expect("initialize sync session");
     components
@@ -94,8 +96,8 @@ async fn has_note(db: &Database, id: &str) -> bool {
 
 /// Device A writes a shared row and pushes; device B pulls and ends up with the
 /// row. This is the whole engine on wasm: A's `Database` captures the INSERT into a
-/// changeset, `CloudSyncStorage` writes it to the shared cloud, B's cycle pulls the
-/// changeset out of that same cloud and applies it to B's `Database`.
+/// changeset, `CloudSyncStorage` publishes an immutable Store package and commit,
+/// and B's cycle verifies and applies that commit to B's `Database`.
 #[wasm_bindgen_test]
 async fn row_syncs_from_one_database_to_another_through_the_engine() {
     console_error_panic_hook::set_once();
@@ -119,17 +121,30 @@ async fn row_syncs_from_one_database_to_another_through_the_engine() {
     .await
     .expect("device A insert");
 
-    // Device A: one cycle pushes its changeset (and head) to the shared cloud.
+    // Device A publishes its package, commit, and head to the shared cloud.
     let storage_a = storage_for(&cloud, &identity);
-    run_cycle(storage_a, &db_a).await;
+    run_cycle(storage_a, &db_a, StoreInitialization::CreateStore).await;
+    let genesis_hash = db_a
+        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+        .await
+        .expect("read A's protocol genesis")
+        .expect("A initialized a protocol genesis")
+        .parse()
+        .expect("parse A's protocol genesis hash");
 
     assert!(
-        cloud.get("changes/device-a/1").is_some(),
-        "device A's changeset must land in the shared cloud at seq 1",
+        cloud
+            .appended_keys()
+            .iter()
+            .any(|key| key.starts_with("store-v1/packages/device-a/1/")),
+        "device A's Store package must land in the shared cloud at seq 1",
     );
     assert!(
-        cloud.get("heads/device-a.json").is_some(),
-        "device A must publish its head",
+        cloud
+            .appended_keys()
+            .iter()
+            .any(|key| key.starts_with("store-v1/heads/device-a/1/")),
+        "device A must publish its Store head",
     );
 
     // The row exists on A, not yet on B.
@@ -139,11 +154,18 @@ async fn row_syncs_from_one_database_to_another_through_the_engine() {
         "B has not pulled yet, so it must not hold A's row",
     );
 
-    // Device B: one cycle pulls A's changeset out of the shared cloud and applies
-    // it. B sees A's head, fetches `changes/device-a/1`, verifies the signature,
-    // and applies the captured INSERT.
+    // Device B verifies A's head, commit, package, and signature, then applies
+    // the captured INSERT.
     let storage_b = storage_for(&cloud, &identity);
-    run_cycle(storage_b, &db_b).await;
+    run_cycle(
+        storage_b,
+        &db_b,
+        StoreInitialization::OpenStore {
+            expected_genesis_hash: genesis_hash,
+            expected_founder: crate::keys::public_key_hex(&identity),
+        },
+    )
+    .await;
 
     assert!(
         has_note(&db_b, "note-1").await,

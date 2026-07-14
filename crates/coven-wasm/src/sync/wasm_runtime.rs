@@ -234,29 +234,16 @@ fn log_alerts(alerts: &SyncLoopAlerts) {
             "Sync paused: this device has not adopted a committed store-key rotation",
         );
     }
-    if alerts.skipped_schema > 0 {
-        error!(
-            count = alerts.skipped_schema,
-            "Skipped changes from a newer app version; update the app to apply them",
-        );
-    }
-    if alerts.rejected_unauthorized > 0 {
-        error!(
-            count = alerts.rejected_unauthorized,
-            "Rejected changes from an unauthorized device (forged or removed member)",
-        );
-    }
-    if alerts.invalid_signatures > 0 {
-        error!(
-            count = alerts.invalid_signatures,
-            "Stalled changes with an invalid signature (forged or corrupt)",
-        );
-    }
-    if !alerts.held_changesets.is_empty() {
-        error!(
-            count = alerts.held_changesets.len(),
-            "Stalled invalid changes",
-        );
+    if !alerts.held_positions.is_empty() {
+        for held in &alerts.held_positions {
+            error!(
+                device_id = %held.coordinate.device_id(),
+                seq = held.coordinate.seq(),
+                coordinate = ?held.coordinate,
+                reason = ?held.reason,
+                "Store object is held",
+            );
+        }
     }
     if alerts.asset_downloads_failed {
         warn!("Some files failed to download; their changes remain pending");

@@ -9,22 +9,18 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::database::{Database, DbError, PendingChangesetBatch};
+use crate::database::{Database, DbError};
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::migration::Migration;
 use crate::storage::cloud::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
 use crate::store_dir::StoreDir;
 use crate::sync::apply::resolve_and_apply_changeset;
-use crate::sync::envelope::{self, ChangesetEnvelope};
-use crate::sync::membership::{
-    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipCoord,
-    MembershipEntry,
-};
-use crate::sync::pull::pull_changes;
+use crate::sync::membership::{MembershipChain, MembershipCoord, MembershipEntry, OwnerGrantId};
 use crate::sync::session::{BlobDecl, SyncedTable};
-use crate::sync::signed_control::{HeadJson, MinSchemaVersionJson};
-use crate::sync::storage::{DeviceHead, HeadListing, MinSchemaVersion, StorageError, SyncStorage};
+use crate::sync::storage::{
+    ProtocolObjectListing, ProtocolObjectLocator, StorageError, SyncStorage,
+};
 
 /// In-memory [`MasterKeyCustody`] for tests, with a switch to force `persist`
 /// to fail. The switch models a device whose keyring is momentarily
@@ -354,7 +350,7 @@ fn open_test_db_with(tables: Vec<SyncedTable>) -> Database {
 
 /// Open a test [`Database`] over the synthetic schema with a caller-supplied
 /// register clock (so a test can control the wall clock), plus an extra `seed`
-/// step run after the schema is created (to plant `sync_state` rows or seeded
+/// step run after the schema is created (to plant `protocol_state` rows or seeded
 /// `notes` rows before `Database::open` reads its floor).
 ///
 /// Used only by the native-only register-clock tests (`hlc_register_tests`).
@@ -429,40 +425,31 @@ pub async fn row_exists(db: &Database, sql: &str) -> bool {
 /// holds — the "clear the captured changes" idiom. Draining clears the journal, so
 /// a later `capture_bytes` returns only the writes since this one.
 pub async fn capture_bytes(db: &Database, stmts: &[&str]) -> Vec<u8> {
-    if !stmts.is_empty() {
-        let owned: Vec<String> = stmts.iter().map(|s| s.to_string()).collect();
-        let tables = db.synced_tables().to_vec();
-        db.call(move |conn| {
-            Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
-                for s in &owned {
-                    tx.execute_batch(s).map_err(DbError::from)?;
-                }
-                Ok::<(), DbError>(())
-            })
-        })
-        .await
-        .unwrap_or_else(|e| panic!("journal writes failed: {e}"));
-    }
-    drain_pending_changesets(db).await
-}
-
-/// Drain the pending-changeset journal, returning the combined bytes and clearing
-/// the drained rows. Empty when the journal holds nothing — the same bytes a sync
-/// cycle would read from the journal and push.
-async fn drain_pending_changesets(db: &Database) -> Vec<u8> {
-    match db
-        .pending_changeset_batch()
-        .await
-        .expect("read pending changesets")
-    {
-        PendingChangesetBatch::Empty => Vec::new(),
-        PendingChangesetBatch::Pending { max_id, changeset } => {
-            db.clear_pending_changesets_through(max_id)
-                .await
-                .expect("clear drained pending changesets");
-            changeset
+    let statements: Vec<String> = stmts
+        .iter()
+        .map(|statement| statement.to_string())
+        .collect();
+    let tables: Vec<String> = db
+        .synced_tables()
+        .iter()
+        .map(|table| table.name().to_string())
+        .collect();
+    db.call(move |conn| {
+        let mut session = rusqlite::session::Session::new(conn).map_err(DbError::from)?;
+        for table in tables {
+            session
+                .attach(Some(table.as_str()))
+                .map_err(DbError::from)?;
         }
-    }
+        for statement in statements {
+            conn.execute_batch(&statement).map_err(DbError::from)?;
+        }
+        let mut bytes = Vec::new();
+        session.changeset_strm(&mut bytes).map_err(DbError::from)?;
+        Ok(bytes)
+    })
+    .await
+    .unwrap_or_else(|error| panic!("capture failed: {error}"))
 }
 
 /// Apply a changeset to the test database with the production conflict-resolving
@@ -494,67 +481,11 @@ pub fn pubkey_hex(kp: &UserKeypair) -> String {
     hex::encode(kp.public_key())
 }
 
-/// A fresh membership chain whose only member is `owner`, the founding owner,
-/// stamped at the standard test founding time. A test that needs a different
-/// founding timestamp builds the chain from `founder_entry` directly.
-pub fn bootstrap_chain(owner: &UserKeypair) -> MembershipChain {
-    let owner_pubkey = pubkey_hex(owner);
-    let founder = founder_entry(owner, "0000000001000-0000-dev1");
+/// A membership chain rooted at the exact founder entry carried by Store genesis.
+pub fn bootstrap_chain(founder: MembershipEntry) -> MembershipChain {
     let mut chain = MembershipChain::new();
+    chain.add_entry(founder).unwrap();
     chain
-        .add_entry_at(
-            MembershipCoord {
-                author_pubkey: owner_pubkey,
-                seq: 1,
-            },
-            founder,
-        )
-        .unwrap();
-    chain
-}
-
-/// A signed founder (first) membership entry for `kp`. Thin alias over the
-/// production [`crate::sync::membership::founder_entry`] so tests and production
-/// build the founder identically.
-pub fn founder_entry(kp: &UserKeypair, timestamp: &str) -> MembershipEntry {
-    crate::sync::membership::founder_entry(kp, timestamp)
-}
-
-/// A signed entry where `author` adds/removes `subject` with `role`.
-pub fn make_entry(
-    author: &UserKeypair,
-    action: MembershipAction,
-    subject: &UserKeypair,
-    role: MemberRole,
-    timestamp: &str,
-) -> MembershipEntry {
-    let mut entry = MembershipEntry {
-        action,
-        user_pubkey: pubkey_hex(subject),
-        provider_account_email: None,
-        prev_hash: None,
-        role,
-        timestamp: timestamp.to_string(),
-        author_pubkey: pubkey_hex(author),
-        signature: String::new(),
-    };
-    sign_membership_entry(&mut entry, author);
-    entry
-}
-
-pub fn make_linked_entry(
-    chain: &MembershipChain,
-    author: &UserKeypair,
-    action: MembershipAction,
-    subject: &UserKeypair,
-    role: MemberRole,
-    timestamp: &str,
-) -> MembershipEntry {
-    let author_pubkey = pubkey_hex(author);
-    let mut entry = make_entry(author, action, subject, role, timestamp);
-    entry.prev_hash = chain.latest_author_hash(&author_pubkey);
-    sign_membership_entry(&mut entry, author);
-    entry
 }
 
 pub async fn append_membership_entry(
@@ -564,19 +495,42 @@ pub async fn append_membership_entry(
     seq: u64,
     entry: MembershipEntry,
 ) {
+    let coord = entry.coord();
+    assert_eq!(coord.author_pubkey, author_pubkey);
+    assert_eq!(coord.seq, seq);
     chain
-        .add_entry_at(
-            MembershipCoord {
-                author_pubkey: author_pubkey.to_string(),
-                seq,
-            },
-            entry.clone(),
-        )
+        .add_entry_at(coord.clone(), entry.clone())
         .expect("valid membership test chain");
-    storage
-        .put_membership_entry(author_pubkey, seq, serde_json::to_vec(&entry).unwrap())
+    crate::sync::store_objects::append_membership_entry_object(storage, &coord, &entry)
         .await
         .expect("upload membership entry");
+}
+
+pub async fn append_membership_entry_bytes(
+    storage: &dyn SyncStorage,
+    author_pubkey: &str,
+    seq: u64,
+    data: Vec<u8>,
+) -> Result<(), StorageError> {
+    let entry: MembershipEntry =
+        serde_json::from_slice(&data).map_err(|error| StorageError::Parse(error.to_string()))?;
+    if entry.author_pubkey != author_pubkey || entry.seq != seq {
+        return Err(StorageError::Parse(format!(
+            "membership bytes declare {}/{}, expected {author_pubkey}/{seq}",
+            entry.author_pubkey, entry.seq
+        )));
+    }
+    let hash = crate::sync::store_commit::ObjectHash::digest(&data);
+    let prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
+        author_pubkey,
+        &entry.author_owner_grant,
+        seq,
+        hash,
+    );
+    storage
+        .append_protocol_object(&prefix, ".json", data)
+        .await?;
+    Ok(())
 }
 
 pub async fn publish_membership_chain_head(
@@ -616,39 +570,18 @@ struct MembershipHeadReadPause {
 
 /// In-memory mock of SyncStorage for tests.
 ///
-/// Stores changesets as plaintext (no encryption in tests) but signs and verifies
-/// the head and min_schema control objects through the same
-/// [`crate::sync::signed_control`] helpers production uses, so tests exercise a
-/// faithful sign-on-write / verify-on-read path rather than a parallel one.
+/// Stores blobs and membership objects in memory and immutable Store protocol
+/// copies under their exact semantic paths.
 pub struct MockSyncStorage {
-    /// Changesets: key = "changes/{device_id}/{seq}" -> packed envelope bytes.
     objects: Mutex<HashMap<String, Vec<u8>>>,
-    /// Published device heads, keyed by device_id -> signed `HeadJson` JSON bytes
-    /// (exactly what the cloud stores, minus the at-rest cipher).
-    heads: Mutex<HashMap<String, Vec<u8>>>,
-    /// Every `(device_id, timestamp)` passed to [`SyncStorage::put_head`], in call
-    /// order. Lets a test assert the timestamp each writer records is RFC 3339, the
-    /// format the trait's `put_head` contract specifies.
-    head_puts: Mutex<Vec<(String, String)>>,
-    /// Snapshot generations and their pointer, keyed exactly as the cloud lays
-    /// them out (`snapshot/{author}/{publish_id}.db`,
-    /// `snapshot/{author}/{publish_id}_meta.json`, `snapshot/current.json`). Keying
-    /// each device's generations under its own `{author}` — not a flat id — is what
-    /// lets a test exercise the real globally-unique keyspace and atomic-publish
-    /// behavior.
-    snapshot_objects: Mutex<HashMap<String, Vec<u8>>>,
-    /// Signed `min_schema_version.json` bytes (None = no minimum set).
-    min_schema_version: Mutex<Option<Vec<u8>>>,
-    /// Per-author signed membership heads, keyed by author pubkey -> head bytes.
-    /// An author absent from this map has not committed a head (its entries are
-    /// uncommitted).
-    membership_heads: Mutex<HashMap<String, Vec<u8>>>,
+    protocol_objects: Mutex<Vec<(crate::storage::cloud::AppendedObject, Vec<u8>)>>,
+    next_protocol_object: std::sync::atomic::AtomicU64,
+    store_commits: Mutex<HashMap<(String, u64), crate::sync::store_commit::StoreBatchCommit>>,
+    genesis: crate::sync::store_commit::ProtocolGenesis,
     /// One membership-head read to pause after snapshotting its bytes. The two
     /// notifications tell the test that the snapshot is held and release it.
     membership_head_read_pause: Mutex<Option<MembershipHeadReadPause>>,
-    /// The device identity this mock signs its head/min_schema with. Defaults to a
-    /// fresh keypair; a membership test that needs the head/floor attributed to a
-    /// specific member constructs the mock with [`Self::with_keypair`].
+    /// The device identity this mock uses for signed Store objects and membership.
     keypair: UserKeypair,
     /// When set, `list_membership_entries` returns an error — to exercise the
     /// fail-closed path where membership can't even be listed (#88), instead of
@@ -661,13 +594,13 @@ pub struct MockSyncStorage {
     /// failing every call alike.
     fail_membership_list_on: std::sync::atomic::AtomicUsize,
     membership_list_count: std::sync::atomic::AtomicUsize,
-    membership_get_count: std::sync::atomic::AtomicUsize,
+    membership_entry_read_count: std::sync::atomic::AtomicUsize,
     /// `(author_pubkey, seq)` entries the LIST omits but a keyed GET still serves.
     /// Simulates the eventual-consistency window where a freshly-written
     /// membership entry isn't in the LIST yet, but a direct GET (read-after-write
     /// consistent) resolves it — the exact lag issue #84's grant-coordinate fetch
     /// is built for.
-    hidden_from_listing: Mutex<std::collections::HashSet<(String, u64)>>,
+    hidden_from_listing: Mutex<std::collections::HashSet<(String, OwnerGrantId, u64)>>,
     fail_blob_puts: std::sync::atomic::AtomicUsize,
     blob_put_count: std::sync::atomic::AtomicUsize,
     blob_put_from_file_count: std::sync::atomic::AtomicUsize,
@@ -676,10 +609,11 @@ pub struct MockSyncStorage {
     fail_changeset_puts: std::sync::atomic::AtomicUsize,
     wrapped_key_put_count: std::sync::atomic::AtomicUsize,
     fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize,
-    membership_head_put_count: std::sync::atomic::AtomicUsize,
-    fail_membership_head_put_on: std::sync::atomic::AtomicUsize,
-    membership_entry_put_count: std::sync::atomic::AtomicUsize,
-    fail_membership_entry_put_on: std::sync::atomic::AtomicUsize,
+    membership_head_append_count: std::sync::atomic::AtomicUsize,
+    fail_membership_head_append_on: std::sync::atomic::AtomicUsize,
+    lose_membership_head_append_on: std::sync::atomic::AtomicUsize,
+    membership_entry_append_count: std::sync::atomic::AtomicUsize,
+    fail_membership_entry_append_on: std::sync::atomic::AtomicUsize,
     /// When armed, every `read_blob_to_file` gathers on this barrier before serving,
     /// so a test can prove the pin loop runs fetches concurrently and bounds them:
     /// with a barrier of size N, N fetches must arrive together to release it, and
@@ -724,23 +658,48 @@ impl MockSyncStorage {
         Self::with_keypair(UserKeypair::generate())
     }
 
-    /// A mock whose head and min_schema control objects are signed by `keypair`.
-    /// Lets a membership test attribute the head it publishes (and any floor it
-    /// sets) to a specific member, the way a real device signs its own.
+    pub fn for_store(store_id: &str) -> Self {
+        Self::with_store_and_keypair(store_id, UserKeypair::generate())
+    }
+
     pub fn with_keypair(keypair: UserKeypair) -> Self {
+        Self::with_store_and_keypair("test-store", keypair)
+    }
+
+    pub fn with_store_and_keypair(store_id: &str, keypair: UserKeypair) -> Self {
+        let founder = crate::sync::membership::founder_entry(
+            store_id,
+            &keypair,
+            "0000000000001-0000-test-founder",
+        );
+        let genesis = crate::sync::store_commit::ProtocolGenesis::signed(
+            store_id.to_string(),
+            founder,
+            1,
+            &keypair,
+        )
+        .expect("create test protocol genesis");
+        let genesis_hash = genesis.object_hash();
+        let copy_id: crate::storage::cloud::CopyId = format!("{:064x}", 0_u64)
+            .parse()
+            .expect("canonical test copy id");
+        let genesis_key = crate::sync::store_commit::genesis_copy_key(genesis_hash, copy_id);
+        let genesis_object = crate::storage::cloud::AppendedObject::from_provider(
+            genesis_key,
+            "mock-protocol-0".to_string(),
+        );
         MockSyncStorage {
             objects: Mutex::new(HashMap::new()),
-            heads: Mutex::new(HashMap::new()),
-            head_puts: Mutex::new(Vec::new()),
-            snapshot_objects: Mutex::new(HashMap::new()),
-            min_schema_version: Mutex::new(None),
-            membership_heads: Mutex::new(HashMap::new()),
+            protocol_objects: Mutex::new(vec![(genesis_object, genesis.to_bytes())]),
+            next_protocol_object: std::sync::atomic::AtomicU64::new(1),
+            store_commits: Mutex::new(HashMap::new()),
+            genesis,
             membership_head_read_pause: Mutex::new(None),
             keypair,
             fail_membership_list: std::sync::atomic::AtomicBool::new(false),
             fail_membership_list_on: std::sync::atomic::AtomicUsize::new(0),
             membership_list_count: std::sync::atomic::AtomicUsize::new(0),
-            membership_get_count: std::sync::atomic::AtomicUsize::new(0),
+            membership_entry_read_count: std::sync::atomic::AtomicUsize::new(0),
             hidden_from_listing: Mutex::new(std::collections::HashSet::new()),
             fail_blob_puts: std::sync::atomic::AtomicUsize::new(0),
             blob_put_count: std::sync::atomic::AtomicUsize::new(0),
@@ -750,14 +709,115 @@ impl MockSyncStorage {
             fail_changeset_puts: std::sync::atomic::AtomicUsize::new(0),
             wrapped_key_put_count: std::sync::atomic::AtomicUsize::new(0),
             fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize::new(0),
-            membership_head_put_count: std::sync::atomic::AtomicUsize::new(0),
-            fail_membership_head_put_on: std::sync::atomic::AtomicUsize::new(0),
-            membership_entry_put_count: std::sync::atomic::AtomicUsize::new(0),
-            fail_membership_entry_put_on: std::sync::atomic::AtomicUsize::new(0),
+            membership_head_append_count: std::sync::atomic::AtomicUsize::new(0),
+            fail_membership_head_append_on: std::sync::atomic::AtomicUsize::new(0),
+            lose_membership_head_append_on: std::sync::atomic::AtomicUsize::new(0),
+            membership_entry_append_count: std::sync::atomic::AtomicUsize::new(0),
+            fail_membership_entry_append_on: std::sync::atomic::AtomicUsize::new(0),
             read_to_file_barrier: Mutex::new(None),
             read_to_file_inflight: std::sync::atomic::AtomicUsize::new(0),
             read_to_file_max_inflight: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    pub fn protocol_genesis_hash(&self) -> crate::sync::store_commit::ObjectHash {
+        self.genesis.object_hash()
+    }
+
+    pub fn protocol_genesis(&self) -> crate::sync::store_commit::ProtocolGenesis {
+        self.genesis.clone()
+    }
+
+    pub fn protocol_founder_pubkey(&self) -> String {
+        crate::keys::public_key_hex(&self.keypair)
+    }
+
+    pub fn protocol_founder_keypair(&self) -> UserKeypair {
+        self.keypair.clone()
+    }
+
+    pub fn protocol_founder_coord(&self) -> crate::sync::membership::MembershipCoord {
+        self.genesis.founder.coord()
+    }
+
+    pub async fn publish_protocol_founder_membership(
+        &self,
+    ) -> crate::sync::membership::MembershipChain {
+        let founder = self.genesis.founder.clone();
+        let coord = founder.coord();
+        let chain = crate::sync::membership::MembershipChain::from_entries(vec![founder.clone()])
+            .expect("validate mock protocol founder");
+        crate::sync::store_objects::append_membership_entry_object(self, &coord, &founder)
+            .await
+            .expect("publish mock protocol founder membership");
+        crate::sync::membership_ops::publish_membership_head(self, &chain, &self.keypair)
+            .await
+            .expect("publish mock protocol founder head");
+        chain
+    }
+
+    pub fn store_commit_position(
+        &self,
+        device_id: &str,
+        seq: u64,
+    ) -> crate::sync::store_commit::CommitPosition {
+        self.store_commits
+            .lock()
+            .unwrap()
+            .get(&(device_id.to_string(), seq))
+            .unwrap_or_else(|| panic!("missing Store commit {device_id}/{seq}"))
+            .position()
+    }
+
+    pub async fn publish_store_snapshot(
+        &self,
+        db_image: Vec<u8>,
+        coverage: std::collections::BTreeMap<String, crate::sync::store_commit::CommitPosition>,
+        schema_version: u32,
+        db: &Database,
+    ) -> crate::sync::store_commit::SnapshotMeta {
+        let membership = self.publish_protocol_founder_membership().await;
+        crate::sync::store_snapshot::push_store_snapshot(
+            self,
+            self.protocol_genesis_hash(),
+            crate::sync::snapshot::CreatedSnapshot {
+                db_image,
+                host_blobs: Vec::new(),
+                publish_blobs: Vec::new(),
+            },
+            coverage,
+            schema_version,
+            &self.keypair,
+            "2026-02-10T00:00:00Z".to_string(),
+            Some(&membership),
+            db,
+        )
+        .await
+        .expect("publish mock Store snapshot")
+    }
+
+    fn append_test_protocol(
+        &self,
+        semantic_prefix: &str,
+        extension: &str,
+        bytes: Vec<u8>,
+    ) -> ProtocolObjectLocator {
+        let id = self
+            .next_protocol_object
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let copy_id: crate::storage::cloud::CopyId = format!("{id:064x}")
+            .parse()
+            .expect("canonical test copy id");
+        let logical_key = format!("{semantic_prefix}/copies/{copy_id}{extension}");
+        let physical = crate::storage::cloud::AppendedObject::from_provider(
+            logical_key.clone(),
+            format!("mock-protocol-{id}"),
+        );
+        self.protocol_objects
+            .lock()
+            .unwrap()
+            .push((physical.clone(), bytes));
+        ProtocolObjectLocator::new(logical_key, physical)
     }
 
     /// Arm `read_blob_to_file` to gather `n` calls on a barrier before each serves,
@@ -802,9 +862,131 @@ impl MockSyncStorage {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn membership_get_count(&self) -> usize {
-        self.membership_get_count
+    pub fn membership_entry_read_count(&self) -> usize {
+        self.membership_entry_read_count
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub async fn discover_membership_entries(&self) -> Vec<MembershipCoord> {
+        crate::sync::membership_ops::list_membership_entries(self)
+            .await
+            .expect("discover membership entries")
+    }
+
+    fn membership_coords(&self, author_pubkey: &str, seq: u64) -> Vec<MembershipCoord> {
+        let mut coords = self
+            .protocol_objects
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(object, _)| {
+                crate::sync::store_commit::parse_membership_entry_copy_key(object.logical_key())
+                    .ok()
+            })
+            .filter(|slot| slot.author == author_pubkey && slot.sequence == seq)
+            .map(|slot| MembershipCoord {
+                author_pubkey: slot.author,
+                author_owner_grant: slot.author_owner_grant,
+                seq: slot.sequence,
+                entry_hash: slot.semantic_hash,
+            })
+            .collect::<Vec<_>>();
+        coords.sort();
+        coords.dedup();
+        coords
+    }
+
+    async fn unique_membership_coord(
+        &self,
+        author_pubkey: &str,
+        seq: u64,
+    ) -> Result<MembershipCoord, StorageError> {
+        let matches = self.membership_coords(author_pubkey, seq);
+        match matches.as_slice() {
+            [coord] => Ok(coord.clone()),
+            [] => Err(StorageError::NotFound(format!(
+                "membership entry {author_pubkey}/{seq}"
+            ))),
+            _ => Err(StorageError::Parse(format!(
+                "membership entry {author_pubkey}/{seq} spans multiple Owner grant streams"
+            ))),
+        }
+    }
+
+    pub async fn read_membership_entry_bytes(
+        &self,
+        author_pubkey: &str,
+        seq: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        let coord = self.unique_membership_coord(author_pubkey, seq).await?;
+        crate::sync::store_objects::load_membership_entry_slot(
+            self,
+            author_pubkey,
+            &coord.author_owner_grant,
+            seq,
+        )
+        .await
+        .map_err(|error| StorageError::Parse(error.to_string()))?
+        .map(|entry| entry.bytes)
+        .ok_or_else(|| StorageError::NotFound(format!("membership entry {author_pubkey}/{seq}")))
+    }
+
+    pub async fn append_membership_entry_bytes(
+        &self,
+        author_pubkey: &str,
+        seq: u64,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        let entry: MembershipEntry = serde_json::from_slice(&data)
+            .map_err(|error| StorageError::Parse(error.to_string()))?;
+        if entry.author_pubkey != author_pubkey || entry.seq != seq {
+            return Err(StorageError::Parse(format!(
+                "membership bytes declare {}/{}, expected {author_pubkey}/{seq}",
+                entry.author_pubkey, entry.seq
+            )));
+        }
+        let hash = crate::sync::store_commit::ObjectHash::digest(&data);
+        let prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
+            author_pubkey,
+            &entry.author_owner_grant,
+            seq,
+            hash,
+        );
+        SyncStorage::append_protocol_object(self, &prefix, ".json", data).await?;
+        Ok(())
+    }
+
+    pub async fn read_latest_membership_head_bytes(
+        &self,
+        author_pubkey: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        crate::sync::store_objects::list_membership_head_objects(self)
+            .await
+            .map_err(|error| StorageError::Parse(error.to_string()))?
+            .heads
+            .into_iter()
+            .filter(|head| head.value.author_pubkey == author_pubkey)
+            .max_by_key(|head| head.value.seq)
+            .map(|head| head.bytes)
+            .ok_or_else(|| StorageError::NotFound(format!("membership head {author_pubkey}")))
+    }
+
+    pub async fn append_membership_head_bytes(
+        &self,
+        author_pubkey: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        let head: crate::sync::membership::AuthorHead = serde_json::from_slice(&data)
+            .map_err(|error| StorageError::Parse(error.to_string()))?;
+        let hash = crate::sync::store_commit::ObjectHash::digest(&data);
+        let prefix = crate::sync::store_commit::membership_head_semantic_prefix(
+            author_pubkey,
+            &head.author_owner_grant,
+            head.seq,
+            hash,
+        );
+        SyncStorage::append_protocol_object(self, &prefix, ".json", data).await?;
+        Ok(())
     }
 
     /// Hide a stored membership entry from `list_membership_entries` while leaving
@@ -814,32 +996,52 @@ impl MockSyncStorage {
     /// member's authorizing Add, hide it from the LIST, and prove issue #84's
     /// grant-coordinate fetch recovers the changeset instead of dropping it.
     pub fn hide_membership_from_listing(&self, author_pubkey: &str, seq: u64) {
-        self.hidden_from_listing
-            .lock()
-            .unwrap()
-            .insert((author_pubkey.to_string(), seq));
+        let matches = self.membership_coords(author_pubkey, seq);
+        assert_eq!(
+            matches.len(),
+            1,
+            "membership slot must identify one grant stream"
+        );
+        let coord = &matches[0];
+        self.hidden_from_listing.lock().unwrap().insert((
+            coord.author_pubkey.clone(),
+            coord.author_owner_grant.clone(),
+            coord.seq,
+        ));
     }
 
     /// Remove an author's published membership head while leaving its entries
     /// stored, so a reader test can distinguish a missing required head from a
     /// lagging entry listing.
     pub fn remove_membership_head(&self, author_pubkey: &str) {
+        let prefix = format!("store-v1/membership/heads/{author_pubkey}/");
+        let mut objects = self.protocol_objects.lock().unwrap();
+        let before = objects.len();
+        objects.retain(|(object, _)| !object.logical_key().starts_with(&prefix));
         assert!(
-            self.membership_heads
-                .lock()
-                .unwrap()
-                .remove(author_pubkey)
-                .is_some(),
-            "remove_membership_head: no head for {author_pubkey}",
+            objects.len() < before,
+            "remove_membership_head: no head for {author_pubkey}"
         );
     }
 
     /// Remove one membership entry from keyed storage as well as the listing.
     pub fn remove_membership_entry(&self, author_pubkey: &str, seq: u64) {
-        let key = format!("membership/{author_pubkey}/{seq}");
+        let matches = self.membership_coords(author_pubkey, seq);
+        assert_eq!(
+            matches.len(),
+            1,
+            "membership slot must identify one grant stream"
+        );
+        let prefix = format!(
+            "store-v1/membership/entries/{author_pubkey}/{}/{seq}/",
+            matches[0].author_owner_grant
+        );
+        let mut objects = self.protocol_objects.lock().unwrap();
+        let before = objects.len();
+        objects.retain(|(object, _)| !object.logical_key().starts_with(&prefix));
         assert!(
-            self.objects.lock().unwrap().remove(&key).is_some(),
-            "remove_membership_entry: no entry at {author_pubkey}/{seq}",
+            objects.len() < before,
+            "remove_membership_entry: no entry at {author_pubkey}/{seq}"
         );
     }
 
@@ -910,10 +1112,10 @@ impl MockSyncStorage {
     /// Fail the `call_number`-th membership-entry put (1-based) to exercise the
     /// invite entry-upload rollback: the wrapped key is written first, then the
     /// entry upload fails and the rollback must restore or delete the slot.
-    pub fn fail_membership_entry_put_on_call(&self, call_number: usize) {
+    pub fn fail_membership_entry_append_on_call(&self, call_number: usize) {
         arm_put_failure(
-            &self.membership_entry_put_count,
-            &self.fail_membership_entry_put_on,
+            &self.membership_entry_append_count,
+            &self.fail_membership_entry_append_on,
             call_number,
             "membership-entry",
         );
@@ -921,13 +1123,24 @@ impl MockSyncStorage {
 
     /// Fail the `call_number`-th membership-head put (1-based) to exercise the
     /// failed-publish retry path: the entry uploads but its head does not commit.
-    pub fn fail_membership_head_put_on_call(&self, call_number: usize) {
+    pub fn fail_membership_head_append_on_call(&self, call_number: usize) {
         arm_put_failure(
-            &self.membership_head_put_count,
-            &self.fail_membership_head_put_on,
+            &self.membership_head_append_count,
+            &self.fail_membership_head_append_on,
             call_number,
             "membership-head",
         );
+    }
+
+    pub fn lose_membership_head_append_result_on_call(&self, call_number: usize) {
+        assert!(
+            call_number > 0,
+            "membership-head append call numbers are 1-based"
+        );
+        self.membership_head_append_count
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.lose_membership_head_append_on
+            .store(call_number, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Remove a blob object from the mock cloud, keyed the same flat
@@ -942,52 +1155,6 @@ impl MockSyncStorage {
         );
     }
 
-    /// The DB image of the live snapshot generation — the one the pointer names —
-    /// or None if no snapshot has been published. Lets a test assert what
-    /// `bootstrap_from_snapshot` would adopt without re-deriving the
-    /// pointer→publish_id→db resolution itself.
-    pub async fn current_snapshot_db(&self) -> Option<Vec<u8>> {
-        let (author, publish_id) = self.current_snapshot_target().await?;
-        self.snapshot_objects
-            .lock()
-            .unwrap()
-            .get(&format!("snapshot/{author}/{publish_id}.db"))
-            .cloned()
-    }
-
-    /// The live snapshot generation's author and publish id, or None if no pointer
-    /// has been published.
-    pub async fn current_snapshot_target(&self) -> Option<(String, u64)> {
-        let pointer_bytes = self
-            .snapshot_objects
-            .lock()
-            .unwrap()
-            .get("snapshot/current.json")
-            .cloned()?;
-        let pointer: crate::sync::signed_control::SnapshotPointerJson =
-            serde_json::from_slice(&pointer_bytes).expect("parse pointer");
-        Some((pointer.author_pubkey, pointer.publish_id))
-    }
-
-    /// The publish id the live snapshot pointer names, or None if no pointer has
-    /// been published.
-    pub async fn current_snapshot_publish_id(&self) -> Option<u64> {
-        self.current_snapshot_target()
-            .await
-            .map(|(_, publish_id)| publish_id)
-    }
-
-    /// The metadata of the live snapshot generation — the one the pointer names —
-    /// or None if no snapshot has been published.
-    pub async fn current_snapshot_meta(&self) -> Option<Vec<u8>> {
-        let (author, publish_id) = self.current_snapshot_target().await?;
-        self.snapshot_objects
-            .lock()
-            .unwrap()
-            .get(&format!("snapshot/{author}/{publish_id}_meta.json"))
-            .cloned()
-    }
-
     /// Store a changeset in the mock storage (simulates what push would do). The
     /// changeset itself is left unsigned (for tests exercising unsigned-changeset
     /// rejection); the device head it advances is signed by the mock's keypair.
@@ -998,201 +1165,258 @@ impl MockSyncStorage {
         changeset_bytes: &[u8],
         schema_version: u32,
     ) {
-        // Sign with the mock's keypair, as production always does: the author is
-        // what the pull records as each introduced blob's uploader (there is no
-        // listing scan), so a blob a signed changeset introduces is downloadable
-        // and later readable. A test that specifically needs an unsigned envelope
-        // (a pre-initialization unanchored path or an unsigned-rejection path) uses
-        // [`store_unsigned_changeset`].
-        let packed = envelope::pack_signed(
-            device_id,
-            seq,
-            schema_version,
-            "",
-            "2026-02-10T00:00:00Z",
-            &self.keypair,
-            None,
-            changeset_bytes,
-        );
-        self.store_packed(device_id, seq, packed);
+        self.store_changeset_with_grant(device_id, seq, changeset_bytes, schema_version, None);
     }
 
-    /// Store an unsigned changeset envelope (`author_pubkey`/`signature` both
-    /// `None`), for tests that exercise the pre-initialization unanchored path or
-    /// assert pull rejects an unsigned changeset once a membership chain exists.
-    pub fn store_unsigned_changeset(
+    pub fn store_changeset_with_grant(
         &self,
         device_id: &str,
         seq: u64,
         changeset_bytes: &[u8],
         schema_version: u32,
+        membership_grant: Option<MembershipCoord>,
     ) {
-        let env = ChangesetEnvelope {
-            device_id: device_id.to_string(),
+        self.store_changeset_signed_as(
+            device_id,
             seq,
+            changeset_bytes,
             schema_version,
-            message: String::new(),
-            timestamp: "2026-02-10T00:00:00Z".to_string(),
-            changeset_size: changeset_bytes.len(),
-            author_pubkey: None,
-            membership_grant: None,
-            signature: None,
+            membership_grant,
+            &self.keypair,
+            &self.keypair,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_changeset_signed_as(
+        &self,
+        device_id: &str,
+        seq: u64,
+        changeset_bytes: &[u8],
+        schema_version: u32,
+        membership_grant: Option<MembershipCoord>,
+        commit_signer: &UserKeypair,
+        head_signer: &UserKeypair,
+    ) {
+        let previous = if seq == 1 {
+            None
+        } else {
+            Some(
+                self.store_commits
+                    .lock()
+                    .unwrap()
+                    .get(&(device_id.to_string(), seq - 1))
+                    .unwrap_or_else(|| panic!("missing predecessor {device_id}/{}", seq - 1))
+                    .commit_hash(),
+            )
         };
-        let packed = envelope::pack(&env, changeset_bytes);
-        self.store_packed(device_id, seq, packed);
-    }
-
-    /// Store a pre-packed envelope (already signed/packed by the caller) and
-    /// advance the device head. For tests that need a specific signature or
-    /// envelope timestamp `store_changeset`'s synthetic envelope can't express.
-    ///
-    /// Used only by the native-only register-clock tests (`hlc_register_tests`).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn put_changeset_packed(&self, device_id: &str, seq: u64, packed: Vec<u8>) {
-        self.store_packed(device_id, seq, packed);
-    }
-
-    /// Insert packed envelope bytes at `changes/{device_id}/{seq}` and advance the
-    /// device head to `seq`, signing the head with the mock's keypair.
-    fn store_packed(&self, device_id: &str, seq: u64, packed: Vec<u8>) {
-        let key = format!("changes/{device_id}/{seq}");
-        self.objects.lock().unwrap().insert(key, packed);
-        self.publish_head(device_id, seq);
-    }
-
-    /// Publish a signed head for `device_id` at `seq`, exactly as `put_head` does,
-    /// but reusable by the changeset-fabrication helpers. Signs with the mock's
-    /// keypair and stores the resulting `HeadJson` JSON bytes.
-    fn publish_head(&self, device_id: &str, seq: u64) {
-        let head = HeadJson::signed(device_id, seq, None, &self.keypair);
-        let bytes = serde_json::to_vec(&head).expect("serialize head");
-        self.heads
+        let commit = crate::sync::store_commit::StoreBatchCommit::signed(
+            self.protocol_genesis_hash(),
+            device_id.to_string(),
+            seq,
+            previous,
+            std::collections::BTreeMap::new(),
+            membership_grant,
+            schema_version,
+            changeset_bytes,
+            commit_signer,
+        )
+        .expect("sign test Store commit");
+        let head = crate::sync::store_commit::StoreDeviceHead::signed(
+            self.protocol_genesis_hash(),
+            device_id.to_string(),
+            Some(commit.position()),
+            "2026-02-10T00:00:00Z".to_string(),
+            head_signer,
+        )
+        .expect("sign test Store head");
+        self.append_test_protocol(&commit.package.object_key, ".pkg", changeset_bytes.to_vec());
+        self.append_test_protocol(
+            &crate::sync::store_commit::commit_semantic_prefix(
+                device_id,
+                seq,
+                commit.commit_hash(),
+            ),
+            ".json",
+            commit.to_bytes(),
+        );
+        self.append_test_protocol(
+            &crate::sync::store_commit::head_semantic_prefix(device_id, seq, head.head_hash()),
+            ".json",
+            head.to_bytes(),
+        );
+        self.store_commits
             .lock()
             .unwrap()
-            .insert(device_id.to_string(), bytes);
-    }
-
-    /// Every `(device_id, timestamp)` passed to [`SyncStorage::put_head`], in call
-    /// order — for asserting the timestamp each head writer records is RFC 3339.
-    pub fn head_put_timestamps(&self) -> Vec<(String, String)> {
-        self.head_puts.lock().unwrap().clone()
-    }
-
-    /// Publish a head for `device_id` signed by `keypair` — so the head's author is
-    /// that device's own key rather than the mock's default identity. Lets a
-    /// changeset-GC test give each device a head attributed to its own membership
-    /// key (the author changeset reclamation matches each device's ack against).
-    pub fn publish_head_as(&self, device_id: &str, seq: u64, keypair: &UserKeypair) {
-        let head = HeadJson::signed(device_id, seq, None, keypair);
-        let bytes = serde_json::to_vec(&head).expect("serialize head");
-        self.heads
-            .lock()
-            .unwrap()
-            .insert(device_id.to_string(), bytes);
-    }
-
-    /// Place an object in a device's head slot that cannot be parsed as a
-    /// `HeadJson`, mirroring a slot the cloud reader can't open/parse/verify. The
-    /// slot is a valid device-head key, so `list_heads` counts it toward
-    /// `unreadable` — letting a test exercise reclamation failing closed.
-    pub fn publish_unreadable_head(&self, device_id: &str) {
-        self.heads
-            .lock()
-            .unwrap()
-            .insert(device_id.to_string(), b"not a head".to_vec());
+            .insert((device_id.to_string(), seq), commit);
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SyncStorage for MockSyncStorage {
-    async fn list_heads(&self) -> Result<HeadListing, StorageError> {
-        let heads = self.heads.lock().unwrap();
-        let mut out = Vec::new();
-        let mut unreadable = 0usize;
-        for (device_id, bytes) in heads.iter() {
-            // Mirror the cloud: a head that can't be parsed or verified is skipped
-            // (not fatal) and counted, so reclamation can fail closed on a
-            // present-but-unreadable slot while the pull stays tolerant.
-            let head: HeadJson = match serde_json::from_slice(bytes) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::warn!("skipping head {device_id} that does not parse: {e}");
-                    unreadable += 1;
-                    continue;
-                }
-            };
-            if !head.verify(device_id) {
-                tracing::warn!("skipping head {device_id} with an invalid signature");
-                unreadable += 1;
-                continue;
-            }
-            out.push(DeviceHead {
-                device_id: device_id.clone(),
-                seq: head.seq,
-                last_sync: head.last_sync,
-                author_pubkey: head.author_pubkey,
-            });
+    async fn append_protocol_object(
+        &self,
+        semantic_prefix: &str,
+        extension: &str,
+        data: Vec<u8>,
+    ) -> Result<ProtocolObjectLocator, StorageError> {
+        if semantic_prefix.starts_with("store-v1/membership/entries/")
+            && armed_put_failure_hits(
+                &self.membership_entry_append_count,
+                &self.fail_membership_entry_append_on,
+            )
+        {
+            return Err(StorageError::Storage(format!(
+                "forced membership-entry append failure for {semantic_prefix}"
+            )));
         }
-        out.sort_by(|a, b| a.device_id.cmp(&b.device_id));
-        Ok(HeadListing {
-            heads: out,
-            unreadable,
+        if semantic_prefix.starts_with("store-v1/membership/heads/")
+            && armed_put_failure_hits(
+                &self.membership_head_append_count,
+                &self.fail_membership_head_append_on,
+            )
+        {
+            return Err(StorageError::Storage(format!(
+                "forced membership-head append failure for {semantic_prefix}"
+            )));
+        }
+        if extension == ".pkg"
+            && self
+                .fail_changeset_puts
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+        {
+            return Err(StorageError::Storage(format!(
+                "forced Store package append failure for {semantic_prefix}"
+            )));
+        }
+        let appended = self.append_test_protocol(semantic_prefix, extension, data);
+        if semantic_prefix.starts_with("store-v1/membership/heads/") {
+            let call = self
+                .membership_head_append_count
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if self
+                .lose_membership_head_append_on
+                .compare_exchange(
+                    call,
+                    0,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                return Err(StorageError::Storage(format!(
+                    "membership-head append result lost after storing {semantic_prefix}"
+                )));
+            }
+        }
+        Ok(appended)
+    }
+
+    async fn list_protocol_objects(
+        &self,
+        prefix: &str,
+    ) -> Result<ProtocolObjectListing, StorageError> {
+        if prefix == "store-v1/membership/entries/" {
+            let armed_call_hit =
+                armed_put_failure_hits(&self.membership_list_count, &self.fail_membership_list_on);
+            if self
+                .fail_membership_list
+                .load(std::sync::atomic::Ordering::SeqCst)
+                || armed_call_hit
+            {
+                return Err(StorageError::Storage(
+                    "injected membership-list failure".into(),
+                ));
+            }
+        }
+        let hidden = self.hidden_from_listing.lock().unwrap();
+        let objects = self
+            .protocol_objects
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(physical, _)| {
+                if !physical.logical_key().starts_with(prefix) {
+                    return false;
+                }
+                if prefix != "store-v1/membership/entries/" {
+                    return true;
+                }
+                crate::sync::store_commit::parse_membership_entry_copy_key(physical.logical_key())
+                    .is_ok_and(|parsed| {
+                        !hidden.contains(&(
+                            parsed.author,
+                            parsed.author_owner_grant,
+                            parsed.sequence,
+                        ))
+                    })
+            })
+            .map(|(physical, _)| {
+                ProtocolObjectLocator::new(physical.logical_key().to_string(), physical.clone())
+            })
+            .collect();
+        Ok(ProtocolObjectListing {
+            objects,
+            coverage: crate::storage::cloud::ListingCoverage::CompleteAtScan,
         })
     }
 
-    async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-        let key = format!("changes/{device_id}/{seq}");
-        let objects = self.objects.lock().unwrap();
-        objects
-            .get(&key)
-            .cloned()
-            .ok_or(StorageError::NotFound(key))
-    }
-
-    async fn put_changeset(
+    async fn read_protocol_object(
         &self,
-        device_id: &str,
-        seq: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        if self
-            .fail_changeset_puts
-            .fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |remaining| remaining.checked_sub(1),
-            )
-            .is_ok()
+        object: &ProtocolObjectLocator,
+        _semantic_prefix: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        let bytes = self
+            .protocol_objects
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(physical, _)| physical == object.physical())
+            .map(|(_, bytes)| bytes.clone())
+            .ok_or_else(|| StorageError::NotFound(object.logical_key().to_string()))?;
+        if crate::sync::store_commit::parse_membership_entry_copy_key(object.logical_key()).is_ok()
         {
-            return Err(StorageError::Storage(format!(
-                "forced changeset publish failure for {device_id}/{seq}"
-            )));
+            self.membership_entry_read_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        let key = format!("changes/{device_id}/{seq}");
-        self.objects.lock().unwrap().insert(key, data);
-        Ok(())
+        if let Ok(parsed) =
+            crate::sync::store_commit::parse_membership_head_copy_key(object.logical_key())
+        {
+            let pause = {
+                let mut pause = self.membership_head_read_pause.lock().unwrap();
+                if pause
+                    .as_ref()
+                    .is_some_and(|pause| pause.author_pubkey == parsed.author)
+                {
+                    pause.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(pause) = pause {
+                pause.snapshot_held.notify_one();
+                pause.release.notified().await;
+            }
+        }
+        Ok(bytes)
     }
 
-    async fn put_head(
+    async fn delete_protocol_object(
         &self,
-        device_id: &str,
-        seq: u64,
-        timestamp: &str,
+        object: &ProtocolObjectLocator,
     ) -> Result<(), StorageError> {
-        self.head_puts
-            .lock()
-            .unwrap()
-            .push((device_id.to_string(), timestamp.to_string()));
-        // Record the timestamp on the head the way the cloud does, so `list_heads`
-        // returns it as the device's `last_sync` — the field the sync-status view
-        // reads.
-        let head = HeadJson::signed(device_id, seq, Some(timestamp.to_string()), &self.keypair);
-        let bytes = serde_json::to_vec(&head).expect("serialize head");
-        self.heads
-            .lock()
-            .unwrap()
-            .insert(device_id.to_string(), bytes);
+        let mut objects = self.protocol_objects.lock().unwrap();
+        let before = objects.len();
+        objects.retain(|(physical, _)| physical != object.physical());
+        if objects.len() == before {
+            return Err(StorageError::NotFound(object.logical_key().to_string()));
+        }
         Ok(())
     }
 
@@ -1389,207 +1613,6 @@ impl SyncStorage for MockSyncStorage {
         Some(hex::encode(self.keypair.public_key()))
     }
 
-    async fn put_snapshot(
-        &self,
-        author: &str,
-        publish_id: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        self.snapshot_objects
-            .lock()
-            .unwrap()
-            .insert(format!("snapshot/{author}/{publish_id}.db"), data);
-        Ok(())
-    }
-
-    async fn get_snapshot(&self, author: &str, publish_id: u64) -> Result<Vec<u8>, StorageError> {
-        let key = format!("snapshot/{author}/{publish_id}.db");
-        self.snapshot_objects
-            .lock()
-            .unwrap()
-            .get(&key)
-            .cloned()
-            .ok_or(StorageError::NotFound(key))
-    }
-
-    async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError> {
-        let key = format!("changes/{device_id}/{seq}");
-        self.objects.lock().unwrap().remove(&key);
-        Ok(())
-    }
-
-    async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError> {
-        let prefix = format!("changes/{device_id}/");
-        let objects = self.objects.lock().unwrap();
-        let mut seqs = Vec::new();
-        for key in objects.keys() {
-            let Some(seq_str) = key.strip_prefix(&prefix) else {
-                continue;
-            };
-            match seq_str.parse::<u64>() {
-                Ok(seq) => seqs.push(seq),
-                Err(e) => tracing::warn!("skipping changeset key {key} with non-numeric seq: {e}"),
-            }
-        }
-        seqs.sort_unstable();
-        Ok(seqs)
-    }
-
-    async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError> {
-        let key = format!("acks/{device_id}.json");
-        self.objects.lock().unwrap().insert(key, data);
-        Ok(())
-    }
-
-    async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError> {
-        let key = format!("acks/{device_id}.json");
-        let objects = self.objects.lock().unwrap();
-        objects
-            .get(&key)
-            .cloned()
-            .ok_or(StorageError::NotFound(key))
-    }
-
-    async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
-        let stored = self.min_schema_version.lock().unwrap();
-        let Some(bytes) = stored.as_ref() else {
-            return Ok(None);
-        };
-        let parsed: MinSchemaVersionJson = serde_json::from_slice(bytes)
-            .map_err(|e| StorageError::Parse(format!("parse min_schema_version: {e}")))?;
-        // Mirror the cloud: an unverifiable floor is treated as absent, and logged.
-        if !parsed.verify() {
-            tracing::warn!("ignoring min_schema_version with an invalid signature");
-            return Ok(None);
-        }
-        Ok(Some(MinSchemaVersion {
-            version: parsed.min_schema_version,
-            author_pubkey: parsed.author_pubkey,
-        }))
-    }
-
-    async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError> {
-        let payload = MinSchemaVersionJson::signed(version, &self.keypair);
-        let bytes = serde_json::to_vec(&payload).expect("serialize min_schema_version");
-        *self.min_schema_version.lock().unwrap() = Some(bytes);
-        Ok(())
-    }
-
-    async fn put_membership_entry(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        if armed_put_failure_hits(
-            &self.membership_entry_put_count,
-            &self.fail_membership_entry_put_on,
-        ) {
-            return Err(StorageError::Storage(format!(
-                "forced membership-entry upload failure for {author_pubkey}/{seq}"
-            )));
-        }
-        let key = format!("membership/{author_pubkey}/{seq}");
-        self.objects.lock().unwrap().insert(key, data);
-        Ok(())
-    }
-
-    async fn get_membership_entry(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.membership_get_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let key = format!("membership/{author_pubkey}/{seq}");
-        let objects = self.objects.lock().unwrap();
-        objects
-            .get(&key)
-            .cloned()
-            .ok_or(StorageError::NotFound(key))
-    }
-
-    async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
-        let armed_call_hit =
-            armed_put_failure_hits(&self.membership_list_count, &self.fail_membership_list_on);
-        if self
-            .fail_membership_list
-            .load(std::sync::atomic::Ordering::SeqCst)
-            || armed_call_hit
-        {
-            return Err(StorageError::Storage(
-                "injected membership-list failure".into(),
-            ));
-        }
-        let objects = self.objects.lock().unwrap();
-        let hidden = self.hidden_from_listing.lock().unwrap();
-        let mut entries = Vec::new();
-
-        for key in objects.keys() {
-            if let Some(rest) = key.strip_prefix("membership/") {
-                if let Some(slash_pos) = rest.rfind('/') {
-                    let author = &rest[..slash_pos];
-                    if let Ok(seq) = rest[slash_pos + 1..].parse::<u64>() {
-                        // Omit entries a test marked as not-yet-visible to the LIST
-                        // (issue #84's eventual-consistency lag); a keyed GET still
-                        // serves them.
-                        if !hidden.contains(&(author.to_string(), seq)) {
-                            entries.push((author.to_string(), seq));
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(entries)
-    }
-
-    async fn put_membership_head(
-        &self,
-        author_pubkey: &str,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        if armed_put_failure_hits(
-            &self.membership_head_put_count,
-            &self.fail_membership_head_put_on,
-        ) {
-            return Err(StorageError::Storage(format!(
-                "forced membership-head upload failure for {author_pubkey}"
-            )));
-        }
-        self.membership_heads
-            .lock()
-            .unwrap()
-            .insert(author_pubkey.to_string(), data);
-        Ok(())
-    }
-
-    async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError> {
-        let bytes = self
-            .membership_heads
-            .lock()
-            .unwrap()
-            .get(author_pubkey)
-            .cloned()
-            .ok_or_else(|| StorageError::NotFound(format!("membership/{author_pubkey}/head")))?;
-        let pause = {
-            let mut pause = self.membership_head_read_pause.lock().unwrap();
-            if pause
-                .as_ref()
-                .is_some_and(|pause| pause.author_pubkey == author_pubkey)
-            {
-                pause.take()
-            } else {
-                None
-            }
-        };
-        if let Some(pause) = pause {
-            pause.snapshot_held.notify_one();
-            pause.release.notified().await;
-        }
-        Ok(bytes)
-    }
-
     async fn put_wrapped_key(
         &self,
         owner_pubkey: &str,
@@ -1626,100 +1649,6 @@ impl SyncStorage for MockSyncStorage {
     ) -> Result<(), StorageError> {
         let key = format!("keys/{owner_pubkey}/{recipient_pubkey}.enc");
         self.objects.lock().unwrap().remove(&key);
-        Ok(())
-    }
-
-    async fn put_snapshot_meta(
-        &self,
-        author: &str,
-        publish_id: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        self.snapshot_objects
-            .lock()
-            .unwrap()
-            .insert(format!("snapshot/{author}/{publish_id}_meta.json"), data);
-        Ok(())
-    }
-
-    async fn get_snapshot_meta(
-        &self,
-        author: &str,
-        publish_id: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        let key = format!("snapshot/{author}/{publish_id}_meta.json");
-        self.snapshot_objects
-            .lock()
-            .unwrap()
-            .get(&key)
-            .cloned()
-            .ok_or(StorageError::NotFound(key))
-    }
-
-    async fn put_snapshot_pointer(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        self.snapshot_objects
-            .lock()
-            .unwrap()
-            .insert("snapshot/current.json".to_string(), data);
-        Ok(())
-    }
-
-    async fn get_snapshot_pointer(&self) -> Result<Vec<u8>, StorageError> {
-        self.snapshot_objects
-            .lock()
-            .unwrap()
-            .get("snapshot/current.json")
-            .cloned()
-            .ok_or(StorageError::NotFound("snapshot/current.json".into()))
-    }
-
-    async fn list_own_snapshot_generations(&self, author: &str) -> Result<Vec<u64>, StorageError> {
-        // List only this author's own keyspace — the meta objects under
-        // `snapshot/{author}/` — exactly as `CloudSyncStorage` does. Ownership is
-        // structural: a peer's generations live under a different prefix.
-        let prefix = format!("snapshot/{author}/");
-        let objects = self.snapshot_objects.lock().unwrap();
-        let mut publish_ids = Vec::new();
-        for key in objects.keys() {
-            let Some(rest) = key.strip_prefix(&prefix) else {
-                // A different author's generation or the shared pointer — not under
-                // this author's prefix, legitimately not ours; skip silently.
-                continue;
-            };
-            // Mirror `CloudSyncStorage`: the `{publish_id}.db` sibling is expected and
-            // listed via its meta (skip silently); a meta with a non-numeric publish
-            // id, or any other object under this author's prefix, is surfaced rather
-            // than dropped.
-            match rest.strip_suffix("_meta.json") {
-                Some(id_str) => match id_str.parse::<u64>() {
-                    Ok(publish_id) => publish_ids.push(publish_id),
-                    Err(e) => {
-                        tracing::warn!(
-                            "snapshot listing: meta key {key} has a non-numeric publish id: {e}"
-                        )
-                    }
-                },
-                None if rest.ends_with(".db") => {}
-                None => tracing::warn!(
-                    "snapshot listing: unexpected object {key} under a snapshot author prefix"
-                ),
-            }
-        }
-        publish_ids.sort_unstable();
-        Ok(publish_ids)
-    }
-
-    async fn delete_snapshot_generation(
-        &self,
-        author: &str,
-        publish_id: u64,
-    ) -> Result<(), StorageError> {
-        // Remove the db first, the meta last: the meta is what `list` keys a
-        // generation by, so a crash between the two leaves it still listed (and
-        // re-deletable), never a meta-less db.
-        let mut objects = self.snapshot_objects.lock().unwrap();
-        objects.remove(&format!("snapshot/{author}/{publish_id}.db"));
-        objects.remove(&format!("snapshot/{author}/{publish_id}_meta.json"));
         Ok(())
     }
 }
@@ -1814,74 +1743,286 @@ impl CloudHome for MockSyncStorage {
         Ok(self.objects.lock().unwrap().contains_key(key))
     }
 
-    async fn grant_access(
+    async fn set_access(
         &self,
-        _grant: crate::storage::cloud::CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        Ok(CloudHomeJoinInfo::S3 {
-            bucket: "test-bucket".to_string(),
-            region: "us-east-1".to_string(),
-            endpoint: None,
-            access_key: "test-access-key".to_string(),
-            secret_key: "test-secret-key".to_string(),
-            key_prefix: None,
+        desired: crate::storage::cloud::CloudAccessState,
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
+        Ok(match desired {
+            crate::storage::cloud::CloudAccessState::Present { .. } => {
+                crate::storage::cloud::CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
+                    bucket: "test-bucket".to_string(),
+                    region: "us-east-1".to_string(),
+                    endpoint: None,
+                    access_key: "test-access-key".to_string(),
+                    secret_key: "test-secret-key".to_string(),
+                    key_prefix: None,
+                })
+            }
+            crate::storage::cloud::CloudAccessState::Absent { .. } => {
+                crate::storage::cloud::CloudAccessOutcome::Absent(
+                    crate::storage::cloud::RevokeOutcome::Unsupported,
+                )
+            }
         })
     }
+}
 
-    async fn revoke_access(
-        &self,
-        _revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
-        Ok(crate::storage::cloud::RevokeOutcome::Unsupported)
-    }
+/// Bind a test database to the immutable Store genesis already carried by the
+/// mock and to the device that will publish from it.
+pub async fn bind_mock_store_protocol(db: &Database, storage: &MockSyncStorage, device_id: &str) {
+    db.set_protocol_state(
+        crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY,
+        &storage.protocol_genesis_hash().to_string(),
+    )
+    .await
+    .expect("bind mock Store genesis");
+    db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
+        .await
+        .expect("bind mock Store device");
+}
+
+/// Append a founder-signed Store genesis and pin its exact hash in a test
+/// database. Real cloud-storage tests use this instead of inventing protocol
+/// state that has no corresponding immutable object.
+pub async fn publish_test_store_genesis(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    store_id: &str,
+    device_id: &str,
+    founder: &UserKeypair,
+) -> crate::sync::store_commit::ObjectHash {
+    let founder_entry = crate::sync::membership::founder_entry(
+        store_id,
+        founder,
+        "0000000000001-0000-test-store-genesis",
+    );
+    let genesis = crate::sync::store_commit::ProtocolGenesis::signed(
+        store_id.to_string(),
+        founder_entry,
+        1,
+        founder,
+    )
+    .expect("sign test Store genesis");
+    let hash = genesis.object_hash();
+    crate::sync::store_objects::append_and_verify(
+        storage,
+        &crate::sync::store_commit::genesis_semantic_prefix(hash),
+        ".json",
+        &genesis.to_bytes(),
+    )
+    .await
+    .expect("append test Store genesis");
+    db.set_protocol_state(
+        crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY,
+        &hash.to_string(),
+    )
+    .await
+    .expect("pin test Store genesis");
+    db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
+        .await
+        .expect("bind test Store device");
+    hash
+}
+
+/// Publish one Store genesis and its byte-identical membership founder root.
+pub async fn publish_test_protocol_roots(
+    storage: &dyn SyncStorage,
+    store_id: &str,
+    founder: &UserKeypair,
+    created_at: &str,
+) -> (
+    crate::sync::store_commit::ProtocolGenesis,
+    crate::sync::membership::MembershipChain,
+) {
+    let founder_entry = crate::sync::membership::founder_entry(store_id, founder, created_at);
+    let genesis = crate::sync::store_commit::ProtocolGenesis::signed(
+        store_id.to_string(),
+        founder_entry.clone(),
+        1,
+        founder,
+    )
+    .expect("sign test Store genesis");
+    let hash = genesis.object_hash();
+    crate::sync::store_objects::append_and_verify(
+        storage,
+        &crate::sync::store_commit::genesis_semantic_prefix(hash),
+        ".json",
+        &genesis.to_bytes(),
+    )
+    .await
+    .expect("publish test Store genesis");
+    let coord = founder_entry.coord();
+    let chain = crate::sync::membership::MembershipChain::from_entries(vec![founder_entry.clone()])
+        .expect("validate test founder membership");
+    crate::sync::store_objects::append_membership_entry_object(storage, &coord, &founder_entry)
+        .await
+        .expect("publish test founder membership");
+    crate::sync::membership_ops::publish_membership_head(storage, &chain, founder)
+        .await
+        .expect("publish test founder head");
+    (genesis, chain)
+}
+
+pub async fn publish_test_founder_membership(
+    storage: &dyn SyncStorage,
+    store_id: &str,
+    founder: &UserKeypair,
+) -> crate::sync::membership::MembershipChain {
+    let genesis = crate::sync::store_objects::discover_genesis(
+        storage,
+        store_id,
+        Some(&crate::keys::public_key_hex(founder)),
+    )
+    .await
+    .expect("load test Store genesis")
+    .value;
+    let entry = genesis.founder;
+    let coord = entry.coord();
+    let mut chain = crate::sync::membership::MembershipChain::new();
+    chain
+        .add_entry_at(coord.clone(), entry.clone())
+        .expect("valid test founder membership");
+    crate::sync::store_objects::append_membership_entry_object(storage, &coord, &entry)
+        .await
+        .expect("publish test founder membership");
+    crate::sync::membership_ops::publish_membership_head(storage, &chain, founder)
+        .await
+        .expect("publish test founder membership head");
+    chain
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn push_test_store_snapshot(
+    storage: &dyn SyncStorage,
+    genesis_hash: crate::sync::store_commit::ObjectHash,
+    db_image: Vec<u8>,
+    coverage: std::collections::BTreeMap<String, crate::sync::store_commit::CommitPosition>,
+    schema_version: u32,
+    founder: &UserKeypair,
+    membership: &crate::sync::membership::MembershipChain,
+    db: &Database,
+) -> crate::sync::store_commit::SnapshotMeta {
+    crate::sync::store_snapshot::push_store_snapshot(
+        storage,
+        genesis_hash,
+        crate::sync::snapshot::CreatedSnapshot {
+            db_image,
+            host_blobs: Vec::new(),
+            publish_blobs: Vec::new(),
+        },
+        coverage,
+        schema_version,
+        founder,
+        "2026-02-10T00:00:00Z".to_string(),
+        Some(membership),
+        db,
+    )
+    .await
+    .expect("publish test Store snapshot")
 }
 
 /// Pull into `db` the way production does: `pull_changes` applies each incoming
 /// changeset with a plain `call` (never journaled), so applied rows aren't
 /// recorded as a local change, while a host write during the pull journals
-/// normally. Returns the updated cursors and the pull result.
+/// normally. Returns the updated positions and the pull result.
 pub async fn pull_into(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &MockSyncStorage,
     device_id: &str,
     store_dir: &crate::store_dir::StoreDir,
-) -> (HashMap<String, u64>, crate::sync::pull::PullResult) {
-    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+) -> (
+    std::collections::BTreeMap<String, u64>,
+    crate::sync::store_pull::StorePullResult,
+) {
+    pull_into_result(db, storage, device_id, store_dir)
         .await
-        .expect("load cycle membership");
-    pull_changes(
-        db,
-        db.synced_tables(),
-        storage,
-        device_id,
-        store_dir,
-        membership.chain,
-        membership.pinned_owner,
-    )
-    .await
-    .expect("pull")
+        .expect("pull")
 }
 
-/// Like [`pull_into`] but returns the `pull_changes` result without unwrapping, so
-/// a test can assert a [`crate::sync::pull::PullError`].
-#[allow(clippy::type_complexity)]
 pub async fn pull_into_result(
     db: &Database,
-    storage: &dyn SyncStorage,
+    storage: &MockSyncStorage,
     device_id: &str,
     store_dir: &crate::store_dir::StoreDir,
-) -> Result<(HashMap<String, u64>, crate::sync::pull::PullResult), crate::sync::pull::PullError> {
-    let membership = crate::sync::pull::load_cycle_membership(storage, db).await?;
-    pull_changes(
+) -> Result<
+    (
+        std::collections::BTreeMap<String, u64>,
+        crate::sync::store_pull::StorePullResult,
+    ),
+    crate::sync::store_pull::StorePullError,
+> {
+    bind_mock_store_protocol(db, storage, device_id).await;
+    let genesis_hash = storage.protocol_genesis_hash();
+    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+        .await
+        .map_err(|error| crate::sync::store_pull::StorePullError::Membership(error.to_string()))?;
+    let result = crate::sync::store_pull::pull_store_commits(
         db,
         db.synced_tables(),
         storage,
+        genesis_hash,
         device_id,
         store_dir,
-        membership.chain,
-        membership.pinned_owner,
+        membership.chain.as_ref(),
+    )
+    .await?;
+    let sequences = result
+        .frontier
+        .iter()
+        .map(|(device_id, position)| (device_id.clone(), position.seq))
+        .collect();
+    Ok((sequences, result))
+}
+
+pub async fn pull_cloud_into(
+    db: &Database,
+    trusted_store_db: &Database,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    device_id: &str,
+    store_dir: &crate::store_dir::StoreDir,
+) -> (
+    std::collections::BTreeMap<String, u64>,
+    crate::sync::store_pull::StorePullResult,
+) {
+    let genesis_hash = trusted_store_db
+        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+        .await
+        .expect("read trusted Store genesis")
+        .expect("trusted database is bound to a Store genesis")
+        .parse()
+        .expect("trusted Store genesis hash");
+    crate::sync::store_genesis::open_store(
+        db,
+        storage,
+        genesis_hash,
+        storage.store_id(),
+        &crate::keys::public_key_hex(storage.user_keypair()),
     )
     .await
+    .expect("open exact test Store");
+    db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
+        .await
+        .expect("bind test Store device");
+    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+        .await
+        .expect("load test Store membership");
+    let result = crate::sync::store_pull::pull_store_commits(
+        db,
+        db.synced_tables(),
+        storage,
+        genesis_hash,
+        device_id,
+        store_dir,
+        membership.chain.as_ref(),
+    )
+    .await
+    .expect("pull exact test Store");
+    let sequences = result
+        .frontier
+        .iter()
+        .map(|(device_id, position)| (device_id.clone(), position.seq))
+        .collect();
+    (sequences, result)
 }
 
 /// Drive the raw engine with an injected [`SyncStorage`] in downstream tests.
@@ -1919,12 +2060,4 @@ pub async fn run_test_cycle(
         observer,
     )
     .await
-}
-
-pub async fn publish_test_founder(
-    storage: &dyn SyncStorage,
-    owner: &UserKeypair,
-    timestamp: &str,
-) -> Result<(), String> {
-    crate::sync::membership_ops::write_founder_entry(storage, owner, timestamp).await
 }

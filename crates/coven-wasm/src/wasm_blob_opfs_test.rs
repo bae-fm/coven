@@ -26,8 +26,10 @@ use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::storage::cloud::RandomCopyIdGenerator;
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use crate::sync::cycle::StoreInitialization;
 use crate::sync::session::BlobDecl;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
@@ -58,12 +60,13 @@ fn open_device(device_id: &str) -> Database {
 /// Run one full sync cycle for `device_id` over `storage`. coven derives
 /// `note_photos`'s blob from the declaration on the synced set. Changeset and
 /// blob I/O use the supplied storage, including its fixed at-rest cipher.
-async fn run_cycle(storage: CloudSyncStorage, db: &Database, store_dir: &StoreDir) {
-    db.set_sync_state("snapshot_seq", "0")
-        .await
-        .expect("seed snapshot floor for blob wasm test");
-
-    let components = crate::sync::cycle::init_sync_over_storage(db, storage)
+async fn run_cycle(
+    storage: CloudSyncStorage,
+    db: &Database,
+    store_dir: &StoreDir,
+    initialization: StoreInitialization,
+) {
+    let components = crate::sync::cycle::init_sync_over_storage(db, storage, initialization)
         .await
         .expect("initialize sync session");
     components
@@ -184,8 +187,16 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         BlobPathScheme::Hashed,
         "wasm-blob-opfs-test",
         identity.clone(),
-    );
-    run_cycle(storage_a, &db_a, &lib_a).await;
+    )
+    .with_copy_ids(std::sync::Arc::new(RandomCopyIdGenerator));
+    run_cycle(storage_a, &db_a, &lib_a, StoreInitialization::CreateStore).await;
+    let genesis_hash = db_a
+        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+        .await
+        .expect("read A's protocol genesis")
+        .expect("A initialized a protocol genesis")
+        .parse()
+        .expect("parse A's protocol genesis hash");
 
     // B has not pulled, so the blob is not in B's cache yet.
     let b_cache = lib_b
@@ -204,9 +215,19 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
         CloudCipher::Encrypted(EncryptionService::from_key([8u8; 32])),
         BlobPathScheme::Hashed,
         "wasm-blob-opfs-test",
-        identity,
-    );
-    run_cycle(storage_b, &db_b, &lib_b).await;
+        identity.clone(),
+    )
+    .with_copy_ids(std::sync::Arc::new(RandomCopyIdGenerator));
+    run_cycle(
+        storage_b,
+        &db_b,
+        &lib_b,
+        StoreInitialization::OpenStore {
+            expected_genesis_hash: genesis_hash,
+            expected_founder: crate::keys::public_key_hex(&identity),
+        },
+    )
+    .await;
 
     // The row crossed...
     let has_photo_row = db_b

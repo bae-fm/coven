@@ -5,10 +5,10 @@
 //! `multi_device_managed_edit_reaches_restore` (in `snapshot.rs`) covers
 //! bootstrap plus a *hand-rolled* pull and snapshot push; it never drives the
 //! real cycle, so it can't see that the cycle, run on a just-joined device whose
-//! `sync_state` the join path left empty, trips `is_initial_sync` and overwrites
+//! `protocol_state` the join path left empty, trips `is_initial_sync` and overwrites
 //! the owner's snapshot with its own.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use crate::blob::{CacheFill, Provenance};
@@ -24,9 +24,7 @@ use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::hlc::Hlc;
 use crate::sync::join::{join_from_invite_code, open_db_and_pull, BootstrapError};
 use crate::sync::session::BlobDecl;
-use crate::sync::snapshot::{
-    bootstrap_from_snapshot, create_snapshot, push_snapshot, SnapshotBlobPreflight,
-};
+use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::run_test_cycle;
 use crate::sync::test_helpers::*;
@@ -40,6 +38,17 @@ const SCHEMA_VERSION: u32 = 1;
 /// as an uncancelled caller's would.
 fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
     tokio::sync::watch::channel(false).1
+}
+
+fn membership_floor(author_pubkey: String) -> Vec<crate::sync::membership::MembershipCoord> {
+    vec![crate::sync::membership::MembershipCoord {
+        author_pubkey,
+        author_owner_grant: crate::sync::membership::OwnerGrantId(
+            crate::sync::store_commit::ObjectHash::digest(b"invite test owner grant"),
+        ),
+        seq: 1,
+        entry_hash: crate::sync::store_commit::ObjectHash::digest(b"invite test founder entry"),
+    }]
 }
 
 /// An invite code carrying an attacker-chosen `store_id` is the path-traversal
@@ -65,7 +74,8 @@ fn invite_code_with_store_id(store_id: &str) -> InviteCode {
             key_prefix: None,
         },
         owner_pubkey: hex::encode([0xAB_u8; 32]),
-        membership_floor: Vec::new(),
+        genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"invite test genesis"),
+        membership_floor: membership_floor(hex::encode([0xAB_u8; 32])),
     }
 }
 
@@ -326,7 +336,8 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
             folder_path: "/Apps/coven/oauth-cleanup-test".to_string(),
         },
         owner_pubkey: hex::encode([0xAB_u8; 32]),
-        membership_floor: Vec::new(),
+        genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"invite test genesis"),
+        membership_floor: membership_floor(hex::encode([0xAB_u8; 32])),
     });
     let oauth_tokens = crate::oauth::OAuthTokens {
         access_token: "access-token".to_string(),
@@ -432,7 +443,6 @@ async fn join_store_refuses_when_completed_store_exists_and_leaves_it_untouched(
         identity_custody,
         cloud_home,
         &ids,
-        &SystemClock,
         |_| {},
         &never_cancelled(),
     )
@@ -506,24 +516,23 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         blob_paths,
         store_id.to_string(),
         owner_keypair.clone(),
-    );
+    )
+    .with_copy_ids(Arc::new(
+        crate::storage::cloud::SequentialCopyIdGenerator::new("join-custody-owner"),
+    ));
 
     // `BootstrapContext::Join` pins the owner before the pull, so
     // `bootstrap_from_snapshot`'s authorization check needs a real,
     // owner-anchored chain — a founder entry, published and headed.
     let owner_pk = crate::sync::test_helpers::pubkey_hex(&owner_keypair);
-    let mut chain = crate::sync::membership::MembershipChain::new();
-    let founder = crate::sync::test_helpers::founder_entry(&owner_keypair, "0000000001000-0000-A");
-    chain
-        .add_entry_at(
-            crate::sync::membership::MembershipCoord {
-                author_pubkey: owner_pk.clone(),
-                seq: 1,
-            },
-            founder.clone(),
-        )
+    let founder = crate::sync::membership::founder_entry(
+        store_id,
+        &owner_keypair,
+        "0000000000001-0000-test-store-genesis",
+    );
+    let mut chain = crate::sync::membership::MembershipChain::from_entries(vec![founder.clone()])
         .expect("valid founder entry");
-    crate::sync::storage::SyncStorage::put_membership_entry(
+    crate::sync::test_helpers::append_membership_entry_bytes(
         &owner_storage,
         &owner_pk,
         1,
@@ -537,6 +546,14 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
 
     let tables = test_synced_tables();
     let db = open_test_db();
+    let genesis_hash = crate::sync::test_helpers::publish_test_store_genesis(
+        &db,
+        &owner_storage,
+        store_id,
+        "owner-device",
+        &owner_keypair,
+    )
+    .await;
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
     let tables_c = tables.clone();
@@ -546,37 +563,57 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         })
         .await
         .expect("create owner snapshot");
-    push_snapshot(
+    crate::sync::test_helpers::push_test_store_snapshot(
         &owner_storage,
-        store_id,
+        genesis_hash,
         snapshot,
-        "owner-device",
-        HashMap::new(),
-        0,
+        BTreeMap::new(),
         db.schema_version(),
         &owner_keypair,
-        &SystemClock,
-        SnapshotBlobPreflight {
-            db: &db,
-            blobs: &[],
-        },
+        &chain,
+        &db,
     )
-    .await
-    .expect("push owner snapshot");
+    .await;
 
     let joiner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
-        Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
+        Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
         cipher.clone(),
         blob_paths,
         store_id.to_string(),
         UserKeypair::generate(),
-    );
+    )
+    .with_copy_ids(Arc::new(
+        crate::storage::cloud::SequentialCopyIdGenerator::new("join-custody-reader"),
+    ));
     let (_tmp_b, store_dir) = temp_store_dir();
     let store_keys = crate::keys::StoreKeys::new(store_id.to_string());
     let custody = Arc::new(RecordingCustody::default());
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir);
     let joiner_identity = UserKeypair::generate();
+    let add_joiner = chain
+        .signed_set_member(
+            &owner_keypair,
+            crate::sync::test_helpers::pubkey_hex(&joiner_identity),
+            None,
+            crate::sync::membership::MemberRole::Member,
+            "0000000002000-0000-A".to_string(),
+        )
+        .expect("owner adds joiner");
+    chain
+        .add_entry_at(add_joiner.coord(), add_joiner.clone())
+        .expect("valid joined-member entry");
+    crate::sync::test_helpers::append_membership_entry_bytes(
+        &owner_storage,
+        &owner_pk,
+        2,
+        serde_json::to_vec(&add_joiner).expect("serialize joined-member entry"),
+    )
+    .await
+    .expect("publish joined-member entry");
+    crate::sync::membership_ops::publish_membership_head(&owner_storage, &chain, &owner_keypair)
+        .await
+        .expect("publish joined-member head");
     let join_info = CloudHomeJoinInfo::CloudKit;
 
     crate::sync::join::bootstrap_and_save_store(
@@ -586,6 +623,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         &store_dir,
         store_id,
         "device-b",
+        genesis_hash,
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &owner_pk,
             keypair: &joiner_identity,
@@ -598,7 +636,6 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         &store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
-        &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
     )
@@ -662,7 +699,7 @@ async fn join_failure_calls_forget_on_the_selected_custody() {
 #[tokio::test]
 async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     let enc = CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32]));
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::for_store("test-lib");
     let tables = test_synced_tables();
 
     // Owner A leaves the cloud in the shape "empty store, then import" produces:
@@ -680,23 +717,9 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         })
         .await
         .expect("owner empty snapshot");
-    push_snapshot(
-        &storage,
-        "test-lib",
-        empty_snap,
-        "A",
-        HashMap::new(),
-        0,
-        db_a.schema_version(),
-        &UserKeypair::generate(),
-        &SystemClock,
-        SnapshotBlobPreflight {
-            db: &db_a,
-            blobs: &[],
-        },
-    )
-    .await
-    .expect("push empty snapshot");
+    storage
+        .publish_store_snapshot(empty_snap, BTreeMap::new(), db_a.schema_version(), &db_a)
+        .await;
 
     let cs1 = capture_bytes(
         &db_a,
@@ -706,29 +729,49 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         ],
     )
     .await;
-    storage.store_changeset("A", 1, &cs1, SCHEMA_VERSION);
+    storage.store_changeset_with_grant(
+        "A",
+        1,
+        &cs1,
+        SCHEMA_VERSION,
+        Some(storage.protocol_founder_coord()),
+    );
 
     // The shared snapshot pointer before B joins. B must not republish (which
     // would flip the pointer to a new generation).
-    let snapshot_before = storage
-        .get_snapshot_pointer()
-        .await
-        .expect("snapshot pointer present");
+    let snapshot_before: Vec<_> =
+        crate::sync::store_objects::list_snapshot_metas(&storage, storage.protocol_genesis_hash())
+            .await
+            .expect("list Store snapshots")
+            .metas
+            .into_iter()
+            .map(|meta| meta.semantic_hash)
+            .collect();
 
     // Device B joins through the real path: bootstrap from the snapshot, then
     // pull the changesets published after it.
     let (_tmp_b, lib_b) = temp_store_dir();
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
-        .await
-        .expect("B bootstrap");
+    let founder_pubkey = storage.protocol_founder_pubkey();
+    let boot = bootstrap_from_snapshot(
+        &storage,
+        "test-lib",
+        storage.protocol_genesis_hash(),
+        &founder_pubkey,
+        &[storage.protocol_founder_coord()],
+        1,
+        &lib_b.db_path(),
+    )
+    .await
+    .expect("B bootstrap");
     open_db_and_pull(
         "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
         "B",
+        &founder_pubkey,
         None,
-        &[],
+        &[storage.protocol_founder_coord()],
         &storage,
         boot,
         &lib_b,
@@ -754,7 +797,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
 
     // B's first real sync cycle, with no local changes of its own.
     let enc_lock = RwLock::new(enc.clone());
-    let keypair = UserKeypair::generate();
+    let keypair = storage.protocol_founder_keypair();
     let b_hlc = Hlc::new("B".to_string());
     run_test_cycle(
         &storage,
@@ -777,10 +820,14 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     // A just-joined device with no local changes must leave the shared snapshot
     // untouched: the pointer still names the owner's generation, not a republished
     // one of B's own.
-    let snapshot_after = storage
-        .get_snapshot_pointer()
-        .await
-        .expect("snapshot pointer present");
+    let snapshot_after: Vec<_> =
+        crate::sync::store_objects::list_snapshot_metas(&storage, storage.protocol_genesis_hash())
+            .await
+            .expect("list Store snapshots")
+            .metas
+            .into_iter()
+            .map(|meta| meta.semantic_hash)
+            .collect();
     assert_eq!(
         snapshot_after, snapshot_before,
         "a just-joined device's first cycle must not republish/clobber the shared snapshot",
@@ -788,12 +835,12 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
 }
 
 #[tokio::test]
-async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
-    let storage = MockSyncStorage::new();
+async fn bootstrap_installs_snapshot_coverage_before_ordinary_pull() {
+    let storage = MockSyncStorage::for_store("test-lib");
     let tables = test_synced_tables();
     let db_a = open_test_db();
 
-    capture_bytes(
+    let first = capture_bytes(
         &db_a,
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -801,6 +848,13 @@ async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
         ],
     )
     .await;
+    storage.store_changeset_with_grant(
+        "A",
+        1,
+        &first,
+        SCHEMA_VERSION,
+        Some(storage.protocol_founder_coord()),
+    );
     let snapshot_dir = tempfile::tempdir().expect("snapshot temp dir");
     let snapshot_path = snapshot_dir.path().to_path_buf();
     let snapshot_tables = tables.clone();
@@ -811,23 +865,14 @@ async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
         })
         .await
         .expect("create snapshot at A/1");
-    push_snapshot(
-        &storage,
-        "test-lib",
-        snapshot,
-        "A",
-        HashMap::from([("A".to_string(), 1)]),
-        1,
-        db_a.schema_version(),
-        &UserKeypair::generate(),
-        &SystemClock,
-        SnapshotBlobPreflight {
-            db: &db_a,
-            blobs: &[],
-        },
-    )
-    .await
-    .expect("publish snapshot at A/1");
+    storage
+        .publish_store_snapshot(
+            snapshot,
+            BTreeMap::from([("A".to_string(), storage.store_commit_position("A", 1))]),
+            db_a.schema_version(),
+            &db_a,
+        )
+        .await;
 
     let second = capture_bytes(
         &db_a,
@@ -835,27 +880,43 @@ async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
              _updated_at = '0000000002000-0000-A' WHERE id = 'n1'"],
     )
     .await;
-    storage.store_changeset("A", 2, &second, SCHEMA_VERSION);
+    storage.store_changeset_with_grant(
+        "A",
+        2,
+        &second,
+        SCHEMA_VERSION,
+        Some(storage.protocol_founder_coord()),
+    );
 
     let (_tmp_b, lib_b) = temp_store_dir();
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
-        .await
-        .expect("bootstrap B from A/1 snapshot");
+    let founder_pubkey = storage.protocol_founder_pubkey();
+    let boot = bootstrap_from_snapshot(
+        &storage,
+        "test-lib",
+        storage.protocol_genesis_hash(),
+        &founder_pubkey,
+        &[storage.protocol_founder_coord()],
+        1,
+        &lib_b.db_path(),
+    )
+    .await
+    .expect("bootstrap B from A/1 snapshot");
     let applied = open_db_and_pull(
         "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
         "B",
+        &founder_pubkey,
         None,
-        &[],
+        &[storage.protocol_founder_coord()],
         &storage,
         boot,
         &lib_b,
         &never_cancelled(),
     )
     .await
-    .expect("install snapshot cursor and pull A/2");
+    .expect("install snapshot position and pull A/2");
     assert_eq!(applied, 1);
 
     let (db_b, _stamper) = Database::open(
@@ -871,18 +932,25 @@ async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
         "After snapshot",
     );
-    let durable_cursor: i64 = db_b
+    let durable_position: (i64, String) = db_b
         .call(|conn| {
             conn.query_row(
-                "SELECT last_seq FROM sync_cursors WHERE device_id = 'A'",
+                "SELECT seq, commit_hash FROM materialized_commits WHERE device_id = 'A'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(DbError::from)
         })
         .await
-        .expect("read durable A cursor");
-    assert_eq!(durable_cursor, 2);
+        .expect("read durable A materialized position");
+    assert_eq!(durable_position.0, 2);
+    assert_eq!(
+        durable_position.1,
+        storage
+            .store_commit_position("A", 2)
+            .commit_hash
+            .to_string(),
+    );
 }
 
 /// The per-reader membership-head watermark is the only defense against a
@@ -894,47 +962,58 @@ async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
 /// the removed member would read as current.
 #[tokio::test]
 async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
-    use crate::sync::membership::{
-        entry_hash, AuthorHead, MemberRole, MembershipAction, MembershipChain, MembershipCoord,
-    };
+    use crate::sync::membership::{entry_hash, AuthorHead, MemberRole, MembershipChain};
     use crate::sync::test_helpers::{
-        append_membership_entry, founder_entry, make_linked_entry, pubkey_hex,
-        publish_membership_chain_head,
+        append_membership_entry, pubkey_hex, publish_membership_chain_head,
     };
 
-    let storage = MockSyncStorage::new();
     let tables = test_synced_tables();
     let owner = UserKeypair::generate();
+    let storage = MockSyncStorage::with_store_and_keypair("test-lib", owner.clone());
     let member = UserKeypair::generate();
     let invitee = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
 
     // Build the chain: found, add a member, then remove them — head at seq 3.
-    let mut chain = MembershipChain::new();
-    let founder = founder_entry(&owner, "0000000001000-0000-owner");
-    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    let add_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "0000000002000-0000-owner",
-    );
+    let founder = storage.protocol_genesis().founder;
+    let mut chain = MembershipChain::from_entries(vec![founder.clone()]).unwrap();
+    crate::sync::store_objects::append_membership_entry_object(
+        &storage,
+        &founder.coord(),
+        &founder,
+    )
+    .await
+    .unwrap();
+    let add_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "0000000002000-0000-owner".to_string(),
+        )
+        .unwrap();
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member.clone()).await;
-    let remove_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Remove,
-        &member,
-        MemberRole::Member,
-        "0000000003000-0000-owner",
-    );
+    let remove_member = chain
+        .signed_remove_member(
+            &owner,
+            pubkey_hex(&member),
+            "0000000003000-0000-owner".to_string(),
+        )
+        .unwrap();
     append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
     // Mint an invite AFTER the removal: its floor reflects the post-removal,
     // post-invite chain state (the invitee's own Add lands at seq 4).
+    let membership_db = crate::sync::test_helpers::open_test_db();
+    membership_db
+        .set_protocol_state(
+            crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+            &owner_pk,
+        )
+        .await
+        .unwrap();
     let hlc = crate::sync::hlc::Hlc::new("owner".to_string());
     let encryption = EncryptionService::from_key([7u8; 32]);
     let invite = crate::sync::membership_ops::invite_member(
@@ -948,15 +1027,20 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
         &encryption,
         "test-lib",
         "Test Lib",
+        &membership_db,
     )
     .await
     .expect("mint invite");
+    let invited_entry: crate::sync::membership::MembershipEntry = serde_json::from_slice(
+        &storage
+            .read_membership_entry_bytes(&owner_pk, 4)
+            .await
+            .expect("read invited member entry"),
+    )
+    .expect("parse invited member entry");
     assert_eq!(
         invite.membership_floor,
-        vec![MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: 4,
-        }],
+        vec![invited_entry.coord()],
         "the invite's floor must reflect the post-removal, post-invite chain state",
     );
 
@@ -971,56 +1055,53 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
         })
         .await
         .expect("owner snapshot");
-    push_snapshot(
+    crate::sync::test_helpers::push_test_store_snapshot(
         &storage,
-        "test-lib",
+        storage.protocol_genesis_hash(),
         snapshot,
-        "owner-device",
-        HashMap::new(),
-        0,
+        BTreeMap::new(),
         db_owner.schema_version(),
         &owner,
-        &SystemClock,
-        SnapshotBlobPreflight {
-            db: &db_owner,
-            blobs: &[],
-        },
+        &chain,
+        &db_owner,
     )
-    .await
-    .expect("push owner snapshot");
+    .await;
 
     // The provider now serves the PRE-removal head — seq 2, before the member
     // was removed. Entries 1-2 really exist and the head is correctly signed;
     // this is a rollback of the true chain's current state, not a forgery.
-    let stale_head = AuthorHead::signed(2, entry_hash(&add_member), &owner);
+    let stale_head = AuthorHead::signed(
+        "test-lib".to_string(),
+        add_member.author_owner_grant.clone(),
+        2,
+        entry_hash(&add_member),
+        &owner,
+    );
+    storage.remove_membership_head(&owner_pk);
     storage
-        .put_membership_head(&owner_pk, serde_json::to_vec(&stale_head).unwrap())
+        .append_membership_head_bytes(&owner_pk, serde_json::to_vec(&stale_head).unwrap())
         .await
         .expect("provider serves the rolled-back head");
 
     let (_tmp_b, lib_b) = temp_store_dir();
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", Some(&owner_pk), 1, &lib_b.db_path())
-        .await
-        .expect("B bootstrap");
-    let result = open_db_and_pull(
-        "test-lib",
-        &lib_b.db_path(),
-        &tables,
-        &test_migrations(),
-        "B",
-        Some(&owner_pk),
-        &invite.membership_floor,
+    let result = bootstrap_from_snapshot(
         &storage,
-        boot,
-        &lib_b,
-        &never_cancelled(),
+        "test-lib",
+        storage.protocol_genesis_hash(),
+        &owner_pk,
+        &invite.membership_floor,
+        1,
+        &lib_b.db_path(),
     )
     .await;
 
     assert!(
-        matches!(result, Err(BootstrapError::Pull(_))),
-        "a fresh joiner seeded from the invite's floor must refuse a membership \
-         head that regresses below it, got {result:?}",
+        matches!(
+            result,
+            Err(crate::sync::snapshot::SnapshotError::UnauthorizedAuthor(_))
+        ),
+        "a fresh joiner must refuse a membership head below the invite floor \
+         before accepting a snapshot, got {result:?}",
     );
 }
 
@@ -1029,26 +1110,39 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
 /// case where the chain kept moving between mint and this device's first sync.
 #[tokio::test]
 async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() {
-    use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
+    use crate::sync::membership::{MemberRole, MembershipChain};
     use crate::sync::test_helpers::{
-        append_membership_entry, founder_entry, make_linked_entry, pubkey_hex,
-        publish_membership_chain_head,
+        append_membership_entry, pubkey_hex, publish_membership_chain_head,
     };
 
-    let storage = MockSyncStorage::new();
     let tables = test_synced_tables();
     let owner = UserKeypair::generate();
+    let storage = MockSyncStorage::with_store_and_keypair("test-lib", owner.clone());
     let invitee = UserKeypair::generate();
     let second_member = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
 
-    let mut chain = MembershipChain::new();
-    let founder = founder_entry(&owner, "0000000001000-0000-owner");
-    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let founder = storage.protocol_genesis().founder;
+    let chain = MembershipChain::from_entries(vec![founder.clone()]).unwrap();
+    crate::sync::store_objects::append_membership_entry_object(
+        &storage,
+        &founder.coord(),
+        &founder,
+    )
+    .await
+    .unwrap();
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
     // Mint the invite right after founding: floor lands at seq 2 (the
     // invitee's own Add).
+    let membership_db = crate::sync::test_helpers::open_test_db();
+    membership_db
+        .set_protocol_state(
+            crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+            &owner_pk,
+        )
+        .await
+        .unwrap();
     let hlc = crate::sync::hlc::Hlc::new("owner".to_string());
     let encryption = EncryptionService::from_key([7u8; 32]);
     let invite = crate::sync::membership_ops::invite_member(
@@ -1062,6 +1156,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
         &encryption,
         "test-lib",
         "Test Lib",
+        &membership_db,
     )
     .await
     .expect("mint invite");
@@ -1074,7 +1169,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
     // `chain` built above (founder only) is stale; re-derive it from storage
     // before appending further, so the next entry's `prev_hash` links to the
     // invitee's Add rather than skipping over it.
-    let visible = storage.list_membership_entries().await.unwrap();
+    let visible = storage.discover_membership_entries().await;
     let mut chain = crate::sync::membership_ops::download_chain(&storage, &visible)
         .await
         .expect("chain including the invite's own Add");
@@ -1082,14 +1177,15 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
     // Between mint and this device's first sync, the chain moved forward
     // further: the owner adds a second member, advancing the real head to
     // seq 3.
-    let add_second_member = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &second_member,
-        MemberRole::Member,
-        "0000000004000-0000-owner",
-    );
+    let add_second_member = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&second_member),
+            None,
+            MemberRole::Member,
+            "0000000004000-0000-owner".to_string(),
+        )
+        .unwrap();
     append_membership_entry(&storage, &mut chain, &owner_pk, 3, add_second_member).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
@@ -1103,35 +1199,38 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
         })
         .await
         .expect("owner snapshot");
-    push_snapshot(
+    crate::sync::test_helpers::push_test_store_snapshot(
         &storage,
-        "test-lib",
+        storage.protocol_genesis_hash(),
         snapshot,
-        "owner-device",
-        HashMap::new(),
-        0,
+        BTreeMap::new(),
         db_owner.schema_version(),
         &owner,
-        &SystemClock,
-        SnapshotBlobPreflight {
-            db: &db_owner,
-            blobs: &[],
-        },
+        &chain,
+        &db_owner,
     )
-    .await
-    .expect("push owner snapshot");
+    .await;
 
     let (_tmp_b, lib_b) = temp_store_dir();
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", Some(&owner_pk), 1, &lib_b.db_path())
-        .await
-        .expect("B bootstrap");
+    let boot = bootstrap_from_snapshot(
+        &storage,
+        "test-lib",
+        storage.protocol_genesis_hash(),
+        &owner_pk,
+        &invite.membership_floor,
+        1,
+        &lib_b.db_path(),
+    )
+    .await
+    .expect("B bootstrap");
     let result = open_db_and_pull(
         "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
         "B",
-        Some(&owner_pk),
+        &owner_pk,
+        None,
         &invite.membership_floor,
         &storage,
         boot,
@@ -1149,14 +1248,14 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
 /// A device that bootstraps from a snapshot must receive not just the catalog
 /// rows but the blob *files* those rows reference. The snapshot is a whole-DB
 /// image carrying a `note_photos` row, but no per-row blob file; the pull that
-/// follows starts past the snapshot's cursors, so the INSERT changeset that first
-/// carried the photo (seq <= cursor) is never re-walked and the per-changeset
+/// follows starts past the snapshot's coverage, so the Store commit that first
+/// carried the photo is never re-walked and the per-commit
 /// blob download never fires for it. Without the bootstrap backfill, the
 /// bootstrapped device has the photo row but no blob file in its cache — a synced
 /// album renders a placeholder cover. Asserts the file lands.
 #[tokio::test]
 async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::for_store("test-lib");
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -1200,23 +1299,9 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         })
         .await
         .expect("owner snapshot");
-    push_snapshot(
-        &storage,
-        "test-lib",
-        snapshot,
-        "A",
-        HashMap::new(),
-        1,
-        db_a.schema_version(),
-        &UserKeypair::generate(),
-        &SystemClock,
-        SnapshotBlobPreflight {
-            db: &db_a,
-            blobs: &[],
-        },
-    )
-    .await
-    .expect("push snapshot");
+    storage
+        .publish_store_snapshot(snapshot, BTreeMap::new(), db_a.schema_version(), &db_a)
+        .await;
 
     // The cover blob exists in the cloud (uploaded when A first imported the
     // album), keyed `photos/photo1` master-scoped as the declaration maps a cover
@@ -1241,17 +1326,27 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         .cache_blob_path("photos", "photo1")
         .expect("cache blob path");
 
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
-        .await
-        .expect("B bootstrap");
+    let founder_pubkey = storage.protocol_founder_pubkey();
+    let boot = bootstrap_from_snapshot(
+        &storage,
+        "test-lib",
+        storage.protocol_genesis_hash(),
+        &founder_pubkey,
+        &[storage.protocol_founder_coord()],
+        1,
+        &lib_b.db_path(),
+    )
+    .await
+    .expect("B bootstrap");
     open_db_and_pull(
         "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
         "B",
+        &founder_pubkey,
         None,
-        &[],
+        &[storage.protocol_founder_coord()],
         &storage,
         boot,
         &lib_b,
@@ -1276,7 +1371,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
 /// refuses the bootstrap before the store is saved.
 #[tokio::test]
 async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::for_store("test-lib");
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -1320,23 +1415,9 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
         })
         .await
         .expect("owner snapshot");
-    push_snapshot(
-        &storage,
-        "test-lib",
-        snapshot,
-        "A",
-        HashMap::new(),
-        1,
-        db_a.schema_version(),
-        &UserKeypair::generate(),
-        &SystemClock,
-        SnapshotBlobPreflight {
-            db: &db_a,
-            blobs: &[],
-        },
-    )
-    .await
-    .expect("push snapshot");
+    storage
+        .publish_store_snapshot(snapshot, BTreeMap::new(), db_a.schema_version(), &db_a)
+        .await;
 
     // Unlike the happy-path test above, the cover blob is NOT in the cloud yet at
     // bootstrap time (e.g. A's upload of it hadn't landed). So the bootstrap's
@@ -1347,17 +1428,27 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
         .cache_blob_path("photos", "photo1")
         .expect("cache blob path");
 
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
-        .await
-        .expect("B bootstrap");
+    let founder_pubkey = storage.protocol_founder_pubkey();
+    let boot = bootstrap_from_snapshot(
+        &storage,
+        "test-lib",
+        storage.protocol_genesis_hash(),
+        &founder_pubkey,
+        &[storage.protocol_founder_coord()],
+        1,
+        &lib_b.db_path(),
+    )
+    .await
+    .expect("B bootstrap");
     open_db_and_pull(
         "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
         "B",
+        &founder_pubkey,
         None,
-        &[],
+        &[storage.protocol_founder_coord()],
         &storage,
         boot,
         &lib_b,
@@ -1381,7 +1472,7 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
 /// materialized.
 #[tokio::test]
 async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::for_store("test-lib");
     let tables = test_synced_tables_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -1428,23 +1519,9 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
         })
         .await
         .expect("owner snapshot");
-    push_snapshot(
-        &storage,
-        "test-lib",
-        snapshot,
-        "A",
-        HashMap::new(),
-        1,
-        db_a.schema_version(),
-        &UserKeypair::generate(),
-        &SystemClock,
-        SnapshotBlobPreflight {
-            db: &db_a,
-            blobs: &[],
-        },
-    )
-    .await
-    .expect("push snapshot");
+    storage
+        .publish_store_snapshot(snapshot, BTreeMap::new(), db_a.schema_version(), &db_a)
+        .await;
 
     let (_tmp_b, lib_b) = temp_store_dir();
     let expected_blob = lib_b
@@ -1455,17 +1532,27 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
     tx.send(true)
         .expect("prime cancel before the reconcile loop");
 
-    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
-        .await
-        .expect("B bootstrap");
+    let founder_pubkey = storage.protocol_founder_pubkey();
+    let boot = bootstrap_from_snapshot(
+        &storage,
+        "test-lib",
+        storage.protocol_genesis_hash(),
+        &founder_pubkey,
+        &[storage.protocol_founder_coord()],
+        1,
+        &lib_b.db_path(),
+    )
+    .await
+    .expect("B bootstrap");
     let result = open_db_and_pull(
         "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
         "B",
+        &founder_pubkey,
         None,
-        &[],
+        &[storage.protocol_founder_coord()],
         &storage,
         boot,
         &lib_b,
@@ -1489,10 +1576,13 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
 /// joiner storage is built over that same cloud. Each reader-publish test supplies
 /// only the custody whose success or failure it exercises.
 struct JoinerFixture {
+    home: crate::InMemoryCloudHome,
     joiner_storage: crate::sync::cloud_storage::CloudSyncStorage,
     cipher: CloudCipher,
     master_key: crate::encryption::MasterKeyring,
+    genesis_hash: crate::sync::store_commit::ObjectHash,
     owner_pk: String,
+    joiner_identity: UserKeypair,
     author_heads: Vec<crate::sync::membership::MembershipCoord>,
     store_keys: crate::keys::StoreKeys,
     join_info: CloudHomeJoinInfo,
@@ -1526,23 +1616,22 @@ async fn joiner_fixture() -> JoinerFixture {
         blob_paths,
         store_id.clone(),
         owner_keypair.clone(),
-    );
+    )
+    .with_copy_ids(Arc::new(
+        crate::storage::cloud::SequentialCopyIdGenerator::new(&format!("{store_id}-owner")),
+    ));
 
     // `BootstrapContext::Join` pins the owner before the pull, so bootstrap's
     // authorization check needs a real, owner-anchored chain.
     let owner_pk = crate::sync::test_helpers::pubkey_hex(&owner_keypair);
-    let mut chain = crate::sync::membership::MembershipChain::new();
-    let founder = crate::sync::test_helpers::founder_entry(&owner_keypair, "0000000001000-0000-A");
-    chain
-        .add_entry_at(
-            crate::sync::membership::MembershipCoord {
-                author_pubkey: owner_pk.clone(),
-                seq: 1,
-            },
-            founder.clone(),
-        )
+    let founder = crate::sync::membership::founder_entry(
+        &store_id,
+        &owner_keypair,
+        "0000000000001-0000-test-store-genesis",
+    );
+    let mut chain = crate::sync::membership::MembershipChain::from_entries(vec![founder.clone()])
         .expect("valid founder entry");
-    crate::sync::storage::SyncStorage::put_membership_entry(
+    crate::sync::test_helpers::append_membership_entry_bytes(
         &owner_storage,
         &owner_pk,
         1,
@@ -1553,9 +1642,41 @@ async fn joiner_fixture() -> JoinerFixture {
     crate::sync::membership_ops::publish_membership_head(&owner_storage, &chain, &owner_keypair)
         .await
         .expect("publish founder membership head");
+    let joiner_identity = UserKeypair::generate();
+    let add_joiner = chain
+        .signed_set_member(
+            &owner_keypair,
+            crate::sync::test_helpers::pubkey_hex(&joiner_identity),
+            None,
+            crate::sync::membership::MemberRole::Member,
+            "0000000002000-0000-A".to_string(),
+        )
+        .expect("owner adds joiner");
+    chain
+        .add_entry_at(add_joiner.coord(), add_joiner.clone())
+        .expect("valid joined-member entry");
+    crate::sync::test_helpers::append_membership_entry_bytes(
+        &owner_storage,
+        &owner_pk,
+        2,
+        serde_json::to_vec(&add_joiner).expect("serialize joined-member entry"),
+    )
+    .await
+    .expect("publish joined-member entry");
+    crate::sync::membership_ops::publish_membership_head(&owner_storage, &chain, &owner_keypair)
+        .await
+        .expect("publish joined-member head");
 
     let tables = test_synced_tables();
     let db = open_test_db();
+    let genesis_hash = crate::sync::test_helpers::publish_test_store_genesis(
+        &db,
+        &owner_storage,
+        &store_id,
+        "owner-device",
+        &owner_keypair,
+    )
+    .await;
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
     let tables_c = tables.clone();
@@ -1565,39 +1686,39 @@ async fn joiner_fixture() -> JoinerFixture {
         })
         .await
         .expect("create owner snapshot");
-    push_snapshot(
+    crate::sync::test_helpers::push_test_store_snapshot(
         &owner_storage,
-        &store_id,
+        genesis_hash,
         snapshot,
-        "owner-device",
-        HashMap::new(),
-        0,
+        BTreeMap::new(),
         db.schema_version(),
         &owner_keypair,
-        &SystemClock,
-        SnapshotBlobPreflight {
-            db: &db,
-            blobs: &[],
-        },
+        &chain,
+        &db,
     )
-    .await
-    .expect("push owner snapshot");
+    .await;
 
     let joiner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
-        Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
+        Arc::new(cloud.clone()) as Arc<dyn crate::storage::cloud::CloudHome>,
         cipher.clone(),
         blob_paths,
         store_id.clone(),
-        UserKeypair::generate(),
-    );
+        joiner_identity.clone(),
+    )
+    .with_copy_ids(Arc::new(
+        crate::storage::cloud::SequentialCopyIdGenerator::new(&format!("{store_id}-reader")),
+    ));
     let (_tmp, store_dir) = temp_store_dir();
     let store_keys = crate::keys::StoreKeys::new(store_id.clone());
 
     JoinerFixture {
+        home: cloud,
         joiner_storage,
         cipher,
         master_key,
+        genesis_hash,
         owner_pk,
+        joiner_identity,
         author_heads: chain.author_heads(),
         store_keys,
         join_info: CloudHomeJoinInfo::CloudKit,
@@ -1608,18 +1729,15 @@ async fn joiner_fixture() -> JoinerFixture {
     }
 }
 
-/// A successful bootstrap publishes the joiner's own head (at seq 0 — it has
-/// authored nothing) and pull-ack BEFORE the store commits, so a peer's changeset
-/// reclamation running during the join sees this reader and pins every floor at
-/// what it still needs. Without this a joiner is invisible to reclamation for the
-/// whole join window and any peer that reclaims can strand it.
+/// Bootstrap publishes the joined device's Active registration before its live
+/// pull; its first cycle then publishes an exact acknowledgement. Commit heads
+/// remain absent until the device authors a commit.
 #[tokio::test]
-async fn bootstrap_publishes_the_joiners_head_and_ack() {
+async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
     let f = joiner_fixture().await;
     let custody = Arc::new(RecordingCustody::default());
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(&f.store_id, &f.store_dir);
-    let joiner_identity = UserKeypair::generate();
 
     crate::sync::join::bootstrap_and_save_store(
         &f.joiner_storage,
@@ -1628,9 +1746,10 @@ async fn bootstrap_publishes_the_joiners_head_and_ack() {
         &f.store_dir,
         &f.store_id,
         "device-b",
+        f.genesis_hash,
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &f.owner_pk,
-            keypair: &joiner_identity,
+            keypair: &f.joiner_identity,
         },
         &f.author_heads,
         &f.tables,
@@ -1640,35 +1759,78 @@ async fn bootstrap_publishes_the_joiners_head_and_ack() {
         &f.store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
-        &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
     )
     .await
     .expect("bootstrap succeeds");
 
-    let listing = crate::sync::storage::SyncStorage::list_heads(&f.joiner_storage)
-        .await
-        .expect("list heads");
-    let head = listing
-        .heads
-        .iter()
-        .find(|h| h.device_id == "device-b")
-        .expect("the joiner published its own head");
+    let (db, _stamper) = Database::open(
+        &f.store_dir.db_path(),
+        f.tables.clone(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        "device-b".to_string(),
+        &test_migrations(),
+    )
+    .expect("open joined database");
+    run_test_cycle(
+        &f.joiner_storage,
+        &f.store_id,
+        "device-b",
+        &Hlc::new("device-b".to_string()),
+        &SystemClock,
+        &db,
+        &RwLock::new(f.cipher.clone()),
+        &PendingRotation::none(),
+        &f.joiner_identity,
+        None,
+        &f.store_dir,
+        None,
+        None,
+    )
+    .await
+    .expect("first joined cycle");
+
+    let registrations = crate::sync::store_objects::list_latest_registration_chains(
+        &f.joiner_storage,
+        f.genesis_hash,
+    )
+    .await
+    .expect("list Store device registrations");
+    let registration = &registrations
+        .latest_by_device
+        .get("device-b")
+        .expect("the joiner published its registration")
+        .value;
     assert_eq!(
-        head.seq, 0,
-        "a joiner has authored nothing, so its head is 0"
+        registration.state,
+        crate::sync::store_commit::StoreDeviceRegistrationState::Active,
+    );
+    assert_eq!(registration.author_pubkey, pubkey_hex(&f.joiner_identity));
+
+    let heads = crate::sync::store_objects::list_visible_heads(&f.joiner_storage, f.genesis_hash)
+        .await
+        .expect("list Store commit heads");
+    assert!(
+        heads
+            .heads
+            .iter()
+            .all(|head| head.value.device_id != "device-b"),
+        "an empty device registration must not invent a commit head",
     );
 
-    let ack_bytes = crate::sync::storage::SyncStorage::get_ack(&f.joiner_storage, "device-b")
-        .await
-        .expect("the joiner published its ack");
-    let ack: crate::sync::signed_control::AckJson =
-        serde_json::from_slice(&ack_bytes).expect("ack parses");
-    assert!(
-        ack.verify("device-b"),
-        "the published ack is signed for the joiner's slot",
-    );
+    let acks =
+        crate::sync::store_objects::list_latest_ack_chains(&f.joiner_storage, f.genesis_hash)
+            .await
+            .expect("list Store acknowledgements");
+    let ack = &acks
+        .latest_by_device
+        .get("device-b")
+        .expect("the joiner published its acknowledgement")
+        .value;
+    assert_eq!(ack.device_id, "device-b");
+    assert_eq!(ack.genesis_hash, f.genesis_hash);
 }
 
 /// A join's saved config — the completion marker — implies a resolvable signing
@@ -1683,7 +1845,6 @@ async fn bootstrap_establishes_the_joiners_identity_before_the_marker() {
     let custody = Arc::new(RecordingCustody::default());
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(&f.store_id, &f.store_dir);
-    let joiner_identity = UserKeypair::generate();
 
     crate::sync::join::bootstrap_and_save_store(
         &f.joiner_storage,
@@ -1692,9 +1853,10 @@ async fn bootstrap_establishes_the_joiners_identity_before_the_marker() {
         &f.store_dir,
         &f.store_id,
         "device-b",
+        f.genesis_hash,
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &f.owner_pk,
-            keypair: &joiner_identity,
+            keypair: &f.joiner_identity,
         },
         &f.author_heads,
         &f.tables,
@@ -1704,7 +1866,6 @@ async fn bootstrap_establishes_the_joiners_identity_before_the_marker() {
         &f.store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
-        &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
     )
@@ -1721,17 +1882,17 @@ async fn bootstrap_establishes_the_joiners_identity_before_the_marker() {
         .expect("a saved config implies the store's identity is already established");
     assert_eq!(
         established.public_key(),
-        joiner_identity.public_key(),
+        f.joiner_identity.public_key(),
         "the established identity is the join request's pending keypair",
     );
 }
 
-/// A bootstrap that fails after publishing the reader deletes both the head and
-/// the ack, so a never-completed join leaves no reader pinning a peer's
-/// reclamation. The failure is induced at the custody-persist step, which runs
-/// after the reader publish.
+/// A bootstrap that fails after publishing its Active registration appends a
+/// signed Retired successor before returning the original failure. Reclamation
+/// can distinguish the abandoned device from an omitted active reader without
+/// deleting or replacing either registration object.
 #[tokio::test]
-async fn bootstrap_failure_removes_the_published_head_and_ack() {
+async fn bootstrap_failure_publishes_a_retired_registration_successor() {
     let f = joiner_fixture().await;
 
     /// A custody whose persist always fails, to fail the bootstrap after the
@@ -1756,7 +1917,6 @@ async fn bootstrap_failure_removes_the_published_head_and_ack() {
 
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(&f.store_id, &f.store_dir);
-    let joiner_identity = UserKeypair::generate();
     let result = crate::sync::join::bootstrap_and_save_store(
         &f.joiner_storage,
         &f.cipher,
@@ -1764,9 +1924,10 @@ async fn bootstrap_failure_removes_the_published_head_and_ack() {
         &f.store_dir,
         &f.store_id,
         "device-b",
+        f.genesis_hash,
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &f.owner_pk,
-            keypair: &joiner_identity,
+            keypair: &f.joiner_identity,
         },
         &f.author_heads,
         &f.tables,
@@ -1776,7 +1937,6 @@ async fn bootstrap_failure_removes_the_published_head_and_ack() {
         &f.store_keys,
         &FailPersistCustody,
         identity_custody.as_ref(),
-        &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
     )
@@ -1787,22 +1947,131 @@ async fn bootstrap_failure_removes_the_published_head_and_ack() {
         "the induced persist failure surfaces as a Key error, got {result:?}",
     );
 
-    let listing = crate::sync::storage::SyncStorage::list_heads(&f.joiner_storage)
-        .await
-        .expect("list heads");
-    assert!(
-        listing.heads.iter().all(|h| h.device_id != "device-b"),
-        "the joiner's head must be deleted after a failed bootstrap",
-    );
+    let registrations = crate::sync::store_objects::list_latest_registration_chains(
+        &f.joiner_storage,
+        f.genesis_hash,
+    )
+    .await
+    .expect("list Store device registrations");
+    let registration = &registrations
+        .latest_by_device
+        .get("device-b")
+        .expect("failed bootstrap retains a registration chain")
+        .value;
     assert_eq!(
-        listing.unreadable, 0,
-        "the deleted head leaves no unreadable slot behind",
+        registration.state,
+        crate::sync::store_commit::StoreDeviceRegistrationState::Retired,
     );
+    assert_eq!(registration.revision, 2);
+    assert!(
+        registration.previous_registration_hash.is_some(),
+        "Retired must name the exact Active registration hash",
+    );
+}
+
+#[tokio::test]
+async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
+    let f = joiner_fixture().await;
+
+    struct FailPersistCustody;
+    impl crate::keys::MasterKeyCustody for FailPersistCustody {
+        fn unlock(
+            &self,
+        ) -> Result<Option<crate::encryption::MasterKeyring>, crate::keys::KeyError> {
+            Ok(None)
+        }
+        fn persist(
+            &self,
+            _keyring: &crate::encryption::MasterKeyring,
+        ) -> Result<(), crate::keys::KeyError> {
+            Err(crate::keys::KeyError::Persistence("induced".to_string()))
+        }
+        fn forget(&self) -> Result<(), crate::keys::KeyError> {
+            Ok(())
+        }
+    }
+
+    let identity_custody =
+        crate::identity_custody::IdentityCustody::Keyring.resolve(&f.store_id, &f.store_dir);
+    f.home.fail_append_before_call(2);
+    let result = crate::sync::join::bootstrap_and_save_store(
+        &f.joiner_storage,
+        &f.cipher,
+        Some(&f.master_key),
+        &f.store_dir,
+        &f.store_id,
+        "device-b",
+        f.genesis_hash,
+        crate::sync::join::BootstrapContext::Join {
+            owner_pubkey: &f.owner_pk,
+            keypair: &f.joiner_identity,
+        },
+        &f.author_heads,
+        &f.tables,
+        &test_migrations(),
+        &f.join_info,
+        "Joined Store",
+        &f.store_keys,
+        &FailPersistCustody,
+        identity_custody.as_ref(),
+        &|_status: &str| {},
+        &never_cancelled(),
+    )
+    .await;
+
     assert!(
         matches!(
-            crate::sync::storage::SyncStorage::get_ack(&f.joiner_storage, "device-b").await,
-            Err(crate::sync::storage::StorageError::NotFound(_)),
+            result,
+            Err(BootstrapError::RegistrationRollback { ref cause, .. })
+                if matches!(cause.as_ref(), BootstrapError::Key(_))
         ),
-        "the joiner's ack must be deleted after a failed bootstrap",
+        "the original bootstrap failure and retirement failure must both surface, got {result:?}",
+    );
+    assert!(f.store_dir.db_path().exists());
+
+    let (db, _stamper) = Database::open(
+        &f.store_dir.db_path(),
+        f.tables.clone(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        "device-b".to_string(),
+        &test_migrations(),
+    )
+    .expect("open preserved rollback outbox");
+    let pending: (i64, String, i64) = db
+        .call(|conn| {
+            conn.query_row(
+                "SELECT revision, state, published FROM local_store_device_registration \
+                 ORDER BY revision DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("read preserved retirement outbox");
+    assert_eq!(pending, (2, "retired".to_string(), 0));
+    drop(db);
+
+    crate::sync::join::finish_failed_bootstrap_registration_rollback(
+        &f.store_dir.db_path(),
+        &f.tables,
+        &test_migrations(),
+        "device-b",
+        &f.joiner_storage,
+        &f.joiner_identity,
+    )
+    .await
+    .expect("retry publishes the owned retirement bytes");
+
+    let registrations = crate::sync::store_objects::list_latest_registration_chains(
+        &f.joiner_storage,
+        f.genesis_hash,
+    )
+    .await
+    .expect("list registration chain after retry");
+    assert_eq!(
+        registrations.latest_by_device["device-b"].value.state,
+        crate::sync::store_commit::StoreDeviceRegistrationState::Retired,
     );
 }

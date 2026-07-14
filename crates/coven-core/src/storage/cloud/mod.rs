@@ -13,7 +13,13 @@ pub mod test_utils;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+#[cfg(any(test, feature = "test-utils"))]
+use sha2::{Digest, Sha256};
+use std::fmt;
+use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::encryption::{ChunkSealer, CHUNK_SIZE};
 use crate::local_blob::PlaintextReader;
@@ -35,6 +41,142 @@ pub enum CloudHomeError {
     Transport(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// A fresh physical-copy id for one append attempt.
+///
+/// Copy ids are runtime storage coordinates, never signed protocol data. Their
+/// 32 random bytes are rendered as exactly 64 lowercase hexadecimal characters.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CopyId([u8; 32]);
+
+impl CopyId {
+    pub fn random() -> Self {
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+}
+
+impl fmt::Debug for CopyId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl fmt::Display for CopyId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&hex::encode(self.0))
+    }
+}
+
+impl FromStr for CopyId {
+    type Err = CloudHomeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() != 64
+            || value
+                .bytes()
+                .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+        {
+            return Err(CloudHomeError::Configuration(format!(
+                "copy id must be 64 lowercase hexadecimal characters: {value:?}"
+            )));
+        }
+        let decoded = hex::decode(value).map_err(|error| {
+            CloudHomeError::Configuration(format!("decode copy id {value:?}: {error}"))
+        })?;
+        let bytes = decoded.try_into().map_err(|_| {
+            CloudHomeError::Configuration(format!("copy id has wrong length: {value:?}"))
+        })?;
+        Ok(Self(bytes))
+    }
+}
+
+/// Injected source of copy ids. Storage asks for ids; it never reads ambient
+/// randomness while deciding protocol paths.
+pub trait CopyIdGenerator: crate::MaybeThreadSafe {
+    fn next_copy_id(&self) -> CopyId;
+}
+
+pub type CopyIdRef = Arc<dyn CopyIdGenerator>;
+
+pub struct RandomCopyIdGenerator;
+
+impl CopyIdGenerator for RandomCopyIdGenerator {
+    fn next_copy_id(&self) -> CopyId {
+        CopyId::random()
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub struct SequentialCopyIdGenerator {
+    prefix: String,
+    next: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl SequentialCopyIdGenerator {
+    pub fn new(prefix: &str) -> Self {
+        Self {
+            prefix: prefix.to_string(),
+            next: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl CopyIdGenerator for SequentialCopyIdGenerator {
+    fn next_copy_id(&self) -> CopyId {
+        use std::sync::atomic::Ordering;
+
+        let sequence = self.next.fetch_add(1, Ordering::SeqCst);
+        let mut digest = Sha256::new();
+        digest.update(self.prefix.as_bytes());
+        digest.update(sequence.to_be_bytes());
+        CopyId(digest.finalize().into())
+    }
+}
+
+/// Whether a listing is authoritative enough to justify deletion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListingCoverage {
+    CompleteAtScan,
+    BestEffort,
+}
+
+/// One physical object returned by an append or listing operation.
+///
+/// The provider id is intentionally opaque. Protocol objects may retain this
+/// value only long enough to read or delete the exact physical copy.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AppendedObject {
+    logical_key: String,
+    opaque_provider_id: String,
+}
+
+impl AppendedObject {
+    #[doc(hidden)]
+    pub fn from_provider(logical_key: String, opaque_provider_id: String) -> Self {
+        Self {
+            logical_key,
+            opaque_provider_id,
+        }
+    }
+
+    pub fn logical_key(&self) -> &str {
+        &self.logical_key
+    }
+
+    pub fn opaque_provider_id(&self) -> &str {
+        &self.opaque_provider_id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppendedListing {
+    pub objects: Vec<AppendedObject>,
+    pub coverage: ListingCoverage,
 }
 
 impl CloudHomeError {
@@ -157,16 +299,23 @@ impl CloudHomeJoinInfo {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloudAccessGrant {
-    pub member_pubkey: String,
-    pub provider_account_email: Option<String>,
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CloudAccessState {
+    Present {
+        member_pubkey: String,
+        provider_account_email: Option<String>,
+    },
+    Absent {
+        member_pubkey: String,
+        provider_account_email: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloudAccessRevoke {
-    pub member_pubkey: String,
-    pub provider_account_email: Option<String>,
+pub enum CloudAccessOutcome {
+    Present(CloudHomeJoinInfo),
+    Absent(RevokeOutcome),
 }
 
 /// Whether a backend actually withdrew a removed member's storage credential.
@@ -183,15 +332,30 @@ pub enum RevokeOutcome {
     Unsupported,
 }
 
-impl CloudAccessGrant {
-    pub fn require_provider_email(&self, provider: &str) -> Result<&str, CloudHomeError> {
-        require_provider_email(provider, self.provider_account_email.as_deref())
+impl CloudAccessState {
+    pub fn member_pubkey(&self) -> &str {
+        match self {
+            Self::Present { member_pubkey, .. } | Self::Absent { member_pubkey, .. } => {
+                member_pubkey
+            }
+        }
     }
-}
 
-impl CloudAccessRevoke {
+    pub fn provider_account_email(&self) -> Option<&str> {
+        match self {
+            Self::Present {
+                provider_account_email,
+                ..
+            }
+            | Self::Absent {
+                provider_account_email,
+                ..
+            } => provider_account_email.as_deref(),
+        }
+    }
+
     pub fn require_provider_email(&self, provider: &str) -> Result<&str, CloudHomeError> {
-        require_provider_email(provider, self.provider_account_email.as_deref())
+        require_provider_email(provider, self.provider_account_email())
     }
 }
 
@@ -538,6 +702,51 @@ pub trait CloudHome: crate::MaybeThreadSafe {
         write_blob(self, key, body, progress).await
     }
 
+    /// Append one fresh physical object at `full_logical_key`.
+    ///
+    /// Store protocol callers include `/copies/{copy_id}` in this key, so the
+    /// default key-value-provider mapping never overwrites another attempt. The
+    /// object becomes listable only after [`write`](CloudHome::write) completes.
+    async fn append_object(
+        &self,
+        full_logical_key: &str,
+        body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        self.write(full_logical_key, body, progress).await?;
+        Ok(AppendedObject::from_provider(
+            full_logical_key.to_string(),
+            full_logical_key.to_string(),
+        ))
+    }
+
+    /// List every physical append copy under `prefix`, without coalescing equal
+    /// logical names or provider ids. Real providers currently report
+    /// best-effort coverage; the in-memory proof backend overrides this with an
+    /// authoritative scan.
+    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        let objects = self
+            .list(prefix)
+            .await?
+            .into_iter()
+            .map(|logical_key| AppendedObject::from_provider(logical_key.clone(), logical_key))
+            .collect();
+        Ok(AppendedListing {
+            objects,
+            coverage: ListingCoverage::BestEffort,
+        })
+    }
+
+    /// Read the exact physical copy named by `object`.
+    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        self.read(object.logical_key()).await
+    }
+
+    /// Delete the exact physical copy named by `object`.
+    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        self.delete(object.logical_key()).await
+    }
+
     /// Read the full contents of a key.
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError>;
 
@@ -553,32 +762,16 @@ pub trait CloudHome: crate::MaybeThreadSafe {
     /// Check whether a key exists.
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError>;
 
-    /// Grant access to a member and return connection info for the cloud home.
-    /// Consumer-cloud backends share the folder with the member's account.
-    /// Shared-credential backends (S3) return the bucket credentials directly.
-    /// Those credentials cannot be withdrawn from one member later, so the
-    /// confidentiality of content written after a removal rests on the store
-    /// key rotation the caller performs when revoking membership, not on making
-    /// the removed member's credential stop working.
-    async fn grant_access(
+    /// Set the provider's access for one stable member principal to the absolute
+    /// desired state. Implementations read the authoritative permission state,
+    /// create/update/delete as required, then read it back and verify the desired
+    /// state. Repeating a request after an unknown outcome is therefore
+    /// idempotent. `Present` returns connection information; `Absent` returns
+    /// whether this provider supports withdrawing one member's credential.
+    async fn set_access(
         &self,
-        grant: CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError>;
-
-    /// Revoke a member's provider-level access to the cloud home. Member removal
-    /// always revokes chain membership and rotates the store key; this call is
-    /// the additional, provider-dependent step of withdrawing the storage
-    /// credential. Consumer clouds unshare the folder and return
-    /// [`RevokeOutcome::Revoked`]. Shared-credential backends (S3) cannot
-    /// withdraw one member's copy of a static bucket key and return
-    /// [`RevokeOutcome::Unsupported`]; removal still completes because the key
-    /// rotation, not this call, protects post-removal content. An `Err` aborts
-    /// the removal, so a backend that offers no per-member revocation reports
-    /// `Unsupported` rather than erroring.
-    async fn revoke_access(
-        &self,
-        revoke: CloudAccessRevoke,
-    ) -> Result<RevokeOutcome, CloudHomeError>;
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError>;
 }
 
 #[cfg(test)]
@@ -890,16 +1083,10 @@ mod streaming_tests {
         async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
             unimplemented!()
         }
-        async fn grant_access(
+        async fn set_access(
             &self,
-            _grant: CloudAccessGrant,
-        ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-            unimplemented!()
-        }
-        async fn revoke_access(
-            &self,
-            _revoke: CloudAccessRevoke,
-        ) -> Result<RevokeOutcome, CloudHomeError> {
+            _desired: CloudAccessState,
+        ) -> Result<CloudAccessOutcome, CloudHomeError> {
             unimplemented!()
         }
     }

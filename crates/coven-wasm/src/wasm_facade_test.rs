@@ -30,6 +30,7 @@ use crate::migration::Migration;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::CloudCipher;
+use crate::sync::cycle::StoreInitialization;
 use crate::sync::hlc::Timestamp;
 use crate::sync::session::SyncedTable;
 use crate::sync::wasm_runtime::WasmSyncSchedule;
@@ -45,9 +46,11 @@ wasm_bindgen_test_configure!(run_in_dedicated_worker);
 /// cloud.
 async fn open_store(
     store_id: &str,
+    database_id: &str,
     device_id: &str,
     cloud: &InMemoryCloudHome,
     identity: &UserKeypair,
+    initialization: StoreInitialization,
 ) -> CovenStore {
     let home: Box<dyn CloudHome> = Box::new(cloud.clone());
     let lib = CovenStore::from_home(
@@ -55,10 +58,12 @@ async fn open_store(
         CloudCipher::Plaintext,
         HomeStorage::Browsable,
         store_id,
+        database_id,
         device_id.to_string(),
         demo_migrations(),
         demo_synced_tables(),
         identity.clone(),
+        initialization,
         // Short cadence so the test converges quickly: a 10 ms startup grace and a
         // 50 ms idle interval, versus the facade's 3 s / 30 s production timings.
         WasmSyncSchedule {
@@ -79,15 +84,36 @@ async fn assemble_store(
     cloud: &InMemoryCloudHome,
     identity: &UserKeypair,
 ) -> Result<CovenStore, String> {
+    assemble_store_with_initialization(
+        store_id,
+        store_id,
+        device_id,
+        cloud,
+        identity,
+        StoreInitialization::CreateStore,
+    )
+    .await
+}
+
+async fn assemble_store_with_initialization(
+    store_id: &str,
+    database_id: &str,
+    device_id: &str,
+    cloud: &InMemoryCloudHome,
+    identity: &UserKeypair,
+    initialization: StoreInitialization,
+) -> Result<CovenStore, String> {
     CovenStore::from_home(
         Box::new(cloud.clone()),
         CloudCipher::Plaintext,
         HomeStorage::Browsable,
         store_id,
+        database_id,
         device_id.to_string(),
         demo_migrations(),
         demo_synced_tables(),
         identity.clone(),
+        initialization,
         WasmSyncSchedule {
             initial_delay_ms: 10,
             idle_interval_ms: 50,
@@ -139,6 +165,7 @@ fn public_open_config(store_id: &str, device_id: &str) -> JsValue {
         "store_id": store_id,
         "storage": "browsable",
         "device_id": device_id,
+        "initialization": { "mode": "create_store" },
     }))
 }
 
@@ -224,9 +251,29 @@ async fn two_stores_converge_a_note_through_the_facade() {
     let run = uuid::Uuid::new_v4().simple().to_string();
     let cloud = InMemoryCloudHome::new();
     let identity = UserKeypair::generate();
-
-    let lib_a = open_store(&format!("tab-a-{run}"), "device-a", &cloud, &identity).await;
-    let lib_b = open_store(&format!("tab-b-{run}"), "device-b", &cloud, &identity).await;
+    let store_id = format!("tabs-{run}");
+    let lib_a = open_store(
+        &store_id,
+        &format!("tab-a-{run}"),
+        "device-a",
+        &cloud,
+        &identity,
+        StoreInitialization::CreateStore,
+    )
+    .await;
+    let genesis_hash = lib_a.protocol_genesis_hash_for_test().await;
+    let lib_b = open_store(
+        &store_id,
+        &format!("tab-b-{run}"),
+        "device-b",
+        &cloud,
+        &identity,
+        StoreInitialization::OpenStore {
+            expected_genesis_hash: genesis_hash,
+            expected_founder: crate::keys::public_key_hex(&identity),
+        },
+    )
+    .await;
 
     // Tab A writes a note through `sql`. The synced `notes` row carries the
     // `_updated_at` register the contract requires (here a literal HLC-shaped stamp

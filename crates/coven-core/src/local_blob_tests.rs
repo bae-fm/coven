@@ -329,7 +329,7 @@ mod durable_write_tests {
     #[tokio::test]
     async fn durable_write_fsyncs_the_written_file_s_parent() {
         let backend = RecordingBackend::default();
-        let path = Path::new("/store/sync_staging.bin");
+        let path = Path::new("/store/upload_staging.bin");
 
         backend
             .write_atomic_durable(path, b"packed changeset")

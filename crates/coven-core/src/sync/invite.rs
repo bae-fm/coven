@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::config::HomeStorage;
+use crate::database::{Database, DurableMembershipMutation};
 use crate::encryption::{self, EncryptionService};
 use crate::keys::{self, KeyError, UserKeypair};
 /// Invitation and revocation flow for shared store membership.
@@ -9,18 +10,18 @@ use crate::keys::{self, KeyError, UserKeypair};
 /// `unwrap_store_keyring()` is called by the invitee to join and unwrap the store key.
 /// `revoke_member()` is called by the store owner to remove a member and rotate the key.
 use crate::storage::cloud::{
-    CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
     RevokeOutcome,
 };
 
 use super::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use super::membership::{
-    sign_membership_entry, MemberRole, MembershipAction, MembershipChain, MembershipCoord,
-    MembershipEntry, MembershipError,
+    AuthorHead, MemberRole, MembershipChain, MembershipChange, MembershipCoord, MembershipEntry,
+    MembershipError, OwnerGrantId,
 };
-use super::membership_ops::{load_anchored_chain, publish_membership_head};
-use super::signed_control::WrappedStoreKey;
+use super::membership_ops::{list_membership_entries, publish_membership_head};
 use super::storage::{StorageError, SyncStorage};
+use super::wrapped_store_key::WrappedStoreKey;
 
 #[derive(Debug, thiserror::Error)]
 pub enum InviteError {
@@ -63,17 +64,94 @@ pub enum InviteError {
     NotAMember(String),
     #[error("Cannot revoke the last owner of a store")]
     LastOwner,
+    #[error("membership mutation database state: {0}")]
+    Database(String),
+    #[error("pending membership mutation does not match this request: {0}")]
+    PendingMutation(String),
+    #[error("durable membership mutation is invalid: {0}")]
+    InvalidDurableMutation(String),
 }
 
-/// The next seq for `author`'s membership entries: one past the tip its own
-/// committed head certifies. Computing it from the committed prefix (not the object
-/// listing) is what lets a retry after a failed head publish reuse the same seq —
-/// the uncommitted object from the prior attempt is overwritten rather than skipped
-/// over, so no orphan is left dangling above the head.
-fn next_membership_seq(chain: &MembershipChain, author_pubkey_hex: &str) -> u64 {
-    chain
-        .author_tip(author_pubkey_hex)
-        .map_or(1, |(seq, _)| seq + 1)
+impl From<crate::database::DbError> for InviteError {
+    fn from(error: crate::database::DbError) -> Self {
+        Self::Database(error.0)
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "plan",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum MembershipMutationPlan {
+    Invite(InviteMutationPlan),
+    Revoke(RevokeMutationPlan),
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InviteMutationPlan {
+    entry: MembershipEntry,
+    head: AuthorHead,
+    invitee_pubkey: String,
+    invitee_email: Option<String>,
+    role: MemberRole,
+    desired_access: CloudAccessState,
+    wrapped_key: Vec<u8>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeMutationPlan {
+    entry: MembershipEntry,
+    head: AuthorHead,
+    revokee_pubkey: String,
+    desired_access: CloudAccessState,
+    wraps: Vec<ReplacementWrappedKey>,
+    keyring_payload: Vec<u8>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplacementWrappedKey {
+    recipient: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum MembershipMutationProgress {
+    Pending,
+    InviteGranted { join_info: CloudHomeJoinInfo },
+}
+
+struct MutationPersistence<'a> {
+    db: &'a Database,
+    intent_hash: super::store_commit::ObjectHash,
+}
+
+impl MutationPersistence<'_> {
+    async fn record_progress(
+        &self,
+        progress: &MembershipMutationProgress,
+    ) -> Result<(), InviteError> {
+        let bytes = serde_json::to_vec(progress).map_err(|error| {
+            InviteError::InvalidDurableMutation(format!("serialize progress: {error}"))
+        })?;
+        self.db
+            .update_membership_mutation_progress(self.intent_hash, bytes)
+            .await?;
+        Ok(())
+    }
+
+    async fn complete(&self) -> Result<(), InviteError> {
+        self.db
+            .complete_membership_mutation(self.intent_hash)
+            .await?;
+        Ok(())
+    }
 }
 
 /// Refuse to write over `author`'s committed prefix. The intended `seq` must sit
@@ -90,9 +168,10 @@ fn next_membership_seq(chain: &MembershipChain, author_pubkey_hex: &str) -> u64 
 async fn guard_extends_committed_head(
     storage: &dyn SyncStorage,
     author: &str,
+    grant: &OwnerGrantId,
     seq: u64,
 ) -> Result<(), InviteError> {
-    if let Some(committed) = super::membership_ops::committed_head_seq(storage, author)
+    if let Some(committed) = super::membership_ops::committed_head_seq(storage, author, grant)
         .await
         .map_err(InviteError::Crypto)?
     {
@@ -221,11 +300,9 @@ async fn upload_membership_entry(
     coord: &MembershipCoord,
     entry: &MembershipEntry,
 ) -> Result<(), InviteError> {
-    let entry_bytes =
-        serde_json::to_vec(entry).map_err(|e| InviteError::Crypto(format!("serialize: {e}")))?;
-    storage
-        .put_membership_entry(&coord.author_pubkey, coord.seq, entry_bytes)
-        .await?;
+    super::store_objects::append_membership_entry_object(storage, coord, entry)
+        .await
+        .map_err(|error| InviteError::Crypto(error.to_string()))?;
 
     Ok(())
 }
@@ -250,7 +327,7 @@ async fn rollback_written_invite(
     invitee_ed25519_pubkey: &str,
     invitee_is_current_member: bool,
     prior_wrapped_key: Option<Vec<u8>>,
-    revoke: CloudAccessRevoke,
+    absent_access: CloudAccessState,
 ) -> Vec<String> {
     let mut rollback_errors = Vec::new();
     if invitee_is_current_member {
@@ -301,8 +378,11 @@ async fn rollback_written_invite(
         {
             rollback_errors.push(rollback.to_string());
         }
-        if let Err(rollback) = cloud_home.revoke_access(revoke).await {
-            rollback_errors.push(rollback.to_string());
+        match cloud_home.set_access(absent_access).await {
+            Ok(CloudAccessOutcome::Absent(_)) => {}
+            Ok(CloudAccessOutcome::Present(_)) => rollback_errors
+                .push("provider returned present outcome for absent access request".to_string()),
+            Err(rollback) => rollback_errors.push(rollback.to_string()),
         }
     }
     rollback_errors
@@ -342,6 +422,291 @@ pub async fn create_invitation(
     .await
 }
 
+fn encode_membership_mutation(plan: &MembershipMutationPlan) -> Result<Vec<u8>, InviteError> {
+    serde_json::to_vec(plan)
+        .map_err(|error| InviteError::InvalidDurableMutation(format!("serialize plan: {error}")))
+}
+
+fn encode_membership_progress(
+    progress: &MembershipMutationProgress,
+) -> Result<Vec<u8>, InviteError> {
+    serde_json::to_vec(progress).map_err(|error| {
+        InviteError::InvalidDurableMutation(format!("serialize progress: {error}"))
+    })
+}
+
+fn decode_membership_mutation(
+    row: DurableMembershipMutation,
+) -> Result<(MembershipMutationPlan, MembershipMutationProgress), InviteError> {
+    let plan = serde_json::from_slice(&row.plan_bytes)
+        .map_err(|error| InviteError::InvalidDurableMutation(format!("parse plan: {error}")))?;
+    let progress = serde_json::from_slice(&row.progress_bytes)
+        .map_err(|error| InviteError::InvalidDurableMutation(format!("parse progress: {error}")))?;
+    Ok((plan, progress))
+}
+
+fn chain_with_exact_entry(
+    chain: &MembershipChain,
+    entry: &MembershipEntry,
+) -> Result<MembershipChain, InviteError> {
+    let coord = entry.coord();
+    if let Some((_, stored)) = chain
+        .entries_with_coords()
+        .find(|(stored_coord, _)| **stored_coord == coord)
+    {
+        if stored != entry {
+            return Err(InviteError::InvalidDurableMutation(format!(
+                "committed entry at {coord:?} differs from the durable plan"
+            )));
+        }
+        return Ok(chain.clone());
+    }
+    let mut validated = chain.clone();
+    validated.add_entry_at(coord, entry.clone())?;
+    Ok(validated)
+}
+
+fn validate_planned_head(entry: &MembershipEntry, head: &AuthorHead) -> Result<(), InviteError> {
+    let coord = entry.coord();
+    if !head.verify()
+        || head.store_id != entry.store_id
+        || head.author_pubkey != coord.author_pubkey
+        || head.author_owner_grant != coord.author_owner_grant
+        || head.seq != coord.seq
+        || head.tip_hash != coord.entry_hash
+    {
+        return Err(InviteError::InvalidDurableMutation(
+            "signed head does not commit the exact planned entry".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn build_invite_mutation(
+    chain: &MembershipChain,
+    owner_keypair: &UserKeypair,
+    invitee_ed25519_pubkey: &str,
+    invitee_email: Option<&str>,
+    role: MemberRole,
+    encryption: &EncryptionService,
+    store_id: &str,
+    timestamp: &str,
+) -> Result<InviteMutationPlan, InviteError> {
+    if chain.store_id() != Some(store_id) {
+        return Err(InviteError::InvalidDurableMutation(format!(
+            "membership chain store {:?} differs from requested store {store_id:?}",
+            chain.store_id()
+        )));
+    }
+    let invitee_x25519_pk = ed25519_hex_to_x25519(invitee_ed25519_pubkey)?;
+    let entry = chain.signed_set_member(
+        owner_keypair,
+        invitee_ed25519_pubkey.to_string(),
+        invitee_email.map(str::to_string),
+        role.clone(),
+        timestamp.to_string(),
+    )?;
+    let entry_coord = entry.coord();
+    let mut validated = chain.clone();
+    validated.add_entry_at(entry_coord.clone(), entry.clone())?;
+    let head = validated.signed_head(owner_keypair).ok_or_else(|| {
+        InviteError::InvalidDurableMutation(
+            "invitation leaves its author without a membership head".to_string(),
+        )
+    })?;
+    validate_planned_head(&entry, &head)?;
+    let wrapped_key = signed_wrapped_key_with_activation(
+        store_id,
+        invitee_ed25519_pubkey,
+        &invitee_x25519_pk,
+        encryption,
+        owner_keypair,
+        Some(entry_coord),
+    )?;
+    Ok(InviteMutationPlan {
+        entry,
+        head,
+        invitee_pubkey: invitee_ed25519_pubkey.to_string(),
+        invitee_email: invitee_email.map(str::to_string),
+        role,
+        desired_access: CloudAccessState::Present {
+            member_pubkey: invitee_ed25519_pubkey.to_string(),
+            provider_account_email: invitee_email.map(str::to_string),
+        },
+        wrapped_key,
+    })
+}
+
+fn invite_plan_matches_request(
+    plan: &InviteMutationPlan,
+    owner_keypair: &UserKeypair,
+    invitee_pubkey: &str,
+    invitee_email: Option<&str>,
+    role: &MemberRole,
+    store_id: &str,
+) -> bool {
+    plan.entry.author_pubkey == hex::encode(owner_keypair.public_key())
+        && plan.entry.store_id == store_id
+        && plan.invitee_pubkey == invitee_pubkey
+        && plan.invitee_email.as_deref() == invitee_email
+        && &plan.role == role
+        && plan.desired_access
+            == (CloudAccessState::Present {
+                member_pubkey: invitee_pubkey.to_string(),
+                provider_account_email: invitee_email.map(str::to_string),
+            })
+        && matches!(
+            &plan.entry.change,
+            MembershipChange::SetMember {
+                user_pubkey,
+                provider_account_email,
+                role: entry_role,
+                ..
+            } if user_pubkey == invitee_pubkey
+                && provider_account_email.as_deref() == invitee_email
+                && entry_role == role
+        )
+}
+
+async fn execute_invite_mutation(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn CloudHome,
+    chain: &mut MembershipChain,
+    plan: InviteMutationPlan,
+    mut progress: MembershipMutationProgress,
+    persistence: MutationPersistence<'_>,
+) -> Result<CloudHomeJoinInfo, InviteError> {
+    validate_planned_head(&plan.entry, &plan.head)?;
+    let validated_chain = chain_with_exact_entry(chain, &plan.entry)?;
+    let wrapped: WrappedStoreKey = serde_json::from_slice(&plan.wrapped_key).map_err(|error| {
+        InviteError::InvalidDurableMutation(format!("parse planned invitation wrap: {error}"))
+    })?;
+    if wrapped.activation.as_ref() != Some(&plan.entry.coord())
+        || wrapped.author_pubkey != plan.entry.author_pubkey
+        || wrapped
+            .verify_and_unwrap(
+                &plan.entry.store_id,
+                &plan.invitee_pubkey,
+                std::iter::once(plan.entry.author_pubkey.as_str()),
+            )
+            .is_err()
+    {
+        return Err(InviteError::InvalidDurableMutation(
+            "planned invitation wrap is not bound to its exact entry, recipient, and author"
+                .to_string(),
+        ));
+    }
+    let outcome = cloud_home.set_access(plan.desired_access.clone()).await?;
+    let CloudAccessOutcome::Present(observed_join_info) = outcome else {
+        return Err(InviteError::InvalidDurableMutation(
+            "provider returned absent outcome for present access request".to_string(),
+        ));
+    };
+    let join_info = match progress {
+        MembershipMutationProgress::Pending => {
+            progress = MembershipMutationProgress::InviteGranted {
+                join_info: observed_join_info.clone(),
+            };
+            persistence.record_progress(&progress).await?;
+            observed_join_info
+        }
+        MembershipMutationProgress::InviteGranted { join_info } => {
+            if join_info != observed_join_info {
+                return Err(InviteError::InvalidDurableMutation(
+                    "provider returned different join information while verifying persisted access"
+                        .to_string(),
+                ));
+            }
+            join_info
+        }
+    };
+    storage
+        .put_wrapped_key(
+            &plan.entry.author_pubkey,
+            &plan.invitee_pubkey,
+            plan.wrapped_key.clone(),
+        )
+        .await?;
+    super::store_objects::append_membership_entry_object(storage, &plan.entry.coord(), &plan.entry)
+        .await
+        .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    super::store_objects::append_membership_head_object(storage, &plan.head)
+        .await
+        .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    *chain = validated_chain;
+    persistence.complete().await?;
+    Ok(join_info)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_invitation_with_encryption_durable(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn CloudHome,
+    chain: &mut MembershipChain,
+    owner_keypair: &UserKeypair,
+    invitee_ed25519_pubkey: &str,
+    invitee_email: Option<&str>,
+    role: MemberRole,
+    encryption: &EncryptionService,
+    store_id: &str,
+    timestamp: &str,
+    db: &Database,
+) -> Result<CloudHomeJoinInfo, InviteError> {
+    let _mutation = db.lock_membership_mutation().await;
+    let (plan, progress, intent_hash) = match db.outbound_membership_mutation().await? {
+        Some(row) => {
+            let intent_hash = row.intent_hash;
+            let (pending, progress) = decode_membership_mutation(row)?;
+            let MembershipMutationPlan::Invite(plan) = pending else {
+                return Err(InviteError::PendingMutation(
+                    "a member removal is pending".to_string(),
+                ));
+            };
+            if !invite_plan_matches_request(
+                &plan,
+                owner_keypair,
+                invitee_ed25519_pubkey,
+                invitee_email,
+                &role,
+                store_id,
+            ) {
+                return Err(InviteError::PendingMutation(
+                    "the pending invitation has different immutable inputs".to_string(),
+                ));
+            }
+            (plan, progress, intent_hash)
+        }
+        None => {
+            let plan = build_invite_mutation(
+                chain,
+                owner_keypair,
+                invitee_ed25519_pubkey,
+                invitee_email,
+                role,
+                encryption,
+                store_id,
+                timestamp,
+            )?;
+            let encoded =
+                encode_membership_mutation(&MembershipMutationPlan::Invite(plan.clone()))?;
+            let progress = MembershipMutationProgress::Pending;
+            let intent_hash = db
+                .stage_membership_mutation(encoded, encode_membership_progress(&progress)?)
+                .await?;
+            (plan, progress, intent_hash)
+        }
+    };
+    execute_invite_mutation(
+        storage,
+        cloud_home,
+        chain,
+        plan,
+        progress,
+        MutationPersistence { db, intent_hash },
+    )
+    .await
+}
+
 pub async fn create_invitation_with_encryption(
     storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
@@ -372,33 +737,26 @@ pub async fn create_invitation_with_encryption(
 
     // Create and sign a membership entry.
     let author_pubkey_hex = hex::encode(owner_keypair.public_key());
-    let entry_coord = MembershipCoord {
-        author_pubkey: author_pubkey_hex.clone(),
-        seq: next_membership_seq(chain, &author_pubkey_hex),
-    };
-    let mut entry = MembershipEntry {
-        action: MembershipAction::Add,
-        user_pubkey: invitee_ed25519_pubkey.to_string(),
-        provider_account_email: invitee_email.map(str::to_string),
-        prev_hash: chain.latest_author_hash(&author_pubkey_hex),
+    let entry = chain.signed_set_member(
+        owner_keypair,
+        invitee_ed25519_pubkey.to_string(),
+        invitee_email.map(str::to_string),
         role,
-        timestamp: timestamp.to_string(),
-        author_pubkey: String::new(),
-        signature: String::new(),
-    };
-    sign_membership_entry(&mut entry, owner_keypair);
+        timestamp.to_string(),
+    )?;
+    let entry_coord = entry.coord();
 
     // Validate against the local chain before any provider or storage mutation.
     let mut validated_chain = chain.clone();
     validated_chain.add_entry_at(entry_coord.clone(), entry.clone())?;
 
-    let grant = CloudAccessGrant {
+    let present_access = CloudAccessState::Present {
         member_pubkey: invitee_ed25519_pubkey.to_string(),
         provider_account_email: invitee_email.map(str::to_string),
     };
-    let revoke = CloudAccessRevoke {
-        member_pubkey: grant.member_pubkey.clone(),
-        provider_account_email: grant.provider_account_email.clone(),
+    let absent_access = CloudAccessState::Absent {
+        member_pubkey: invitee_ed25519_pubkey.to_string(),
+        provider_account_email: invitee_email.map(str::to_string),
     };
 
     // Whether the invitee is already a current member, judged against the chain as
@@ -428,7 +786,14 @@ pub async fn create_invitation_with_encryption(
         Err(e) => return Err(e.into()),
     };
 
-    let join_info = cloud_home.grant_access(grant).await?;
+    let join_info = match cloud_home.set_access(present_access).await? {
+        CloudAccessOutcome::Present(join_info) => join_info,
+        CloudAccessOutcome::Absent(_) => {
+            return Err(InviteError::Crypto(
+                "provider returned absent outcome for present access request".to_string(),
+            ))
+        }
+    };
 
     // Upload wrapped key and membership entry.
     if let Err(original) = storage
@@ -441,12 +806,23 @@ pub async fn create_invitation_with_encryption(
         // held their access before this invite, so revoking it would strip access
         // this invite never granted.
         if !invitee_is_current_member {
-            if let Err(rollback) = cloud_home.revoke_access(revoke).await {
-                return Err(InviteError::Rollback {
-                    operation: "upload wrapped key",
-                    original: original.to_string(),
-                    rollback: rollback.to_string(),
-                });
+            match cloud_home.set_access(absent_access.clone()).await {
+                Ok(CloudAccessOutcome::Absent(_)) => {}
+                Ok(CloudAccessOutcome::Present(_)) => {
+                    return Err(InviteError::Rollback {
+                        operation: "upload wrapped key",
+                        original: original.to_string(),
+                        rollback: "provider returned present outcome for absent access request"
+                            .to_string(),
+                    });
+                }
+                Err(rollback) => {
+                    return Err(InviteError::Rollback {
+                        operation: "upload wrapped key",
+                        original: original.to_string(),
+                        rollback: rollback.to_string(),
+                    });
+                }
             }
         }
         return Err(original.into());
@@ -460,8 +836,13 @@ pub async fn create_invitation_with_encryption(
     // for an Add that never committed (the wrap authenticates against the current
     // Owner set, so the invitee could otherwise read the store while peers reject
     // their writes). The retry recomputes the seq from the now-newer head.
-    if let Err(original) =
-        guard_extends_committed_head(storage, &author_pubkey_hex, entry_coord.seq).await
+    if let Err(original) = guard_extends_committed_head(
+        storage,
+        &author_pubkey_hex,
+        &entry_coord.author_owner_grant,
+        entry_coord.seq,
+    )
+    .await
     {
         let rollback_errors = rollback_written_invite(
             storage,
@@ -470,7 +851,7 @@ pub async fn create_invitation_with_encryption(
             invitee_ed25519_pubkey,
             invitee_is_current_member,
             prior_wrapped_key,
-            revoke,
+            absent_access,
         )
         .await;
         if !rollback_errors.is_empty() {
@@ -491,7 +872,7 @@ pub async fn create_invitation_with_encryption(
             invitee_ed25519_pubkey,
             invitee_is_current_member,
             prior_wrapped_key,
-            revoke,
+            absent_access,
         )
         .await;
         if !rollback_errors.is_empty() {
@@ -539,6 +920,7 @@ pub async fn unwrap_store_keyring(
     keypair: &UserKeypair,
     store_id: &str,
     founder: &str,
+    membership_floor: &[MembershipCoord],
 ) -> Result<EncryptionService, InviteError> {
     // The candidate keyring: enough to read the sealed membership chain, but not
     // yet trusted to be the real, owner-authorized store key.
@@ -554,11 +936,19 @@ pub async fn unwrap_store_keyring(
         BlobPathScheme::for_storage(HomeStorage::Opaque),
         store_id.to_string(),
         keypair.clone(),
-    );
-    let entry_keys = storage.list_membership_entries().await?;
-    let chain = load_anchored_chain(&storage, &entry_keys, Some(founder), None)
+    )
+    .with_copy_ids(Arc::new(crate::storage::cloud::RandomCopyIdGenerator));
+    let entry_keys = list_membership_entries(&storage)
         .await
-        .map_err(|e| InviteError::Crypto(format!("membership chain: {e}")))?;
+        .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    let chain = super::membership_ops::load_anchored_chain_at_floor(
+        &storage,
+        &entry_keys,
+        founder,
+        membership_floor,
+    )
+    .await
+    .map_err(|e| InviteError::Crypto(format!("membership chain: {e}")))?;
 
     // The current Owner set — the same non-temporal fold every other
     // authorization path uses (`current_members` filtered to Owner) — is the
@@ -580,7 +970,7 @@ pub async fn unwrap_store_keyring(
     // Authenticate the wrapped key against that Owner set — and, if a revoke
     // re-wrapped the slot between invite and join, against the activation's
     // now-visible Remove entry — then decrypt and adopt it.
-    let visible = membership_coords(&entry_keys);
+    let visible = chain.author_heads();
     unwrap_store_keyring_for_owners_with_activation(
         cloud_home.as_ref(),
         keypair,
@@ -822,11 +1212,312 @@ pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
 /// 4. Publishes the signed Remove membership entry as the visible commit point
 ///
 /// Returns the new encryption key (caller must persist it and start using it).
+async fn build_revoke_mutation(
+    cloud_home: &dyn CloudHome,
+    chain: &MembershipChain,
+    owner_keypair: &UserKeypair,
+    revokee_pubkey: &str,
+    store_id: &str,
+    timestamp: &str,
+    current_encryption: &EncryptionService,
+) -> Result<RevokeMutationPlan, InviteError> {
+    if chain.store_id() != Some(store_id) {
+        return Err(InviteError::InvalidDurableMutation(format!(
+            "membership chain store {:?} differs from requested store {store_id:?}",
+            chain.store_id()
+        )));
+    }
+    let members = chain.current_members();
+    if !members.iter().any(|(pubkey, _)| pubkey == revokee_pubkey) {
+        return Err(InviteError::NotAMember(revokee_pubkey.to_string()));
+    }
+    let current_owners = members
+        .iter()
+        .filter(|(pubkey, role)| pubkey != revokee_pubkey && *role == MemberRole::Owner)
+        .map(|(pubkey, _)| pubkey.clone())
+        .collect::<Vec<_>>();
+    if current_owners.is_empty() {
+        return Err(InviteError::LastOwner);
+    }
+    let entry = chain.signed_remove_member(
+        owner_keypair,
+        revokee_pubkey.to_string(),
+        timestamp.to_string(),
+    )?;
+    let remove_coord = entry.coord();
+    let mut validated = chain.clone();
+    validated.add_entry_at(remove_coord.clone(), entry.clone())?;
+    let head = validated.signed_head(owner_keypair).ok_or_else(|| {
+        InviteError::InvalidDurableMutation(
+            "removal leaves its author without a membership head".to_string(),
+        )
+    })?;
+    validate_planned_head(&entry, &head)?;
+    let author = hex::encode(owner_keypair.public_key());
+    let mut visible_coords = chain.author_heads();
+    visible_coords.push(remove_coord.clone());
+    let prior_attempt = match unwrap_store_keyring_for_owners_with_activation(
+        cloud_home,
+        owner_keypair,
+        store_id,
+        std::iter::once(author.as_str()),
+        Some(&visible_coords),
+    )
+    .await
+    {
+        Ok(keyring) if keyring.current_generation() > current_encryption.current_generation() => {
+            Some(keyring)
+        }
+        Ok(_) => None,
+        Err(InviteError::CloudHome(CloudHomeError::NotFound(_)))
+        | Err(InviteError::InactiveWrappedKey { .. }) => None,
+        Err(error) => return Err(error),
+    };
+    let new_keyring = match prior_attempt {
+        Some(prior) => current_encryption.merged_with(&prior),
+        None => current_encryption
+            .with_appended_generation(
+                current_encryption
+                    .current_generation()
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        InviteError::Crypto("store key generation overflow".to_string())
+                    })?,
+                encryption::generate_random_key(),
+            )
+            .map_err(|error| InviteError::Crypto(format!("append key generation: {error}")))?,
+    };
+    let remaining_members = validated.current_members();
+    let mut wraps = Vec::with_capacity(remaining_members.len());
+    for (recipient, _) in remaining_members {
+        let recipient_key = ed25519_hex_to_x25519(&recipient)?;
+        wraps.push(ReplacementWrappedKey {
+            recipient: recipient.clone(),
+            bytes: signed_wrapped_key_with_activation(
+                store_id,
+                &recipient,
+                &recipient_key,
+                &new_keyring,
+                owner_keypair,
+                Some(remove_coord.clone()),
+            )?,
+        });
+    }
+    Ok(RevokeMutationPlan {
+        entry,
+        head,
+        revokee_pubkey: revokee_pubkey.to_string(),
+        desired_access: CloudAccessState::Absent {
+            member_pubkey: revokee_pubkey.to_string(),
+            provider_account_email: chain
+                .current_member_provider_email(revokee_pubkey)
+                .map(str::to_string),
+        },
+        wraps,
+        keyring_payload: new_keyring
+            .to_keyring_payload()
+            .map_err(|error| InviteError::Crypto(format!("serialize rotated keyring: {error}")))?,
+    })
+}
+
+fn revoke_plan_matches_request(
+    plan: &RevokeMutationPlan,
+    owner_keypair: &UserKeypair,
+    revokee_pubkey: &str,
+    store_id: &str,
+) -> bool {
+    plan.entry.author_pubkey == hex::encode(owner_keypair.public_key())
+        && plan.entry.store_id == store_id
+        && plan.revokee_pubkey == revokee_pubkey
+        && matches!(
+            &plan.entry.change,
+            MembershipChange::RemoveMember { user_pubkey, .. }
+                if user_pubkey == revokee_pubkey
+        )
+        && matches!(
+            &plan.desired_access,
+            CloudAccessState::Absent { member_pubkey, .. }
+                if member_pubkey == revokee_pubkey
+        )
+}
+
+async fn execute_revoke_mutation(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn CloudHome,
+    chain: &mut MembershipChain,
+    plan: RevokeMutationPlan,
+    progress: MembershipMutationProgress,
+    persistence: MutationPersistence<'_>,
+) -> Result<EncryptionService, InviteError> {
+    if !matches!(progress, MembershipMutationProgress::Pending) {
+        return Err(InviteError::InvalidDurableMutation(
+            "removal carries invitation progress".to_string(),
+        ));
+    }
+    validate_planned_head(&plan.entry, &plan.head)?;
+    let validated_chain = chain_with_exact_entry(chain, &plan.entry)?;
+    let keyring = EncryptionService::from_keyring_payload(plan.keyring_payload.clone())
+        .map_err(|error| InviteError::Crypto(format!("parse rotated keyring: {error}")))?;
+    let remaining = validated_chain.current_members();
+    if remaining.len() != plan.wraps.len() {
+        return Err(InviteError::InvalidDurableMutation(
+            "planned replacement wraps do not cover every remaining member exactly once"
+                .to_string(),
+        ));
+    }
+    let mut planned_recipients = std::collections::BTreeSet::new();
+    for wrapped in &plan.wraps {
+        if !planned_recipients.insert(wrapped.recipient.clone())
+            || !remaining
+                .iter()
+                .any(|(member_pubkey, _)| member_pubkey == &wrapped.recipient)
+        {
+            return Err(InviteError::InvalidDurableMutation(format!(
+                "planned replacement wrap has duplicate or non-member recipient {}",
+                wrapped.recipient
+            )));
+        }
+        let envelope: WrappedStoreKey =
+            serde_json::from_slice(&wrapped.bytes).map_err(|error| {
+                InviteError::InvalidDurableMutation(format!(
+                    "parse planned replacement wrap for {}: {error}",
+                    wrapped.recipient
+                ))
+            })?;
+        if envelope.activation.as_ref() != Some(&plan.entry.coord())
+            || envelope.generation != keyring.current_generation()
+            || envelope.author_pubkey != plan.entry.author_pubkey
+            || envelope
+                .verify_and_unwrap(
+                    &plan.entry.store_id,
+                    &wrapped.recipient,
+                    std::iter::once(plan.entry.author_pubkey.as_str()),
+                )
+                .is_err()
+        {
+            return Err(InviteError::InvalidDurableMutation(format!(
+                "planned replacement wrap for {} is not bound to the exact removal, generation, recipient, and author",
+                wrapped.recipient
+            )));
+        }
+        storage
+            .put_wrapped_key(
+                &plan.entry.author_pubkey,
+                &wrapped.recipient,
+                wrapped.bytes.clone(),
+            )
+            .await?;
+    }
+    super::store_objects::append_membership_entry_object(storage, &plan.entry.coord(), &plan.entry)
+        .await
+        .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    storage
+        .delete_wrapped_key(&plan.entry.author_pubkey, &plan.revokee_pubkey)
+        .await?;
+    match cloud_home.set_access(plan.desired_access.clone()).await? {
+        CloudAccessOutcome::Absent(_) => {}
+        CloudAccessOutcome::Present(_) => {
+            return Err(InviteError::InvalidDurableMutation(
+                "provider returned present outcome for absent access request".to_string(),
+            ))
+        }
+    }
+    super::store_objects::append_membership_head_object(storage, &plan.head)
+        .await
+        .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    *chain = validated_chain;
+    persistence.complete().await?;
+    Ok(keyring)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn revoke_member_durable(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn CloudHome,
+    chain: &mut MembershipChain,
+    owner_keypair: &UserKeypair,
+    revokee_pubkey: &str,
+    store_id: &str,
+    timestamp: &str,
+    current_encryption: &EncryptionService,
+    db: &Database,
+) -> Result<EncryptionService, InviteError> {
+    let _mutation = db.lock_membership_mutation().await;
+    let (plan, progress, intent_hash) = match db.outbound_membership_mutation().await? {
+        Some(row) => {
+            let intent_hash = row.intent_hash;
+            let (pending, progress) = decode_membership_mutation(row)?;
+            let MembershipMutationPlan::Revoke(plan) = pending else {
+                return Err(InviteError::PendingMutation(
+                    "an invitation is pending".to_string(),
+                ));
+            };
+            if !revoke_plan_matches_request(&plan, owner_keypair, revokee_pubkey, store_id) {
+                return Err(InviteError::PendingMutation(
+                    "the pending removal has different immutable inputs".to_string(),
+                ));
+            }
+            (plan, progress, intent_hash)
+        }
+        None => {
+            let is_current = chain
+                .current_members()
+                .iter()
+                .any(|(pubkey, _)| pubkey == revokee_pubkey);
+            let was_removed = chain.entries().iter().any(|entry| {
+                matches!(
+                    &entry.change,
+                    MembershipChange::RemoveMember { user_pubkey, .. }
+                        if user_pubkey == revokee_pubkey
+                )
+            });
+            if !is_current && was_removed {
+                return revoke_member(
+                    storage,
+                    cloud_home,
+                    chain,
+                    owner_keypair,
+                    revokee_pubkey,
+                    store_id,
+                    timestamp,
+                    current_encryption,
+                )
+                .await;
+            }
+            let plan = build_revoke_mutation(
+                cloud_home,
+                chain,
+                owner_keypair,
+                revokee_pubkey,
+                store_id,
+                timestamp,
+                current_encryption,
+            )
+            .await?;
+            let encoded =
+                encode_membership_mutation(&MembershipMutationPlan::Revoke(plan.clone()))?;
+            let progress = MembershipMutationProgress::Pending;
+            let intent_hash = db
+                .stage_membership_mutation(encoded, encode_membership_progress(&progress)?)
+                .await?;
+            (plan, progress, intent_hash)
+        }
+    };
+    execute_revoke_mutation(
+        storage,
+        cloud_home,
+        chain,
+        plan,
+        progress,
+        MutationPersistence { db, intent_hash },
+    )
+    .await
+}
+
 pub async fn revoke_member(
     storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
     chain: &mut MembershipChain,
-    entry_keys: Vec<(String, u64)>,
     owner_keypair: &UserKeypair,
     revokee_pubkey: &str,
     store_id: &str,
@@ -836,7 +1527,10 @@ pub async fn revoke_member(
     let members = chain.current_members();
     let revokee_is_current = members.iter().any(|(pk, _)| pk == revokee_pubkey);
     let revokee_was_removed = chain.entries().iter().any(|entry| {
-        entry.action == MembershipAction::Remove && entry.user_pubkey == revokee_pubkey
+        matches!(
+            &entry.change,
+            MembershipChange::RemoveMember { user_pubkey, .. } if user_pubkey == revokee_pubkey
+        )
     });
     if !revokee_is_current && !revokee_was_removed {
         return Err(InviteError::NotAMember(revokee_pubkey.to_string()));
@@ -852,28 +1546,17 @@ pub async fn revoke_member(
         return Err(InviteError::LastOwner);
     }
 
-    // Withdraw the removed member's storage credential where the provider
-    // supports it. Removal does not depend on it: the chain Remove and key
-    // rotation below are the protection, so a backend that cannot revoke reports
-    // Unsupported and removal proceeds.
     let provider_account_email = chain
         .current_member_provider_email(revokee_pubkey)
         .map(str::to_string);
-    match cloud_home
-        .revoke_access(CloudAccessRevoke {
-            member_pubkey: revokee_pubkey.to_string(),
-            provider_account_email,
-        })
-        .await?
-    {
-        RevokeOutcome::Revoked => {}
-        RevokeOutcome::Unsupported => {
-            tracing::info!(
-                member = %revokee_pubkey,
-                "cloud provider offers no per-member credential revocation; removal proceeds — chain revocation and store key rotation are the protection",
-            );
-        }
-    }
+    let absent_access = CloudAccessState::Absent {
+        member_pubkey: revokee_pubkey.to_string(),
+        provider_account_email: provider_account_email.clone(),
+    };
+    let present_access = CloudAccessState::Present {
+        member_pubkey: revokee_pubkey.to_string(),
+        provider_account_email,
+    };
 
     // This owner deletes only its own wrap for the revokee, from its own prefix.
     // Any wrap another owner sealed for the revokee is a pre-rotation generation —
@@ -882,7 +1565,7 @@ pub async fn revoke_member(
     let author_pubkey_hex = hex::encode(owner_keypair.public_key());
 
     if !revokee_is_current {
-        let visible_coords = membership_coords(&entry_keys);
+        let visible_coords = chain.author_heads();
         let keyring = unwrap_store_keyring_for_owners_with_activation(
             cloud_home,
             owner_keypair,
@@ -891,28 +1574,19 @@ pub async fn revoke_member(
             Some(&visible_coords),
         )
         .await?;
+        revoke_provider_access(cloud_home, absent_access).await?;
         storage
             .delete_wrapped_key(&author_pubkey_hex, revokee_pubkey)
             .await?;
         return Ok(keyring);
     }
 
-    let remove_coord = MembershipCoord {
-        author_pubkey: author_pubkey_hex.clone(),
-        seq: next_membership_seq(chain, &author_pubkey_hex),
-    };
-    // Create and sign a Remove entry.
-    let mut entry = MembershipEntry {
-        action: MembershipAction::Remove,
-        user_pubkey: revokee_pubkey.to_string(),
-        provider_account_email: None,
-        prev_hash: chain.latest_author_hash(&author_pubkey_hex),
-        role: MemberRole::Member, // role field is not meaningful for Remove, but required
-        timestamp: timestamp.to_string(),
-        author_pubkey: String::new(),
-        signature: String::new(),
-    };
-    sign_membership_entry(&mut entry, owner_keypair);
+    let entry = chain.signed_remove_member(
+        owner_keypair,
+        revokee_pubkey.to_string(),
+        timestamp.to_string(),
+    )?;
+    let remove_coord = entry.coord();
 
     // Validate against a clone before any storage writes. The caller's chain
     // advances only after the Remove entry is uploaded as the commit point.
@@ -930,7 +1604,8 @@ pub async fn revoke_member(
     // above the one this device still holds (a genuine prior attempt, not just its
     // own pre-rotation wrap). Anything else — no prior wrap, an activation not yet
     // visible — falls through to a fresh mint.
-    let visible_coords = membership_coords(&entry_keys);
+    let mut visible_coords = chain.author_heads();
+    visible_coords.push(remove_coord.clone());
     let prior_attempt = match unwrap_store_keyring_for_owners_with_activation(
         cloud_home,
         owner_keypair,
@@ -969,7 +1644,16 @@ pub async fn revoke_member(
             ed25519_hex_to_x25519(member_pubkey).map(|x25519_pk| (member_pubkey, x25519_pk))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let mut rewraps = Vec::with_capacity(remaining_member_keys.len());
     for (member_pubkey, x25519_pk) in remaining_member_keys {
+        let previous = match storage
+            .get_wrapped_key(&author_pubkey_hex, member_pubkey)
+            .await
+        {
+            Ok(bytes) => Some(bytes),
+            Err(StorageError::NotFound(_)) => None,
+            Err(error) => return Err(InviteError::Bucket(error)),
+        };
         let wrapped = signed_wrapped_key_with_activation(
             store_id,
             member_pubkey,
@@ -978,36 +1662,226 @@ pub async fn revoke_member(
             owner_keypair,
             Some(remove_coord.clone()),
         )?;
-        storage
-            .put_wrapped_key(&author_pubkey_hex, member_pubkey, wrapped)
-            .await?;
+        rewraps.push(PlannedWrappedKey {
+            recipient: member_pubkey.clone(),
+            previous,
+            replacement: wrapped,
+        });
     }
-
-    // Delete this owner's wrap for the revoked member, from its own prefix.
-    storage
-        .delete_wrapped_key(&author_pubkey_hex, revokee_pubkey)
-        .await?;
+    let mut touched = Vec::with_capacity(rewraps.len() + 1);
+    for rewrap in rewraps {
+        touched.push(PriorWrappedKey {
+            recipient: rewrap.recipient.clone(),
+            bytes: rewrap.previous,
+        });
+        if let Err(error) = storage
+            .put_wrapped_key(&author_pubkey_hex, &rewrap.recipient, rewrap.replacement)
+            .await
+        {
+            let original = InviteError::Bucket(error);
+            rollback_revocation(
+                storage,
+                cloud_home,
+                &author_pubkey_hex,
+                &touched,
+                None,
+                "write remaining member wraps",
+                original.to_string(),
+            )
+            .await?;
+            return Err(original);
+        }
+    }
 
     // Don't overwrite a committed Remove another owner device already published at
     // this seq; fail loud and let the retry rebuild on top of the observed head.
-    guard_extends_committed_head(storage, &author_pubkey_hex, remove_coord.seq).await?;
-    upload_membership_entry(storage, &remove_coord, &entry).await?;
-    publish_membership_head(storage, &validated_chain, owner_keypair)
+    if let Err(original) = guard_extends_committed_head(
+        storage,
+        &author_pubkey_hex,
+        &remove_coord.author_owner_grant,
+        remove_coord.seq,
+    )
+    .await
+    {
+        rollback_revocation(
+            storage,
+            cloud_home,
+            &author_pubkey_hex,
+            &touched,
+            None,
+            "verify membership head predecessor",
+            original.to_string(),
+        )
+        .await?;
+        return Err(original);
+    }
+    if let Err(original) = upload_membership_entry(storage, &remove_coord, &entry).await {
+        rollback_revocation(
+            storage,
+            cloud_home,
+            &author_pubkey_hex,
+            &touched,
+            None,
+            "write membership removal entry",
+            original.to_string(),
+        )
+        .await?;
+        return Err(original);
+    }
+    let prior_wrap = match storage
+        .get_wrapped_key(&author_pubkey_hex, revokee_pubkey)
         .await
-        .map_err(|e| InviteError::Crypto(format!("publish membership head: {e}")))?;
+    {
+        Ok(bytes) => Some(bytes),
+        Err(StorageError::NotFound(_)) => None,
+        Err(error) => {
+            let original = InviteError::Bucket(error);
+            rollback_revocation(
+                storage,
+                cloud_home,
+                &author_pubkey_hex,
+                &touched,
+                None,
+                "read prior revokee wrap",
+                original.to_string(),
+            )
+            .await?;
+            return Err(original);
+        }
+    };
+    touched.push(PriorWrappedKey {
+        recipient: revokee_pubkey.to_string(),
+        bytes: prior_wrap,
+    });
+    if let Err(error) = storage
+        .delete_wrapped_key(&author_pubkey_hex, revokee_pubkey)
+        .await
+    {
+        let original = InviteError::Bucket(error);
+        rollback_revocation(
+            storage,
+            cloud_home,
+            &author_pubkey_hex,
+            &touched,
+            None,
+            "delete revokee wrap",
+            original.to_string(),
+        )
+        .await?;
+        return Err(original);
+    }
+    let revoked = match revoke_provider_access(cloud_home, absent_access).await {
+        Ok(revoked) => revoked,
+        Err(original) => {
+            rollback_revocation(
+                storage,
+                cloud_home,
+                &author_pubkey_hex,
+                &touched,
+                Some(present_access.clone()),
+                "revoke provider access",
+                original.to_string(),
+            )
+            .await?;
+            return Err(original);
+        }
+    };
+    if let Err(error) = publish_membership_head(storage, &validated_chain, owner_keypair).await {
+        let original = format!("publish membership head: {error}");
+        rollback_revocation(
+            storage,
+            cloud_home,
+            &author_pubkey_hex,
+            &touched,
+            revoked.then_some(present_access),
+            "publish membership head",
+            original.clone(),
+        )
+        .await?;
+        return Err(InviteError::Crypto(original));
+    }
     *chain = validated_chain;
 
     Ok(new_keyring)
 }
 
-fn membership_coords(entry_keys: &[(String, u64)]) -> Vec<MembershipCoord> {
-    entry_keys
-        .iter()
-        .map(|(author_pubkey, seq)| MembershipCoord {
-            author_pubkey: author_pubkey.clone(),
-            seq: *seq,
+struct PlannedWrappedKey {
+    recipient: String,
+    previous: Option<Vec<u8>>,
+    replacement: Vec<u8>,
+}
+
+struct PriorWrappedKey {
+    recipient: String,
+    bytes: Option<Vec<u8>>,
+}
+
+async fn revoke_provider_access(
+    cloud_home: &dyn CloudHome,
+    absent_access: CloudAccessState,
+) -> Result<bool, InviteError> {
+    match cloud_home.set_access(absent_access).await? {
+        CloudAccessOutcome::Absent(RevokeOutcome::Revoked) => Ok(true),
+        CloudAccessOutcome::Absent(RevokeOutcome::Unsupported) => {
+            tracing::info!(
+                "cloud provider offers no per-member credential revocation; chain revocation and store key rotation protect later content",
+            );
+            Ok(false)
+        }
+        CloudAccessOutcome::Present(_) => Err(InviteError::Crypto(
+            "provider returned present outcome for absent access request".to_string(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rollback_revocation(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn CloudHome,
+    author: &str,
+    wrapped_keys: &[PriorWrappedKey],
+    regrant: Option<CloudAccessState>,
+    operation: &'static str,
+    original: String,
+) -> Result<(), InviteError> {
+    let mut failures = Vec::new();
+    for wrapped_key in wrapped_keys.iter().rev() {
+        let result = match wrapped_key.bytes.as_ref() {
+            Some(bytes) => {
+                storage
+                    .put_wrapped_key(author, &wrapped_key.recipient, bytes.clone())
+                    .await
+            }
+            None => {
+                storage
+                    .delete_wrapped_key(author, &wrapped_key.recipient)
+                    .await
+            }
+        };
+        if let Err(error) = result {
+            failures.push(format!(
+                "restore wrapped key for {}: {error}",
+                wrapped_key.recipient
+            ));
+        }
+    }
+    if let Some(grant) = regrant {
+        match cloud_home.set_access(grant).await {
+            Ok(CloudAccessOutcome::Present(_)) => {}
+            Ok(CloudAccessOutcome::Absent(_)) => failures
+                .push("restore provider access: provider returned absent outcome".to_string()),
+            Err(error) => failures.push(format!("restore provider access: {error}")),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(InviteError::Rollback {
+            operation,
+            original,
+            rollback: failures.join("; "),
         })
-        .collect()
+    }
 }
 
 #[cfg(test)]
@@ -1019,9 +1893,19 @@ mod tests {
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::membership::MemberRole;
     use crate::sync::membership_ops::download_entries;
-    use crate::sync::test_helpers::{bootstrap_chain, pubkey_hex, MockSyncStorage};
+    use crate::sync::test_helpers::{
+        bootstrap_chain, pubkey_hex, publish_test_protocol_roots, test_migrations,
+        test_synced_tables, MockSyncStorage,
+    };
     use async_trait::async_trait;
     use std::sync::Arc;
+
+    async fn membership_coords(
+        _storage: &MockSyncStorage,
+        entry_keys: &[MembershipCoord],
+    ) -> Vec<MembershipCoord> {
+        entry_keys.to_vec()
+    }
 
     /// Minimal CloudHome mock that returns a dummy S3 JoinInfo.
     struct MockCloudHome;
@@ -1064,45 +1948,62 @@ mod tests {
         async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
             Ok(false)
         }
-        async fn grant_access(
+        async fn set_access(
             &self,
-            _grant: CloudAccessGrant,
-        ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-            Ok(CloudHomeJoinInfo::S3 {
-                bucket: "test-bucket".to_string(),
-                region: "us-east-1".to_string(),
-                endpoint: None,
-                access_key: "test-access-key".to_string(),
-                secret_key: "test-secret-key".to_string(),
-                key_prefix: None,
+            desired: CloudAccessState,
+        ) -> Result<CloudAccessOutcome, CloudHomeError> {
+            Ok(match desired {
+                CloudAccessState::Present { .. } => {
+                    CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
+                        bucket: "test-bucket".to_string(),
+                        region: "us-east-1".to_string(),
+                        endpoint: None,
+                        access_key: "test-access-key".to_string(),
+                        secret_key: "test-secret-key".to_string(),
+                        key_prefix: None,
+                    })
+                }
+                CloudAccessState::Absent { .. } => {
+                    CloudAccessOutcome::Absent(RevokeOutcome::Unsupported)
+                }
             })
-        }
-        async fn revoke_access(
-            &self,
-            _revoke: CloudAccessRevoke,
-        ) -> Result<RevokeOutcome, CloudHomeError> {
-            Ok(RevokeOutcome::Unsupported)
         }
     }
 
     /// CloudHome mock that records grant/revoke identities.
     struct RecordingCloudHome {
-        grants: std::sync::Mutex<Vec<CloudAccessGrant>>,
-        revokes: std::sync::Mutex<Vec<CloudAccessRevoke>>,
+        accesses: std::sync::Mutex<Vec<CloudAccessState>>,
+        fail_next_grant: std::sync::atomic::AtomicBool,
     }
 
     impl RecordingCloudHome {
         fn new() -> Self {
             Self {
-                grants: std::sync::Mutex::new(Vec::new()),
-                revokes: std::sync::Mutex::new(Vec::new()),
+                accesses: std::sync::Mutex::new(Vec::new()),
+                fail_next_grant: std::sync::atomic::AtomicBool::new(false),
             }
         }
-        fn last_grant(&self) -> Option<CloudAccessGrant> {
-            self.grants.lock().unwrap().last().cloned()
+        fn last_grant(&self) -> Option<CloudAccessState> {
+            self.accesses
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|access| matches!(access, CloudAccessState::Present { .. }))
+                .cloned()
         }
-        fn last_revoke(&self) -> Option<CloudAccessRevoke> {
-            self.revokes.lock().unwrap().last().cloned()
+        fn last_revoke(&self) -> Option<CloudAccessState> {
+            self.accesses
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|access| matches!(access, CloudAccessState::Absent { .. }))
+                .cloned()
+        }
+        fn fail_next_grant(&self) {
+            self.fail_next_grant
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -1144,26 +2045,34 @@ mod tests {
         async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
             Ok(false)
         }
-        async fn grant_access(
+        async fn set_access(
             &self,
-            grant: CloudAccessGrant,
-        ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-            self.grants.lock().unwrap().push(grant);
-            Ok(CloudHomeJoinInfo::S3 {
-                bucket: "test-bucket".to_string(),
-                region: "us-east-1".to_string(),
-                endpoint: None,
-                access_key: "test-access-key".to_string(),
-                secret_key: "test-secret-key".to_string(),
-                key_prefix: None,
-            })
-        }
-        async fn revoke_access(
-            &self,
-            revoke: CloudAccessRevoke,
-        ) -> Result<RevokeOutcome, CloudHomeError> {
-            self.revokes.lock().unwrap().push(revoke);
-            Ok(RevokeOutcome::Unsupported)
+            desired: CloudAccessState,
+        ) -> Result<CloudAccessOutcome, CloudHomeError> {
+            self.accesses.lock().unwrap().push(desired.clone());
+            match desired {
+                CloudAccessState::Present { .. } => {
+                    if self
+                        .fail_next_grant
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        return Err(CloudHomeError::Transport(
+                            "forced provider regrant failure".to_string(),
+                        ));
+                    }
+                    Ok(CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
+                        bucket: "test-bucket".to_string(),
+                        region: "us-east-1".to_string(),
+                        endpoint: None,
+                        access_key: "test-access-key".to_string(),
+                        secret_key: "test-secret-key".to_string(),
+                        key_prefix: None,
+                    }))
+                }
+                CloudAccessState::Absent { .. } => {
+                    Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
+                }
+            }
         }
     }
 
@@ -1198,7 +2107,7 @@ mod tests {
     }
 
     async fn stored_membership_entries(storage: &MockSyncStorage) -> Vec<MembershipEntry> {
-        let entry_keys = storage.list_membership_entries().await.unwrap();
+        let entry_keys = storage.discover_membership_entries().await;
         download_entries(storage, &entry_keys)
             .await
             .unwrap()
@@ -1237,8 +2146,8 @@ mod tests {
         let invitee = gen_keypair();
         let encryption_key: [u8; 32] = [42u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         // Owner invites the new member.
         create_invitation(
@@ -1370,8 +2279,8 @@ mod tests {
         let encryption_key: [u8; 32] = [5u8; 32];
 
         let cloud = RecordingCloudHome::new();
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
         create_invitation(
             &storage,
             &cloud,
@@ -1388,7 +2297,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cloud.last_grant(),
-            Some(CloudAccessGrant {
+            Some(CloudAccessState::Present {
                 member_pubkey: invitee_pubkey,
                 provider_account_email: Some("a@b.com".to_string()),
             })
@@ -1403,8 +2312,8 @@ mod tests {
         let encryption_key: [u8; 32] = [5u8; 32];
 
         let cloud = RecordingCloudHome::new();
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
         create_invitation(
             &storage,
             &cloud,
@@ -1421,10 +2330,200 @@ mod tests {
         .unwrap();
         assert_eq!(
             cloud.last_grant(),
-            Some(CloudAccessGrant {
+            Some(CloudAccessState::Present {
                 member_pubkey: invitee_pubkey,
                 provider_account_email: None,
             })
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn durable_invite_reuses_exact_plan_after_restart_and_lost_head_result() {
+        let owner = gen_keypair();
+        let invitee = gen_keypair();
+        let invitee_pubkey = pubkey_hex(&invitee);
+        let storage = MockSyncStorage::with_store_and_keypair(LIB_ID, owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let cloud = RecordingCloudHome::new();
+        let directory = tempfile::tempdir().expect("membership outbox temp directory");
+        let path = directory.path().join("store.sqlite3");
+        let open = || {
+            Database::open(
+                &path,
+                test_synced_tables(),
+                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                "durable-invite-device".to_string(),
+                &test_migrations(),
+            )
+            .expect("open membership outbox database")
+            .0
+        };
+        let db = open();
+        storage.lose_membership_head_append_result_on_call(1);
+        let first = create_invitation_with_encryption_durable(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &invitee_pubkey,
+            Some("invitee@example.com"),
+            MemberRole::Member,
+            &EncryptionService::from_key([91; 32]),
+            LIB_ID,
+            "0000000002000-0000-device",
+            &db,
+        )
+        .await;
+        assert!(first
+            .expect_err("lost head result must retain the durable mutation")
+            .to_string()
+            .contains("result lost"),);
+        assert!(db
+            .outbound_membership_mutation()
+            .await
+            .expect("read pending invitation")
+            .is_some());
+        drop(db);
+
+        let reopened = open();
+        create_invitation_with_encryption_durable(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &invitee_pubkey,
+            Some("invitee@example.com"),
+            MemberRole::Member,
+            &EncryptionService::from_key([92; 32]),
+            LIB_ID,
+            "0000000009000-0000-different-retry-time",
+            &reopened,
+        )
+        .await
+        .expect("resume exact durable invitation");
+
+        assert!(reopened
+            .outbound_membership_mutation()
+            .await
+            .expect("read completed invitation")
+            .is_none());
+        assert!(chain
+            .current_members()
+            .iter()
+            .any(|(pubkey, role)| pubkey == &invitee_pubkey && *role == MemberRole::Member));
+        assert_eq!(
+            cloud
+                .accesses
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|access| matches!(access, CloudAccessState::Present { .. }))
+                .count(),
+            2,
+            "restart must reassert and verify the same absolute provider access state",
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn durable_remove_reuses_rotation_after_restart_and_lost_head_result() {
+        let owner = gen_keypair();
+        let member = gen_keypair();
+        let member_pubkey = pubkey_hex(&member);
+        let storage = MockSyncStorage::with_store_and_keypair(LIB_ID, owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let cloud = RecordingCloudHome::new();
+        let current = EncryptionService::from_key([93; 32]);
+        create_invitation_with_encryption(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &member_pubkey,
+            Some("member@example.com"),
+            MemberRole::Member,
+            &current,
+            LIB_ID,
+            "0000000002000-0000-device",
+        )
+        .await
+        .expect("establish member before durable removal");
+
+        let directory = tempfile::tempdir().expect("membership outbox temp directory");
+        let path = directory.path().join("store.sqlite3");
+        let open = || {
+            Database::open(
+                &path,
+                test_synced_tables(),
+                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                "durable-remove-device".to_string(),
+                &test_migrations(),
+            )
+            .expect("open membership outbox database")
+            .0
+        };
+        let db = open();
+        storage.lose_membership_head_append_result_on_call(1);
+        let first = revoke_member_durable(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &member_pubkey,
+            LIB_ID,
+            "0000000003000-0000-device",
+            &current,
+            &db,
+        )
+        .await;
+        assert!(first
+            .expect_err("lost head result must retain the durable removal")
+            .to_string()
+            .contains("result lost"),);
+        assert!(db
+            .outbound_membership_mutation()
+            .await
+            .expect("read pending removal")
+            .is_some());
+        drop(db);
+
+        let reopened = open();
+        let rotated = revoke_member_durable(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &member_pubkey,
+            LIB_ID,
+            "0000000009000-0000-different-retry-time",
+            &EncryptionService::from_key([94; 32]),
+            &reopened,
+        )
+        .await
+        .expect("resume exact durable removal");
+        assert_eq!(rotated.current_generation(), 2);
+        assert!(!chain
+            .current_members()
+            .iter()
+            .any(|(pubkey, _)| pubkey == &member_pubkey));
+        assert!(reopened
+            .outbound_membership_mutation()
+            .await
+            .expect("read completed removal")
+            .is_none());
+        assert_eq!(
+            cloud
+                .accesses
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|access| matches!(access, CloudAccessState::Absent { .. }))
+                .count(),
+            2,
+            "unknown provider outcome is retried as the same absolute absent state",
         );
     }
 
@@ -1515,8 +2614,8 @@ mod tests {
         let wrong_keypair = gen_keypair();
         let encryption_key: [u8; 32] = [7u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         create_invitation(
             &storage,
@@ -1542,8 +2641,8 @@ mod tests {
     #[tokio::test]
     async fn create_invitation_invalid_pubkey_hex() {
         let owner = gen_keypair();
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
         let encryption_key: [u8; 32] = [0u8; 32];
 
         let result = create_invitation(
@@ -1566,8 +2665,8 @@ mod tests {
     #[tokio::test]
     async fn create_invitation_off_curve_pubkey_errors() {
         let owner = gen_keypair();
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
         let encryption_key: [u8; 32] = [0u8; 32];
         let off_curve_pubkey = "0200000000000000000000000000000000000000000000000000000000000000";
 
@@ -1595,8 +2694,8 @@ mod tests {
         let invitee = gen_keypair();
         let encryption_key: [u8; 32] = [0u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         // Add member first.
         create_invitation(
@@ -1638,8 +2737,8 @@ mod tests {
         let invitee = gen_keypair();
         let encryption_key: [u8; 32] = [1u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         create_invitation(
             &storage,
@@ -1657,10 +2756,10 @@ mod tests {
         .unwrap();
 
         // Verify the membership entry was uploaded.
-        let entries = storage.list_membership_entries().await.unwrap();
+        let entries = storage.discover_membership_entries().await;
         let owner_entries: Vec<_> = entries
             .iter()
-            .filter(|(author, _)| author == &pubkey_hex(&owner))
+            .filter(|coord| coord.author_pubkey == pubkey_hex(&owner))
             .collect();
         assert_eq!(owner_entries.len(), 1);
 
@@ -1678,8 +2777,8 @@ mod tests {
         let member = gen_keypair();
         let old_key: [u8; 32] = [42u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         // Owner invites the member.
         create_invitation(
@@ -1708,7 +2807,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member),
             LIB_ID,
@@ -1736,7 +2834,8 @@ mod tests {
         assert!(result.is_err());
 
         // Owner can still unwrap the new key.
-        let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let visible_entries =
+            membership_coords(&storage, &storage.discover_membership_entries().await).await;
         let owner_pk = pubkey_hex(&owner);
         let owner_unwrapped = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
@@ -1751,10 +2850,10 @@ mod tests {
         assert_eq!(owner_unwrapped, new_key.key_bytes());
 
         // The Remove entry was uploaded to the storage.
-        let entries = storage.list_membership_entries().await.unwrap();
+        let entries = storage.discover_membership_entries().await;
         let owner_entries: Vec<_> = entries
             .iter()
-            .filter(|(author, _)| author == &pubkey_hex(&owner))
+            .filter(|coord| coord.author_pubkey == pubkey_hex(&owner))
             .collect();
         // 1 for invite + 1 for revoke = 2
         assert_eq!(owner_entries.len(), 2);
@@ -1776,8 +2875,8 @@ mod tests {
         let old_key: [u8; 32] = [30u8; 32];
         let attempt1_key: [u8; 32] = [31u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
         invite_member_for_test(
             &storage,
             &mut chain,
@@ -1801,21 +2900,14 @@ mod tests {
         // Remove entry uploaded (so it is listed) but the head NOT advanced, plus
         // the first attempt's generation-2 keyring wrapped to the owner's own slot
         // and to the remaining member's, each activated by that Remove entry.
-        let remove_coord = MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: next_membership_seq(&chain, &owner_pk),
-        };
-        let mut remove_entry = MembershipEntry {
-            action: MembershipAction::Remove,
-            user_pubkey: pubkey_hex(&victim),
-            provider_account_email: None,
-            prev_hash: chain.latest_author_hash(&owner_pk),
-            role: MemberRole::Member,
-            timestamp: "0000000004000-0000-dev1".to_string(),
-            author_pubkey: String::new(),
-            signature: String::new(),
-        };
-        sign_membership_entry(&mut remove_entry, &owner);
+        let remove_entry = chain
+            .signed_remove_member(
+                &owner,
+                pubkey_hex(&victim),
+                "0000000004000-0000-dev1".to_string(),
+            )
+            .expect("owner removes victim");
+        let remove_coord = remove_entry.coord();
         upload_membership_entry(&storage, &remove_coord, &remove_entry)
             .await
             .unwrap();
@@ -1840,7 +2932,8 @@ mod tests {
         }
 
         // The member's cycle already adopted the first attempt's key.
-        let visible = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let visible =
+            membership_coords(&storage, &storage.discover_membership_entries().await).await;
         let member_adopted = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &member,
@@ -1861,7 +2954,6 @@ mod tests {
             &storage,
             &storage,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&victim),
             LIB_ID,
@@ -1962,8 +3054,8 @@ mod tests {
         let member2 = gen_keypair();
         let old_key: [u8; 32] = [10u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         // Invite two members.
         create_invitation(
@@ -2001,7 +3093,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&member1),
             LIB_ID,
@@ -2012,7 +3103,8 @@ mod tests {
         .unwrap();
 
         // Both remaining members (owner + member2) can unwrap the new key.
-        let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let visible_entries =
+            membership_coords(&storage, &storage.discover_membership_entries().await).await;
         let owner_pk = pubkey_hex(&owner);
         let owner_key = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
@@ -2052,8 +3144,8 @@ mod tests {
         let old_key: [u8; 32] = [14u8; 32];
         let new_key: [u8; 32] = [15u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
         invite_member_for_test(
             &storage,
             &mut chain,
@@ -2067,7 +3159,11 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let activation = MembershipCoord {
             author_pubkey: owner_pk.clone(),
+            author_owner_grant: chain
+                .active_owner_grant(&owner_pk)
+                .expect("founder Owner grant"),
             seq: 3,
+            entry_hash: crate::sync::store_commit::ObjectHash::digest(b"uncommitted removal"),
         };
         let keyring = EncryptionService::from_key(old_key)
             .with_appended_generation(2, new_key)
@@ -2086,7 +3182,8 @@ mod tests {
             .await
             .unwrap();
 
-        let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let visible_entries =
+            membership_coords(&storage, &storage.discover_membership_entries().await).await;
         let result = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
             &member,
@@ -2118,6 +3215,7 @@ mod tests {
             LIB_ID,
             signer.clone(),
         )
+        .with_copy_ids(Arc::new(crate::storage::cloud::RandomCopyIdGenerator))
     }
 
     /// A member invited but not yet joined is a current member, so revoking a
@@ -2127,8 +3225,6 @@ mod tests {
     /// the join succeeds and the invitee adopts the post-rotation key generation.
     #[tokio::test]
     async fn pending_invitee_joins_after_a_third_member_is_revoked() {
-        use crate::sync::membership_ops::write_founder_entry;
-
         let owner = gen_keypair();
         let pending = gen_keypair();
         let third = gen_keypair();
@@ -2138,10 +3234,9 @@ mod tests {
         let storage = opaque_storage(home.clone(), old_key, &owner);
         // The founder entry lives on the home in production (written at store
         // creation); the joiner reads and anchors the chain to it, so found there.
-        write_founder_entry(&storage, &owner, "0000000001000-0000-dev1")
-            .await
-            .unwrap();
-        let mut chain = bootstrap_chain(&owner);
+        let (_, mut chain) =
+            publish_test_protocol_roots(&storage, "test-store", &owner, "0000000001000-0000-dev1")
+                .await;
 
         create_invitation(
             &storage,
@@ -2178,7 +3273,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&third),
             LIB_ID,
@@ -2190,9 +3284,15 @@ mod tests {
 
         // The pending invitee joins now, resolving the activation against the
         // listed Remove entry rather than being refused for lack of one.
-        let joined = unwrap_store_keyring(home.clone(), &pending, LIB_ID, &pubkey_hex(&owner))
-            .await
-            .unwrap();
+        let joined = unwrap_store_keyring(
+            home.clone(),
+            &pending,
+            LIB_ID,
+            &pubkey_hex(&owner),
+            &chain.author_heads(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             joined.key_bytes(),
@@ -2216,8 +3316,6 @@ mod tests {
     /// refused, so a slot cannot be adopted before its Remove is durably visible.
     #[tokio::test]
     async fn join_refuses_wrapped_key_whose_activation_is_not_visible() {
-        use crate::sync::membership_ops::write_founder_entry;
-
         let owner = gen_keypair();
         let member = gen_keypair();
         let old_key: [u8; 32] = [21u8; 32];
@@ -2225,10 +3323,9 @@ mod tests {
 
         let home = Arc::new(InMemoryCloudHome::new());
         let storage = opaque_storage(home.clone(), old_key, &owner);
-        write_founder_entry(&storage, &owner, "0000000001000-0000-dev1")
-            .await
-            .unwrap();
-        let mut chain = bootstrap_chain(&owner);
+        let (_, mut chain) =
+            publish_test_protocol_roots(&storage, "test-store", &owner, "0000000001000-0000-dev1")
+                .await;
         create_invitation(
             &storage,
             &MockCloudHome,
@@ -2249,7 +3346,11 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let activation = MembershipCoord {
             author_pubkey: owner_pk.clone(),
+            author_owner_grant: chain
+                .active_owner_grant(&owner_pk)
+                .expect("founder Owner grant"),
             seq: 99,
+            entry_hash: crate::sync::store_commit::ObjectHash::digest(b"missing removal"),
         };
         let keyring = EncryptionService::from_key(old_key)
             .with_appended_generation(2, new_key)
@@ -2268,7 +3369,14 @@ mod tests {
             .await
             .unwrap();
 
-        let result = unwrap_store_keyring(home.clone(), &member, LIB_ID, &owner_pk).await;
+        let result = unwrap_store_keyring(
+            home.clone(),
+            &member,
+            LIB_ID,
+            &owner_pk,
+            &chain.author_heads(),
+        )
+        .await;
         assert!(
             matches!(
                 &result,
@@ -2285,8 +3393,6 @@ mod tests {
     /// signed it.
     #[tokio::test]
     async fn non_founder_owner_invite_is_joinable() {
-        use crate::sync::membership_ops::write_founder_entry;
-
         let founder = gen_keypair();
         let second_owner = gen_keypair();
         let joiner = gen_keypair();
@@ -2294,10 +3400,13 @@ mod tests {
 
         let home = Arc::new(InMemoryCloudHome::new());
         let founder_storage = opaque_storage(home.clone(), key, &founder);
-        write_founder_entry(&founder_storage, &founder, "0000000001000-0000-dev1")
-            .await
-            .unwrap();
-        let mut chain = bootstrap_chain(&founder);
+        let (_, mut chain) = publish_test_protocol_roots(
+            &founder_storage,
+            "test-store",
+            &founder,
+            "0000000001000-0000-dev1",
+        )
+        .await;
 
         // The founder promotes B to Owner.
         create_invitation(
@@ -2335,9 +3444,15 @@ mod tests {
         // C joins, pinning the founder. B is still a current Owner, so B's wrapped
         // key verifies against the current Owner set ({founder, B}) and the join
         // succeeds.
-        let joined = unwrap_store_keyring(home.clone(), &joiner, LIB_ID, &pubkey_hex(&founder))
-            .await
-            .expect("a non-founder owner's invite is joinable");
+        let joined = unwrap_store_keyring(
+            home.clone(),
+            &joiner,
+            LIB_ID,
+            &pubkey_hex(&founder),
+            &chain.author_heads(),
+        )
+        .await
+        .expect("a non-founder owner's invite is joinable");
         assert_eq!(joined.key_bytes(), key);
     }
 
@@ -2348,10 +3463,6 @@ mod tests {
     /// B's wrap holds a stale generation regardless.)
     #[tokio::test]
     async fn invite_from_a_removed_owner_is_not_joinable() {
-        use crate::sync::membership::MembershipAction;
-        use crate::sync::membership_ops::write_founder_entry;
-        use crate::sync::test_helpers::make_linked_entry;
-
         let founder = gen_keypair();
         let second_owner = gen_keypair();
         let joiner = gen_keypair();
@@ -2359,10 +3470,13 @@ mod tests {
 
         let home = Arc::new(InMemoryCloudHome::new());
         let founder_storage = opaque_storage(home.clone(), key, &founder);
-        write_founder_entry(&founder_storage, &founder, "0000000001000-0000-dev1")
-            .await
-            .unwrap();
-        let mut chain = bootstrap_chain(&founder);
+        let (_, mut chain) = publish_test_protocol_roots(
+            &founder_storage,
+            "test-store",
+            &founder,
+            "0000000001000-0000-dev1",
+        )
+        .await;
 
         // The founder promotes B to Owner; B invites C, signing C's slot.
         create_invitation(
@@ -2398,32 +3512,24 @@ mod tests {
         // The founder removes B before C joins. C's slot still holds B's signature
         // (the removal here does not re-wrap it).
         let founder_pk = pubkey_hex(&founder);
-        let remove_b = make_linked_entry(
-            &chain,
-            &founder,
-            MembershipAction::Remove,
-            &second_owner,
-            MemberRole::Member,
-            "0000000004000-0000-dev1",
-        );
-        let remove_seq = next_membership_seq(&chain, &founder_pk);
-        chain
-            .add_entry_at(
-                MembershipCoord {
-                    author_pubkey: founder_pk.clone(),
-                    seq: remove_seq,
-                },
-                remove_b.clone(),
+        let remove_b = chain
+            .signed_remove_member(
+                &founder,
+                pubkey_hex(&second_owner),
+                "0000000004000-0000-dev1".to_string(),
             )
-            .unwrap();
-        founder_storage
-            .put_membership_entry(
-                &founder_pk,
-                remove_seq,
-                serde_json::to_vec(&remove_b).unwrap(),
-            )
-            .await
-            .unwrap();
+            .expect("founder removes second owner");
+        let remove_coord = remove_b.coord();
+        let remove_seq = remove_coord.seq;
+        chain.add_entry_at(remove_coord, remove_b.clone()).unwrap();
+        crate::sync::test_helpers::append_membership_entry_bytes(
+            &founder_storage,
+            &founder_pk,
+            remove_seq,
+            serde_json::to_vec(&remove_b).unwrap(),
+        )
+        .await
+        .unwrap();
         publish_membership_head(&founder_storage, &chain, &founder)
             .await
             .unwrap();
@@ -2431,7 +3537,14 @@ mod tests {
         // C joins: B is no longer a current Owner, so its prefix is not scanned and
         // C's wrap (only ever under B) is unreachable — no current owner vouches for
         // C, so the join finds no adoptable key.
-        let result = unwrap_store_keyring(home.clone(), &joiner, LIB_ID, &founder_pk).await;
+        let result = unwrap_store_keyring(
+            home.clone(),
+            &joiner,
+            LIB_ID,
+            &founder_pk,
+            &chain.author_heads(),
+        )
+        .await;
         assert!(
             matches!(
                 result,
@@ -2447,8 +3560,6 @@ mod tests {
     /// will not adopt what it wrapped.
     #[tokio::test]
     async fn join_refuses_wrapped_key_signed_by_non_owner_member() {
-        use crate::sync::membership_ops::write_founder_entry;
-
         let founder = gen_keypair();
         let member = gen_keypair();
         let joiner = gen_keypair();
@@ -2456,10 +3567,13 @@ mod tests {
 
         let home = Arc::new(InMemoryCloudHome::new());
         let storage = opaque_storage(home.clone(), key, &founder);
-        write_founder_entry(&storage, &founder, "0000000001000-0000-dev1")
-            .await
-            .unwrap();
-        let mut chain = bootstrap_chain(&founder);
+        let (_, mut chain) = publish_test_protocol_roots(
+            &storage,
+            "test-store",
+            &founder,
+            "0000000001000-0000-dev1",
+        )
+        .await;
 
         // The founder adds a plain Member and the joiner.
         create_invitation(
@@ -2507,8 +3621,14 @@ mod tests {
             .await
             .unwrap();
 
-        let result =
-            unwrap_store_keyring(home.clone(), &joiner, LIB_ID, &pubkey_hex(&founder)).await;
+        let result = unwrap_store_keyring(
+            home.clone(),
+            &joiner,
+            LIB_ID,
+            &pubkey_hex(&founder),
+            &chain.author_heads(),
+        )
+        .await;
         assert!(
             matches!(result, Err(InviteError::Crypto(_))),
             "a key signed by a non-Owner member must be refused, got {result:?}",
@@ -2521,9 +3641,6 @@ mod tests {
     /// grants no authority.
     #[tokio::test]
     async fn join_refuses_wrapped_key_signed_by_uncommitted_owner() {
-        use crate::sync::membership::founder_entry;
-        use crate::sync::membership_ops::write_founder_entry;
-
         let founder = gen_keypair();
         let rogue = gen_keypair();
         let joiner = gen_keypair();
@@ -2531,10 +3648,13 @@ mod tests {
 
         let home = Arc::new(InMemoryCloudHome::new());
         let storage = opaque_storage(home.clone(), key, &founder);
-        write_founder_entry(&storage, &founder, "0000000001000-0000-dev1")
-            .await
-            .unwrap();
-        let mut chain = bootstrap_chain(&founder);
+        let (_, mut chain) = publish_test_protocol_roots(
+            &storage,
+            "test-store",
+            &founder,
+            "0000000001000-0000-dev1",
+        )
+        .await;
 
         // The founder adds `rogue` as a plain Member (so it holds the store key)
         // and the joiner.
@@ -2570,15 +3690,16 @@ mod tests {
         // `rogue` self-publishes a founder-style Owner add at membership/{rogue}/1
         // but never publishes its head, so the entry stays uncommitted and never
         // enters the anchored chain.
-        let rogue_self_add = founder_entry(&rogue, "0000000002500-0000-dev1");
-        storage
-            .put_membership_entry(
-                &pubkey_hex(&rogue),
-                1,
-                serde_json::to_vec(&rogue_self_add).unwrap(),
-            )
-            .await
-            .unwrap();
+        let rogue_self_add =
+            crate::sync::membership::founder_entry("test-store", &rogue, "0000000002500-0000-dev1");
+        crate::sync::test_helpers::append_membership_entry_bytes(
+            &storage,
+            &pubkey_hex(&rogue),
+            1,
+            serde_json::to_vec(&rogue_self_add).unwrap(),
+        )
+        .await
+        .unwrap();
 
         // `rogue` seals the real key to the joiner and signs it as if it were an
         // Owner, overwriting the founder-signed slot.
@@ -2596,8 +3717,14 @@ mod tests {
             .await
             .unwrap();
 
-        let result =
-            unwrap_store_keyring(home.clone(), &joiner, LIB_ID, &pubkey_hex(&founder)).await;
+        let result = unwrap_store_keyring(
+            home.clone(),
+            &joiner,
+            LIB_ID,
+            &pubkey_hex(&founder),
+            &chain.author_heads(),
+        )
+        .await;
         assert!(
             matches!(result, Err(InviteError::Crypto(_))),
             "a key signed by an uncommitted self-promoted Owner must be refused, got {result:?}",
@@ -2611,8 +3738,8 @@ mod tests {
         let remaining = gen_keypair();
         let old_key: [u8; 32] = [11u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -2638,7 +3765,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&revokee),
             LIB_ID,
@@ -2658,8 +3784,13 @@ mod tests {
         let stored_entries = stored_membership_entries(&storage).await;
         assert!(
             !stored_entries.iter().any(|entry| {
-                entry.action == MembershipAction::Remove
-                    && entry.user_pubkey == pubkey_hex(&revokee)
+                matches!(
+                    &entry.change,
+                    crate::sync::membership::MembershipChange::RemoveMember {
+                        user_pubkey,
+                        ..
+                    } if user_pubkey == &pubkey_hex(&revokee)
+                )
             }),
             "the Remove entry must not be published before all re-wraps land",
         );
@@ -2680,8 +3811,8 @@ mod tests {
         let old_key: [u8; 32] = [16u8; 32];
         let off_curve_pubkey = "0200000000000000000000000000000000000000000000000000000000000000";
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -2706,29 +3837,21 @@ mod tests {
             .await
             .unwrap();
 
-        let owner_pk = pubkey_hex(&owner);
-        let coord = MembershipCoord {
-            author_pubkey: owner_pk.clone(),
-            seq: next_membership_seq(&chain, &owner_pk),
-        };
-        let mut invalid_entry = MembershipEntry {
-            action: MembershipAction::Add,
-            user_pubkey: off_curve_pubkey.to_string(),
-            provider_account_email: None,
-            prev_hash: chain.latest_author_hash(&owner_pk),
-            role: MemberRole::Member,
-            timestamp: "0000000004000-0000-dev1".to_string(),
-            author_pubkey: String::new(),
-            signature: String::new(),
-        };
-        sign_membership_entry(&mut invalid_entry, &owner);
-        chain.add_entry_at(coord, invalid_entry).unwrap();
+        let invalid_entry = chain
+            .signed_set_member(
+                &owner,
+                off_curve_pubkey.to_string(),
+                None,
+                MemberRole::Member,
+                "0000000004000-0000-dev1".to_string(),
+            )
+            .expect("owner adds syntactically invalid member key");
+        chain.add_entry(invalid_entry).unwrap();
 
         let result = revoke_member(
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&revokee),
             LIB_ID,
@@ -2763,8 +3886,8 @@ mod tests {
         let remaining_b = gen_keypair();
         let old_key: [u8; 32] = [12u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -2799,7 +3922,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&revokee),
             LIB_ID,
@@ -2813,7 +3935,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&revokee),
             LIB_ID,
@@ -2838,7 +3959,8 @@ mod tests {
             "retry deletes the revokee's wrapped key",
         );
 
-        let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let visible_entries =
+            membership_coords(&storage, &storage.discover_membership_entries().await).await;
         let owner_pk = pubkey_hex(&owner);
         for member in [&owner, &remaining_a, &remaining_b] {
             let unwrapped = unwrap_store_keyring_for_owners_with_activation(
@@ -2862,8 +3984,8 @@ mod tests {
         let remaining = gen_keypair();
         let old_key: [u8; 32] = [13u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -2888,7 +4010,6 @@ mod tests {
             &storage,
             &storage,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&revokee),
             LIB_ID,
@@ -2902,7 +4023,6 @@ mod tests {
             &storage,
             &storage,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&revokee),
             LIB_ID,
@@ -2914,7 +4034,8 @@ mod tests {
 
         assert_eq!(retry_key.key_bytes(), committed_key.key_bytes());
 
-        let visible_entries = membership_coords(&storage.list_membership_entries().await.unwrap());
+        let visible_entries =
+            membership_coords(&storage, &storage.discover_membership_entries().await).await;
         let owner_pk = pubkey_hex(&owner);
         let remaining_key = unwrap_store_keyring_for_owners_with_activation(
             &storage as &dyn CloudHome,
@@ -2936,9 +4057,9 @@ mod tests {
         let member_pubkey = pubkey_hex(&member);
         let old_key: [u8; 32] = [42u8; 32];
 
-        let storage = MockSyncStorage::new();
+        let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(&owner);
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         create_invitation(
             &storage,
@@ -2974,7 +4095,6 @@ mod tests {
             &storage,
             &cloud,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &member_pubkey,
             LIB_ID,
@@ -2986,9 +4106,226 @@ mod tests {
 
         assert_eq!(
             cloud.last_revoke(),
-            Some(CloudAccessRevoke {
+            Some(CloudAccessState::Absent {
                 member_pubkey,
                 provider_account_email: Some("second@example.com".to_string()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_removal_head_restores_every_wrap_and_provider_grant() {
+        let owner = gen_keypair();
+        let revokee = gen_keypair();
+        let remaining = gen_keypair();
+        let old_key = [73_u8; 32];
+        let owner_pubkey = pubkey_hex(&owner);
+        let revokee_pubkey = pubkey_hex(&revokee);
+        let remaining_pubkey = pubkey_hex(&remaining);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let cloud = RecordingCloudHome::new();
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+
+        create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &revokee_pubkey,
+            None,
+            MemberRole::Member,
+            &old_key,
+            LIB_ID,
+            "0000000002000-0000-owner",
+        )
+        .await
+        .unwrap();
+        create_invitation(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &remaining_pubkey,
+            None,
+            MemberRole::Member,
+            &old_key,
+            LIB_ID,
+            "0000000003000-0000-owner",
+        )
+        .await
+        .unwrap();
+        let revokee_wrap = storage
+            .get_wrapped_key(&owner_pubkey, &revokee_pubkey)
+            .await
+            .unwrap();
+        let remaining_wrap = storage
+            .get_wrapped_key(&owner_pubkey, &remaining_pubkey)
+            .await
+            .unwrap();
+        assert!(storage
+            .get_wrapped_key(&owner_pubkey, &owner_pubkey)
+            .await
+            .is_err());
+
+        storage.fail_membership_head_append_on_call(1);
+        let error = revoke_member(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &revokee_pubkey,
+            LIB_ID,
+            "0000000004000-0000-owner",
+            &EncryptionService::from_key(old_key),
+        )
+        .await
+        .expect_err("the removal head write is the commit point");
+
+        assert!(error.to_string().contains("publish membership head"));
+        assert!(chain
+            .current_members()
+            .iter()
+            .any(|(member, _)| member == &revokee_pubkey));
+        assert_eq!(
+            storage
+                .get_wrapped_key(&owner_pubkey, &revokee_pubkey)
+                .await
+                .unwrap(),
+            revokee_wrap
+        );
+        assert_eq!(
+            storage
+                .get_wrapped_key(&owner_pubkey, &remaining_pubkey)
+                .await
+                .unwrap(),
+            remaining_wrap
+        );
+        assert!(storage
+            .get_wrapped_key(&owner_pubkey, &owner_pubkey)
+            .await
+            .is_err());
+        assert_eq!(
+            cloud.last_grant(),
+            Some(CloudAccessState::Present {
+                member_pubkey: revokee_pubkey.clone(),
+                provider_account_email: None,
+            })
+        );
+        assert_eq!(
+            cloud.last_revoke(),
+            Some(CloudAccessState::Absent {
+                member_pubkey: revokee_pubkey,
+                provider_account_email: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_provider_restore_reports_original_and_rollback_state() {
+        let owner = gen_keypair();
+        let revokee = gen_keypair();
+        let remaining = gen_keypair();
+        let old_key = [74_u8; 32];
+        let owner_pubkey = pubkey_hex(&owner);
+        let revokee_pubkey = pubkey_hex(&revokee);
+        let remaining_pubkey = pubkey_hex(&remaining);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let cloud = RecordingCloudHome::new();
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+
+        for (member, timestamp) in [
+            (&revokee, "0000000002000-0000-owner"),
+            (&remaining, "0000000003000-0000-owner"),
+        ] {
+            create_invitation(
+                &storage,
+                &cloud,
+                &mut chain,
+                &owner,
+                &pubkey_hex(member),
+                None,
+                MemberRole::Member,
+                &old_key,
+                LIB_ID,
+                timestamp,
+            )
+            .await
+            .unwrap();
+        }
+        let revokee_wrap = storage
+            .get_wrapped_key(&owner_pubkey, &revokee_pubkey)
+            .await
+            .unwrap();
+        let remaining_wrap = storage
+            .get_wrapped_key(&owner_pubkey, &remaining_pubkey)
+            .await
+            .unwrap();
+
+        storage.fail_membership_head_append_on_call(1);
+        cloud.fail_next_grant();
+        let error = revoke_member(
+            &storage,
+            &cloud,
+            &mut chain,
+            &owner,
+            &revokee_pubkey,
+            LIB_ID,
+            "0000000004000-0000-owner",
+            &EncryptionService::from_key(old_key),
+        )
+        .await
+        .expect_err("a failed rollback must surface both failures");
+
+        let InviteError::Rollback {
+            operation,
+            original,
+            rollback,
+        } = error
+        else {
+            panic!("expected rollback error");
+        };
+        assert_eq!(operation, "publish membership head");
+        assert!(
+            original.contains("forced membership-head append failure"),
+            "{original}"
+        );
+        assert!(
+            rollback.contains("forced provider regrant failure"),
+            "{rollback}"
+        );
+        assert!(chain
+            .current_members()
+            .iter()
+            .any(|(member, _)| member == &revokee_pubkey));
+        assert_eq!(
+            storage
+                .get_wrapped_key(&owner_pubkey, &revokee_pubkey)
+                .await
+                .unwrap(),
+            revokee_wrap
+        );
+        assert_eq!(
+            storage
+                .get_wrapped_key(&owner_pubkey, &remaining_pubkey)
+                .await
+                .unwrap(),
+            remaining_wrap
+        );
+        assert_eq!(
+            cloud
+                .accesses
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|access| matches!(access, CloudAccessState::Absent { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            cloud.last_grant(),
+            Some(CloudAccessState::Present {
+                member_pubkey: revokee_pubkey,
+                provider_account_email: None,
             })
         );
     }
@@ -2998,14 +4335,13 @@ mod tests {
         let owner = gen_keypair();
         let outsider = gen_keypair();
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         let result = revoke_member(
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&outsider),
             LIB_ID,
@@ -3022,8 +4358,8 @@ mod tests {
         let owner = gen_keypair();
         let member = gen_keypair();
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         // Add a regular member.
         create_invitation(
@@ -3046,7 +4382,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &owner,
             &pubkey_hex(&owner),
             LIB_ID,
@@ -3064,8 +4399,8 @@ mod tests {
         let member1 = gen_keypair();
         let member2 = gen_keypair();
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         // Add two members.
         create_invitation(
@@ -3103,7 +4438,6 @@ mod tests {
             &storage,
             &MockCloudHome,
             &mut chain,
-            storage.list_membership_entries().await.unwrap(),
             &member1,
             &pubkey_hex(&member2),
             LIB_ID,
@@ -3121,19 +4455,17 @@ mod tests {
     /// never re-admits itself above the head, so no author link ever breaks.
     #[tokio::test]
     async fn invite_converges_after_failed_head_publish() {
-        use crate::sync::membership_ops::{load_anchored_chain, write_founder_entry};
+        use crate::sync::membership_ops::load_anchored_chain;
 
         let owner = gen_keypair();
         let invitee = gen_keypair();
         let owner_pk = pubkey_hex(&owner);
         let key: [u8; 32] = [21u8; 32];
 
-        let storage = MockSyncStorage::new();
-        write_founder_entry(&storage, &owner, "0000000001000-0000-dev1")
-            .await
-            .unwrap();
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        storage.publish_protocol_founder_membership().await;
 
-        let load = |visible: Vec<(String, u64)>| {
+        let load = |visible: Vec<MembershipCoord>| {
             let owner_pk = owner_pk.clone();
             let storage = &storage;
             async move {
@@ -3144,8 +4476,8 @@ mod tests {
         };
 
         // Attempt 1: the entry uploads, then the head publish fails.
-        let mut chain = load(storage.list_membership_entries().await.unwrap()).await;
-        storage.fail_membership_head_put_on_call(1);
+        let mut chain = load(storage.discover_membership_entries().await).await;
+        storage.fail_membership_head_append_on_call(1);
         let first = create_invitation(
             &storage,
             &MockCloudHome,
@@ -3162,7 +4494,7 @@ mod tests {
         assert!(first.is_err(), "the head-publish failure must surface");
 
         // The orphan entry is uncommitted: the committed head is still the founder's.
-        let committed = load(storage.list_membership_entries().await.unwrap()).await;
+        let committed = load(storage.discover_membership_entries().await).await;
         assert!(
             !committed
                 .current_members()
@@ -3188,7 +4520,7 @@ mod tests {
         .await
         .expect("the retry converges");
 
-        let loaded = load(storage.list_membership_entries().await.unwrap()).await;
+        let loaded = load(storage.discover_membership_entries().await).await;
         assert!(loaded
             .current_members()
             .iter()
@@ -3208,7 +4540,7 @@ mod tests {
     /// documented on `guard_extends_committed_head`, not covered here.
     #[tokio::test]
     async fn same_author_two_devices_second_fails_loud_then_retry_converges() {
-        use crate::sync::membership_ops::{load_anchored_chain, write_founder_entry};
+        use crate::sync::membership_ops::load_anchored_chain;
 
         let owner = gen_keypair();
         let first_invitee = gen_keypair();
@@ -3216,12 +4548,10 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let key: [u8; 32] = [22u8; 32];
 
-        let storage = MockSyncStorage::new();
-        write_founder_entry(&storage, &owner, "0000000001000-0000-dev1")
-            .await
-            .unwrap();
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        storage.publish_protocol_founder_membership().await;
 
-        let load = |visible: Vec<(String, u64)>| {
+        let load = |visible: Vec<MembershipCoord>| {
             let owner_pk = owner_pk.clone();
             let storage = &storage;
             async move {
@@ -3232,7 +4562,7 @@ mod tests {
         };
 
         // Both devices observe the founder head; device two keeps that stale view.
-        let mut device_one = load(storage.list_membership_entries().await.unwrap()).await;
+        let mut device_one = load(storage.discover_membership_entries().await).await;
         let mut device_two_stale = device_one.clone();
 
         // Device one invites and commits at seq 2.
@@ -3275,7 +4605,7 @@ mod tests {
         );
 
         // The first device's committed entry was not clobbered.
-        let after_stale = load(storage.list_membership_entries().await.unwrap()).await;
+        let after_stale = load(storage.discover_membership_entries().await).await;
         assert!(after_stale
             .current_members()
             .iter()
@@ -3298,7 +4628,7 @@ mod tests {
         .await
         .expect("the retry converges");
 
-        let loaded = load(storage.list_membership_entries().await.unwrap()).await;
+        let loaded = load(storage.discover_membership_entries().await).await;
         let members = loaded.current_members();
         assert!(members
             .iter()
@@ -3317,7 +4647,7 @@ mod tests {
     /// read the store while peers reject their writes.
     #[tokio::test]
     async fn stale_head_guard_failure_rolls_back_grant_and_slot() {
-        use crate::sync::membership_ops::{load_anchored_chain, write_founder_entry};
+        use crate::sync::membership_ops::load_anchored_chain;
 
         let owner = gen_keypair();
         let committed_invitee = gen_keypair();
@@ -3325,13 +4655,11 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let key: [u8; 32] = [44u8; 32];
 
-        let storage = MockSyncStorage::new();
+        let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        write_founder_entry(&storage, &owner, "0000000001000-0000-dev1")
-            .await
-            .unwrap();
+        storage.publish_protocol_founder_membership().await;
 
-        let load = |visible: Vec<(String, u64)>| {
+        let load = |visible: Vec<MembershipCoord>| {
             let owner_pk = owner_pk.clone();
             let storage = &storage;
             async move {
@@ -3342,7 +4670,7 @@ mod tests {
         };
 
         // Both devices observe the founder head; device two keeps that stale view.
-        let mut device_one = load(storage.list_membership_entries().await.unwrap()).await;
+        let mut device_one = load(storage.discover_membership_entries().await).await;
         let mut device_two_stale = device_one.clone();
 
         // Device one invites and commits at seq 2, advancing the owner's head.
@@ -3396,7 +4724,7 @@ mod tests {
         // The access this invite granted was revoked, so no dangling grant remains.
         assert_eq!(
             cloud.last_revoke(),
-            Some(CloudAccessRevoke {
+            Some(CloudAccessState::Absent {
                 member_pubkey: pubkey_hex(&guard_victim),
                 provider_account_email: None,
             }),
@@ -3404,7 +4732,7 @@ mod tests {
         );
 
         // The committed invitee is untouched; the guard victim never joined.
-        let loaded = load(storage.list_membership_entries().await.unwrap()).await;
+        let loaded = load(storage.discover_membership_entries().await).await;
         assert!(loaded
             .current_members()
             .iter()
@@ -3427,9 +4755,9 @@ mod tests {
         let old_key: [u8; 32] = [30u8; 32];
         let new_key: [u8; 32] = [31u8; 32];
 
-        let storage = MockSyncStorage::new();
+        let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(&owner);
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -3447,7 +4775,7 @@ mod tests {
 
         // Re-invite the same member with a different key, but the entry upload fails
         // after the wrapped-key slot has already been overwritten.
-        storage.fail_membership_entry_put_on_call(1);
+        storage.fail_membership_entry_append_on_call(1);
         let result = create_invitation(
             &storage,
             &cloud,
@@ -3498,9 +4826,9 @@ mod tests {
         let invitee = gen_keypair();
         let key: [u8; 32] = [32u8; 32];
 
-        let storage = MockSyncStorage::new();
+        let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(&owner);
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         assert!(
             storage
@@ -3510,7 +4838,7 @@ mod tests {
             "the invitee has no wrapped key before the invite",
         );
 
-        storage.fail_membership_entry_put_on_call(1);
+        storage.fail_membership_entry_append_on_call(1);
         let result = create_invitation(
             &storage,
             &cloud,
@@ -3541,7 +4869,7 @@ mod tests {
         // member, so no dangling cloud grant is left behind.
         assert_eq!(
             cloud.last_revoke(),
-            Some(CloudAccessRevoke {
+            Some(CloudAccessState::Absent {
                 member_pubkey: pubkey_hex(&invitee),
                 provider_account_email: None,
             }),
@@ -3561,9 +4889,9 @@ mod tests {
         let old_key: [u8; 32] = [35u8; 32];
         let new_key: [u8; 32] = [36u8; 32];
 
-        let storage = MockSyncStorage::new();
+        let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(&owner);
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -3587,7 +4915,7 @@ mod tests {
             .iter()
             .any(|(pk, _)| pk == &pubkey_hex(&member)));
 
-        storage.fail_membership_entry_put_on_call(1);
+        storage.fail_membership_entry_append_on_call(1);
         let result = create_invitation(
             &storage,
             &cloud,
@@ -3632,9 +4960,9 @@ mod tests {
         let invitee = gen_keypair();
         let key: [u8; 32] = [37u8; 32];
 
-        let storage = MockSyncStorage::new();
+        let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(&owner);
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         // Seed a stray slot for a non-member (anomalous leftover state).
         storage
@@ -3650,7 +4978,7 @@ mod tests {
             .iter()
             .any(|(pk, _)| pk == &pubkey_hex(&invitee)));
 
-        storage.fail_membership_entry_put_on_call(1);
+        storage.fail_membership_entry_append_on_call(1);
         let result = create_invitation(
             &storage,
             &cloud,
@@ -3680,7 +5008,7 @@ mod tests {
         );
         assert_eq!(
             cloud.last_revoke(),
-            Some(CloudAccessRevoke {
+            Some(CloudAccessState::Absent {
                 member_pubkey: pubkey_hex(&invitee),
                 provider_account_email: None,
             }),
@@ -3698,9 +5026,9 @@ mod tests {
         let old_key: [u8; 32] = [33u8; 32];
         let new_key: [u8; 32] = [34u8; 32];
 
-        let storage = MockSyncStorage::new();
+        let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(&owner);
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -3763,8 +5091,8 @@ mod tests {
         let old_key: [u8; 32] = [38u8; 32];
         let new_key: [u8; 32] = [39u8; 32];
 
-        let storage = MockSyncStorage::new();
-        let mut chain = bootstrap_chain(&owner);
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -3779,7 +5107,7 @@ mod tests {
         // The overwrite (wrapped-key put #1) lands; the entry upload fails; the
         // restore (wrapped-key put #2) also fails.
         storage.fail_wrapped_key_put_on_call(2);
-        storage.fail_membership_entry_put_on_call(1);
+        storage.fail_membership_entry_append_on_call(1);
         let result = create_invitation(
             &storage,
             &MockCloudHome,

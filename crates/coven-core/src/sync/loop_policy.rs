@@ -8,8 +8,8 @@ use crate::changeset::RowChange;
 
 use super::cloud_storage::RotationPending;
 use super::cycle::SyncCycleResult;
-use super::pull::HeldChangeset;
 use super::status::DeviceActivity;
+use super::store_pull::HeldStorePosition;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopWait {
@@ -35,13 +35,9 @@ pub struct SyncLoopAlerts {
     /// confidentiality invariant, so it takes priority over every other alert
     /// below.
     pub rotation_pending: Option<RotationPending>,
-    pub skipped_schema: u64,
-    pub rejected_unauthorized: u64,
-    pub invalid_signatures: u64,
     /// Changesets held after a validation/apply failure, with per-changeset
     /// detail (device, seq, reason) — so a host can name which are stalled.
-    pub held_changesets: Vec<HeldChangeset>,
-    pub constraint_conflicts: u64,
+    pub held_positions: Vec<HeldStorePosition>,
     pub asset_downloads_failed: bool,
     pub local_blob_cleanup_pending: bool,
 }
@@ -55,35 +51,12 @@ impl SyncLoopAlerts {
                  wait for the next sync cycle to adopt the key.",
                 pending.committed_generation, pending.live_generation,
             ))
-        } else if self.skipped_schema > 0 {
+        } else if !self.held_positions.is_empty() {
             Some(format!(
-                "{} changes from a newer app version were skipped. Update the app to apply them.",
-                self.skipped_schema,
-            ))
-        } else if self.rejected_unauthorized > 0 {
-            Some(format!(
-                "{} changes from an unauthorized device were rejected.",
-                self.rejected_unauthorized,
-            ))
-        } else if self.invalid_signatures > 0 {
-            Some(format!(
-                "{} changes with an invalid signature are stalled.",
-                self.invalid_signatures,
-            ))
-        } else if !self.held_changesets.is_empty() {
-            Some(format!(
-                "{} invalid changes are stalled.",
-                self.held_changesets.len(),
-            ))
-        } else if self.constraint_conflicts > 0 {
-            let noun = if self.constraint_conflicts == 1 {
-                "change"
-            } else {
-                "changes"
-            };
-            Some(format!(
-                "{} {} hit a local uniqueness or constraint conflict.",
-                self.constraint_conflicts, noun,
+                "Store object {}/{} is held: {:?}",
+                self.held_positions[0].coordinate.device_id(),
+                self.held_positions[0].coordinate.seq(),
+                self.held_positions[0].reason,
             ))
         } else if self.asset_downloads_failed {
             Some("Some files failed to download; their changes remain pending.".to_string())
@@ -109,7 +82,7 @@ pub struct SyncLoopSuccess {
     /// can touch the same row, so a host re-reads affected rows by primary key
     /// rather than trusting it as exhaustive.
     ///
-    /// [`PullResult::row_changes`]: crate::sync::pull::PullResult::row_changes
+    /// [`StorePullResult::row_changes`]: crate::sync::store_pull::StorePullResult::row_changes
     pub row_changes: Option<Vec<RowChange>>,
     pub alerts: SyncLoopAlerts,
 }
@@ -151,11 +124,7 @@ pub fn after_success(result: SyncCycleResult) -> SyncLoopDecision {
             row_changes,
             alerts: SyncLoopAlerts {
                 rotation_pending: result.rotation_pending,
-                skipped_schema: result.skipped_schema,
-                rejected_unauthorized: result.rejected_unauthorized,
-                invalid_signatures: result.invalid_signatures,
-                held_changesets: result.held_changesets,
-                constraint_conflicts: result.constraint_conflicts,
+                held_positions: result.held_positions,
                 asset_downloads_failed: result.asset_downloads_failed,
                 local_blob_cleanup_pending: result.local_blob_cleanup_pending,
             },
@@ -183,16 +152,22 @@ pub fn after_failure(
 mod tests {
     use super::*;
 
-    use crate::sync::pull::HeldChangesetReason;
+    use crate::sync::store_commit::{CommitPosition, ObjectHash};
+    use crate::sync::store_pull::{
+        HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason,
+    };
 
-    fn held(n: usize) -> Vec<HeldChangeset> {
+    fn held(n: usize) -> Vec<HeldStorePosition> {
         (0..n)
-            .map(|i| HeldChangeset {
-                device_id: format!("dev-{i}"),
-                seq: i as u64,
-                reason: HeldChangesetReason::ApplyFailed {
-                    error: "boom".to_string(),
+            .map(|i| HeldStorePosition {
+                coordinate: HeldStoreCoordinate::Commit {
+                    device_id: format!("dev-{i}"),
+                    position: CommitPosition {
+                        seq: i as u64 + 1,
+                        commit_hash: ObjectHash::digest(format!("commit-{i}").as_bytes()),
+                    },
                 },
+                reason: HeldStorePositionReason::InvalidChangeset("boom".to_string()),
             })
             .collect()
     }
@@ -211,11 +186,7 @@ mod tests {
     fn cycle_result() -> SyncCycleResult {
         SyncCycleResult {
             changesets_applied: 0,
-            skipped_schema: 0,
-            rejected_unauthorized: 0,
-            invalid_signatures: 0,
-            held_changesets: Vec::new(),
-            constraint_conflicts: 0,
+            held_positions: Vec::new(),
             device_activity: device_activity(2),
             sync_time: "2026-07-03T00:00:00Z".to_string(),
             asset_downloads_failed: false,
@@ -246,11 +217,7 @@ mod tests {
     fn success_carries_device_activity_and_all_alert_categories() {
         let mut result = cycle_result();
         result.device_activity = device_activity(2);
-        result.held_changesets = held(3);
-        result.skipped_schema = 1;
-        result.rejected_unauthorized = 2;
-        result.invalid_signatures = 4;
-        result.constraint_conflicts = 5;
+        result.held_positions = held(3);
         result.asset_downloads_failed = true;
 
         let decision = after_success(result);
@@ -262,14 +229,13 @@ mod tests {
                 assert_eq!(success.device_activity[0].author, "author-0");
                 assert_eq!(success.device_count, 3);
                 // Every warning category reaches the report's alerts.
-                assert_eq!(success.alerts.skipped_schema, 1);
-                assert_eq!(success.alerts.rejected_unauthorized, 2);
-                assert_eq!(success.alerts.invalid_signatures, 4);
-                assert_eq!(success.alerts.constraint_conflicts, 5);
                 assert!(success.alerts.asset_downloads_failed);
                 // Held changesets travel with device/seq/reason, not a bare count.
-                assert_eq!(success.alerts.held_changesets.len(), 3);
-                assert_eq!(success.alerts.held_changesets[0].device_id, "dev-0");
+                assert_eq!(success.alerts.held_positions.len(), 3);
+                assert_eq!(
+                    success.alerts.held_positions[0].coordinate.device_id(),
+                    "dev-0"
+                );
             }
             SyncLoopReport::Failure(error) => panic!("expected success, got {error}"),
         }
@@ -301,18 +267,14 @@ mod tests {
     fn alert_message_priority_matches_native_status() {
         let alerts = SyncLoopAlerts {
             rotation_pending: None,
-            skipped_schema: 1,
-            rejected_unauthorized: 2,
-            invalid_signatures: 3,
-            held_changesets: held(4),
-            constraint_conflicts: 5,
+            held_positions: held(4),
             asset_downloads_failed: true,
             local_blob_cleanup_pending: true,
         };
 
         assert_eq!(
             alerts.primary_message().as_deref(),
-            Some("1 changes from a newer app version were skipped. Update the app to apply them."),
+            Some("Store object dev-0/1 is held: InvalidChangeset(\"boom\")"),
         );
     }
 
@@ -323,11 +285,7 @@ mod tests {
                 committed_generation: 2,
                 live_generation: 1,
             }),
-            skipped_schema: 1,
-            rejected_unauthorized: 2,
-            invalid_signatures: 3,
-            held_changesets: held(4),
-            constraint_conflicts: 5,
+            held_positions: held(4),
             asset_downloads_failed: true,
             local_blob_cleanup_pending: true,
         };
@@ -343,19 +301,12 @@ mod tests {
     fn constraint_conflict_alert_is_reported() {
         let alerts = SyncLoopAlerts {
             rotation_pending: None,
-            skipped_schema: 0,
-            rejected_unauthorized: 0,
-            invalid_signatures: 0,
-            held_changesets: Vec::new(),
-            constraint_conflicts: 1,
+            held_positions: Vec::new(),
             asset_downloads_failed: false,
             local_blob_cleanup_pending: false,
         };
 
-        assert_eq!(
-            alerts.primary_message().as_deref(),
-            Some("1 change hit a local uniqueness or constraint conflict."),
-        );
+        assert_eq!(alerts.primary_message(), None);
     }
 
     #[test]

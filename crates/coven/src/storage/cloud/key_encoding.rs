@@ -24,12 +24,12 @@ impl fmt::Display for DecodeKeyError {
 
 impl std::error::Error for DecodeKeyError {}
 
-/// `changes/dev1/42.enc` -> `6368616e6765732f646576312f34322e656e63`.
+/// `objects/dev1/42.enc` -> `6f626a656374732f646576312f34322e656e63`.
 pub(super) fn encode_key(key: &str) -> String {
     hex::encode(key.as_bytes())
 }
 
-/// `6368616e6765732f646576312f34322e656e63` -> `changes/dev1/42.enc`.
+/// `6f626a656374732f646576312f34322e656e63` -> `objects/dev1/42.enc`.
 pub(super) fn decode_key(filename: &str) -> Result<String, DecodeKeyError> {
     let bytes = hex::decode(filename).map_err(DecodeKeyError::Hex)?;
     String::from_utf8(bytes).map_err(DecodeKeyError::Utf8)
@@ -52,10 +52,10 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip() {
         for key in [
-            "snapshot/abc/0.db.enc",
-            "snapshot/current.json.enc",
-            "changes/device-abc/1.enc",
-            "heads/device-abc.json.enc",
+            "objects/snapshot-image.db.enc",
+            "objects/current.json.enc",
+            "objects/device-abc/1.enc",
+            "objects/device-abc.json.enc",
             "images/cover.jpg",
             "images/cover_art.jpg",
             "images/a__b.jpg",
@@ -72,8 +72,8 @@ mod tests {
     #[test]
     fn encode_replaces_slashes() {
         assert_eq!(
-            encode_key("changes/dev1/42.enc"),
-            "6368616e6765732f646576312f34322e656e63",
+            encode_key("objects/dev1/42.enc"),
+            "6f626a656374732f646576312f34322e656e63",
         );
     }
 

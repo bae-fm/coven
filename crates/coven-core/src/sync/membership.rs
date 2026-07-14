@@ -1,54 +1,41 @@
-/// Membership chain: an append-only log of membership changes for shared stores.
-///
-/// The chain is stored as encrypted files in sync storage and reconstructed
-/// on each sync. It is not stored in the DB.
-///
-/// Layout in storage:
-/// ```text
-/// membership/{author_pubkey_hex}/{seq}.enc   -- one Add/Remove entry
-/// membership/{author_pubkey_hex}/head.enc    -- that author's signed head
-/// ```
-///
-/// Each entry records an Add or Remove action, signed by a current owner.
-/// The first entry must be a self-signed Add with role Owner. Each owner also
-/// publishes a [`AuthorHead`] certifying how far its own entry prefix is
-/// committed; the committed membership set is the union of every current owner's
-/// committed prefix, so there is no shared last-writer-wins head and concurrent
-/// owners commit without racing each other.
-use std::collections::BTreeMap;
+//! Store-bound causal membership protocol.
+//!
+//! Every Owner grant has its own author stream. Re-adding the same public key as
+//! an Owner creates a new grant and therefore a new stream beginning at sequence
+//! one. Entries carry the complete observed stream frontier; authorization is
+//! derived from that causal past, never from `created_at`.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
+use super::store_commit::{ObjectHash, STORE_PROTOCOL_VERSION};
 use crate::keys::{self, UserKeypair};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum MembershipAction {
-    Add,
-    Remove,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct OwnerGrantId(pub ObjectHash);
+
+impl fmt::Display for OwnerGrantId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MemberRole {
     Owner,
     Member,
-    /// Read-only member: holds the store key and is registered in the chain,
-    /// but may not author catalog changesets. The restriction is enforced
-    /// acceptance-side: a puller re-derives each author's role from the chain and
-    /// rejects a Follower's changesets — there is no proxy. Revocable like any
-    /// member.
     Follower,
 }
 
 impl MemberRole {
-    /// Whether this role may author catalog changesets (write). Followers can't.
     pub fn can_write(&self) -> bool {
-        matches!(self, MemberRole::Owner | MemberRole::Member)
+        matches!(self, Self::Owner | Self::Member)
     }
 }
 
-/// A current member of the shared store, as returned by `get_members`: the
-/// member's public key, their role, and whether it is the local user.
 #[derive(Debug, Clone)]
 pub struct MemberInfo {
     pub pubkey: String,
@@ -56,359 +43,410 @@ pub struct MemberInfo {
     pub is_self: bool,
 }
 
-/// A single membership entry in the chain.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MembershipEntry {
-    pub action: MembershipAction,
-    pub user_pubkey: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_account_email: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prev_hash: Option<String>,
-    pub role: MemberRole,
-    pub timestamp: String,
-    pub author_pubkey: String,
-    pub signature: String,
-}
-
-/// Storage coordinate of a membership entry: the owner who signed it
-/// (`author_pubkey`, an owner's pubkey) and that owner's per-author sequence
-/// number (`seq`). Together they are the entry's object key
-/// `membership/{author_pubkey}/{seq}`.
-///
-/// A changeset names the coordinate of the entry that grants its author write
-/// access. A puller that does not yet see that entry — membership entries and
-/// changesets are separate, unordered object streams — can then fetch exactly
-/// that one object (a keyed GET is strongly consistent, unlike the LIST that
-/// rebuilds the chain each cycle) and resolve the gap deterministically instead
-/// of dropping the changeset as non-member.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct MembershipCoord {
-    pub author_pubkey: String,
-    pub seq: u64,
-}
-
-/// A signed statement by one author certifying how far its own membership prefix
-/// is committed: entries `membership/{author}/1..=seq` exist and the entry at
-/// `seq` hashes to `tip_hash`. Stored at `membership/{author}/head`.
-///
-/// Each owner publishes and signs its own head under its own prefix, so concurrent
-/// owners commit independently and entries can only accumulate — there is no shared
-/// object a later writer can roll back over a peer's. A reader admits an author's
-/// prefix only up to that author's head `seq`, so an entry is uncommitted until its
-/// own author's head covers it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthorHead {
-    pub author_pubkey: String,
-    pub seq: u64,
-    pub tip_hash: String,
-    pub signature: String,
-}
-
-/// The coordinate of the entry that grants `pubkey` write access: the most
-/// recent (by causal timestamp) write-capable `Add` of `pubkey` among `entries`,
-/// each paired with the storage coordinate it was loaded from. Returns `None`
-/// when no such entry exists. A device embeds this in changesets it authors so a
-/// puller can name and fetch the exact entry that authorizes the write.
-///
-/// A later `Remove` or role downgrade is not consulted here — the puller merges
-/// the named entry into its own full chain and re-judges, so a revocation it
-/// already holds still wins. This only needs to name the granting entry.
-pub fn write_grant_coord(
-    entries: &[(MembershipCoord, MembershipEntry)],
-    pubkey: &str,
-) -> Option<MembershipCoord> {
-    entries
-        .iter()
-        .filter(|(_, e)| {
-            e.action == MembershipAction::Add && e.user_pubkey == pubkey && e.role.can_write()
-        })
-        .max_by(|(_, a), (_, b)| a.timestamp.cmp(&b.timestamp))
-        .map(|(coord, _)| coord.clone())
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum MembershipError {
-    #[error("first entry must be a self-signed owner Add")]
-    InvalidFirstEntry,
-    #[error("entry at index {0} has an invalid signature")]
-    InvalidSignature(usize),
-    #[error("entry at index {0}: author is not an owner at that point in the chain")]
-    NotAnOwner(usize),
-    #[error("chain is empty")]
-    EmptyChain,
-    #[error("entry at index {index} has predecessor hash {actual:?}, expected {expected:?}")]
-    BrokenAuthorLink {
-        index: usize,
-        expected: Option<String>,
-        actual: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub enum MembershipChange {
+    Founder {
+        owner_pubkey: String,
+        owner_grant_id: OwnerGrantId,
+    },
+    SetMember {
+        user_pubkey: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_account_email: Option<String>,
+        role: MemberRole,
+        grant_id: OwnerGrantId,
+        replaces: BTreeSet<OwnerGrantId>,
+        owner_barriers: BTreeMap<OwnerGrantId, OwnerStreamBarrier>,
+    },
+    RemoveMember {
+        user_pubkey: String,
+        removes: BTreeSet<OwnerGrantId>,
+        owner_barriers: BTreeMap<OwnerGrantId, OwnerStreamBarrier>,
     },
 }
 
-/// Canonical bytes of the signed fields (everything except `signature`).
-/// Field order is fixed here so the bytes are deterministic without depending
-/// on any serde feature flag.
-pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
-    #[derive(Serialize)]
-    struct Signed<'a> {
-        action: &'a MembershipAction,
-        author_pubkey: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        provider_account_email: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        prev_hash: Option<&'a str>,
-        role: &'a MemberRole,
-        timestamp: &'a str,
-        user_pubkey: &'a str,
-    }
-    let signed = Signed {
-        action: &entry.action,
-        author_pubkey: &entry.author_pubkey,
-        provider_account_email: entry.provider_account_email.as_deref(),
-        prev_hash: entry.prev_hash.as_deref(),
-        role: &entry.role,
-        timestamp: &entry.timestamp,
-        user_pubkey: &entry.user_pubkey,
-    };
-    serde_json::to_vec(&signed).expect("entry fields serialize")
-}
-
-pub fn entry_hash(entry: &MembershipEntry) -> String {
-    hex::encode(Sha256::digest(
-        serde_json::to_vec(entry).expect("membership entry serialization cannot fail"),
-    ))
-}
-
-/// Build the founder entry of a store's membership chain: a self-signed `Add`
-/// of `owner` with the `Owner` role. Every store is founded by exactly one such
-/// entry at creation, and the chain is later anchored to `owner`'s pubkey so no
-/// one can wipe `membership/*` and refound themselves as Owner (issue #95).
-pub fn founder_entry(owner: &UserKeypair, timestamp: &str) -> MembershipEntry {
-    let pk_hex = keys::public_key_hex(owner);
-    let mut entry = MembershipEntry {
-        action: MembershipAction::Add,
-        user_pubkey: pk_hex.clone(),
-        provider_account_email: None,
-        prev_hash: None,
-        role: MemberRole::Owner,
-        timestamp: timestamp.to_string(),
-        author_pubkey: pk_hex,
-        signature: String::new(),
-    };
-    sign_membership_entry(&mut entry, owner);
-    entry
-}
-
-/// Sign a membership entry with the given keypair.
-///
-/// Sets `author_pubkey` and `signature` on the entry.
-pub fn sign_membership_entry(entry: &mut MembershipEntry, keypair: &UserKeypair) {
-    entry.author_pubkey = keys::public_key_hex(keypair);
-    let bytes = canonical_bytes(entry);
-    let (_, signature) = keys::sign_hex(keypair, &bytes);
-    entry.signature = signature;
-}
-
-/// Verify the signature on a membership entry.
-pub fn verify_membership_entry(entry: &MembershipEntry) -> bool {
-    keys::verify_signature_hex(
-        &entry.author_pubkey,
-        &entry.signature,
-        &canonical_bytes(entry),
-    )
-}
-
-fn apply_active_member_rule(active: &mut Vec<(String, MemberRole)>, entry: &MembershipEntry) {
-    active.retain(|(pk, _)| pk != &entry.user_pubkey);
-    if entry.action == MembershipAction::Add {
-        active.push((entry.user_pubkey.clone(), entry.role.clone()));
+impl MembershipChange {
+    pub fn user_pubkey(&self) -> &str {
+        match self {
+            Self::Founder { owner_pubkey, .. } => owner_pubkey,
+            Self::SetMember { user_pubkey, .. } | Self::RemoveMember { user_pubkey, .. } => {
+                user_pubkey
+            }
+        }
     }
 }
 
-fn members_can_write(members: &[(String, MemberRole)], pubkey: &str) -> bool {
-    members
-        .iter()
-        .any(|(pk, role)| pk == pubkey && role.can_write())
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipCoord {
+    pub author_pubkey: String,
+    pub author_owner_grant: OwnerGrantId,
+    pub seq: u64,
+    pub entry_hash: ObjectHash,
 }
 
-fn members_has_owner(members: &[(String, MemberRole)], pubkey: &str) -> bool {
-    members
-        .iter()
-        .any(|(pk, role)| pk == pubkey && *role == MemberRole::Owner)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub enum OwnerStreamBarrier {
+    BeforeFirst,
+    Through(MembershipCoord),
 }
 
-/// An append-only membership chain.
-///
-/// Entries are sorted by timestamp (HLC string comparison gives causal order).
+impl OwnerStreamBarrier {
+    fn includes(&self, coord: &MembershipCoord) -> bool {
+        match self {
+            Self::BeforeFirst => false,
+            Self::Through(barrier) => coord.seq <= barrier.seq,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipEntry {
+    pub version: u32,
+    pub store_id: String,
+    pub author_pubkey: String,
+    pub author_owner_grant: OwnerGrantId,
+    pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_hash: Option<ObjectHash>,
+    pub dependencies: BTreeMap<OwnerGrantId, MembershipCoord>,
+    pub created_at: String,
+    pub change: MembershipChange,
+    pub signature: String,
+}
+
+impl MembershipEntry {
+    pub fn coord(&self) -> MembershipCoord {
+        MembershipCoord {
+            author_pubkey: self.author_pubkey.clone(),
+            author_owner_grant: self.author_owner_grant.clone(),
+            seq: self.seq,
+            entry_hash: entry_hash(self),
+        }
+    }
+
+    pub fn provider_account_email(&self) -> Option<&str> {
+        match &self.change {
+            MembershipChange::SetMember {
+                provider_account_email,
+                ..
+            } => provider_account_email.as_deref(),
+            MembershipChange::Founder { .. } | MembershipChange::RemoveMember { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorHead {
+    pub version: u32,
+    pub store_id: String,
+    pub author_pubkey: String,
+    pub author_owner_grant: OwnerGrantId,
+    pub seq: u64,
+    pub tip_hash: ObjectHash,
+    pub signature: String,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum MembershipError {
+    #[error("membership chain is empty")]
+    EmptyChain,
+    #[error("membership entry {0} has unsupported version")]
+    UnsupportedVersion(usize),
+    #[error("membership entry {index} belongs to store {actual:?}, expected {expected:?}")]
+    StoreMismatch {
+        index: usize,
+        expected: String,
+        actual: String,
+    },
+    #[error("membership entry {0} has an invalid signature")]
+    InvalidSignature(usize),
+    #[error("membership entry {index} is in coordinate {actual:?}, expected {expected:?}")]
+    CoordinateMismatch {
+        index: usize,
+        expected: Box<MembershipCoord>,
+        actual: Box<MembershipCoord>,
+    },
+    #[error("membership stream {author}/{grant} is missing sequence {seq}")]
+    MissingSequence {
+        author: String,
+        grant: OwnerGrantId,
+        seq: u64,
+    },
+    #[error("membership stream {author}/{grant} has conflicting entries at sequence {seq}")]
+    ConflictingSequence {
+        author: String,
+        grant: OwnerGrantId,
+        seq: u64,
+    },
+    #[error("membership entry {index} has predecessor {actual:?}, expected {expected:?}")]
+    BrokenStreamLink {
+        index: usize,
+        expected: Option<ObjectHash>,
+        actual: Option<ObjectHash>,
+    },
+    #[error("membership entry {index} does not carry its complete own-stream dependency")]
+    MissingOwnDependency { index: usize },
+    #[error("membership entry {index} depends on missing coordinate {dependency:?}")]
+    MissingDependency {
+        index: usize,
+        dependency: MembershipCoord,
+    },
+    #[error("membership entry {index} has dependency key {key} for stream {actual}")]
+    DependencyStreamMismatch {
+        index: usize,
+        key: OwnerGrantId,
+        actual: OwnerGrantId,
+    },
+    #[error("membership dependency graph contains a cycle")]
+    DependencyCycle,
+    #[error("membership founder entry is invalid")]
+    InvalidFounder,
+    #[error("membership entry {index} author is not active under Owner grant {grant}")]
+    AuthorGrantInactive { index: usize, grant: OwnerGrantId },
+    #[error("membership entry {index} creates an already-defined grant {grant}")]
+    DuplicateGrant { index: usize, grant: OwnerGrantId },
+    #[error("membership entry {index} replaces or removes grant {grant} owned by another member")]
+    GrantOwnerMismatch { index: usize, grant: OwnerGrantId },
+    #[error("membership entry {index} removes no exact grants")]
+    EmptyRemoval { index: usize },
+    #[error("membership entry {index} removes Owner grant {grant} without its exact observed-through coordinate")]
+    MissingOwnerRevocationBarrier { index: usize, grant: OwnerGrantId },
+    #[error(
+        "membership entry {index} carries an invalid revocation barrier for Owner grant {grant}"
+    )]
+    InvalidOwnerRevocationBarrier { index: usize, grant: OwnerGrantId },
+    #[error("membership entry {index} depends on {dependency:?} beyond revoked Owner grant {grant}'s barrier {barrier:?}")]
+    DependencyBeyondRevocationBarrier {
+        index: usize,
+        grant: OwnerGrantId,
+        dependency: Box<MembershipCoord>,
+        barrier: Box<OwnerStreamBarrier>,
+    },
+    #[error("concurrent Owner revocations leave no active Owner")]
+    ConcurrentOwnerRevocationConflict,
+    #[error("member {pubkey} has concurrent active grants {grants:?}")]
+    ConcurrentMemberGrantConflict {
+        pubkey: String,
+        grants: Vec<OwnerGrantId>,
+    },
+    #[error("signer {0} has no active Owner grant")]
+    SignerIsNotOwner(String),
+    #[error("member {0} has no active grants")]
+    NotAMember(String),
+}
+
+#[derive(Debug, Clone)]
+struct GrantRecord {
+    pubkey: String,
+    role: MemberRole,
+    provider_account_email: Option<String>,
+    created_at: MembershipCoord,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CausalState {
+    grants: BTreeMap<OwnerGrantId, GrantRecord>,
+    removed: BTreeSet<OwnerGrantId>,
+}
+
+impl CausalState {
+    fn merge(&mut self, other: &Self) {
+        for (grant, record) in &other.grants {
+            self.grants
+                .entry(grant.clone())
+                .or_insert_with(|| record.clone());
+        }
+        self.removed.extend(other.removed.iter().cloned());
+    }
+
+    fn active_grant(&self, grant: &OwnerGrantId) -> Option<&GrantRecord> {
+        (!self.removed.contains(grant))
+            .then(|| self.grants.get(grant))
+            .flatten()
+    }
+
+    fn active_owner(&self, grant: &OwnerGrantId, pubkey: &str) -> bool {
+        self.active_grant(grant)
+            .is_some_and(|record| record.pubkey == pubkey && record.role == MemberRole::Owner)
+    }
+
+    fn apply_change(
+        &mut self,
+        coord: &MembershipCoord,
+        change: &MembershipChange,
+        index: usize,
+    ) -> Result<(), MembershipError> {
+        match change {
+            MembershipChange::Founder {
+                owner_pubkey,
+                owner_grant_id,
+            } => {
+                if self.grants.contains_key(owner_grant_id) {
+                    return Err(MembershipError::DuplicateGrant {
+                        index,
+                        grant: owner_grant_id.clone(),
+                    });
+                }
+                self.grants.insert(
+                    owner_grant_id.clone(),
+                    GrantRecord {
+                        pubkey: owner_pubkey.clone(),
+                        role: MemberRole::Owner,
+                        provider_account_email: None,
+                        created_at: coord.clone(),
+                    },
+                );
+            }
+            MembershipChange::SetMember {
+                user_pubkey,
+                provider_account_email,
+                role,
+                grant_id,
+                replaces,
+                ..
+            } => {
+                if self.grants.contains_key(grant_id) {
+                    return Err(MembershipError::DuplicateGrant {
+                        index,
+                        grant: grant_id.clone(),
+                    });
+                }
+                for replaced in replaces {
+                    let Some(record) = self.grants.get(replaced) else {
+                        return Err(MembershipError::GrantOwnerMismatch {
+                            index,
+                            grant: replaced.clone(),
+                        });
+                    };
+                    if record.pubkey != *user_pubkey {
+                        return Err(MembershipError::GrantOwnerMismatch {
+                            index,
+                            grant: replaced.clone(),
+                        });
+                    }
+                    self.removed.insert(replaced.clone());
+                }
+                self.grants.insert(
+                    grant_id.clone(),
+                    GrantRecord {
+                        pubkey: user_pubkey.clone(),
+                        role: role.clone(),
+                        provider_account_email: provider_account_email.clone(),
+                        created_at: coord.clone(),
+                    },
+                );
+            }
+            MembershipChange::RemoveMember {
+                user_pubkey,
+                removes,
+                ..
+            } => {
+                if removes.is_empty() {
+                    return Err(MembershipError::EmptyRemoval { index });
+                }
+                for removed in removes {
+                    let Some(record) = self.grants.get(removed) else {
+                        return Err(MembershipError::GrantOwnerMismatch {
+                            index,
+                            grant: removed.clone(),
+                        });
+                    };
+                    if record.pubkey != *user_pubkey {
+                        return Err(MembershipError::GrantOwnerMismatch {
+                            index,
+                            grant: removed.clone(),
+                        });
+                    }
+                    self.removed.insert(removed.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MembershipChain {
     entries: Vec<MembershipEntry>,
-    coords: Vec<Option<MembershipCoord>>,
+    coords: Vec<MembershipCoord>,
+    state: CausalState,
+    caps: BTreeMap<OwnerGrantId, OwnerStreamBarrier>,
 }
 
 impl MembershipChain {
-    /// Create an empty chain.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Create a chain from existing entries (e.g., downloaded from storage).
-    /// Entries are sorted by timestamp and validated on construction.
-    pub fn from_entries(mut entries: Vec<MembershipEntry>) -> Result<Self, MembershipError> {
-        entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        let coords = vec![None; entries.len()];
-        let chain = Self { entries, coords };
-        chain.validate()?;
-        Ok(chain)
+    pub fn from_entries(entries: Vec<MembershipEntry>) -> Result<Self, MembershipError> {
+        Self::from_entries_with_coords(
+            entries
+                .into_iter()
+                .map(|entry| (entry.coord(), entry))
+                .collect(),
+        )
     }
 
     pub fn from_entries_with_coords(
-        mut entries: Vec<(MembershipCoord, MembershipEntry)>,
+        entries: Vec<(MembershipCoord, MembershipEntry)>,
     ) -> Result<Self, MembershipError> {
-        entries.sort_by(|(_, a), (_, b)| a.timestamp.cmp(&b.timestamp));
-        let (coords, entries): (Vec<_>, Vec<_>) = entries
-            .into_iter()
-            .map(|(coord, entry)| (Some(coord), entry))
-            .unzip();
-        let chain = Self { entries, coords };
-        chain.validate()?;
-        chain.validate_author_links()?;
+        if entries.is_empty() {
+            return Err(MembershipError::EmptyChain);
+        }
+        let (coords, entries): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        let mut chain = Self {
+            entries,
+            coords,
+            state: CausalState::default(),
+            caps: BTreeMap::new(),
+        };
+        chain.rebuild()?;
         Ok(chain)
     }
 
-    /// Return the entries in the chain.
     pub fn entries(&self) -> &[MembershipEntry] {
         &self.entries
     }
 
-    /// The coordinate of the entry that grants `pubkey` write access, derived from
-    /// this chain's own entries and their storage coordinates. The chain-scoped form
-    /// of [`write_grant_coord`], used to bind an outgoing changeset to its
-    /// authorizing entry without a second membership download.
-    pub fn write_grant_coord(&self, pubkey: &str) -> Option<MembershipCoord> {
-        let paired: Vec<(MembershipCoord, MembershipEntry)> = self
-            .entries_with_effective_coords()
-            .into_iter()
-            .map(|(_, coord, entry)| (coord, entry.clone()))
-            .collect();
-        write_grant_coord(&paired, pubkey)
+    pub fn entries_with_coords(
+        &self,
+    ) -> impl Iterator<Item = (&MembershipCoord, &MembershipEntry)> {
+        self.coords.iter().zip(self.entries.iter())
     }
 
-    /// The pubkey of the founder (chain entry #1, the self-signed Owner Add), or
-    /// `None` for an empty chain. The store is anchored to this pubkey: a chain
-    /// whose founder is not the store's established owner is a takeover attempt
-    /// (issue #95), so callers compare this against the pinned owner pubkey.
+    pub fn store_id(&self) -> Option<&str> {
+        self.entries.first().map(|entry| entry.store_id.as_str())
+    }
+
+    pub fn founder_coord(&self) -> Option<&MembershipCoord> {
+        self.entries_with_coords().find_map(|(coord, entry)| {
+            matches!(entry.change, MembershipChange::Founder { .. }).then_some(coord)
+        })
+    }
+
     pub fn founder_pubkey(&self) -> Option<&str> {
-        self.entries.first().map(|e| e.user_pubkey.as_str())
+        self.entries.iter().find_map(|entry| match &entry.change {
+            MembershipChange::Founder { owner_pubkey, .. } => Some(owner_pubkey.as_str()),
+            MembershipChange::SetMember { .. } | MembershipChange::RemoveMember { .. } => None,
+        })
     }
 
-    /// Whether this chain is founded by `owner_pubkey` — its entry #1 is an Owner
-    /// Add of exactly that pubkey. The anchoring check that prevents a wiped
-    /// `membership/*` from being refounded under an attacker's key.
     pub fn is_founded_by(&self, owner_pubkey: &str) -> bool {
         self.founder_pubkey() == Some(owner_pubkey)
     }
 
-    /// Validate the entire chain.
-    ///
-    /// Rules:
-    /// 1. First entry must be Add with role Owner, self-signed.
-    /// 2. Every entry must have a valid signature.
-    /// 3. Every entry's author must be a current Owner at that point.
     pub fn validate(&self) -> Result<(), MembershipError> {
-        if self.entries.is_empty() {
-            return Err(MembershipError::EmptyChain);
-        }
-
-        let first = &self.entries[0];
-        if first.action != MembershipAction::Add
-            || first.role != MemberRole::Owner
-            || first.author_pubkey != first.user_pubkey
-        {
-            return Err(MembershipError::InvalidFirstEntry);
-        }
-
-        if !verify_membership_entry(first) {
-            return Err(MembershipError::InvalidSignature(0));
-        }
-
-        let mut active: Vec<(String, MemberRole)> = Vec::new();
-        apply_active_member_rule(&mut active, first);
-
-        for (i, entry) in self.entries.iter().enumerate().skip(1) {
-            if !verify_membership_entry(entry) {
-                return Err(MembershipError::InvalidSignature(i));
-            }
-
-            if !members_has_owner(&active, &entry.author_pubkey) {
-                return Err(MembershipError::NotAnOwner(i));
-            }
-
-            apply_active_member_rule(&mut active, entry);
-        }
-
-        Ok(())
+        let mut rebuilt = self.clone();
+        rebuilt.rebuild()
     }
 
-    /// Whether a pubkey is *currently* authorized to author catalog changesets
-    /// — a current Owner or Member. Followers are read-only, so a changeset
-    /// they authored is rejected on pull.
-    ///
-    /// Non-temporal by design: pull asks this of the latest chain it has, not
-    /// of an author-supplied (spoofable) timestamp. Revocation is enforced by
-    /// the key rotation `remove_member` performs, not by replaying the chain at
-    /// a claimed instant.
-    pub fn can_write_now(&self, pubkey: &str) -> bool {
-        members_can_write(&self.current_members(), pubkey)
-    }
-
-    /// Whether `pubkey` is *currently* a store Owner. Owner-only writes
-    /// (snapshots) authorize against this rather than `can_write_now`.
-    pub fn is_owner_now(&self, pubkey: &str) -> bool {
-        members_has_owner(&self.current_members(), pubkey)
-    }
-
-    /// Return current active members with their roles.
-    pub fn current_members(&self) -> Vec<(String, MemberRole)> {
-        let mut active: Vec<(String, MemberRole)> = Vec::new();
-
-        for entry in &self.entries {
-            apply_active_member_rule(&mut active, entry);
-        }
-
-        active
-    }
-
-    pub fn current_member_provider_email(&self, pubkey: &str) -> Option<&str> {
-        let mut email = None;
-        for entry in &self.entries {
-            if entry.user_pubkey != pubkey {
-                continue;
-            }
-            match entry.action {
-                MembershipAction::Add => {
-                    email = entry.provider_account_email.as_deref();
-                }
-                MembershipAction::Remove => {
-                    email = None;
-                }
-            }
-        }
-        email
-    }
-
-    /// Validate and append an entry to the chain.
     pub fn add_entry(&mut self, entry: MembershipEntry) -> Result<(), MembershipError> {
-        self.entries.push(entry);
-        self.coords.push(None);
-        match self.validate() {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.entries.pop();
-                self.coords.pop();
-                Err(e)
-            }
-        }
+        self.add_entry_at(entry.coord(), entry)
     }
 
     pub fn add_entry_at(
@@ -417,1012 +455,1038 @@ impl MembershipChain {
         entry: MembershipEntry,
     ) -> Result<(), MembershipError> {
         self.entries.push(entry);
-        self.coords.push(Some(coord));
-        match self.validate().and_then(|()| self.validate_author_links()) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.entries.pop();
-                self.coords.pop();
-                Err(e)
+        self.coords.push(coord);
+        if let Err(error) = self.rebuild() {
+            self.entries.pop();
+            self.coords.pop();
+            self.rebuild().expect("previous membership chain validated");
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn can_write_now(&self, pubkey: &str) -> bool {
+        self.active_grants_for(pubkey)
+            .iter()
+            .any(|(_, record)| record.role.can_write())
+    }
+
+    pub fn is_owner_now(&self, pubkey: &str) -> bool {
+        self.active_grants_for(pubkey)
+            .iter()
+            .any(|(_, record)| record.role == MemberRole::Owner)
+    }
+
+    pub fn authorizes_write_at(&self, coord: &MembershipCoord, pubkey: &str) -> bool {
+        self.active_grants_for(pubkey)
+            .iter()
+            .any(|(_, record)| record.role.can_write() && record.created_at == *coord)
+    }
+
+    pub fn contains_coord(&self, expected: &MembershipCoord) -> bool {
+        self.coords.iter().any(|coord| coord == expected)
+    }
+
+    pub fn current_members(&self) -> Vec<(String, MemberRole)> {
+        let mut members = BTreeMap::new();
+        for (grant, record) in &self.state.grants {
+            if !self.state.removed.contains(grant) {
+                members.insert(record.pubkey.clone(), record.role.clone());
             }
         }
+        members.into_iter().collect()
     }
 
-    /// The greatest committed seq for `author_pubkey` and the hash of that entry,
-    /// or `None` if the author has no entries in this chain. This pair is exactly
-    /// what the author's [`AuthorHead`] certifies.
-    pub fn author_tip(&self, author_pubkey: &str) -> Option<(u64, String)> {
-        let mut latest: Option<(u64, &MembershipEntry)> = None;
-        for (_, coord, entry) in self.entries_with_effective_coords() {
-            if coord.author_pubkey != author_pubkey {
-                continue;
-            };
-            if latest
-                .as_ref()
-                .is_none_or(|(latest_seq, _)| coord.seq > *latest_seq)
-            {
-                latest = Some((coord.seq, entry));
-            }
-        }
-        latest.map(|(seq, entry)| (seq, entry_hash(entry)))
-    }
-
-    /// The hash of `author_pubkey`'s latest entry — the `prev_hash` a fresh entry
-    /// by that author links to. `None` when the author has no entries yet.
-    pub fn latest_author_hash(&self, author_pubkey: &str) -> Option<String> {
-        self.author_tip(author_pubkey).map(|(_, hash)| hash)
-    }
-
-    /// Every distinct author's committed head coordinate in this chain — one
-    /// `(author_pubkey, seq)` per author who has authored at least one entry, at
-    /// that author's highest committed seq. Empty only for an empty chain, before
-    /// store membership has been initialized.
-    ///
-    /// This is the floor an invite or restore code carries from mint time: the
-    /// joiner or restorer seeds its per-author head watermark from it before its
-    /// first sync cycle, so a storage provider serving a head at or below this
-    /// floor — an older, otherwise validly signed state, e.g. from before a
-    /// removal this floor already reflects — is refused as a regression exactly
-    /// as if this reader had already seen the current state.
-    pub fn author_heads(&self) -> Vec<MembershipCoord> {
-        let mut heads: BTreeMap<String, u64> = BTreeMap::new();
-        for (_, coord, _) in self.entries_with_effective_coords() {
-            let seq = heads.entry(coord.author_pubkey.clone()).or_insert(0);
-            *seq = (*seq).max(coord.seq);
-        }
-        heads
+    pub fn current_member_provider_email(&self, pubkey: &str) -> Option<&str> {
+        self.active_grants_for(pubkey)
             .into_iter()
-            .map(|(author_pubkey, seq)| MembershipCoord { author_pubkey, seq })
+            .next()
+            .and_then(|(_, record)| record.provider_account_email.as_deref())
+    }
+
+    pub fn write_grant_coord(&self, pubkey: &str) -> Option<MembershipCoord> {
+        self.active_grants_for(pubkey)
+            .into_iter()
+            .find(|(_, record)| record.role.can_write())
+            .map(|(_, record)| record.created_at.clone())
+    }
+
+    pub fn active_grant_ids(&self, pubkey: &str) -> BTreeSet<OwnerGrantId> {
+        self.active_grants_for(pubkey)
+            .into_iter()
+            .map(|(grant, _)| grant.clone())
             .collect()
     }
 
-    /// Build `signer`'s signed head from this chain's current tip for that author,
-    /// or `None` if the author has authored no entries (nothing to certify).
-    pub fn signed_head(&self, signer: &UserKeypair) -> Option<AuthorHead> {
-        let author = keys::public_key_hex(signer);
-        self.author_tip(&author)
-            .map(|(seq, tip_hash)| AuthorHead::signed(seq, tip_hash, signer))
+    pub fn active_owner_grant(&self, pubkey: &str) -> Option<OwnerGrantId> {
+        self.active_grants_for(pubkey)
+            .into_iter()
+            .find(|(_, record)| record.role == MemberRole::Owner)
+            .map(|(grant, _)| grant.clone())
     }
 
-    fn entries_with_effective_coords(&self) -> Vec<(usize, MembershipCoord, &MembershipEntry)> {
-        let mut derived_seq = BTreeMap::<String, u64>::new();
-        self.entries
+    pub fn author_heads(&self) -> Vec<MembershipCoord> {
+        let mut heads = BTreeMap::<OwnerGrantId, MembershipCoord>::new();
+        for coord in &self.coords {
+            if self
+                .caps
+                .get(&coord.author_owner_grant)
+                .is_some_and(|barrier| !barrier.includes(coord))
+            {
+                continue;
+            }
+            heads
+                .entry(coord.author_owner_grant.clone())
+                .and_modify(|current| {
+                    if coord.seq > current.seq {
+                        *current = coord.clone();
+                    }
+                })
+                .or_insert_with(|| coord.clone());
+        }
+        heads.into_values().collect()
+    }
+
+    pub fn stream_tip(&self, author_pubkey: &str, grant: &OwnerGrantId) -> Option<MembershipCoord> {
+        self.author_heads().into_iter().find(|coord| {
+            coord.author_pubkey == author_pubkey && coord.author_owner_grant == *grant
+        })
+    }
+
+    pub fn raw_stream_tip(
+        &self,
+        author_pubkey: &str,
+        grant: &OwnerGrantId,
+    ) -> Option<MembershipCoord> {
+        self.coords
             .iter()
-            .enumerate()
-            .map(|(index, entry)| {
-                let coord = match self.coords[index].clone() {
-                    Some(coord) => {
-                        let seq = derived_seq.entry(coord.author_pubkey.clone()).or_insert(0);
-                        *seq = (*seq).max(coord.seq);
-                        coord
-                    }
-                    None => {
-                        let seq = derived_seq.entry(entry.author_pubkey.clone()).or_insert(0);
-                        *seq += 1;
-                        MembershipCoord {
-                            author_pubkey: entry.author_pubkey.clone(),
-                            seq: *seq,
-                        }
-                    }
-                };
-                (index, coord, entry)
+            .filter(|coord| {
+                coord.author_pubkey == author_pubkey && coord.author_owner_grant == *grant
+            })
+            .max_by_key(|coord| coord.seq)
+            .cloned()
+    }
+
+    pub fn signed_head(&self, signer: &UserKeypair) -> Option<AuthorHead> {
+        let author = keys::public_key_hex(signer);
+        let grant = self.active_owner_grant(&author)?;
+        let tip = self.stream_tip(&author, &grant)?;
+        Some(AuthorHead::signed(
+            self.store_id()?.to_string(),
+            grant,
+            tip.seq,
+            tip.entry_hash,
+            signer,
+        ))
+    }
+
+    pub fn signed_set_member(
+        &self,
+        signer: &UserKeypair,
+        user_pubkey: String,
+        provider_account_email: Option<String>,
+        role: MemberRole,
+        created_at: String,
+    ) -> Result<MembershipEntry, MembershipError> {
+        let author = keys::public_key_hex(signer);
+        let author_grant = self
+            .active_owner_grant(&author)
+            .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
+        let (seq, previous_hash) = self.next_stream_position(&author, &author_grant);
+        let grant_id = derive_grant_id(
+            self.store_id().expect("validated chain has a store id"),
+            &author,
+            &author_grant,
+            seq,
+            &user_pubkey,
+        );
+        let replaces = self.active_grant_ids(&user_pubkey);
+        let owner_barriers = self.owner_barriers(&replaces);
+        let mut entry = MembershipEntry {
+            version: STORE_PROTOCOL_VERSION,
+            store_id: self
+                .store_id()
+                .expect("validated chain has a store id")
+                .to_string(),
+            author_pubkey: author,
+            author_owner_grant: author_grant,
+            seq,
+            previous_hash,
+            dependencies: self.frontier(),
+            created_at,
+            change: MembershipChange::SetMember {
+                user_pubkey: user_pubkey.clone(),
+                provider_account_email,
+                role,
+                grant_id,
+                replaces,
+                owner_barriers,
+            },
+            signature: String::new(),
+        };
+        sign_membership_entry(&mut entry, signer);
+        Ok(entry)
+    }
+
+    pub fn signed_remove_member(
+        &self,
+        signer: &UserKeypair,
+        user_pubkey: String,
+        created_at: String,
+    ) -> Result<MembershipEntry, MembershipError> {
+        let removes = self.active_grant_ids(&user_pubkey);
+        if removes.is_empty() {
+            return Err(MembershipError::NotAMember(user_pubkey));
+        }
+        let author = keys::public_key_hex(signer);
+        let author_grant = self
+            .active_owner_grant(&author)
+            .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
+        let (seq, previous_hash) = self.next_stream_position(&author, &author_grant);
+        let owner_barriers = self.owner_barriers(&removes);
+        let mut entry = MembershipEntry {
+            version: STORE_PROTOCOL_VERSION,
+            store_id: self
+                .store_id()
+                .expect("validated chain has a store id")
+                .to_string(),
+            author_pubkey: author,
+            author_owner_grant: author_grant,
+            seq,
+            previous_hash,
+            dependencies: self.frontier(),
+            created_at,
+            change: MembershipChange::RemoveMember {
+                user_pubkey,
+                removes,
+                owner_barriers,
+            },
+            signature: String::new(),
+        };
+        sign_membership_entry(&mut entry, signer);
+        Ok(entry)
+    }
+
+    fn next_stream_position(
+        &self,
+        author: &str,
+        grant: &OwnerGrantId,
+    ) -> (u64, Option<ObjectHash>) {
+        self.stream_tip(author, grant)
+            .map_or((1, None), |tip| (tip.seq + 1, Some(tip.entry_hash)))
+    }
+
+    fn frontier(&self) -> BTreeMap<OwnerGrantId, MembershipCoord> {
+        self.author_heads()
+            .into_iter()
+            .map(|coord| (coord.author_owner_grant.clone(), coord))
+            .collect()
+    }
+
+    fn owner_barriers(
+        &self,
+        grants: &BTreeSet<OwnerGrantId>,
+    ) -> BTreeMap<OwnerGrantId, OwnerStreamBarrier> {
+        grants
+            .iter()
+            .filter_map(|grant| {
+                let record = self.state.grants.get(grant)?;
+                (record.role == MemberRole::Owner).then(|| {
+                    let barrier = self
+                        .stream_tip(&record.pubkey, grant)
+                        .map_or(OwnerStreamBarrier::BeforeFirst, OwnerStreamBarrier::Through);
+                    (grant.clone(), barrier)
+                })
             })
             .collect()
     }
 
-    fn validate_author_links(&self) -> Result<(), MembershipError> {
-        let mut by_author: BTreeMap<String, Vec<(usize, u64)>> = BTreeMap::new();
-        for (index, coord, _) in self.entries_with_effective_coords() {
-            by_author
-                .entry(coord.author_pubkey)
-                .or_default()
-                .push((index, coord.seq));
+    fn active_grants_for(&self, pubkey: &str) -> Vec<(&OwnerGrantId, &GrantRecord)> {
+        self.state
+            .grants
+            .iter()
+            .filter(|(grant, record)| {
+                record.pubkey == pubkey && !self.state.removed.contains(*grant)
+            })
+            .collect()
+    }
+
+    fn rebuild(&mut self) -> Result<(), MembershipError> {
+        let expected_store = self
+            .entries
+            .first()
+            .ok_or(MembershipError::EmptyChain)?
+            .store_id
+            .clone();
+        if expected_store.is_empty() {
+            return Err(MembershipError::InvalidFounder);
         }
 
-        for entries in by_author.values_mut() {
-            entries.sort_by_key(|(_, seq)| *seq);
-            let mut expected = None;
-            for (index, _) in entries {
-                let entry = &self.entries[*index];
-                if entry.prev_hash != expected {
-                    return Err(MembershipError::BrokenAuthorLink {
-                        index: *index,
-                        expected,
-                        actual: entry.prev_hash.clone(),
-                    });
-                }
-                expected = Some(entry_hash(entry));
+        let mut index_by_coord = BTreeMap::new();
+        let mut streams = BTreeMap::<(String, OwnerGrantId), BTreeMap<u64, usize>>::new();
+        for (index, (coord, entry)) in self.entries_with_coords().enumerate() {
+            if entry.version != STORE_PROTOCOL_VERSION {
+                return Err(MembershipError::UnsupportedVersion(index));
+            }
+            if entry.store_id != expected_store {
+                return Err(MembershipError::StoreMismatch {
+                    index,
+                    expected: expected_store.clone(),
+                    actual: entry.store_id.clone(),
+                });
+            }
+            if !verify_membership_entry(entry) {
+                return Err(MembershipError::InvalidSignature(index));
+            }
+            let actual = entry.coord();
+            if *coord != actual {
+                return Err(MembershipError::CoordinateMismatch {
+                    index,
+                    expected: Box::new(coord.clone()),
+                    actual: Box::new(actual),
+                });
+            }
+            if index_by_coord.insert(coord.clone(), index).is_some() {
+                return Err(MembershipError::CoordinateMismatch {
+                    index,
+                    expected: Box::new(coord.clone()),
+                    actual: Box::new(coord.clone()),
+                });
+            }
+            let replaced = streams
+                .entry((
+                    coord.author_pubkey.clone(),
+                    coord.author_owner_grant.clone(),
+                ))
+                .or_default()
+                .insert(coord.seq, index);
+            if replaced.is_some() {
+                return Err(MembershipError::ConflictingSequence {
+                    author: coord.author_pubkey.clone(),
+                    grant: coord.author_owner_grant.clone(),
+                    seq: coord.seq,
+                });
             }
         }
+
+        for ((author, grant), entries) in &streams {
+            let max_seq = *entries
+                .keys()
+                .next_back()
+                .expect("stream group is non-empty");
+            let mut previous = None;
+            for seq in 1..=max_seq {
+                let Some(index) = entries.get(&seq) else {
+                    return Err(MembershipError::MissingSequence {
+                        author: author.clone(),
+                        grant: grant.clone(),
+                        seq,
+                    });
+                };
+                let entry = &self.entries[*index];
+                if entry.previous_hash != previous {
+                    return Err(MembershipError::BrokenStreamLink {
+                        index: *index,
+                        expected: previous,
+                        actual: entry.previous_hash,
+                    });
+                }
+                if seq == 1 {
+                    if entry.dependencies.contains_key(grant) {
+                        return Err(MembershipError::MissingOwnDependency { index: *index });
+                    }
+                } else {
+                    let previous_index = entries
+                        .get(&(seq - 1))
+                        .expect("contiguous stream retains predecessor");
+                    if entry.dependencies.get(grant) != Some(&self.coords[*previous_index]) {
+                        return Err(MembershipError::MissingOwnDependency { index: *index });
+                    }
+                }
+                previous = Some(self.coords[*index].entry_hash);
+            }
+        }
+
+        for (index, entry) in self.entries.iter().enumerate() {
+            for (grant, dependency) in &entry.dependencies {
+                if grant != &dependency.author_owner_grant {
+                    return Err(MembershipError::DependencyStreamMismatch {
+                        index,
+                        key: grant.clone(),
+                        actual: dependency.author_owner_grant.clone(),
+                    });
+                }
+                if !index_by_coord.contains_key(dependency) {
+                    return Err(MembershipError::MissingDependency {
+                        index,
+                        dependency: dependency.clone(),
+                    });
+                }
+            }
+        }
+
+        let founder_indices: Vec<_> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                matches!(entry.change, MembershipChange::Founder { .. }).then_some(index)
+            })
+            .collect();
+        if founder_indices.len() != 1 {
+            return Err(MembershipError::InvalidFounder);
+        }
+        let founder_index = founder_indices[0];
+        let founder = &self.entries[founder_index];
+        let MembershipChange::Founder {
+            owner_pubkey,
+            owner_grant_id,
+        } = &founder.change
+        else {
+            unreachable!()
+        };
+        if founder.seq != 1
+            || founder.author_pubkey != *owner_pubkey
+            || founder.author_owner_grant != *owner_grant_id
+            || founder.previous_hash.is_some()
+            || !founder.dependencies.is_empty()
+            || owner_grant_id != &derive_founder_grant_id(&founder.store_id, owner_pubkey)
+        {
+            return Err(MembershipError::InvalidFounder);
+        }
+
+        let mut remaining: BTreeSet<usize> = (0..self.entries.len()).collect();
+        let mut states = BTreeMap::<MembershipCoord, CausalState>::new();
+        let mut causal_order = Vec::with_capacity(self.entries.len());
+        while !remaining.is_empty() {
+            let ready: Vec<_> = remaining
+                .iter()
+                .copied()
+                .filter(|index| {
+                    self.entries[*index]
+                        .dependencies
+                        .values()
+                        .all(|coord| states.contains_key(coord))
+                })
+                .collect();
+            if ready.is_empty() {
+                return Err(MembershipError::DependencyCycle);
+            }
+            for index in ready {
+                remaining.remove(&index);
+                causal_order.push(index);
+                let entry = &self.entries[index];
+                let coord = &self.coords[index];
+                let mut state = CausalState::default();
+                for dependency in entry.dependencies.values() {
+                    state.merge(
+                        states
+                            .get(dependency)
+                            .expect("ready entry has every dependency state"),
+                    );
+                }
+                if index != founder_index
+                    && !state.active_owner(&entry.author_owner_grant, &entry.author_pubkey)
+                {
+                    return Err(MembershipError::AuthorGrantInactive {
+                        index,
+                        grant: entry.author_owner_grant.clone(),
+                    });
+                }
+                if let MembershipChange::RemoveMember {
+                    removes,
+                    owner_barriers,
+                    ..
+                }
+                | MembershipChange::SetMember {
+                    replaces: removes,
+                    owner_barriers,
+                    ..
+                } = &entry.change
+                {
+                    for grant in owner_barriers.keys() {
+                        if !removes.contains(grant)
+                            || !state
+                                .grants
+                                .get(grant)
+                                .is_some_and(|record| record.role == MemberRole::Owner)
+                        {
+                            return Err(MembershipError::InvalidOwnerRevocationBarrier {
+                                index,
+                                grant: grant.clone(),
+                            });
+                        }
+                    }
+                    for removed in removes {
+                        let is_owner = state
+                            .grants
+                            .get(removed)
+                            .is_some_and(|record| record.role == MemberRole::Owner);
+                        if !is_owner {
+                            continue;
+                        }
+                        let Some(barrier) = owner_barriers.get(removed) else {
+                            return Err(MembershipError::MissingOwnerRevocationBarrier {
+                                index,
+                                grant: removed.clone(),
+                            });
+                        };
+                        let exact = match barrier {
+                            OwnerStreamBarrier::BeforeFirst => {
+                                !entry.dependencies.contains_key(removed)
+                            }
+                            OwnerStreamBarrier::Through(coord) => {
+                                coord.author_owner_grant == *removed
+                                    && entry.dependencies.get(removed) == Some(coord)
+                            }
+                        };
+                        if !exact {
+                            return Err(MembershipError::InvalidOwnerRevocationBarrier {
+                                index,
+                                grant: removed.clone(),
+                            });
+                        }
+                    }
+                }
+                state.apply_change(coord, &entry.change, index)?;
+                states.insert(coord.clone(), state);
+            }
+        }
+
+        let mut raw_state = CausalState::default();
+        for state in states.values() {
+            raw_state.merge(state);
+        }
+        if !raw_state.grants.is_empty()
+            && !raw_state.grants.iter().any(|(grant, record)| {
+                record.role == MemberRole::Owner && !raw_state.removed.contains(grant)
+            })
+        {
+            return Err(MembershipError::ConcurrentOwnerRevocationConflict);
+        }
+
+        let mut caps = BTreeMap::<OwnerGrantId, OwnerStreamBarrier>::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if let MembershipChange::RemoveMember {
+                removes,
+                owner_barriers,
+                ..
+            }
+            | MembershipChange::SetMember {
+                replaces: removes,
+                owner_barriers,
+                ..
+            } = &entry.change
+            {
+                for removed in removes {
+                    if raw_state
+                        .grants
+                        .get(removed)
+                        .is_some_and(|record| record.role == MemberRole::Owner)
+                    {
+                        let barrier = owner_barriers.get(removed).ok_or_else(|| {
+                            MembershipError::MissingOwnerRevocationBarrier {
+                                index,
+                                grant: removed.clone(),
+                            }
+                        })?;
+                        caps.entry(removed.clone())
+                            .and_modify(|current| {
+                                let replace = match (&*current, barrier) {
+                                    (OwnerStreamBarrier::BeforeFirst, _) => false,
+                                    (_, OwnerStreamBarrier::BeforeFirst) => true,
+                                    (
+                                        OwnerStreamBarrier::Through(current),
+                                        OwnerStreamBarrier::Through(candidate),
+                                    ) => candidate.seq < current.seq,
+                                };
+                                if replace {
+                                    current.clone_from(barrier);
+                                }
+                            })
+                            .or_insert_with(|| barrier.clone());
+                    }
+                }
+            }
+        }
+
+        for (index, entry) in self.entries.iter().enumerate() {
+            for (grant, dependency) in &entry.dependencies {
+                if let Some(barrier) = caps.get(grant) {
+                    if !barrier.includes(dependency) {
+                        return Err(MembershipError::DependencyBeyondRevocationBarrier {
+                            index,
+                            grant: grant.clone(),
+                            dependency: Box::new(dependency.clone()),
+                            barrier: Box::new(barrier.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut effective = CausalState::default();
+        for index in causal_order {
+            let coord = &self.coords[index];
+            if caps
+                .get(&coord.author_owner_grant)
+                .is_some_and(|barrier| !barrier.includes(coord))
+            {
+                continue;
+            }
+            effective.apply_change(coord, &self.entries[index].change, index)?;
+        }
+
+        let mut active_by_member = BTreeMap::<String, Vec<OwnerGrantId>>::new();
+        for (grant, record) in &effective.grants {
+            if !effective.removed.contains(grant) {
+                active_by_member
+                    .entry(record.pubkey.clone())
+                    .or_default()
+                    .push(grant.clone());
+            }
+        }
+        if let Some((pubkey, grants)) = active_by_member
+            .into_iter()
+            .find(|(_, grants)| grants.len() > 1)
+        {
+            return Err(MembershipError::ConcurrentMemberGrantConflict { pubkey, grants });
+        }
+        if !effective.grants.iter().any(|(grant, record)| {
+            record.role == MemberRole::Owner && !effective.removed.contains(grant)
+        }) {
+            return Err(MembershipError::ConcurrentOwnerRevocationConflict);
+        }
+
+        self.state = effective;
+        self.caps = caps;
         Ok(())
     }
 }
 
+pub fn derive_founder_grant_id(store_id: &str, owner_pubkey: &str) -> OwnerGrantId {
+    OwnerGrantId(ObjectHash::digest(
+        format!("coven.membership-founder-grant.v1\0{store_id}\0{owner_pubkey}").as_bytes(),
+    ))
+}
+
+pub fn derive_grant_id(
+    store_id: &str,
+    author_pubkey: &str,
+    author_grant: &OwnerGrantId,
+    seq: u64,
+    user_pubkey: &str,
+) -> OwnerGrantId {
+    OwnerGrantId(ObjectHash::digest(
+        format!(
+            "coven.membership-grant.v1\0{store_id}\0{author_pubkey}\0{author_grant}\0{seq}\0{user_pubkey}"
+        )
+        .as_bytes(),
+    ))
+}
+
+pub fn founder_entry(store_id: &str, owner: &UserKeypair, created_at: &str) -> MembershipEntry {
+    let owner_pubkey = keys::public_key_hex(owner);
+    let owner_grant_id = derive_founder_grant_id(store_id, &owner_pubkey);
+    let mut entry = MembershipEntry {
+        version: STORE_PROTOCOL_VERSION,
+        store_id: store_id.to_string(),
+        author_pubkey: owner_pubkey.clone(),
+        author_owner_grant: owner_grant_id.clone(),
+        seq: 1,
+        previous_hash: None,
+        dependencies: BTreeMap::new(),
+        created_at: created_at.to_string(),
+        change: MembershipChange::Founder {
+            owner_pubkey,
+            owner_grant_id,
+        },
+        signature: String::new(),
+    };
+    sign_membership_entry(&mut entry, owner);
+    entry
+}
+
+pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct Signed<'a> {
+        version: u32,
+        store_id: &'a str,
+        author_pubkey: &'a str,
+        author_owner_grant: &'a OwnerGrantId,
+        seq: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        previous_hash: Option<ObjectHash>,
+        dependencies: &'a BTreeMap<OwnerGrantId, MembershipCoord>,
+        created_at: &'a str,
+        change: &'a MembershipChange,
+    }
+    serde_json::to_vec(&Signed {
+        version: entry.version,
+        store_id: &entry.store_id,
+        author_pubkey: &entry.author_pubkey,
+        author_owner_grant: &entry.author_owner_grant,
+        seq: entry.seq,
+        previous_hash: entry.previous_hash,
+        dependencies: &entry.dependencies,
+        created_at: &entry.created_at,
+        change: &entry.change,
+    })
+    .expect("membership signed fields serialize")
+}
+
+pub fn entry_hash(entry: &MembershipEntry) -> ObjectHash {
+    ObjectHash::digest(
+        &serde_json::to_vec(entry).expect("membership entry serialization cannot fail"),
+    )
+}
+
+pub fn sign_membership_entry(entry: &mut MembershipEntry, keypair: &UserKeypair) {
+    entry.author_pubkey = keys::public_key_hex(keypair);
+    let (_, signature) = keys::sign_hex(keypair, &canonical_bytes(entry));
+    entry.signature = signature;
+}
+
+pub fn verify_membership_entry(entry: &MembershipEntry) -> bool {
+    keys::verify_signature_hex(
+        &entry.author_pubkey,
+        &entry.signature,
+        &canonical_bytes(entry),
+    )
+}
+
 impl AuthorHead {
-    /// Sign a head under `keypair`'s own pubkey, certifying its prefix through
-    /// `seq` with tip hash `tip_hash`.
-    pub fn signed(seq: u64, tip_hash: String, keypair: &UserKeypair) -> Self {
-        let author_pubkey = keys::public_key_hex(keypair);
-        let payload = author_head_payload(&author_pubkey, seq, &tip_hash);
-        let (_, signature) = keys::sign_hex(keypair, &payload);
-        AuthorHead {
+    pub fn signed(
+        store_id: String,
+        author_owner_grant: OwnerGrantId,
+        seq: u64,
+        tip_hash: ObjectHash,
+        signer: &UserKeypair,
+    ) -> Self {
+        let author_pubkey = keys::public_key_hex(signer);
+        let mut head = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_id,
             author_pubkey,
+            author_owner_grant,
             seq,
             tip_hash,
-            signature,
-        }
+            signature: String::new(),
+        };
+        let (_, signature) = keys::sign_hex(signer, &head.canonical_bytes());
+        head.signature = signature;
+        head
     }
 
     pub fn verify(&self) -> bool {
-        keys::verify_signature_hex(
-            &self.author_pubkey,
-            &self.signature,
-            &author_head_payload(&self.author_pubkey, self.seq, &self.tip_hash),
-        )
+        self.version == STORE_PROTOCOL_VERSION
+            && keys::verify_signature_hex(
+                &self.author_pubkey,
+                &self.signature,
+                &self.canonical_bytes(),
+            )
     }
-}
 
-fn author_head_payload(author_pubkey: &str, seq: u64, tip_hash: &str) -> Vec<u8> {
-    #[derive(Serialize)]
-    struct HeadFields<'a> {
-        author_pubkey: &'a str,
-        seq: u64,
-        tip_hash: &'a str,
+    fn canonical_bytes(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Signed<'a> {
+            version: u32,
+            store_id: &'a str,
+            author_pubkey: &'a str,
+            author_owner_grant: &'a OwnerGrantId,
+            seq: u64,
+            tip_hash: ObjectHash,
+        }
+        serde_json::to_vec(&Signed {
+            version: self.version,
+            store_id: &self.store_id,
+            author_pubkey: &self.author_pubkey,
+            author_owner_grant: &self.author_owner_grant,
+            seq: self.seq,
+            tip_hash: self.tip_hash,
+        })
+        .expect("membership head signed fields serialize")
     }
-    serde_json::to_vec(&HeadFields {
-        author_pubkey,
-        seq,
-        tip_hash,
-    })
-    .expect("membership head fields serialization cannot fail")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::UserKeypair;
-    use crate::sync::test_helpers::{founder_entry, make_entry, pubkey_hex};
 
-    fn gen_keypair() -> UserKeypair {
+    fn key() -> UserKeypair {
         UserKeypair::generate()
     }
 
-    /// The core invariant a per-store identity buys: a device's identity in
-    /// one store carries no authority in another.
-    ///
-    /// Two stores, A and B, each founded by their own device identity (two
-    /// separate `UserKeypair`s — already proof that creating two stores
-    /// yields two different pubkeys, and that neither chain's founder is the
-    /// other's). Round-trip A's identity through an actual restore code, the
-    /// exact bytes a user would extract and hand over, then try to use it to
-    /// author a new entry in B's chain: refused, because B's active-member
-    /// set names a different pubkey for this device. The same extracted
-    /// identity authors an entry in A's own chain without issue, proving the
-    /// refusal in B is about scope, not a broken signature.
-    #[test]
-    fn a_store_identity_does_not_authorize_another_store() {
-        use crate::storage::cloud::CloudHomeJoinInfo;
-        use crate::sync::restore_code::{decode_restore_code, encode_restore_code, RestoreCode};
-
-        let identity_a = gen_keypair();
-        let identity_b = gen_keypair();
-        assert_ne!(
-            pubkey_hex(&identity_a),
-            pubkey_hex(&identity_b),
-            "two stores on one device must generate distinct identities",
-        );
-
-        let mut chain_a = MembershipChain::new();
-        chain_a
-            .add_entry(founder_entry(&identity_a, "0000000001000-0000-a"))
-            .expect("found store a");
-        let mut chain_b = MembershipChain::new();
-        chain_b
-            .add_entry(founder_entry(&identity_b, "0000000001000-0000-b"))
-            .expect("found store b");
-        assert_ne!(
-            chain_a.founder_pubkey(),
-            chain_b.founder_pubkey(),
-            "neither store's chain names the other's founder",
-        );
-
-        // The identity a restore code for store A carries — round-tripped
-        // through the actual wire format, not just the same value in memory.
-        let restore_code = RestoreCode {
-            v: crate::sync::restore_code::RESTORE_CODE_VERSION,
-            sid: "store-a".to_string(),
-            ek: None,
-            name: "Store A".to_string(),
-            provider: CloudHomeJoinInfo::CloudKit,
-            sk: hex::encode(identity_a.to_keypair_bytes()),
-            membership_floor: Vec::new(),
-        };
-        let decoded =
-            decode_restore_code(&encode_restore_code(&restore_code)).expect("restore code decodes");
-        let extracted_signing_key: [u8; 64] = hex::decode(&decoded.sk)
-            .expect("sk is hex")
-            .try_into()
-            .expect("sk is 64 bytes");
-        let extracted =
-            UserKeypair::from_signing_key_bytes(&extracted_signing_key).expect("valid keypair");
-        assert_eq!(
-            pubkey_hex(&extracted),
-            pubkey_hex(&identity_a),
-            "the restore code round-trips store a's identity unchanged",
-        );
-
-        // The extracted identity authors a new entry in ITS OWN store (A)
-        // without issue — it really is a working signer.
-        let outsider = gen_keypair();
-        let add_in_a = make_entry(
-            &extracted,
-            MembershipAction::Add,
-            &outsider,
-            MemberRole::Member,
-            "0000000002000-0000-a",
-        );
-        chain_a
-            .add_entry(add_in_a)
-            .expect("store a's own identity can author entries in store a");
-
-        // The SAME identity, presented as the author of a new entry in store
-        // B's chain, is refused: B's active-member set was founded by
-        // identity_b, and never recognized identity_a as a member at all.
-        let add_in_b = make_entry(
-            &extracted,
-            MembershipAction::Add,
-            &outsider,
-            MemberRole::Member,
-            "0000000002000-0000-b",
-        );
-        let result = chain_b.add_entry(add_in_b);
-        assert!(
-            matches!(result, Err(MembershipError::NotAnOwner(_))),
-            "store a's identity must not authorize a write in store b, got {result:?}",
-        );
+    fn founded(store_id: &str, owner: &UserKeypair) -> MembershipChain {
+        MembershipChain::from_entries(vec![founder_entry(store_id, owner, "founder")]).unwrap()
     }
 
     #[test]
-    fn single_owner_chain() {
-        let owner = gen_keypair();
-        let entry = founder_entry(&owner, "0000000001000-0000-dev1");
-
-        let mut chain = MembershipChain::new();
-        chain.add_entry(entry).unwrap();
-        chain.validate().unwrap();
-
-        let members = chain.current_members();
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].0, pubkey_hex(&owner));
-        assert_eq!(members[0].1, MemberRole::Owner);
-    }
-
-    #[test]
-    fn write_grant_coord_names_the_latest_write_granting_add() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-        let follower = gen_keypair();
-
-        // Pairs as a puller holds them: each entry with the storage coordinate it
-        // was loaded from. Founder at (owner, 1); the owner then adds a member at
-        // (owner, 2) and a follower at (owner, 3).
-        let coord = |kp: &UserKeypair, seq| MembershipCoord {
-            author_pubkey: pubkey_hex(kp),
-            seq,
-        };
-        let entries = vec![
-            (
-                coord(&owner, 1),
-                founder_entry(&owner, "0000000001000-0000-dev1"),
-            ),
-            (
-                coord(&owner, 2),
-                make_entry(
-                    &owner,
-                    MembershipAction::Add,
-                    &member,
-                    MemberRole::Member,
-                    "0000000002000-0000-dev1",
-                ),
-            ),
-            (
-                coord(&owner, 3),
-                make_entry(
-                    &owner,
-                    MembershipAction::Add,
-                    &follower,
-                    MemberRole::Follower,
-                    "0000000003000-0000-dev1",
-                ),
-            ),
-        ];
-
-        // The owner's grant is the founder entry; the member's is its Add.
-        assert_eq!(
-            write_grant_coord(&entries, &pubkey_hex(&owner)),
-            Some(coord(&owner, 1))
-        );
-        assert_eq!(
-            write_grant_coord(&entries, &pubkey_hex(&member)),
-            Some(coord(&owner, 2))
-        );
-        // A read-only follower has no write grant; nor does an outsider.
-        assert_eq!(write_grant_coord(&entries, &pubkey_hex(&follower)), None);
-        assert_eq!(write_grant_coord(&entries, "deadbeef"), None);
-    }
-
-    /// A re-add at a later coordinate (e.g. a role restore) wins over the earlier
-    /// one: the grant names the entry with the greatest timestamp, so a puller
-    /// fetches the still-current grant, not a stale one.
-    #[test]
-    fn write_grant_coord_prefers_the_latest_add() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-        let coord = |kp: &UserKeypair, seq| MembershipCoord {
-            author_pubkey: pubkey_hex(kp),
-            seq,
-        };
-        let entries = vec![
-            (
-                coord(&owner, 1),
-                founder_entry(&owner, "0000000001000-0000-dev1"),
-            ),
-            (
-                coord(&owner, 2),
-                make_entry(
-                    &owner,
-                    MembershipAction::Add,
-                    &member,
-                    MemberRole::Member,
-                    "0000000002000-0000-dev1",
-                ),
-            ),
-            // Same member re-added later (a fresh Add) at a higher coordinate.
-            (
-                coord(&owner, 5),
-                make_entry(
-                    &owner,
-                    MembershipAction::Add,
-                    &member,
-                    MemberRole::Member,
-                    "0000000005000-0000-dev1",
-                ),
-            ),
-        ];
-        assert_eq!(
-            write_grant_coord(&entries, &pubkey_hex(&member)),
-            Some(coord(&owner, 5))
-        );
-    }
-
-    #[test]
-    fn founder_pubkey_identifies_the_anchor() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-        let owner_pk = pubkey_hex(&owner);
-        let chain = MembershipChain::from_entries(vec![
-            founder_entry(&owner, "0000000001000-0000-dev1"),
-            make_entry(
+    fn timestamp_does_not_change_causal_authorization() {
+        let owner = key();
+        let member = key();
+        let mut chain = founded("store", &owner);
+        let add = chain
+            .signed_set_member(
                 &owner,
-                MembershipAction::Add,
-                &member,
+                keys::public_key_hex(&member),
+                None,
                 MemberRole::Member,
-                "0000000002000-0000-dev1",
-            ),
-        ])
-        .unwrap();
-
-        // The founder is entry #1's pubkey regardless of later members.
-        assert_eq!(chain.founder_pubkey(), Some(owner_pk.as_str()));
-        assert!(chain.is_founded_by(&owner_pk));
-        assert!(!chain.is_founded_by(&pubkey_hex(&member)));
-        assert!(!chain.is_founded_by("deadbeef"));
-
-        // An empty chain has no founder to anchor to.
-        assert_eq!(MembershipChain::new().founder_pubkey(), None);
-        assert!(!MembershipChain::new().is_founded_by(&owner_pk));
+                "9999".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(add).unwrap();
+        let remove = chain
+            .signed_remove_member(&owner, keys::public_key_hex(&member), "0000".to_string())
+            .unwrap();
+        chain.add_entry(remove).unwrap();
+        assert!(!chain.can_write_now(&keys::public_key_hex(&member)));
     }
 
     #[test]
-    fn follower_role_is_read_only_and_revocable() {
-        let owner = gen_keypair();
-        let follower = gen_keypair();
-        let member = gen_keypair();
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
+    fn owner_readd_uses_a_new_sequence_one_stream() {
+        let owner = key();
+        let second = key();
+        let mut chain = founded("store", &owner);
+        let first = chain
+            .signed_set_member(
                 &owner,
-                MembershipAction::Add,
-                &follower,
-                MemberRole::Follower,
-                "0000000002000-0000-dev1",
-            ))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &member,
-                MemberRole::Member,
-                "0000000003000-0000-dev1",
-            ))
-            .unwrap();
-        chain.validate().unwrap();
-
-        // Owners and Members may author changesets; a Follower may not.
-        let members = chain.current_members();
-        assert!(members_can_write(&members, &pubkey_hex(&owner)));
-        assert!(members_can_write(&members, &pubkey_hex(&member)));
-        assert!(!members_can_write(&members, &pubkey_hex(&follower)));
-        // ...but the Follower is still a registered member (can read).
-        assert!(members.iter().any(|(pk, _)| pk == &pubkey_hex(&follower)));
-
-        // Revoking the follower drops them entirely: not a current member,
-        // cannot write.
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Remove,
-                &follower,
-                MemberRole::Follower,
-                "0000000004000-0000-dev1",
-            ))
-            .unwrap();
-        let members = chain.current_members();
-        assert!(!members.iter().any(|(pk, _)| pk == &pubkey_hex(&follower)));
-        assert!(!members_can_write(&members, &pubkey_hex(&follower)));
-    }
-
-    #[test]
-    fn is_owner_now_is_true_only_for_current_owners() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-        let follower = gen_keypair();
-        let owner2 = gen_keypair();
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &member,
-                MemberRole::Member,
-                "0000000002000-0000-dev1",
-            ))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &follower,
-                MemberRole::Follower,
-                "0000000003000-0000-dev1",
-            ))
-            .unwrap();
-        // The founder promotes a second Owner — already-supported multi-owner.
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &owner2,
+                keys::public_key_hex(&second),
+                None,
                 MemberRole::Owner,
-                "0000000004000-0000-dev1",
-            ))
+                "add".to_string(),
+            )
             .unwrap();
-        chain.validate().unwrap();
-
-        // Only Owners pass: the founder and the second Owner.
-        let members = chain.current_members();
-        assert!(members_has_owner(&members, &pubkey_hex(&owner)));
-        assert!(members_has_owner(&members, &pubkey_hex(&owner2)));
-        // A write-capable Member is NOT an Owner — the owner-only bar is stricter
-        // than can_write_now.
-        assert!(members_can_write(&members, &pubkey_hex(&member)));
-        assert!(!members_has_owner(&members, &pubkey_hex(&member)));
-        // A read-only Follower and an outsider are not Owners.
-        assert!(!members_has_owner(&members, &pubkey_hex(&follower)));
-        assert!(!members_has_owner(&members, "deadbeef"));
-    }
-
-    #[test]
-    fn role_change_member_to_follower_revokes_write() {
-        let owner = gen_keypair();
-        let m = gen_keypair();
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &m,
-                MemberRole::Member,
-                "0000000002000-0000-dev1",
-            ))
-            .unwrap();
-        // While a Member, they may author changesets.
-        assert!(chain.can_write_now(&pubkey_hex(&m)));
-
-        // Re-add with a lower role downgrades them; write is revoked.
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &m,
-                MemberRole::Follower,
-                "0000000003000-0000-dev1",
-            ))
-            .unwrap();
-        assert!(!chain.can_write_now(&pubkey_hex(&m)));
-    }
-
-    #[test]
-    fn add_member_signed_by_owner() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &member,
-                MemberRole::Member,
-                "0000000002000-0000-dev1",
-            ))
-            .unwrap();
-
-        chain.validate().unwrap();
-
-        let members = chain.current_members();
-        assert_eq!(members.len(), 2);
-        assert!(members
-            .iter()
-            .any(|(pk, r)| pk == &pubkey_hex(&owner) && *r == MemberRole::Owner));
-        assert!(members
-            .iter()
-            .any(|(pk, r)| pk == &pubkey_hex(&member) && *r == MemberRole::Member));
-    }
-
-    #[test]
-    fn remove_member_signed_by_owner() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &member,
-                MemberRole::Member,
-                "0000000002000-0000-dev1",
-            ))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Remove,
-                &member,
-                MemberRole::Member,
-                "0000000003000-0000-dev1",
-            ))
-            .unwrap();
-
-        chain.validate().unwrap();
-
-        let members = chain.current_members();
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].0, pubkey_hex(&owner));
-    }
-
-    #[test]
-    fn current_members_returns_active() {
-        let owner = gen_keypair();
-        let m1 = gen_keypair();
-        let m2 = gen_keypair();
-
-        let chain = MembershipChain::from_entries(vec![
-            founder_entry(&owner, "0000000001000-0000-dev1"),
-            make_entry(
-                &owner,
-                MembershipAction::Add,
-                &m1,
-                MemberRole::Member,
-                "0000000002000-0000-dev1",
-            ),
-            make_entry(
-                &owner,
-                MembershipAction::Add,
-                &m2,
-                MemberRole::Member,
-                "0000000003000-0000-dev1",
-            ),
-            make_entry(
-                &owner,
-                MembershipAction::Remove,
-                &m1,
-                MemberRole::Member,
-                "0000000004000-0000-dev1",
-            ),
-        ])
-        .unwrap();
-
-        let members = chain.current_members();
-        assert_eq!(members.len(), 2);
-        assert!(members.iter().any(|(pk, _)| pk == &pubkey_hex(&owner)));
-        assert!(members.iter().any(|(pk, _)| pk == &pubkey_hex(&m2)));
-        assert!(!members.iter().any(|(pk, _)| pk == &pubkey_hex(&m1)));
-    }
-
-    #[test]
-    fn add_signed_by_non_owner_fails() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-        let outsider = gen_keypair();
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &member,
-                MemberRole::Member,
-                "0000000002000-0000-dev1",
-            ))
-            .unwrap();
-
-        // Member (not owner) tries to add someone.
-        let result = chain.add_entry(make_entry(
-            &member,
-            MembershipAction::Add,
-            &outsider,
-            MemberRole::Member,
-            "0000000003000-0000-dev1",
-        ));
-
-        assert!(matches!(result, Err(MembershipError::NotAnOwner(_))));
-    }
-
-    #[test]
-    fn remove_signed_by_non_owner_fails() {
-        let owner = gen_keypair();
-        let m1 = gen_keypair();
-        let m2 = gen_keypair();
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &m1,
-                MemberRole::Member,
-                "0000000002000-0000-dev1",
-            ))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &m2,
-                MemberRole::Member,
-                "0000000003000-0000-dev1",
-            ))
-            .unwrap();
-
-        // m1 (Member, not Owner) tries to remove m2.
-        let result = chain.add_entry(make_entry(
-            &m1,
-            MembershipAction::Remove,
-            &m2,
-            MemberRole::Member,
-            "0000000004000-0000-dev1",
-        ));
-
-        assert!(matches!(result, Err(MembershipError::NotAnOwner(_))));
-    }
-
-    #[test]
-    fn first_entry_not_self_signed_owner_add_fails() {
-        let kp1 = gen_keypair();
-        let kp2 = gen_keypair();
-
-        // First entry signed by kp1 but adding kp2 as owner (not self-signed).
-        let entry = make_entry(
-            &kp1,
-            MembershipAction::Add,
-            &kp2,
-            MemberRole::Owner,
-            "0000000001000-0000-dev1",
-        );
-
-        let mut chain = MembershipChain::new();
-        let result = chain.add_entry(entry);
-        assert!(matches!(result, Err(MembershipError::InvalidFirstEntry)));
-    }
-
-    #[test]
-    fn first_entry_as_member_fails() {
-        let kp = gen_keypair();
-        let pk_hex = pubkey_hex(&kp);
-
-        // Self-signed but role is Member, not Owner.
-        let mut entry = MembershipEntry {
-            action: MembershipAction::Add,
-            user_pubkey: pk_hex.clone(),
-            provider_account_email: None,
-            prev_hash: None,
-            role: MemberRole::Member,
-            timestamp: "0000000001000-0000-dev1".to_string(),
-            author_pubkey: pk_hex,
-            signature: String::new(),
-        };
-        sign_membership_entry(&mut entry, &kp);
-
-        let mut chain = MembershipChain::new();
-        let result = chain.add_entry(entry);
-        assert!(matches!(result, Err(MembershipError::InvalidFirstEntry)));
-    }
-
-    #[test]
-    fn tampered_entry_fails_signature_verification() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-
-        let mut entry = make_entry(
-            &owner,
-            MembershipAction::Add,
-            &member,
-            MemberRole::Member,
-            "0000000002000-0000-dev1",
-        );
-
-        // Tamper with the role after signing.
-        entry.role = MemberRole::Owner;
-
-        assert!(!verify_membership_entry(&entry));
-
-        // Also fails when added to a chain.
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
-            .unwrap();
-
-        let result = chain.add_entry(entry);
-        assert!(matches!(result, Err(MembershipError::InvalidSignature(_))));
-        assert_eq!(chain.entries().len(), 1);
-    }
-
-    #[test]
-    fn failed_append_reports_new_entry_index_and_rolls_back() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-        let outsider = gen_keypair();
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
-            .unwrap();
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Add,
-                &member,
-                MemberRole::Member,
-                "0000000002000-0000-dev1",
-            ))
-            .unwrap();
-
-        let result = chain.add_entry(make_entry(
-            &member,
-            MembershipAction::Add,
-            &outsider,
-            MemberRole::Member,
-            "0000000003000-0000-dev1",
-        ));
-
-        assert!(matches!(result, Err(MembershipError::NotAnOwner(2))));
-        assert_eq!(chain.entries().len(), 2);
-        assert!(chain.validate().is_ok());
-    }
-
-    #[test]
-    fn entry_ordering_by_timestamp() {
-        let owner = gen_keypair();
-        let m1 = gen_keypair();
-        let m2 = gen_keypair();
-
-        // Create entries out of order.
-        let e3 = make_entry(
-            &owner,
-            MembershipAction::Add,
-            &m2,
-            MemberRole::Member,
-            "0000000003000-0000-dev1",
-        );
-        let e1 = founder_entry(&owner, "0000000001000-0000-dev1");
-        let e2 = make_entry(
-            &owner,
-            MembershipAction::Add,
-            &m1,
-            MemberRole::Member,
-            "0000000002000-0000-dev1",
-        );
-
-        // from_entries should sort and validate them.
-        let chain = MembershipChain::from_entries(vec![e3, e1, e2]).unwrap();
-
-        // Verify they're sorted.
-        let entries = chain.entries();
-        assert!(entries[0].timestamp < entries[1].timestamp);
-        assert!(entries[1].timestamp < entries[2].timestamp);
-    }
-
-    #[test]
-    fn validate_empty_chain_fails() {
-        let chain = MembershipChain::new();
-        let result = chain.validate();
-        assert!(matches!(result, Err(MembershipError::EmptyChain)));
-    }
-
-    #[test]
-    fn validate_detects_invalid_signature_in_middle() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-
-        let e1 = founder_entry(&owner, "0000000001000-0000-dev1");
-        let mut e2 = make_entry(
-            &owner,
-            MembershipAction::Add,
-            &member,
-            MemberRole::Member,
-            "0000000002000-0000-dev1",
-        );
-
-        // Tamper with e2's timestamp after signing.
-        e2.timestamp = "0000000002500-0000-dev1".to_string();
-
-        let result = MembershipChain::from_entries(vec![e1, e2]);
-        assert!(matches!(result, Err(MembershipError::InvalidSignature(1))));
-    }
-
-    #[test]
-    fn canonical_bytes_is_deterministic() {
-        let kp = gen_keypair();
-        let entry = MembershipEntry {
-            action: MembershipAction::Add,
-            user_pubkey: pubkey_hex(&kp),
-            provider_account_email: None,
-            prev_hash: None,
-            role: MemberRole::Owner,
-            timestamp: "0000000001000-0000-dev1".to_string(),
-            author_pubkey: pubkey_hex(&kp),
-            signature: "does-not-matter".to_string(),
-        };
-
-        let b1 = canonical_bytes(&entry);
-        let b2 = canonical_bytes(&entry);
-        assert_eq!(b1, b2);
-
-        // Signature is not included in canonical bytes.
-        let mut entry2 = entry.clone();
-        entry2.signature = "something-else".to_string();
-        assert_eq!(canonical_bytes(&entry2), b1);
-    }
-
-    /// Pin the exact signed bytes: fields serialize in alphabetical order with
-    /// no whitespace. A change here alters every membership signature, so it must
-    /// be caught, not silently absorbed.
-    #[test]
-    fn canonical_bytes_pins_exact_json() {
-        let entry = MembershipEntry {
-            action: MembershipAction::Add,
-            user_pubkey: "bbbb".to_string(),
-            provider_account_email: None,
-            prev_hash: None,
-            role: MemberRole::Owner,
-            timestamp: "0000000001000-0000-dev1".to_string(),
-            author_pubkey: "aaaa".to_string(),
-            signature: "does-not-matter".to_string(),
-        };
-        let expected = r#"{"action":"Add","author_pubkey":"aaaa","role":"Owner","timestamp":"0000000001000-0000-dev1","user_pubkey":"bbbb"}"#;
-        assert_eq!(canonical_bytes(&entry), expected.as_bytes());
-    }
-
-    #[test]
-    fn provider_email_is_signed_when_present() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-        let mut entry = make_entry(
-            &owner,
-            MembershipAction::Add,
-            &member,
-            MemberRole::Member,
-            "0000000002000-0000-dev1",
-        );
-        entry.provider_account_email = Some("member@example.com".to_string());
-        sign_membership_entry(&mut entry, &owner);
-
-        assert!(verify_membership_entry(&entry));
-        let bytes = canonical_bytes(&entry);
-        let text = std::str::from_utf8(&bytes).unwrap();
-        assert!(text.contains(r#""provider_account_email":"member@example.com""#));
-
-        entry.provider_account_email = Some("other@example.com".to_string());
-        assert!(!verify_membership_entry(&entry));
-    }
-
-    #[test]
-    fn current_member_provider_email_tracks_latest_active_add() {
-        let owner = gen_keypair();
-        let member = gen_keypair();
-        let member_pk = pubkey_hex(&member);
-
-        let mut chain = MembershipChain::new();
-        chain
-            .add_entry(founder_entry(&owner, "0000000001000-0000-dev1"))
-            .unwrap();
-
-        let mut first = make_entry(
-            &owner,
-            MembershipAction::Add,
-            &member,
-            MemberRole::Member,
-            "0000000002000-0000-dev1",
-        );
-        first.provider_account_email = Some("first@example.com".to_string());
-        sign_membership_entry(&mut first, &owner);
         chain.add_entry(first).unwrap();
-        assert_eq!(
-            chain.current_member_provider_email(&member_pk),
-            Some("first@example.com")
-        );
-
-        let mut second = make_entry(
-            &owner,
-            MembershipAction::Add,
-            &member,
-            MemberRole::Member,
-            "0000000003000-0000-dev1",
-        );
-        second.provider_account_email = Some("second@example.com".to_string());
-        sign_membership_entry(&mut second, &owner);
-        chain.add_entry(second).unwrap();
-        assert_eq!(
-            chain.current_member_provider_email(&member_pk),
-            Some("second@example.com")
-        );
-
-        chain
-            .add_entry(make_entry(
-                &owner,
-                MembershipAction::Remove,
-                &member,
-                MemberRole::Member,
-                "0000000004000-0000-dev1",
-            ))
+        let old_grant = chain
+            .active_owner_grant(&keys::public_key_hex(&second))
             .unwrap();
-        assert_eq!(chain.current_member_provider_email(&member_pk), None);
+        let remove = chain
+            .signed_remove_member(&owner, keys::public_key_hex(&second), "remove".to_string())
+            .unwrap();
+        chain.add_entry(remove).unwrap();
+        let readd = chain
+            .signed_set_member(
+                &owner,
+                keys::public_key_hex(&second),
+                None,
+                MemberRole::Owner,
+                "readd".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(readd).unwrap();
+        let new_grant = chain
+            .active_owner_grant(&keys::public_key_hex(&second))
+            .unwrap();
+        assert_ne!(old_grant, new_grant);
+        let authored = chain
+            .signed_set_member(
+                &second,
+                keys::public_key_hex(&key()),
+                None,
+                MemberRole::Member,
+                "authored".to_string(),
+            )
+            .unwrap();
+        assert_eq!(authored.seq, 1);
+        assert_eq!(authored.author_owner_grant, new_grant);
+    }
+
+    #[test]
+    fn before_first_barrier_excludes_every_entry_from_the_revoked_owner_stream() {
+        let founder = key();
+        let second_owner = key();
+        let target = key();
+        let mut observed = founded("store", &founder);
+        let add_owner = observed
+            .signed_set_member(
+                &founder,
+                keys::public_key_hex(&second_owner),
+                None,
+                MemberRole::Owner,
+                "add owner".to_string(),
+            )
+            .unwrap();
+        observed.add_entry(add_owner).unwrap();
+
+        let stale_entry = observed
+            .signed_set_member(
+                &second_owner,
+                keys::public_key_hex(&target),
+                None,
+                MemberRole::Member,
+                "stale entry".to_string(),
+            )
+            .unwrap();
+        let removal = observed
+            .signed_remove_member(
+                &founder,
+                keys::public_key_hex(&second_owner),
+                "remove owner".to_string(),
+            )
+            .unwrap();
+        assert!(matches!(
+            &removal.change,
+            MembershipChange::RemoveMember { owner_barriers, .. }
+                if owner_barriers.values().all(|barrier| *barrier == OwnerStreamBarrier::BeforeFirst)
+        ));
+
+        let mut entries = observed.entries().to_vec();
+        entries.extend([removal, stale_entry]);
+        let chain = MembershipChain::from_entries(entries).unwrap();
+        assert!(!chain.can_write_now(&keys::public_key_hex(&target)));
+        assert!(chain
+            .author_heads()
+            .iter()
+            .all(|coord| coord.author_pubkey != keys::public_key_hex(&second_owner)));
+    }
+
+    #[test]
+    fn through_barrier_accepts_its_exact_prefix_and_refuses_dependencies_beyond_it() {
+        let founder = key();
+        let second_owner = key();
+        let first_target = key();
+        let second_target = key();
+        let third_target = key();
+        let mut observed = founded("store", &founder);
+        let add_owner = observed
+            .signed_set_member(
+                &founder,
+                keys::public_key_hex(&second_owner),
+                None,
+                MemberRole::Owner,
+                "add owner".to_string(),
+            )
+            .unwrap();
+        observed.add_entry(add_owner).unwrap();
+        let first = observed
+            .signed_set_member(
+                &second_owner,
+                keys::public_key_hex(&first_target),
+                None,
+                MemberRole::Member,
+                "first".to_string(),
+            )
+            .unwrap();
+        observed.add_entry(first.clone()).unwrap();
+
+        let removal = observed
+            .signed_remove_member(
+                &founder,
+                keys::public_key_hex(&second_owner),
+                "remove owner".to_string(),
+            )
+            .unwrap();
+        assert!(matches!(
+            &removal.change,
+            MembershipChange::RemoveMember { owner_barriers, .. }
+                if owner_barriers.values().any(|barrier| barrier == &OwnerStreamBarrier::Through(first.coord()))
+        ));
+
+        let second = observed
+            .signed_set_member(
+                &second_owner,
+                keys::public_key_hex(&second_target),
+                None,
+                MemberRole::Member,
+                "second".to_string(),
+            )
+            .unwrap();
+        let mut exact_entries = observed.entries().to_vec();
+        exact_entries.extend([removal.clone(), second.clone()]);
+        let exact = MembershipChain::from_entries(exact_entries).unwrap();
+        assert!(exact.can_write_now(&keys::public_key_hex(&first_target)));
+        assert!(!exact.can_write_now(&keys::public_key_hex(&second_target)));
+
+        let mut stale = observed;
+        stale.add_entry(second).unwrap();
+        let third = stale
+            .signed_set_member(
+                &second_owner,
+                keys::public_key_hex(&third_target),
+                None,
+                MemberRole::Member,
+                "third".to_string(),
+            )
+            .unwrap();
+        stale.add_entry(third.clone()).unwrap();
+        let mut beyond_entries = stale.entries().to_vec();
+        beyond_entries.push(removal);
+        assert!(matches!(
+            MembershipChain::from_entries(beyond_entries),
+            Err(MembershipError::DependencyBeyondRevocationBarrier { dependency, .. })
+                if *dependency == third.dependencies[&third.author_owner_grant]
+        ));
+    }
+
+    #[test]
+    fn through_barrier_rejects_a_coordinate_hash_that_is_not_its_dependency() {
+        let founder = key();
+        let second_owner = key();
+        let mut chain = founded("store", &founder);
+        let add_owner = chain
+            .signed_set_member(
+                &founder,
+                keys::public_key_hex(&second_owner),
+                None,
+                MemberRole::Owner,
+                "add owner".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(add_owner).unwrap();
+        let authored = chain
+            .signed_set_member(
+                &second_owner,
+                keys::public_key_hex(&key()),
+                None,
+                MemberRole::Member,
+                "authored".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(authored).unwrap();
+        let mut removal = chain
+            .signed_remove_member(
+                &founder,
+                keys::public_key_hex(&second_owner),
+                "remove owner".to_string(),
+            )
+            .unwrap();
+        let MembershipChange::RemoveMember { owner_barriers, .. } = &mut removal.change else {
+            unreachable!();
+        };
+        let OwnerStreamBarrier::Through(barrier) = owner_barriers
+            .values_mut()
+            .next()
+            .expect("owner removal barrier")
+        else {
+            unreachable!();
+        };
+        barrier.entry_hash = ObjectHash::digest(b"wrong barrier hash");
+        sign_membership_entry(&mut removal, &founder);
+        assert!(matches!(
+            chain.add_entry(removal),
+            Err(MembershipError::InvalidOwnerRevocationBarrier { .. })
+        ));
+    }
+
+    #[test]
+    fn cross_store_replay_fails_even_with_the_same_founder_key() {
+        let owner = key();
+        let from_a = founder_entry("store-a", &owner, "founder");
+        let mut replayed = from_a.clone();
+        replayed.store_id = "store-b".to_string();
+        assert!(!verify_membership_entry(&replayed));
+        assert!(MembershipChain::from_entries(vec![from_a])
+            .unwrap()
+            .is_founded_by(&keys::public_key_hex(&owner)));
+    }
+
+    #[test]
+    fn created_at_is_signed_but_never_orders_entries() {
+        let owner = key();
+        let entry = founder_entry("store", &owner, "display-time");
+        let mut tampered = entry.clone();
+        tampered.created_at = "other".to_string();
+        assert!(!verify_membership_entry(&tampered));
     }
 }

@@ -49,7 +49,7 @@ use super::s3_common::{
     apply_prefix, is_range_success, normalize_prefix, probe_error, strip_listed_key_prefix,
 };
 use super::{
-    range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
+    range_header, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
     CloudHomeJoinInfo, RevokeOutcome,
 };
 
@@ -490,7 +490,7 @@ fn list_url(
 
 /// Map a non-success response to a storage error, including the response body so
 /// the S3 error code/message is visible. `op` names the operation for the message
-/// (e.g. `"put heads/dev1.json"`). Reading the body can itself fail (a dropped
+/// (e.g. `"put objects/dev1.json"`). Reading the body can itself fail (a dropped
 /// connection mid-error); fall back to the empty string so the status still
 /// surfaces.
 async fn status_error(op: &str, resp: Response) -> CloudHomeError {
@@ -506,7 +506,7 @@ async fn status_error(op: &str, resp: Response) -> CloudHomeError {
 }
 
 /// Read a successful response's body into bytes. `ctx` names what is being read
-/// for the error message (e.g. `"read body for heads/dev1.json"`).
+/// for the error message (e.g. `"read body for objects/dev1.json"`).
 async fn resp_bytes(resp: Response, ctx: &str) -> Result<Vec<u8>, CloudHomeError> {
     let bytes = resp
         .bytes()
@@ -789,25 +789,25 @@ impl CloudHome for S3WasmCloudHome {
         }
     }
 
-    async fn grant_access(
+    async fn set_access(
         &self,
-        _grant: CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        Ok(CloudHomeJoinInfo::S3 {
-            bucket: self.bucket.clone(),
-            region: self.region.clone(),
-            endpoint: self.endpoint.clone(),
-            access_key: self.access_key.clone(),
-            secret_key: self.secret_key.clone(),
-            key_prefix: self.key_prefix.clone(),
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
+        Ok(match desired {
+            CloudAccessState::Present { .. } => {
+                CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
+                    bucket: self.bucket.clone(),
+                    region: self.region.clone(),
+                    endpoint: self.endpoint.clone(),
+                    access_key: self.access_key.clone(),
+                    secret_key: self.secret_key.clone(),
+                    key_prefix: self.key_prefix.clone(),
+                })
+            }
+            CloudAccessState::Absent { .. } => {
+                CloudAccessOutcome::Absent(RevokeOutcome::Unsupported)
+            }
         })
-    }
-
-    async fn revoke_access(
-        &self,
-        _revoke: CloudAccessRevoke,
-    ) -> Result<RevokeOutcome, CloudHomeError> {
-        Ok(RevokeOutcome::Unsupported)
     }
 }
 
@@ -818,22 +818,22 @@ mod tests {
     #[test]
     fn apply_prefix_prepends_prefix() {
         assert_eq!(
-            apply_prefix(Some("libs/abc"), "heads/dev1.json"),
-            "libs/abc/heads/dev1.json"
+            apply_prefix(Some("libs/abc"), "objects/dev1.json"),
+            "libs/abc/objects/dev1.json"
         );
     }
 
     #[test]
     fn apply_prefix_no_prefix() {
-        assert_eq!(apply_prefix(None, "heads/dev1.json"), "heads/dev1.json");
+        assert_eq!(apply_prefix(None, "objects/dev1.json"), "objects/dev1.json");
     }
 
     #[test]
     fn normalized_prefix_drops_trailing_slash() {
         let prefix = normalize_prefix(Some("libs/abc/".to_string()));
         assert_eq!(
-            apply_prefix(prefix.as_deref(), "heads/dev1.json"),
-            "libs/abc/heads/dev1.json"
+            apply_prefix(prefix.as_deref(), "objects/dev1.json"),
+            "libs/abc/objects/dev1.json"
         );
     }
 
@@ -856,10 +856,10 @@ mod tests {
     #[test]
     fn object_url_is_path_style_with_encoded_segments() {
         let base = endpoint_base("us-east-1", None);
-        let full = apply_prefix(Some("libs/abc"), "changes/dev 1/42.enc");
+        let full = apply_prefix(Some("libs/abc"), "objects/dev 1/42.enc");
         assert_eq!(
             object_url(&base, "my-bucket", &full),
-            "https://s3.us-east-1.amazonaws.com/my-bucket/libs/abc/changes/dev%201/42.enc"
+            "https://s3.us-east-1.amazonaws.com/my-bucket/libs/abc/objects/dev%201/42.enc"
         );
     }
 
@@ -867,7 +867,7 @@ mod tests {
     fn list_url_encodes_prefix_and_token() {
         let base = endpoint_base("us-east-1", None);
         assert_eq!(
-            list_url(&base, "my-bucket", "libs/abc/changes/", None),
+            list_url(&base, "my-bucket", "libs/abc/objects/", None),
             "https://s3.us-east-1.amazonaws.com/my-bucket?list-type=2&prefix=libs%2Fabc%2Fchanges%2F"
         );
         assert_eq!(
@@ -891,11 +891,11 @@ mod tests {
   <KeyCount>2</KeyCount>
   <IsTruncated>false</IsTruncated>
   <Contents>
-    <Key>libs/abc/heads/dev1.json</Key>
+    <Key>libs/abc/objects/dev1.json</Key>
     <Size>10</Size>
   </Contents>
   <Contents>
-    <Key>libs/abc/changes/dev1/1.enc</Key>
+    <Key>libs/abc/objects/dev1/1.enc</Key>
     <Size>20</Size>
   </Contents>
 </ListBucketResult>"#;
@@ -903,8 +903,8 @@ mod tests {
         assert_eq!(
             page.keys,
             vec![
-                "libs/abc/heads/dev1.json".to_string(),
-                "libs/abc/changes/dev1/1.enc".to_string(),
+                "libs/abc/objects/dev1.json".to_string(),
+                "libs/abc/objects/dev1/1.enc".to_string(),
             ]
         );
         assert_eq!(page.next_continuation_token, None);
@@ -1002,7 +1002,7 @@ mod tests {
         );
 
         let outcome = home
-            .revoke_access(CloudAccessRevoke {
+            .set_access(CloudAccessState::Absent {
                 member_pubkey: "member-pubkey".to_string(),
                 provider_account_email: None,
             })
@@ -1011,7 +1011,7 @@ mod tests {
 
         assert_eq!(
             outcome,
-            RevokeOutcome::Unsupported,
+            CloudAccessOutcome::Absent(RevokeOutcome::Unsupported),
             "S3 hands out one static bucket credential that cannot be withdrawn per member, so it reports Unsupported rather than claiming a revocation it did not perform",
         );
     }
@@ -1144,7 +1144,7 @@ mod tests {
             None,
         );
 
-        let url = object_url(&home.base_url, &home.bucket, "heads/dev1.json");
+        let url = object_url(&home.base_url, &home.bucket, "objects/dev1.json");
         let request = Request::builder()
             .method(Method::GET)
             .uri(url)

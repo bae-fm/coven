@@ -17,8 +17,8 @@ use super::oauth_rest::{
 };
 use super::oauth_session::OAuthSession;
 use super::{
-    BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    RevokeOutcome,
+    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, RevokeOutcome,
 };
 use crate::clock::ClockRef;
 use crate::keys::StoreKeys;
@@ -84,7 +84,7 @@ impl DropboxCloudHome {
     }
 
     /// Build the full Dropbox path for a key.
-    /// `changes/dev1/42.enc` -> `/Apps/your-app/my-store/changes/dev1/42.enc`
+    /// `objects/dev1/42.enc` -> `/Apps/your-app/my-store/objects/dev1/42.enc`
     fn full_path(&self, key: &str) -> String {
         format!("{}/{}", self.folder_path, key)
     }
@@ -212,6 +212,84 @@ impl DropboxCloudHome {
         Err(CloudHomeError::Transport(format!(
             "{operation} timed out after 30 seconds"
         )))
+    }
+
+    async fn folder_member_access(
+        &self,
+        shared_folder_id: &str,
+        email: &str,
+    ) -> Result<Option<String>, CloudHomeError> {
+        let mut endpoint = "sharing/list_folder_members";
+        let mut request = serde_json::json!({
+            "shared_folder_id": shared_folder_id,
+            "include_inherited": false,
+            "limit": 1000,
+        });
+        loop {
+            let resp = self
+                .session
+                .api_call(|token| {
+                    self.client()
+                        .post(format!("{API_BASE}/{endpoint}"))
+                        .bearer_auth(token)
+                        .json(&request)
+                })
+                .await?;
+            let resp = ensure_ok(resp, "list folder members", self.not_found()).await?;
+            let body: serde_json::Value = http::ok_json(resp, "parse folder members").await?;
+            for (array, identity_field) in [("users", "user"), ("invitees", "invitee")] {
+                if let Some(access) = body[array].as_array().and_then(|members| {
+                    members.iter().find_map(|member| {
+                        let member_email = member[identity_field]["email"].as_str()?;
+                        member_email
+                            .eq_ignore_ascii_case(email)
+                            .then(|| member["access_type"][".tag"].as_str().map(str::to_string))?
+                    })
+                }) {
+                    return Ok(Some(access));
+                }
+            }
+            let Some(cursor) = body["cursor"].as_str() else {
+                return Ok(None);
+            };
+            endpoint = "sharing/list_folder_members/continue";
+            request = serde_json::json!({ "cursor": cursor });
+        }
+    }
+
+    async fn remove_folder_member(
+        &self,
+        shared_folder_id: &str,
+        email: &str,
+    ) -> Result<(), CloudHomeError> {
+        let remove_body = serde_json::json!({
+            "shared_folder_id": shared_folder_id,
+            "member": { ".tag": "email", "email": email },
+            "leave_a_copy": false,
+        });
+        let resp = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .post(format!("{}/sharing/remove_folder_member", API_BASE))
+                    .bearer_auth(token)
+                    .json(&remove_body)
+            })
+            .await?;
+        let status = resp.status();
+        let body = http::body_text(resp).await;
+        if !status.is_success() {
+            if dropbox_revoke_error_is_already_absent(&body) {
+                return Ok(());
+            }
+            return Err(CloudHomeError::Transport(format!(
+                "revoke access for {email} (HTTP {status}): {body}"
+            )));
+        }
+        match parse_dropbox_revoke_launch(&body)? {
+            DropboxRevokeLaunch::Complete => Ok(()),
+            DropboxRevokeLaunch::AsyncJob(job_id) => self.poll_remove_member_job(&job_id).await,
+        }
     }
 }
 
@@ -613,69 +691,68 @@ impl CloudHome for DropboxCloudHome {
         exists_from_response(resp, &format!("exists {key}"), self.not_found()).await
     }
 
-    async fn grant_access(
+    async fn set_access(
         &self,
-        grant: CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        let email = grant.require_provider_email("Dropbox")?;
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
+        let email = desired.require_provider_email("Dropbox")?.to_string();
         let shared_folder_id = self.get_or_create_shared_folder_id().await?;
-        let add_body = serde_json::json!({
-            "shared_folder_id": shared_folder_id,
-            "members": [{
-                "member": { ".tag": "email", "email": email },
-                "access_level": { ".tag": "editor" },
-            }],
-            "quiet": false,
-        });
-        let resp = self
-            .session
-            .api_call(|token| {
-                self.client()
-                    .post(format!("{}/sharing/add_folder_member", API_BASE))
-                    .bearer_auth(token)
-                    .json(&add_body)
-            })
-            .await?;
-        ensure_ok(resp, &format!("grant access to {email}"), self.not_found()).await?;
-        Ok(self.join_info())
-    }
-
-    async fn revoke_access(
-        &self,
-        revoke: CloudAccessRevoke,
-    ) -> Result<RevokeOutcome, CloudHomeError> {
-        let email = revoke.require_provider_email("Dropbox")?;
-        let shared_folder_id = self.get_or_create_shared_folder_id().await?;
-        let remove_body = serde_json::json!({
-            "shared_folder_id": shared_folder_id,
-            "member": { ".tag": "email", "email": email },
-            "leave_a_copy": false,
-        });
-        let resp = self
-            .session
-            .api_call(|token| {
-                self.client()
-                    .post(format!("{}/sharing/remove_folder_member", API_BASE))
-                    .bearer_auth(token)
-                    .json(&remove_body)
-            })
-            .await?;
-        let status = resp.status();
-        let body = http::body_text(resp).await;
-        if !status.is_success() {
-            // A member who isn't there is already revoked.
-            if dropbox_revoke_error_is_already_absent(&body) {
-                return Ok(RevokeOutcome::Revoked);
+        match desired {
+            CloudAccessState::Present { .. } => {
+                let current = self.folder_member_access(&shared_folder_id, &email).await?;
+                if current.as_deref() != Some("editor") {
+                    if current.is_some() {
+                        self.remove_folder_member(&shared_folder_id, &email).await?;
+                    }
+                    let add_body = serde_json::json!({
+                        "shared_folder_id": shared_folder_id,
+                        "members": [{
+                            "member": { ".tag": "email", "email": email },
+                            "access_level": { ".tag": "editor" },
+                        }],
+                        "quiet": false,
+                    });
+                    let resp = self
+                        .session
+                        .api_call(|token| {
+                            self.client()
+                                .post(format!("{}/sharing/add_folder_member", API_BASE))
+                                .bearer_auth(token)
+                                .json(&add_body)
+                        })
+                        .await?;
+                    ensure_ok(resp, &format!("grant access to {email}"), self.not_found()).await?;
+                }
+                if self
+                    .folder_member_access(&shared_folder_id, &email)
+                    .await?
+                    .as_deref()
+                    != Some("editor")
+                {
+                    return Err(CloudHomeError::Transport(format!(
+                        "editor access for {email} is not visible after update"
+                    )));
+                }
+                Ok(CloudAccessOutcome::Present(self.join_info()))
             }
-            return Err(CloudHomeError::Transport(format!(
-                "revoke access for {email} (HTTP {status}): {body}"
-            )));
-        }
-        match parse_dropbox_revoke_launch(&body)? {
-            DropboxRevokeLaunch::Complete => Ok(RevokeOutcome::Revoked),
-            DropboxRevokeLaunch::AsyncJob(job_id) => {
-                self.poll_remove_member_job(&job_id).await?;
-                Ok(RevokeOutcome::Revoked)
+            CloudAccessState::Absent { .. } => {
+                if self
+                    .folder_member_access(&shared_folder_id, &email)
+                    .await?
+                    .is_some()
+                {
+                    self.remove_folder_member(&shared_folder_id, &email).await?;
+                }
+                if self
+                    .folder_member_access(&shared_folder_id, &email)
+                    .await?
+                    .is_some()
+                {
+                    return Err(CloudHomeError::Transport(format!(
+                        "access for {email} remains after removal"
+                    )));
+                }
+                Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
             }
         }
     }
@@ -724,8 +801,8 @@ mod tests {
     #[test]
     fn full_path_joins_correctly() {
         assert_eq!(
-            home().full_path("changes/dev1/42.enc"),
-            "/Apps/your-app/my-store/changes/dev1/42.enc"
+            home().full_path("objects/dev1/42.enc"),
+            "/Apps/your-app/my-store/objects/dev1/42.enc"
         );
     }
 
@@ -769,7 +846,7 @@ mod tests {
     fn classify_write_error_quota_message_names_provider_and_recovery() {
         let body = r#"{"error_summary":"path/insufficient_space/..","error":{}}"#;
         let err =
-            classify_write_error(reqwest::StatusCode::INSUFFICIENT_STORAGE, body, "changes/1");
+            classify_write_error(reqwest::StatusCode::INSUFFICIENT_STORAGE, body, "objects/1");
         let msg = err.to_string();
         assert!(msg.contains("Dropbox storage is full"), "{msg}");
         assert!(msg.contains("Free up space"), "{msg}");
@@ -778,10 +855,10 @@ mod tests {
     #[test]
     fn classify_write_error_keeps_raw_for_non_quota_errors() {
         let body = r#"{"error_summary":"path/conflict/file","error":{}}"#;
-        let err = classify_write_error(reqwest::StatusCode::CONFLICT, body, "changes/dev1/1.enc");
+        let err = classify_write_error(reqwest::StatusCode::CONFLICT, body, "objects/dev1/1.enc");
         let msg = err.to_string();
         assert!(msg.contains("HTTP 409"), "{msg}");
-        assert!(msg.contains("changes/dev1/1.enc"), "{msg}");
+        assert!(msg.contains("objects/dev1/1.enc"), "{msg}");
         assert!(!msg.contains("storage is full"), "{msg}");
     }
 
@@ -836,8 +913,8 @@ mod tests {
     fn parse_list_page_strips_non_ascii_folder_prefix() {
         assert_list_page_strips_folder_prefix(
             "/Apps/your-app/Folderé",
-            "/apps/your-app/folderé/changes/dev1/1.enc",
-            "/Apps/your-app/Folderé/changes/dev1/1.enc",
+            "/apps/your-app/folderé/objects/dev1/1.enc",
+            "/Apps/your-app/Folderé/objects/dev1/1.enc",
         );
     }
 
@@ -845,8 +922,8 @@ mod tests {
     fn parse_list_page_strips_prefix_without_lowercase_length_drift() {
         assert_list_page_strips_folder_prefix(
             "/Apps/your-app/İlib",
-            "/apps/your-app/i̇lib/changes/dev1/1.enc",
-            "/Apps/your-app/İlib/changes/dev1/1.enc",
+            "/apps/your-app/i̇lib/objects/dev1/1.enc",
+            "/Apps/your-app/İlib/objects/dev1/1.enc",
         );
     }
 
@@ -866,9 +943,9 @@ mod tests {
         })
         .to_string();
         let page = home
-            .parse_list_page(&body, "changes/")
+            .parse_list_page(&body, "objects/")
             .expect("parse list page");
 
-        assert_eq!(page.keys, vec!["changes/dev1/1.enc"]);
+        assert_eq!(page.keys, vec!["objects/dev1/1.enc"]);
     }
 }

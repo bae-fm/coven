@@ -9,7 +9,7 @@
 //! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`]. Platform crates
 //! choose how a SQLite connection is opened and held.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -27,6 +27,15 @@ use crate::migration::{run_migrations, Migration, MigrationError};
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::session::SyncedTable;
+use crate::sync::store_commit::{
+    CommitPosition, ObjectHash, ProtocolGenesis, SnapshotMeta, StoreAck, StoreBatchCommit,
+    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationState,
+};
+
+pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
+pub const PROTOCOL_GENESIS_HASH_STATE_KEY: &str = "protocol_genesis_hash";
+pub const LAST_SNAPSHOT_HASH_STATE_KEY: &str = "last_snapshot_hash";
+pub const LAST_SNAPSHOT_FRONTIER_STATE_KEY: &str = "last_snapshot_frontier";
 
 /// An error from the owned database.
 #[derive(Debug, thiserror::Error)]
@@ -71,6 +80,12 @@ struct DatabaseState {
     /// Serializes complete membership-chain loads that share this database, so a
     /// load cannot return an older chain after another load commits a newer floor.
     membership_load: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes construction and execution of the one local membership mutation
+    /// whose exact signed bytes are held in `outbound_membership_mutation`.
+    membership_mutation: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes staging and publication of the one exact snapshot generation
+    /// held in `outbound_store_snapshot`.
+    snapshot_publication: Arc<tokio::sync::Mutex<()>>,
     /// Serializes the full durable-intent to filesystem-deletion to intent-removal
     /// operation across every clone of this database.
     local_blob_cleanup: Arc<tokio::sync::Mutex<()>>,
@@ -216,15 +231,20 @@ impl DatabaseCore {
         // are stripped on snapshot, so a versioned ledger can't track them; the
         // host's synced ladder version rides inside the snapshot's DB header.
         apply_coven_schema(&conn).map_err(DbError::from)?;
-        migrate_bookkeeping_schema(&conn)?;
+        conn.execute(
+            "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (LOCAL_DEVICE_ID_STATE_KEY, hlc.device_id()),
+        )
+        .map_err(DbError::from)?;
         let schema_version = run_migrations(&conn, migrations)?;
 
         // Enforce the synced-table contract against the live host schema: each
         // host table must present the pk shape and `_updated_at` the
         // capture/gate/apply paths assume. Validating here — after the migration
         // ladder built the tables, on the integrator's own device — turns a wrong
-        // shape into an open error naming the table, rather than a peer's cursor
-        // wedging forever at pull time.
+        // shape into an open error naming the table, rather than a peer's
+        // materialized position holding forever at pull time.
         validate_host_synced_tables(&conn, &synced_tables)?;
 
         // Seed the register clock so a restart cannot mint a stamp behind a value
@@ -232,13 +252,13 @@ impl DatabaseCore {
         // `_updated_at`).
         let persisted = conn
             .query_row(
-                "SELECT value FROM sync_state WHERE key = ?1",
+                "SELECT value FROM protocol_state WHERE key = ?1",
                 [HIGHWATER_STATE_KEY],
                 |r| r.get::<_, String>(0),
             )
             .optional()
             .map_err(DbError::from)?;
-        seed_from(&hlc, persisted, "HLC high-water mark in sync_state")?;
+        seed_from(&hlc, persisted, "HLC high-water mark in protocol_state")?;
         let seed_wall_ms = hlc.wall_now_ms();
         let seed_bound_ms = seed_wall_ms.saturating_add(MAX_FUTURE_SKEW_MS);
         let on_disk = scan_max_updated_at(&conn, &synced_tables, seed_bound_ms)?;
@@ -337,6 +357,8 @@ impl DatabaseCore {
             blob_tombstone_grace: self.blob_tombstone_grace,
             transfer_limits: self.transfer_limits,
             membership_load: Arc::new(tokio::sync::Mutex::new(())),
+            membership_mutation: Arc::new(tokio::sync::Mutex::new(())),
+            snapshot_publication: Arc::new(tokio::sync::Mutex::new(())),
             local_blob_cleanup: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(any(test, feature = "test-utils"))]
             test_pause_points: Arc::new(TestPausePoints::default()),
@@ -453,9 +475,140 @@ pub struct Database {
     state: DatabaseState,
 }
 
-pub(crate) enum PendingChangesetBatch {
+pub(crate) enum PreparedStoreBatch {
     Empty,
-    Pending { max_id: i64, changeset: Vec<u8> },
+    Prepared {
+        max_pending_id: i64,
+        changeset: Vec<u8>,
+        dependencies: BTreeMap<String, CommitPosition>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OutboundStoreBatch {
+    pub seq: u64,
+    pub commit_hash: ObjectHash,
+    pub previous_commit_hash: Option<ObjectHash>,
+    pub dependencies: BTreeMap<String, CommitPosition>,
+    pub package_bytes: Vec<u8>,
+    pub package_hash: ObjectHash,
+    pub commit_bytes: Vec<u8>,
+    pub head_hash: ObjectHash,
+    pub head_bytes: Vec<u8>,
+    pub blob_manifest: StoreBlobManifest,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OutboundStoreAck {
+    pub revision: u64,
+    pub ack_hash: ObjectHash,
+    pub previous_ack_hash: Option<ObjectHash>,
+    pub ack_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DurableProtocolObject {
+    pub semantic_hash: ObjectHash,
+    pub bytes: Vec<u8>,
+    pub published: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DurableDeviceRegistration {
+    pub revision: u64,
+    pub registration_hash: ObjectHash,
+    pub previous_registration_hash: Option<ObjectHash>,
+    pub state: StoreDeviceRegistrationState,
+    pub registration_bytes: Vec<u8>,
+    pub published: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DurableMembershipMutation {
+    pub intent_hash: ObjectHash,
+    pub plan_bytes: Vec<u8>,
+    pub progress_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DurableSnapshotPublication {
+    pub snapshot_hash: ObjectHash,
+    pub image_hash: ObjectHash,
+    pub image_bytes: Vec<u8>,
+    pub meta_bytes: Vec<u8>,
+}
+
+pub(crate) struct StoreBatchStage {
+    pub max_pending_id: i64,
+    pub package_bytes: Vec<u8>,
+    pub commit: StoreBatchCommit,
+    pub head: StoreDeviceHead,
+    pub blob_manifest: StoreBlobManifest,
+    pub local_cleanup: StoreBatchLocalCleanup,
+    pub completion: StoreBatchCompletion,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreBlobManifest {
+    pub blobs: Vec<StoreBlobManifestEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreBlobManifestEntry {
+    pub namespace: String,
+    pub id: String,
+    pub scope: String,
+    pub cloud_path: Option<String>,
+    pub provenance: String,
+    pub fill: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreBatchLocalCleanup {
+    pub drops: Vec<StoreBatchBlobDrop>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreBatchBlobDrop {
+    pub namespace: String,
+    pub id: String,
+    pub size: u64,
+    pub disposition: StoreBatchBlobDisposition,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StoreBatchBlobDisposition {
+    Drop,
+    Cache,
+    Pin,
+}
+
+impl StoreBatchBlobDisposition {
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Drop => "drop",
+            Self::Cache => "cache",
+            Self::Pin => "pin",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreBatchCompletion {
+    pub consumed_make_remote_intents: Vec<StoreConsumedMakeRemoteIntent>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreConsumedMakeRemoteIntent {
+    pub root_table: String,
+    pub root_id: String,
 }
 
 fn validate_host_synced_tables(
@@ -653,6 +806,14 @@ impl Database {
     /// and every clone that shares its state.
     pub(crate) async fn lock_membership_load(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.state.membership_load.clone().lock_owned().await
+    }
+
+    pub(crate) async fn lock_membership_mutation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.state.membership_mutation.clone().lock_owned().await
+    }
+
+    pub(crate) async fn lock_snapshot_publication(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.state.snapshot_publication.clone().lock_owned().await
     }
 
     pub(crate) async fn lock_local_blob_cleanup(&self) -> tokio::sync::OwnedMutexGuard<()> {
@@ -954,6 +1115,7 @@ impl Database {
     fn insert_pending_changeset_on(
         tx: &rusqlite::Transaction<'_>,
         changeset: &[u8],
+        dependencies: &BTreeMap<String, CommitPosition>,
         rows_changed: u64,
     ) -> Result<(), DbError> {
         if changeset.is_empty() {
@@ -980,9 +1142,11 @@ impl Database {
             }
             return Ok(());
         }
+        let dependencies = serde_json::to_string(dependencies)
+            .map_err(|error| DbError(format!("serialize pending dependency frontier: {error}")))?;
         tx.execute(
-            "INSERT INTO pending_changesets (changeset) VALUES (?1)",
-            [changeset],
+            "INSERT INTO pending_changesets (changeset, dependencies) VALUES (?1, ?2)",
+            rusqlite::params![changeset, dependencies],
         )
         .map(|_| ())
         .map_err(DbError::from)
@@ -1006,27 +1170,51 @@ impl Database {
         let value = f(&tx)?;
         let changeset = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
         let rows_changed = conn.total_changes().saturating_sub(changes_before);
-        Self::insert_pending_changeset_on(&tx, &changeset, rows_changed).map_err(E::from)?;
+        let local_device_id: String = tx
+            .query_row(
+                "SELECT value FROM protocol_state WHERE key = ?1",
+                [LOCAL_DEVICE_ID_STATE_KEY],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+            .map_err(E::from)?;
+        let dependencies =
+            Self::materialized_frontier_on(&tx, Some(&local_device_id)).map_err(E::from)?;
+        Self::insert_pending_changeset_on(&tx, &changeset, &dependencies, rows_changed)
+            .map_err(E::from)?;
         tx.commit().map_err(DbError::from).map_err(E::from)?;
         Ok(value)
     }
 
-    pub(crate) async fn pending_changeset_batch(&self) -> Result<PendingChangesetBatch, DbError> {
+    pub(crate) async fn prepare_store_batch(&self) -> Result<PreparedStoreBatch, DbError> {
+        let gates = self.gates();
         self.call(move |conn| {
             let mut stmt = conn
-                .prepare("SELECT id, changeset FROM pending_changesets ORDER BY id")
+                .prepare("SELECT id, changeset, dependencies FROM pending_changesets ORDER BY id")
                 .map_err(DbError::from)?;
             let rows = stmt
                 .query_map([], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
                 })
                 .map_err(DbError::from)?;
             let mut max_id = None;
             let mut changesets = Vec::new();
+            let mut dependencies = BTreeMap::new();
             for row in rows {
-                let (id, changeset) = row.map_err(DbError::from)?;
+                let (id, changeset, raw_dependencies) = row.map_err(DbError::from)?;
                 max_id = Some(id);
                 changesets.push(changeset);
+                let row_dependencies: BTreeMap<String, CommitPosition> =
+                    serde_json::from_str(&raw_dependencies).map_err(|error| {
+                        DbError(format!(
+                            "pending_changesets row {id} has invalid dependency frontier: {error}"
+                        ))
+                    })?;
+                Self::combine_frontier(&mut dependencies, row_dependencies)?;
             }
             if changesets.iter().any(Vec::is_empty) {
                 return Err(DbError(
@@ -1034,48 +1222,1261 @@ impl Database {
                 ));
             }
             let changeset = match changesets.as_slice() {
-                [] => return Ok(PendingChangesetBatch::Empty),
+                [] => return Ok(PreparedStoreBatch::Empty),
                 [single] => single.clone(),
                 _ => gate::combine_changesets(conn, &changesets)
                     .map_err(|e| DbError(format!("combine pending changesets: {e}")))?,
             };
+            let changeset = gate::gate_outbound(conn, &changeset, &gates)
+                .map_err(|error| DbError(format!("gate outbound Store batch: {error}")))?;
             let max_id = max_id.expect("non-empty pending changeset batch has a max id");
-            Ok(PendingChangesetBatch::Pending { max_id, changeset })
+            Ok(PreparedStoreBatch::Prepared {
+                max_pending_id: max_id,
+                changeset,
+                dependencies,
+            })
         })
         .await
     }
 
-    pub(crate) async fn clear_pending_changesets_through(
+    #[cfg(test)]
+    pub(crate) async fn enqueue_store_changeset_for_test(
         &self,
-        max_id: i64,
+        changeset: Vec<u8>,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
-            conn.execute("DELETE FROM pending_changesets WHERE id <= ?1", [max_id])
-                .map(|_| ())
-                .map_err(DbError::from)
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let local_device_id: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let dependencies = Self::materialized_frontier_on(&tx, Some(&local_device_id))?;
+            Self::insert_pending_changeset_on(&tx, &changeset, &dependencies, 1)?;
+            tx.commit().map_err(DbError::from)
         })
         .await
     }
 
-    // ---- Bookkeeping: sync_state ----
+    pub(crate) async fn stage_store_batch(&self, stage: StoreBatchStage) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let local_device_id: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if stage.commit.device_id != local_device_id || stage.head.device_id != local_device_id
+            {
+                return Err(DbError(format!(
+                    "outbound Store batch belongs to {:?}/{:?}, local device is {:?}",
+                    stage.commit.device_id, stage.head.device_id, local_device_id
+                )));
+            }
+            let genesis_hash: ObjectHash = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [PROTOCOL_GENESIS_HASH_STATE_KEY],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)?
+                .parse()
+                .map_err(|error| DbError(format!("protocol genesis hash: {error}")))?;
+            stage
+                .commit
+                .verify_at(genesis_hash, &local_device_id, stage.commit.seq)
+                .map_err(|error| DbError(format!("verify staged Store commit: {error}")))?;
+            stage
+                .commit
+                .verify_package(&stage.package_bytes)
+                .map_err(|error| DbError(format!("verify staged Store package: {error}")))?;
+            let expected_position = stage.commit.position();
+            if stage.head.position.as_ref() != Some(&expected_position) {
+                return Err(DbError(
+                    "outbound Store head does not activate its commit".to_string(),
+                ));
+            }
+            let head_bytes = stage.head.to_bytes();
+            let parsed_head = StoreDeviceHead::parse_at(
+                &head_bytes,
+                genesis_hash,
+                &local_device_id,
+                stage.commit.seq,
+            )
+            .map_err(|error| DbError(format!("verify staged Store head: {error}")))?;
+            if parsed_head != stage.head {
+                return Err(DbError(
+                    "staged Store head changed during encoding".to_string(),
+                ));
+            }
 
-    pub async fn get_sync_state(&self, key: &str) -> Result<Option<String>, DbError> {
+            let queued_predecessor = tx
+                .query_row(
+                    "SELECT seq, commit_hash FROM outbound_store_batches ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?
+                .map(|(seq, hash)| {
+                    Ok::<_, DbError>(CommitPosition {
+                        seq: Self::sequence_from_sqlite(&local_device_id, seq)?,
+                        commit_hash: hash.parse().map_err(|error| {
+                            DbError(format!("outbound predecessor hash: {error}"))
+                        })?,
+                    })
+                })
+                .transpose()?;
+            let durable_predecessor = match queued_predecessor {
+                Some(position) => Some(position),
+                None => Self::latest_position_for_device_on(&tx, &local_device_id)?,
+            };
+            let expected_seq = durable_predecessor
+                .as_ref()
+                .map_or(1, |position| position.seq.saturating_add(1));
+            let expected_hash = durable_predecessor.map(|position| position.commit_hash);
+            if stage.commit.seq != expected_seq
+                || stage.commit.previous_commit_hash != expected_hash
+            {
+                return Err(DbError(format!(
+                    "outbound Store commit is {}/{:?}, expected {expected_seq}/{expected_hash:?}",
+                    stage.commit.seq, stage.commit.previous_commit_hash
+                )));
+            }
+
+            let dependencies = serde_json::to_string(&stage.commit.dependencies)
+                .map_err(|error| DbError(format!("serialize outbound dependencies: {error}")))?;
+            let commit_hash = stage.commit.commit_hash();
+            let package_hash = stage.commit.package.content_hash;
+            let commit_bytes = stage.commit.to_bytes();
+            let head_hash = stage.head.head_hash();
+            let blob_manifest = serde_json::to_string(&stage.blob_manifest)
+                .map_err(|error| DbError(format!("serialize outbound blob manifest: {error}")))?;
+            let local_cleanup_metadata = serde_json::to_string(&stage.local_cleanup)
+                .map_err(|error| DbError(format!("serialize outbound local cleanup: {error}")))?;
+            let completion_metadata = serde_json::to_string(&stage.completion)
+                .map_err(|error| DbError(format!("serialize outbound completion: {error}")))?;
+            tx.execute(
+                "INSERT INTO outbound_store_batches (
+                    seq, commit_hash, previous_commit_hash, dependencies,
+                    package_bytes, package_hash, commit_bytes, head_hash, head_bytes,
+                    max_pending_id, blob_manifest, local_cleanup_metadata,
+                    completion_metadata
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                rusqlite::params![
+                    Self::sequence_to_sqlite(&local_device_id, stage.commit.seq)?,
+                    commit_hash.to_string(),
+                    stage
+                        .commit
+                        .previous_commit_hash
+                        .map(|hash| hash.to_string()),
+                    dependencies,
+                    stage.package_bytes,
+                    package_hash.to_string(),
+                    commit_bytes,
+                    head_hash.to_string(),
+                    head_bytes,
+                    stage.max_pending_id,
+                    blob_manifest,
+                    local_cleanup_metadata,
+                    completion_metadata,
+                ],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "DELETE FROM pending_changesets WHERE id <= ?1",
+                [stage.max_pending_id],
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn oldest_outbound_store_batch(
+        &self,
+    ) -> Result<Option<OutboundStoreBatch>, DbError> {
+        self.call(|conn| {
+            conn.query_row(
+                "SELECT seq, commit_hash, previous_commit_hash, dependencies,
+                        package_bytes, package_hash, commit_bytes, head_hash, head_bytes,
+                        max_pending_id, blob_manifest, local_cleanup_metadata,
+                        completion_metadata
+                 FROM outbound_store_batches ORDER BY seq LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Vec<u8>>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, String>(12)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(
+                |(
+                    seq,
+                    commit_hash,
+                    previous_commit_hash,
+                    dependencies,
+                    package_bytes,
+                    package_hash,
+                    commit_bytes,
+                    head_hash,
+                    head_bytes,
+                    _max_pending_id,
+                    blob_manifest,
+                    local_cleanup_metadata,
+                    completion_metadata,
+                )| {
+                    let _: StoreBatchLocalCleanup =
+                        serde_json::from_str(&local_cleanup_metadata)
+                            .map_err(|error| DbError(format!("outbound local cleanup: {error}")))?;
+                    let _: StoreBatchCompletion = serde_json::from_str(&completion_metadata)
+                        .map_err(|error| DbError(format!("outbound completion: {error}")))?;
+                    let device_id: String = conn
+                        .query_row(
+                            "SELECT value FROM protocol_state WHERE key = ?1",
+                            [LOCAL_DEVICE_ID_STATE_KEY],
+                            |row| row.get(0),
+                        )
+                        .map_err(DbError::from)?;
+                    Ok(OutboundStoreBatch {
+                        seq: Self::sequence_from_sqlite(&device_id, seq)?,
+                        commit_hash: commit_hash
+                            .parse()
+                            .map_err(|error| DbError(format!("outbound commit hash: {error}")))?,
+                        previous_commit_hash: previous_commit_hash
+                            .map(|hash| {
+                                hash.parse().map_err(|error| {
+                                    DbError(format!("outbound predecessor hash: {error}"))
+                                })
+                            })
+                            .transpose()?,
+                        dependencies: serde_json::from_str(&dependencies)
+                            .map_err(|error| DbError(format!("outbound dependencies: {error}")))?,
+                        package_bytes,
+                        package_hash: package_hash
+                            .parse()
+                            .map_err(|error| DbError(format!("outbound package hash: {error}")))?,
+                        commit_bytes,
+                        head_hash: head_hash
+                            .parse()
+                            .map_err(|error| DbError(format!("outbound head hash: {error}")))?,
+                        head_bytes,
+                        blob_manifest: serde_json::from_str(&blob_manifest)
+                            .map_err(|error| DbError(format!("outbound blob manifest: {error}")))?,
+                    })
+                },
+            )
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn latest_local_store_position(
+        &self,
+    ) -> Result<Option<CommitPosition>, DbError> {
+        self.call(|conn| {
+            let device_id: String = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let queued = conn
+                .query_row(
+                    "SELECT seq, commit_hash FROM outbound_store_batches
+                     ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?
+                .map(|(seq, hash)| {
+                    Ok::<_, DbError>(CommitPosition {
+                        seq: Self::sequence_from_sqlite(&device_id, seq)?,
+                        commit_hash: hash.parse().map_err(|error| {
+                            DbError(format!("outbound Store position hash: {error}"))
+                        })?,
+                    })
+                })
+                .transpose()?;
+            match queued {
+                Some(position) => Ok(Some(position)),
+                None => Self::latest_position_for_device_on(conn, &device_id),
+            }
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_outbound_store_batch(
+        &self,
+        seq: u64,
+        commit_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let local_device_id: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let (stored, local_cleanup, completion): (Vec<u8>, String, String) = tx
+                .query_row(
+                    "SELECT commit_bytes, local_cleanup_metadata, completion_metadata
+                     FROM outbound_store_batches
+                     WHERE seq = ?1 AND commit_hash = ?2",
+                    (
+                        Self::sequence_to_sqlite(&local_device_id, seq)?,
+                        commit_hash.to_string(),
+                    ),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(DbError::from)?;
+            let genesis_hash: ObjectHash = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [PROTOCOL_GENESIS_HASH_STATE_KEY],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)?
+                .parse()
+                .map_err(|error| DbError(format!("protocol genesis hash: {error}")))?;
+            let commit = StoreBatchCommit::parse_at(&stored, genesis_hash, &local_device_id, seq)
+                .map_err(|error| DbError(format!("outbound commit: {error}")))?;
+            if commit.commit_hash() != commit_hash {
+                return Err(DbError("outbound commit hash changed".to_string()));
+            }
+            let local_cleanup: StoreBatchLocalCleanup = serde_json::from_str(&local_cleanup)
+                .map_err(|error| DbError(format!("outbound local cleanup: {error}")))?;
+            let completion: StoreBatchCompletion = serde_json::from_str(&completion)
+                .map_err(|error| DbError(format!("outbound completion: {error}")))?;
+            Self::record_materialized_commit_on(&tx, &commit)?;
+            for drop in local_cleanup.drops {
+                tx.execute(
+                    "INSERT INTO published_blob_drop_intents
+                     (seq, namespace, blob_id, size, disposition)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(seq, namespace, blob_id) DO NOTHING",
+                    rusqlite::params![
+                        Self::sequence_to_sqlite(&local_device_id, seq)?,
+                        drop.namespace,
+                        drop.id,
+                        i64::try_from(drop.size).map_err(|_| DbError(
+                            "outbound local cleanup size exceeds SQLite integer".to_string()
+                        ))?,
+                        drop.disposition.as_db(),
+                    ],
+                )
+                .map_err(DbError::from)?;
+            }
+            for intent in completion.consumed_make_remote_intents {
+                Self::delete_make_remote_intent_on(&tx, &intent.root_table, &intent.root_id)?;
+            }
+            let deleted = tx
+                .execute(
+                    "DELETE FROM outbound_store_batches WHERE seq = ?1 AND commit_hash = ?2",
+                    (
+                        Self::sequence_to_sqlite(&local_device_id, seq)?,
+                        commit_hash.to_string(),
+                    ),
+                )
+                .map_err(DbError::from)?;
+            if deleted != 1 {
+                return Err(DbError("outbound Store row disappeared".to_string()));
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn latest_local_store_ack(
+        &self,
+    ) -> Result<Option<(u64, ObjectHash)>, DbError> {
+        self.call(|conn| {
+            conn.query_row(
+                "SELECT revision, ack_hash FROM (\
+                   SELECT revision, ack_hash FROM outbound_store_acks \
+                   UNION ALL \
+                   SELECT revision, ack_hash FROM published_store_acks\
+                 ) ORDER BY revision DESC LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|(revision, hash)| {
+                Ok((
+                    Self::sequence_from_sqlite("Store acknowledgement", revision)?,
+                    hash.parse()
+                        .map_err(|error| DbError(format!("Store acknowledgement hash: {error}")))?,
+                ))
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn stage_store_ack(&self, ack: StoreAck) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let genesis_hash: ObjectHash = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [PROTOCOL_GENESIS_HASH_STATE_KEY],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)?
+                .parse()
+                .map_err(|error| DbError(format!("protocol genesis hash: {error}")))?;
+            let device_id: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            StoreAck::parse_at(&ack.to_bytes(), genesis_hash, &device_id, ack.revision)
+                .map_err(|error| DbError(format!("verify staged Store acknowledgement: {error}")))?;
+            let previous = tx
+                .query_row(
+                    "SELECT revision, ack_hash FROM published_store_acks \
+                     ORDER BY revision DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let expected_revision = previous.as_ref().map_or(1, |(revision, _)| revision + 1);
+            let expected_previous = previous
+                .map(|(_, hash)| {
+                    hash.parse::<ObjectHash>().map_err(|error| {
+                        DbError(format!("published Store acknowledgement hash: {error}"))
+                    })
+                })
+                .transpose()?;
+            if i64::try_from(ack.revision).ok() != Some(expected_revision)
+                || ack.previous_ack_hash != expected_previous
+            {
+                return Err(DbError(format!(
+                    "Store acknowledgement does not extend local chain at revision {expected_revision}"
+                )));
+            }
+            let bytes = ack.to_bytes();
+            tx.execute(
+                "INSERT INTO outbound_store_acks \
+                 (revision, ack_hash, previous_ack_hash, ack_bytes) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    Self::sequence_to_sqlite("Store acknowledgement", ack.revision)?,
+                    ack.ack_hash().to_string(),
+                    ack.previous_ack_hash.map(|hash| hash.to_string()),
+                    bytes,
+                ],
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn oldest_outbound_store_ack(
+        &self,
+    ) -> Result<Option<OutboundStoreAck>, DbError> {
+        self.call(|conn| {
+            conn.query_row(
+                "SELECT revision, ack_hash, previous_ack_hash, ack_bytes \
+                 FROM outbound_store_acks ORDER BY revision LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|(revision, ack_hash, previous_ack_hash, ack_bytes)| {
+                Ok(OutboundStoreAck {
+                    revision: Self::sequence_from_sqlite("Store acknowledgement", revision)?,
+                    ack_hash: ack_hash.parse().map_err(|error| {
+                        DbError(format!("outbound Store acknowledgement hash: {error}"))
+                    })?,
+                    previous_ack_hash: previous_ack_hash
+                        .map(|hash| {
+                            hash.parse().map_err(|error| {
+                                DbError(format!(
+                                    "outbound Store previous acknowledgement hash: {error}"
+                                ))
+                            })
+                        })
+                        .transpose()?,
+                    ack_bytes,
+                })
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_outbound_store_ack(
+        &self,
+        revision: u64,
+        ack_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let deleted = tx
+                .execute(
+                    "DELETE FROM outbound_store_acks WHERE revision = ?1 AND ack_hash = ?2",
+                    (
+                        Self::sequence_to_sqlite("Store acknowledgement", revision)?,
+                        ack_hash.to_string(),
+                    ),
+                )
+                .map_err(DbError::from)?;
+            if deleted != 1 {
+                return Err(DbError(
+                    "outbound Store acknowledgement disappeared".to_string(),
+                ));
+            }
+            tx.execute(
+                "INSERT INTO published_store_acks (revision, ack_hash) VALUES (?1, ?2)",
+                (
+                    Self::sequence_to_sqlite("Store acknowledgement", revision)?,
+                    ack_hash.to_string(),
+                ),
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn outbound_membership_mutation(
+        &self,
+    ) -> Result<Option<DurableMembershipMutation>, DbError> {
+        self.call(|conn| {
+            conn.query_row(
+                "SELECT intent_hash, plan_bytes, progress_bytes \
+                 FROM outbound_membership_mutation WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|(hash, plan_bytes, progress_bytes)| {
+                let intent_hash: ObjectHash = hash
+                    .parse()
+                    .map_err(|error| DbError(format!("membership intent hash: {error}")))?;
+                if ObjectHash::digest(&plan_bytes) != intent_hash {
+                    return Err(DbError(
+                        "membership intent hash differs from its exact plan bytes".to_string(),
+                    ));
+                }
+                Ok(DurableMembershipMutation {
+                    intent_hash,
+                    plan_bytes,
+                    progress_bytes,
+                })
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn stage_membership_mutation(
+        &self,
+        plan_bytes: Vec<u8>,
+        progress_bytes: Vec<u8>,
+    ) -> Result<ObjectHash, DbError> {
+        self.call(move |conn| {
+            let intent_hash = ObjectHash::digest(&plan_bytes);
+            let existing = conn
+                .query_row(
+                    "SELECT intent_hash, plan_bytes FROM outbound_membership_mutation \
+                     WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if let Some((existing_hash, existing_plan)) = existing {
+                if existing_hash == intent_hash.to_string() && existing_plan == plan_bytes {
+                    return Ok(intent_hash);
+                }
+                return Err(DbError(
+                    "a different membership mutation is already pending".to_string(),
+                ));
+            }
+            conn.execute(
+                "INSERT INTO outbound_membership_mutation \
+                 (singleton, intent_hash, plan_bytes, progress_bytes) \
+                 VALUES (1, ?1, ?2, ?3)",
+                rusqlite::params![intent_hash.to_string(), plan_bytes, progress_bytes],
+            )
+            .map_err(DbError::from)?;
+            Ok(intent_hash)
+        })
+        .await
+    }
+
+    pub(crate) async fn update_membership_mutation_progress(
+        &self,
+        intent_hash: ObjectHash,
+        progress_bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE outbound_membership_mutation SET progress_bytes = ?1 \
+                     WHERE singleton = 1 AND intent_hash = ?2",
+                    rusqlite::params![progress_bytes, intent_hash.to_string()],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError(
+                    "membership mutation ownership row is absent or changed".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_membership_mutation(
+        &self,
+        intent_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let deleted = conn
+                .execute(
+                    "DELETE FROM outbound_membership_mutation \
+                     WHERE singleton = 1 AND intent_hash = ?1",
+                    [intent_hash.to_string()],
+                )
+                .map_err(DbError::from)?;
+            if deleted != 1 {
+                return Err(DbError(
+                    "membership mutation ownership row is absent or changed".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn outbound_snapshot_publication(
+        &self,
+    ) -> Result<Option<DurableSnapshotPublication>, DbError> {
+        self.call(|conn| {
+            conn.query_row(
+                "SELECT snapshot_hash, image_hash, image_bytes, meta_bytes \
+                 FROM outbound_store_snapshot WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|(snapshot_hash, image_hash, image_bytes, meta_bytes)| {
+                let snapshot_hash = snapshot_hash
+                    .parse()
+                    .map_err(|error| DbError(format!("outbound snapshot hash: {error}")))?;
+                let image_hash: ObjectHash = image_hash
+                    .parse()
+                    .map_err(|error| DbError(format!("outbound snapshot image hash: {error}")))?;
+                if ObjectHash::digest(&image_bytes) != image_hash {
+                    return Err(DbError(
+                        "outbound snapshot image hash differs from its exact bytes".to_string(),
+                    ));
+                }
+                Ok(DurableSnapshotPublication {
+                    snapshot_hash,
+                    image_hash,
+                    image_bytes,
+                    meta_bytes,
+                })
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn stage_snapshot_publication(
+        &self,
+        snapshot_hash: ObjectHash,
+        image_hash: ObjectHash,
+        image_bytes: Vec<u8>,
+        meta_bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            if ObjectHash::digest(&image_bytes) != image_hash {
+                return Err(DbError(
+                    "staged snapshot image hash differs from its exact bytes".to_string(),
+                ));
+            }
+            let existing = conn
+                .query_row(
+                    "SELECT snapshot_hash, image_hash, image_bytes, meta_bytes \
+                     FROM outbound_store_snapshot WHERE singleton = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, Vec<u8>>(3)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if let Some((stored_snapshot, stored_image, stored_image_bytes, stored_meta_bytes)) =
+                existing
+            {
+                if stored_snapshot == snapshot_hash.to_string()
+                    && stored_image == image_hash.to_string()
+                    && stored_image_bytes == image_bytes
+                    && stored_meta_bytes == meta_bytes
+                {
+                    return Ok(());
+                }
+                return Err(DbError(
+                    "a different snapshot publication is already pending".to_string(),
+                ));
+            }
+            conn.execute(
+                "INSERT INTO outbound_store_snapshot \
+                 (singleton, snapshot_hash, image_hash, image_bytes, meta_bytes) \
+                 VALUES (1, ?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    snapshot_hash.to_string(),
+                    image_hash.to_string(),
+                    image_bytes,
+                    meta_bytes,
+                ],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_snapshot_publication(
+        &self,
+        snapshot_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (stored_image_hash, image_bytes, meta_bytes): (String, Vec<u8>, Vec<u8>) = tx
+                .query_row(
+                    "SELECT image_hash, image_bytes, meta_bytes \
+                     FROM outbound_store_snapshot \
+                     WHERE singleton = 1 AND snapshot_hash = ?1",
+                    [snapshot_hash.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(DbError::from)?;
+            let image_hash: ObjectHash = stored_image_hash
+                .parse()
+                .map_err(|error| DbError(format!("outbound snapshot image hash: {error}")))?;
+            if ObjectHash::digest(&image_bytes) != image_hash {
+                return Err(DbError(
+                    "outbound snapshot image hash differs from its exact bytes".to_string(),
+                ));
+            }
+            let unverified: SnapshotMeta = serde_json::from_slice(&meta_bytes)
+                .map_err(|error| DbError(format!("outbound snapshot metadata: {error}")))?;
+            let meta = SnapshotMeta::parse_at(
+                &meta_bytes,
+                unverified.genesis_hash,
+                &unverified.author_pubkey,
+                snapshot_hash,
+            )
+            .map_err(|error| DbError(format!("verify outbound snapshot metadata: {error}")))?;
+            if meta.image_hash != image_hash {
+                return Err(DbError(
+                    "outbound snapshot metadata names different image bytes".to_string(),
+                ));
+            }
+            let local_device_id: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let frontier = serde_json::to_string(&meta.coverage)
+                .map_err(|error| DbError(format!("serialize snapshot frontier: {error}")))?;
+            for (key, value) in [
+                (LAST_SNAPSHOT_HASH_STATE_KEY, snapshot_hash.to_string()),
+                ("last_snapshot_time", meta.created_at.clone()),
+                (LAST_SNAPSHOT_FRONTIER_STATE_KEY, frontier),
+            ] {
+                tx.execute(
+                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
+                .map_err(DbError::from)?;
+            }
+            match meta.coverage.get(&local_device_id) {
+                Some(position) => {
+                    let encoded = serde_json::to_string(position).map_err(|error| {
+                        DbError(format!("serialize snapshot position: {error}"))
+                    })?;
+                    tx.execute(
+                        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        ("last_snapshot_local_position", encoded),
+                    )
+                    .map_err(DbError::from)?;
+                }
+                None => {
+                    tx.execute(
+                        "DELETE FROM protocol_state WHERE key = ?1",
+                        ["last_snapshot_local_position"],
+                    )
+                    .map_err(DbError::from)?;
+                }
+            }
+            let deleted = tx
+                .execute(
+                    "DELETE FROM outbound_store_snapshot \
+                     WHERE singleton = 1 AND snapshot_hash = ?1",
+                    [snapshot_hash.to_string()],
+                )
+                .map_err(DbError::from)?;
+            if deleted != 1 {
+                return Err(DbError(
+                    "outbound snapshot ownership row is absent or changed".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn local_protocol_genesis(
+        &self,
+    ) -> Result<Option<DurableProtocolObject>, DbError> {
+        self.call(|conn| {
+            conn.query_row(
+                "SELECT genesis_hash, genesis_bytes, published \
+                 FROM local_protocol_genesis WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|(hash, bytes, published)| {
+                Ok(DurableProtocolObject {
+                    semantic_hash: hash.parse().map_err(|error| {
+                        DbError(format!("local protocol genesis hash: {error}"))
+                    })?,
+                    bytes,
+                    published: match published {
+                        0 => false,
+                        1 => true,
+                        value => {
+                            return Err(DbError(format!(
+                                "local protocol genesis has invalid published value {value}"
+                            )))
+                        }
+                    },
+                })
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn stage_protocol_genesis(
+        &self,
+        genesis: ProtocolGenesis,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let bytes = genesis.to_bytes();
+            let parsed = ProtocolGenesis::parse(&bytes)
+                .map_err(|error| DbError(format!("verify staged protocol genesis: {error}")))?;
+            if parsed != genesis {
+                return Err(DbError(
+                    "staged protocol genesis changed during encoding".to_string(),
+                ));
+            }
+            let hash = genesis.object_hash();
+            let existing = conn
+                .query_row(
+                    "SELECT genesis_hash, genesis_bytes FROM local_protocol_genesis \
+                     WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if let Some((existing_hash, existing_bytes)) = existing {
+                if existing_hash == hash.to_string() && existing_bytes == bytes {
+                    return Ok(());
+                }
+                return Err(DbError(
+                    "local protocol genesis already owns different bytes".to_string(),
+                ));
+            }
+            conn.execute(
+                "INSERT INTO local_protocol_genesis \
+                 (singleton, genesis_hash, genesis_bytes, published) VALUES (1, ?1, ?2, 0)",
+                (hash.to_string(), bytes),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_protocol_genesis(
+        &self,
+        genesis_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let updated = tx
+                .execute(
+                    "UPDATE local_protocol_genesis SET published = 1 \
+                     WHERE singleton = 1 AND genesis_hash = ?1",
+                    [genesis_hash.to_string()],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError(
+                    "local protocol genesis ownership row is absent".to_string(),
+                ));
+            }
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (PROTOCOL_GENESIS_HASH_STATE_KEY, genesis_hash.to_string()),
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn latest_local_store_device_registration(
+        &self,
+    ) -> Result<Option<DurableDeviceRegistration>, DbError> {
+        self.read_local_store_device_registration(
+            "SELECT revision, registration_hash, previous_registration_hash, state, \
+                    registration_bytes, published \
+             FROM local_store_device_registration ORDER BY revision DESC LIMIT 1",
+        )
+        .await
+    }
+
+    pub(crate) async fn oldest_unpublished_store_device_registration(
+        &self,
+    ) -> Result<Option<DurableDeviceRegistration>, DbError> {
+        self.read_local_store_device_registration(
+            "SELECT revision, registration_hash, previous_registration_hash, state, \
+                    registration_bytes, published \
+             FROM local_store_device_registration WHERE published = 0 \
+             ORDER BY revision LIMIT 1",
+        )
+        .await
+    }
+
+    async fn read_local_store_device_registration(
+        &self,
+        sql: &'static str,
+    ) -> Result<Option<DurableDeviceRegistration>, DbError> {
+        self.call(move |conn| {
+            conn.query_row(sql, [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .optional()
+            .map_err(DbError::from)?
+            .map(|(revision, hash, previous_hash, state, bytes, published)| {
+                let revision = u64::try_from(revision).map_err(|_| {
+                    DbError(format!(
+                        "local Store device registration has invalid revision {revision}"
+                    ))
+                })?;
+                if revision == 0 {
+                    return Err(DbError(
+                        "local Store device registration has revision zero".to_string(),
+                    ));
+                }
+                Ok(DurableDeviceRegistration {
+                    revision,
+                    registration_hash: hash.parse().map_err(|error| {
+                        DbError(format!("local Store device registration hash: {error}"))
+                    })?,
+                    previous_registration_hash: previous_hash
+                        .map(|hash| {
+                            hash.parse().map_err(|error| {
+                                DbError(format!(
+                                    "local Store device previous registration hash: {error}"
+                                ))
+                            })
+                        })
+                        .transpose()?,
+                    state: match state.as_str() {
+                        "active" => StoreDeviceRegistrationState::Active,
+                        "retired" => StoreDeviceRegistrationState::Retired,
+                        _ => {
+                            return Err(DbError(format!(
+                                "local Store device registration has invalid state {state:?}"
+                            )))
+                        }
+                    },
+                    registration_bytes: bytes,
+                    published: match published {
+                        0 => false,
+                        1 => true,
+                        value => {
+                            return Err(DbError(format!(
+                            "local Store device registration has invalid published value {value}"
+                        )))
+                        }
+                    },
+                })
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn stage_store_device_registration(
+        &self,
+        registration: StoreDeviceRegistration,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let genesis_hash: ObjectHash = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [PROTOCOL_GENESIS_HASH_STATE_KEY],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)?
+                .parse()
+                .map_err(|error| DbError(format!("protocol genesis hash: {error}")))?;
+            let device_id: String = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let bytes = registration.to_bytes();
+            let parsed = StoreDeviceRegistration::parse_at(
+                &bytes,
+                genesis_hash,
+                &device_id,
+                registration.revision,
+            )
+            .map_err(|error| DbError(format!("verify Store device registration: {error}")))?;
+            if parsed != registration {
+                return Err(DbError(
+                    "Store device registration changed during verification".to_string(),
+                ));
+            }
+            let hash = registration.registration_hash();
+            let existing = conn
+                .query_row(
+                    "SELECT revision, registration_hash, state, registration_bytes, published \
+                     FROM local_store_device_registration ORDER BY revision DESC LIMIT 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Vec<u8>>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if let Some((revision, existing_hash, state, existing_bytes, published)) = existing {
+                let revision = u64::try_from(revision).map_err(|_| {
+                    DbError("local Store device registration revision is negative".to_string())
+                })?;
+                if revision == registration.revision {
+                    if existing_hash == hash.to_string() && existing_bytes == bytes {
+                        return Ok(());
+                    }
+                    return Err(DbError(format!(
+                        "local Store device registration revision {revision} owns different bytes"
+                    )));
+                }
+                let previous = StoreDeviceRegistration::parse_at(
+                    &existing_bytes,
+                    genesis_hash,
+                    &device_id,
+                    revision,
+                )
+                .map_err(|error| {
+                    DbError(format!(
+                        "verify previous Store device registration: {error}"
+                    ))
+                })?;
+                if previous.registration_hash().to_string() != existing_hash
+                    || previous.author_pubkey != registration.author_pubkey
+                {
+                    return Err(DbError(
+                        "Store device registration successor must retain the exact author chain"
+                            .to_string(),
+                    ));
+                }
+                if published != 1 {
+                    return Err(DbError(format!(
+                        "local Store device registration revision {revision} is not published"
+                    )));
+                }
+                if registration.revision != revision + 1
+                    || registration.previous_registration_hash
+                        != Some(existing_hash.parse().map_err(|error| {
+                            DbError(format!("previous Store device registration hash: {error}"))
+                        })?)
+                    || state != "active"
+                    || registration.state != StoreDeviceRegistrationState::Retired
+                {
+                    return Err(DbError(
+                        "Store device registration must transition from published Active to Retired"
+                            .to_string(),
+                    ));
+                }
+            } else if registration.revision != 1
+                || registration.previous_registration_hash.is_some()
+                || registration.state != StoreDeviceRegistrationState::Active
+            {
+                return Err(DbError(
+                    "first Store device registration must be revision 1 Active".to_string(),
+                ));
+            }
+            let revision = i64::try_from(registration.revision).map_err(|_| {
+                DbError("Store device registration revision exceeds SQLite INTEGER".to_string())
+            })?;
+            let state = match registration.state {
+                StoreDeviceRegistrationState::Active => "active",
+                StoreDeviceRegistrationState::Retired => "retired",
+            };
+            conn.execute(
+                "INSERT INTO local_store_device_registration \
+                 (revision, registration_hash, previous_registration_hash, state, \
+                  registration_bytes, published) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                (
+                    revision,
+                    hash.to_string(),
+                    registration
+                        .previous_registration_hash
+                        .map(|hash| hash.to_string()),
+                    state,
+                    bytes,
+                ),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_store_device_registration(
+        &self,
+        revision: u64,
+        registration_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let revision = i64::try_from(revision).map_err(|_| {
+                DbError("Store device registration revision exceeds SQLite INTEGER".to_string())
+            })?;
+            let updated = conn
+                .execute(
+                    "UPDATE local_store_device_registration SET published = 1 \
+                     WHERE revision = ?1 AND registration_hash = ?2",
+                    (revision, registration_hash.to_string()),
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError(
+                    "local Store device registration ownership row is absent".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    // ---- Bookkeeping: protocol_state ----
+
+    pub async fn get_protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
         let key = key.to_string();
         self.call(move |conn| {
-            conn.query_row("SELECT value FROM sync_state WHERE key = ?1", [key], |r| {
-                r.get::<_, String>(0)
-            })
+            conn.query_row(
+                "SELECT value FROM protocol_state WHERE key = ?1",
+                [key],
+                |r| r.get::<_, String>(0),
+            )
             .optional()
             .map_err(DbError::from)
         })
         .await
     }
 
-    pub async fn set_sync_state(&self, key: &str, value: &str) -> Result<(), DbError> {
+    pub async fn set_protocol_state(&self, key: &str, value: &str) -> Result<(), DbError> {
         let (key, value) = (key.to_string(), value.to_string());
         self.call(move |conn| {
             conn.execute(
-                "INSERT INTO sync_state (key, value) VALUES (?1, ?2) \
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
@@ -1085,10 +2486,10 @@ impl Database {
         .await
     }
 
-    pub async fn delete_sync_state(&self, key: &str) -> Result<(), DbError> {
+    pub async fn delete_protocol_state(&self, key: &str) -> Result<(), DbError> {
         let key = key.to_string();
         self.call(move |conn| {
-            conn.execute("DELETE FROM sync_state WHERE key = ?1", [key])
+            conn.execute("DELETE FROM protocol_state WHERE key = ?1", [key])
                 .map(|_| ())
                 .map_err(DbError::from)
         })
@@ -1102,14 +2503,14 @@ impl Database {
     /// small namespace (`covers`) is never wiped by pressure from a big one
     /// (`release_files`): each evicts against its own budget. Stored as a single
     /// decimal value under [`crate::blob::cache::cache_budget_state_key`] in
-    /// `sync_state` (config, not per-blob accounting — the cache's truth is still the
+    /// `protocol_state` (config, not per-blob accounting — the cache's truth is still the
     /// folder on disk).
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, DbError> {
         let key = crate::blob::cache::cache_budget_state_key(namespace);
-        match self.get_sync_state(&key).await? {
+        match self.get_protocol_state(&key).await? {
             Some(raw) => raw.parse::<u64>().map(Some).map_err(|e| {
                 DbError(format!(
-                    "cache budget for {namespace:?} in sync_state is not a byte count: {e}"
+                    "cache budget for {namespace:?} in protocol_state is not a byte count: {e}"
                 ))
             }),
             None => Ok(None),
@@ -1120,10 +2521,10 @@ impl Database {
     /// into that namespace's cache that pushes `storage/cache/<namespace>/` over this
     /// total evicts its oldest files (by mtime) back under it; `pinned/` is never
     /// counted or touched, and another namespace's files are never walked. Stored
-    /// under [`crate::blob::cache::cache_budget_state_key`] in `sync_state`.
+    /// under [`crate::blob::cache::cache_budget_state_key`] in `protocol_state`.
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
         let key = crate::blob::cache::cache_budget_state_key(namespace);
-        self.set_sync_state(&key, &max_bytes.to_string()).await
+        self.set_protocol_state(&key, &max_bytes.to_string()).await
     }
 
     // ---- Bookkeeping: blob_uploaders (which device uploaded a blob) ----
@@ -1187,151 +2588,334 @@ impl Database {
             .await
     }
 
-    // ---- Bookkeeping: sync_cursors ----
+    // ---- Materialized Store commit ledger ----
 
-    pub(crate) async fn get_all_sync_cursors(&self) -> Result<HashMap<String, u64>, DbError> {
-        self.call(Self::get_all_sync_cursors_on).await
+    pub(crate) async fn materialized_frontier(
+        &self,
+    ) -> Result<BTreeMap<String, CommitPosition>, DbError> {
+        self.call(|conn| Self::materialized_frontier_on(conn, None))
+            .await
     }
 
-    /// Read the complete cursor vector on a connection the caller already owns.
-    /// Snapshot capture uses this immediately beside `VACUUM INTO`, so no host
-    /// write or remote apply can land between the image and its coverage vector.
-    pub(crate) fn get_all_sync_cursors_on(
+    pub(crate) async fn exact_materialized_hash(
+        &self,
+        device_id: &str,
+        seq: u64,
+    ) -> Result<Option<ObjectHash>, DbError> {
+        let device_id = device_id.to_string();
+        self.call(move |conn| Self::materialized_position_on(conn, &device_id, seq))
+            .await
+    }
+
+    pub(crate) async fn snapshot_coverage_frontier(
+        &self,
+    ) -> Result<BTreeMap<String, CommitPosition>, DbError> {
+        self.call(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT device_id, seq, commit_hash FROM snapshot_coverage")
+                .map_err(DbError::from)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            let mut frontier = BTreeMap::new();
+            for row in rows {
+                let (device_id, seq, hash) = row.map_err(DbError::from)?;
+                frontier.insert(
+                    device_id.clone(),
+                    CommitPosition {
+                        seq: Self::sequence_from_sqlite(&device_id, seq)?,
+                        commit_hash: hash
+                            .parse()
+                            .map_err(|error| DbError(format!("snapshot coverage hash: {error}")))?,
+                    },
+                );
+            }
+            Ok(frontier)
+        })
+        .await
+    }
+
+    pub(crate) fn materialized_frontier_on(
         conn: &Connection,
-    ) -> Result<HashMap<String, u64>, DbError> {
+        exclude_device: Option<&str>,
+    ) -> Result<BTreeMap<String, CommitPosition>, DbError> {
+        let mut frontier = BTreeMap::new();
         let mut stmt = conn
-            .prepare("SELECT device_id, last_seq FROM sync_cursors")
+            .prepare(
+                "SELECT m.device_id, m.seq, m.commit_hash \
+                 FROM materialized_commits m \
+                 JOIN (SELECT device_id, MAX(seq) AS seq FROM materialized_commits \
+                       GROUP BY device_id) latest \
+                   ON latest.device_id = m.device_id AND latest.seq = m.seq",
+            )
             .map_err(DbError::from)?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
             .map_err(DbError::from)?;
-        let mut out = HashMap::new();
         for row in rows {
-            let (id, seq) = row.map_err(DbError::from)?;
-            let seq = Self::cursor_from_sqlite(&id, seq)?;
-            out.insert(id, seq);
+            let (device_id, seq, hash) = row.map_err(DbError::from)?;
+            if exclude_device == Some(device_id.as_str()) {
+                continue;
+            }
+            frontier.insert(
+                device_id.clone(),
+                CommitPosition {
+                    seq: Self::sequence_from_sqlite(&device_id, seq)?,
+                    commit_hash: hash
+                        .parse()
+                        .map_err(|error| DbError(format!("materialized commit hash: {error}")))?,
+                },
+            );
         }
-        Ok(out)
+
+        let mut coverage = conn
+            .prepare("SELECT device_id, seq, commit_hash FROM snapshot_coverage")
+            .map_err(DbError::from)?;
+        let rows = coverage
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?;
+        for row in rows {
+            let (device_id, seq, hash) = row.map_err(DbError::from)?;
+            if exclude_device == Some(device_id.as_str()) {
+                continue;
+            }
+            let position = CommitPosition {
+                seq: Self::sequence_from_sqlite(&device_id, seq)?,
+                commit_hash: hash
+                    .parse()
+                    .map_err(|error| DbError(format!("snapshot coverage hash: {error}")))?,
+            };
+            if frontier
+                .get(&device_id)
+                .is_none_or(|current| current.seq < position.seq)
+            {
+                frontier.insert(device_id, position);
+            }
+        }
+        Ok(frontier)
     }
 
-    pub(crate) fn validate_sync_cursors(cursors: &HashMap<String, u64>) -> Result<(), DbError> {
-        for (device_id, seq) in cursors {
-            Self::cursor_to_sqlite(device_id, *seq)?;
+    fn combine_frontier(
+        combined: &mut BTreeMap<String, CommitPosition>,
+        incoming: BTreeMap<String, CommitPosition>,
+    ) -> Result<(), DbError> {
+        for (device_id, position) in incoming {
+            if position.seq == 0 {
+                return Err(DbError(format!(
+                    "dependency for {device_id:?} names sequence zero"
+                )));
+            }
+            match combined.get(&device_id) {
+                Some(current) if current.seq == position.seq && current != &position => {
+                    return Err(DbError(format!(
+                        "dependency frontier forks {device_id:?} at sequence {}",
+                        position.seq
+                    )))
+                }
+                Some(current) if current.seq >= position.seq => {}
+                _ => {
+                    combined.insert(device_id, position);
+                }
+            }
         }
         Ok(())
     }
 
-    /// Replace the complete cursor vector with the positions carried by one
-    /// verified snapshot capability. No caller outside snapshot bootstrap can
-    /// manufacture this installation path.
-    pub(crate) async fn replace_snapshot_cursors(
-        &self,
-        cursors: &HashMap<String, u64>,
-    ) -> Result<(), DbError> {
-        Self::validate_sync_cursors(cursors)?;
-        let cursors = cursors.clone();
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            tx.execute("DELETE FROM sync_cursors", [])
-                .map_err(DbError::from)?;
-            for (device_id, seq) in cursors {
-                let seq = Self::cursor_to_sqlite(&device_id, seq)?;
-                tx.execute(
-                    "INSERT INTO sync_cursors (device_id, last_seq) VALUES (?1, ?2)",
-                    (&device_id, seq),
-                )
-                .map_err(DbError::from)?;
-            }
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
-    /// Advance a cursor as its own atomic database operation. Pull paths that
-    /// accept no rows (an authenticated rejection or an empty changeset) use this;
-    /// row-bearing applies call [`Self::advance_sync_cursor_on`] inside their row
-    /// transaction.
-    pub(crate) async fn advance_sync_cursor(
-        &self,
-        device_id: &str,
-        expected_previous: u64,
-        next: u64,
-    ) -> Result<(), DbError> {
-        let device_id = device_id.to_string();
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            Self::advance_sync_cursor_on(&tx, &device_id, expected_previous, next)?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
-    /// Advance exactly one cursor step on a caller-owned transaction. The
-    /// expected predecessor binds incoming rows to the durable position they
-    /// follow; a stale caller fails instead of lowering or jumping the cursor.
-    pub(crate) fn advance_sync_cursor_on(
+    pub(crate) fn materialized_position_on(
         conn: &Connection,
         device_id: &str,
-        expected_previous: u64,
-        next: u64,
+        seq: u64,
+    ) -> Result<Option<ObjectHash>, DbError> {
+        let seq = Self::sequence_to_sqlite(device_id, seq)?;
+        conn.query_row(
+            "SELECT commit_hash FROM materialized_commits \
+             WHERE device_id = ?1 AND seq = ?2",
+            (device_id, seq),
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .map(|hash| {
+            hash.parse()
+                .map_err(|error| DbError(format!("materialized commit hash: {error}")))
+        })
+        .transpose()
+    }
+
+    fn latest_position_for_device_on(
+        conn: &Connection,
+        device_id: &str,
+    ) -> Result<Option<CommitPosition>, DbError> {
+        let materialized = conn
+            .query_row(
+                "SELECT seq, commit_hash FROM materialized_commits
+                 WHERE device_id = ?1 ORDER BY seq DESC LIMIT 1",
+                [device_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let coverage = conn
+            .query_row(
+                "SELECT seq, commit_hash FROM snapshot_coverage WHERE device_id = ?1",
+                [device_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        let positions = [materialized, coverage]
+            .into_iter()
+            .flatten()
+            .map(|(seq, hash)| {
+                Ok(CommitPosition {
+                    seq: Self::sequence_from_sqlite(device_id, seq)?,
+                    commit_hash: hash
+                        .parse()
+                        .map_err(|error| DbError(format!("latest Store position hash: {error}")))?,
+                })
+            })
+            .collect::<Result<Vec<_>, DbError>>()?;
+        if positions.len() == 2
+            && positions[0].seq == positions[1].seq
+            && positions[0].commit_hash != positions[1].commit_hash
+        {
+            return Err(DbError(format!(
+                "materialized ledger and snapshot coverage fork {device_id:?} at sequence {}",
+                positions[0].seq
+            )));
+        }
+        Ok(positions.into_iter().max_by_key(|position| position.seq))
+    }
+
+    pub(crate) fn record_materialized_commit_on(
+        conn: &Connection,
+        commit: &StoreBatchCommit,
     ) -> Result<(), DbError> {
-        let expected_next = expected_previous.checked_add(1).ok_or_else(|| {
-            DbError(format!(
-                "sync cursor {device_id:?} cannot advance beyond {expected_previous}"
-            ))
-        })?;
-        if next != expected_next {
-            return Err(DbError(format!(
-                "sync cursor {device_id:?} expected next sequence {expected_next}, got {next}"
-            )));
-        }
-
-        let stored = Self::read_sync_cursor_on(conn, device_id)?;
-        let predecessor_matches = match stored {
-            Some(stored) => stored == expected_previous,
-            None => expected_previous == 0,
+        let actual_hash = commit.commit_hash();
+        let predecessor = if commit.seq == 1 {
+            None
+        } else if let Some(hash) =
+            Self::materialized_position_on(conn, &commit.device_id, commit.seq - 1)?
+        {
+            Some(hash)
+        } else {
+            conn.query_row(
+                "SELECT commit_hash FROM snapshot_coverage \
+                 WHERE device_id = ?1 AND seq = ?2",
+                (
+                    &commit.device_id,
+                    Self::sequence_to_sqlite(&commit.device_id, commit.seq - 1)?,
+                ),
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|hash| {
+                hash.parse()
+                    .map_err(|error| DbError(format!("snapshot coverage hash: {error}")))
+            })
+            .transpose()?
         };
-        if !predecessor_matches {
+        if predecessor != commit.previous_commit_hash {
             return Err(DbError(format!(
-                "sync cursor {device_id:?} expected durable sequence {expected_previous}, \
-                 found {}",
-                stored.map_or_else(|| "absent".to_string(), |value| value.to_string())
+                "Store commit {}/{} names predecessor {:?}, durable predecessor is {:?}",
+                commit.device_id, commit.seq, commit.previous_commit_hash, predecessor
             )));
         }
-
-        let next = Self::cursor_to_sqlite(device_id, next)?;
+        let seq = Self::sequence_to_sqlite(&commit.device_id, commit.seq)?;
         conn.execute(
-            "INSERT INTO sync_cursors (device_id, last_seq) VALUES (?1, ?2) \
-             ON CONFLICT(device_id) DO UPDATE SET last_seq = excluded.last_seq",
-            (device_id, next),
+            "INSERT INTO materialized_commits (device_id, seq, commit_hash) \
+             VALUES (?1, ?2, ?3)",
+            (&commit.device_id, seq, actual_hash.to_string()),
         )
         .map(|_| ())
         .map_err(DbError::from)
     }
 
-    fn read_sync_cursor_on(conn: &Connection, device_id: &str) -> Result<Option<u64>, DbError> {
-        conn.query_row(
-            "SELECT last_seq FROM sync_cursors WHERE device_id = ?1",
-            [device_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map_err(DbError::from)?
-        .map(|value| Self::cursor_from_sqlite(device_id, value))
-        .transpose()
+    pub(crate) async fn install_bootstrap_state(
+        &self,
+        coverage: &BTreeMap<String, CommitPosition>,
+        snapshot_hash: ObjectHash,
+        genesis_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        let coverage = coverage.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            tx.execute("DELETE FROM snapshot_coverage", [])
+                .map_err(DbError::from)?;
+            for (device_id, position) in coverage {
+                tx.execute(
+                    "INSERT INTO snapshot_coverage \
+                     (device_id, seq, commit_hash, snapshot_hash) VALUES (?1, ?2, ?3, ?4)",
+                    (
+                        &device_id,
+                        Self::sequence_to_sqlite(&device_id, position.seq)?,
+                        position.commit_hash.to_string(),
+                        snapshot_hash.to_string(),
+                    ),
+                )
+                .map_err(DbError::from)?;
+            }
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (PROTOCOL_GENESIS_HASH_STATE_KEY, genesis_hash.to_string()),
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (LAST_SNAPSHOT_HASH_STATE_KEY, snapshot_hash.to_string()),
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
     }
 
-    fn cursor_from_sqlite(device_id: &str, value: i64) -> Result<u64, DbError> {
-        u64::try_from(value).map_err(|_| {
+    fn sequence_from_sqlite(device_id: &str, value: i64) -> Result<u64, DbError> {
+        let value = u64::try_from(value).map_err(|_| {
             DbError(format!(
-                "sync cursor {device_id:?} contains negative sequence {value}"
+                "Store position for {device_id:?} contains negative sequence {value}"
+            ))
+        })?;
+        if value == 0 {
+            return Err(DbError(format!(
+                "Store position for {device_id:?} contains sequence zero"
+            )));
+        }
+        Ok(value)
+    }
+
+    fn sequence_to_sqlite(device_id: &str, value: u64) -> Result<i64, DbError> {
+        if value == 0 {
+            return Err(DbError(format!(
+                "Store position for {device_id:?} cannot use sequence zero"
+            )));
+        }
+        i64::try_from(value).map_err(|_| {
+            DbError(format!(
+                "Store position for {device_id:?} exceeds SQLite INTEGER"
             ))
         })
-    }
-
-    fn cursor_to_sqlite(device_id: &str, value: u64) -> Result<i64, DbError> {
-        i64::try_from(value)
-            .map_err(|_| DbError(format!("sync cursor {device_id:?} exceeds SQLite INTEGER")))
     }
 
     // ---- Cloud outbox ----
@@ -2023,33 +3607,6 @@ fn open_connection(path: &Path) -> Result<Connection, DbError> {
     )
 }
 
-fn migrate_bookkeeping_schema(conn: &Connection) -> Result<(), DbError> {
-    if !table_has_column(conn, "published_blob_drop_intents", "size")? {
-        conn.execute(
-            "ALTER TABLE published_blob_drop_intents ADD COLUMN size INTEGER",
-            [],
-        )
-        .map_err(DbError::from)?;
-    }
-    Ok(())
-}
-
-fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, DbError> {
-    let sql = format!(
-        "PRAGMA table_info({})",
-        crate::sync::session::quote_ident(table)
-    );
-    let mut stmt = conn.prepare(&sql).map_err(DbError::from)?;
-    let mut rows = stmt.query([]).map_err(DbError::from)?;
-    while let Some(row) = rows.next().map_err(DbError::from)? {
-        let name: String = row.get(1).map_err(DbError::from)?;
-        if name == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2201,7 +3758,7 @@ mod tests {
 
     #[tokio::test]
     async fn database_open_rejects_host_declared_reserved_tables() {
-        for table_name in ["cloud_outbox", "sync_state"] {
+        for table_name in ["cloud_outbox", "protocol_state"] {
             let result = Database::open(
                 Path::new(":memory:"),
                 vec![SyncedTable::new(table_name)],

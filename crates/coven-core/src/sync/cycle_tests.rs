@@ -24,8 +24,11 @@ use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, 
 use crate::sync::cycle::{self, run_single_sync_cycle};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
-use crate::sync::signed_control::AckJson;
 use crate::sync::storage::SyncStorage;
+use crate::sync::store_commit::{
+    CommitPosition, ProtocolGenesis, SnapshotMeta, StoreAck, StoreDeviceHead,
+    StoreDeviceRegistration, StoreDeviceRegistrationState,
+};
 use crate::sync::test_helpers::*;
 
 const T0: &str = "2024-01-01T00:00:00Z";
@@ -33,6 +36,17 @@ const T0: &str = "2024-01-01T00:00:00Z";
 /// The synthetic test db opens with a single migration, so its
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.
 const SCHEMA_VERSION: u32 = 1;
+
+fn cycle_cloud_storage(
+    home: Arc<dyn CloudHome>,
+    cipher: CloudCipher,
+    blob_paths: BlobPathScheme,
+    store_id: &str,
+    keypair: UserKeypair,
+) -> CloudSyncStorage {
+    CloudSyncStorage::new(home, cipher, blob_paths, store_id, keypair)
+        .with_copy_ids(Arc::new(crate::storage::cloud::RandomCopyIdGenerator))
+}
 
 /// Run one sync cycle for device "M" with no cloud home (no outbox drain).
 async fn run_cycle_m(
@@ -43,6 +57,20 @@ async fn run_cycle_m(
     hlc: &Hlc,
     ld: &StoreDir,
 ) {
+    run_cycle_m_result(storage, db, cipher, keypair, hlc, ld)
+        .await
+        .expect("cycle");
+}
+
+async fn run_cycle_m_result(
+    storage: &MockSyncStorage,
+    db: &Database,
+    cipher: &RwLock<CloudCipher>,
+    keypair: &UserKeypair,
+    hlc: &Hlc,
+    ld: &StoreDir,
+) -> Result<(), String> {
+    bind_mock_store_protocol(db, storage, "M").await;
     run_single_sync_cycle(
         storage,
         "test-lib",
@@ -59,7 +87,120 @@ async fn run_cycle_m(
         None,
     )
     .await
-    .expect("cycle");
+    .map(|_| ())
+}
+
+async fn store_package_exists(storage: &MockSyncStorage, device_id: &str, seq: u64) -> bool {
+    let Some(commit) = crate::sync::store_objects::load_commit_slot(
+        storage,
+        storage.protocol_genesis_hash(),
+        device_id,
+        seq,
+    )
+    .await
+    .expect("load Store commit slot") else {
+        return false;
+    };
+    crate::sync::store_objects::load_package(storage, &commit.value)
+        .await
+        .expect("load Store package")
+        .is_some()
+}
+
+async fn store_snapshot_metas(storage: &MockSyncStorage) -> Vec<SnapshotMeta> {
+    crate::sync::store_objects::list_snapshot_metas(storage, storage.protocol_genesis_hash())
+        .await
+        .expect("list Store snapshots")
+        .metas
+        .into_iter()
+        .map(|meta| meta.value)
+        .collect()
+}
+
+async fn store_heads(storage: &MockSyncStorage) -> Vec<StoreDeviceHead> {
+    crate::sync::store_objects::list_visible_heads(storage, storage.protocol_genesis_hash())
+        .await
+        .expect("list Store heads")
+        .heads
+        .into_iter()
+        .map(|head| head.value)
+        .collect()
+}
+
+async fn publish_mock_founder_membership(
+    storage: &MockSyncStorage,
+) -> crate::sync::membership::MembershipChain {
+    let founder = storage.protocol_genesis().founder;
+    let founder_coord = founder.coord();
+    let mut chain = crate::sync::membership::MembershipChain::new();
+    chain
+        .add_entry_at(founder_coord.clone(), founder.clone())
+        .expect("valid protocol founder membership");
+    crate::sync::store_objects::append_membership_entry_object(storage, &founder_coord, &founder)
+        .await
+        .expect("publish protocol founder membership");
+    crate::sync::membership_ops::publish_membership_head(
+        storage,
+        &chain,
+        &storage.protocol_founder_keypair(),
+    )
+    .await
+    .expect("publish protocol founder membership head");
+    chain
+}
+
+async fn append_active_store_device(
+    storage: &MockSyncStorage,
+    device_id: &str,
+    signer: &UserKeypair,
+) {
+    let registration = StoreDeviceRegistration::signed(
+        storage.protocol_genesis_hash(),
+        device_id.to_string(),
+        1,
+        None,
+        StoreDeviceRegistrationState::Active,
+        signer,
+    )
+    .expect("sign active Store device registration");
+    crate::sync::store_objects::append_and_verify(
+        storage,
+        &crate::sync::store_commit::registration_semantic_prefix(
+            device_id,
+            1,
+            registration.registration_hash(),
+        ),
+        ".json",
+        &registration.to_bytes(),
+    )
+    .await
+    .expect("append active Store device registration");
+}
+
+async fn append_store_ack(
+    storage: &MockSyncStorage,
+    device_id: &str,
+    frontier: BTreeMap<String, CommitPosition>,
+    signer: &UserKeypair,
+) {
+    let ack = StoreAck::signed(
+        storage.protocol_genesis_hash(),
+        device_id.to_string(),
+        1,
+        None,
+        frontier,
+        T0.to_string(),
+        signer,
+    )
+    .expect("sign Store acknowledgement");
+    crate::sync::store_objects::append_and_verify(
+        storage,
+        &crate::sync::store_commit::ack_semantic_prefix(device_id, 1, ack.ack_hash()),
+        ".json",
+        &ack.to_bytes(),
+    )
+    .await
+    .expect("append Store acknowledgement");
 }
 
 async fn make_remote_intent_present(db: &Database, root_table: &str, root_id: &str) -> bool {
@@ -114,18 +255,6 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
     // A slow/stuck upload for some OTHER unit is pending the whole time.
     seed_pending_upload(&db).await;
 
-    // The cycle below pushes a changeset and then snapshots it, and changeset
-    // reclamation runs after the snapshot. Seed a peer that has not acked so the
-    // store is multi-device with an un-acked member: its missing ack pins the
-    // reclaim floor at 0, so the freshly pushed changeset is kept (a peer might
-    // still need it), exactly as a real fleet behaves until everyone acks. Without
-    // this peer M would be the only device and the snapshot-covered changeset would
-    // be reclaimed, which is correct but not what this gate-focused test asserts.
-    storage
-        .put_head("peer-lagging", 0, T0)
-        .await
-        .expect("seed an un-acked peer head");
-
     // One shareable note (its blobs are up → gate on) and one still-private note
     // (its blobs aren't up yet → gate off; the host hasn't flipped it).
     host_exec(
@@ -144,7 +273,7 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
     // The changeset pushes despite the pending upload — no global deferral.
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        storage.get_changeset("M", 1).await.is_ok(),
+        store_package_exists(&storage, "M", 1).await,
         "a gated-true changeset must push even while an unrelated upload is pending",
     );
 
@@ -202,7 +331,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
 
     // n1 was gated-false in cycle 1 (cut → no changeset pushed), so the flip
-    // re-emits it at seq 1. Re-pull from empty cursors to pick it up wherever it
+    // re-emits it at seq 1. Re-pull from empty positions to pick it up wherever it
     // landed.
     pull_into(&db_b, &storage, "B", &ld).await;
     assert_eq!(
@@ -228,14 +357,14 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
     let hlc = Hlc::new("M".to_string());
 
     // local_seq past 0 with no snapshot yet → the snapshot policy fires this cycle.
-    db.set_sync_state("local_seq", "1")
+    db.set_protocol_state("local_seq", "1")
         .await
         .expect("seed local_seq");
     seed_pending_upload(&db).await;
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        SyncStorage::get_snapshot_pointer(&storage).await.is_ok(),
+        !store_snapshot_metas(&storage).await.is_empty(),
         "the snapshot must publish even while an upload is pending — the gate, not a \
          global flag, decides what it carries",
     );
@@ -290,8 +419,8 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
         "the blob referenced by the initial snapshot is uploaded before the pointer publishes",
     );
     assert!(
-        SyncStorage::get_snapshot_pointer(&storage).await.is_ok(),
-        "the snapshot pointer publishes after its referenced blob exists",
+        !store_snapshot_metas(&storage).await.is_empty(),
+        "the snapshot metadata publishes after its referenced blob exists",
     );
 }
 
@@ -336,6 +465,7 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     // initial-snapshot path (the rows reach the cloud via the snapshot).
     let _ = capture_bytes(&db, &[]).await;
     storage.fail_next_blob_puts(1);
+    bind_mock_store_protocol(&db, &storage, "M").await;
 
     let failed = match run_single_sync_cycle(
         &storage,
@@ -363,8 +493,8 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
         "cycle surfaces the blob upload failure: {failed}",
     );
     assert!(
-        SyncStorage::get_snapshot_pointer(&storage).await.is_err(),
-        "the snapshot pointer is not published when a referenced blob upload fails",
+        store_snapshot_metas(&storage).await.is_empty(),
+        "snapshot metadata is not published when a referenced blob upload fails",
     );
 }
 
@@ -387,20 +517,20 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
-    let hlc = Hlc::new("owner-dev".to_string());
     let db = open_test_db();
 
     // First connect: empty storage, no pinned owner → found + pin.
-    let storage = MockSyncStorage::new();
-    ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+    let genesis = storage.protocol_genesis();
+    ensure_owner_anchored_chain(&storage, &db, &genesis, &owner)
         .await
         .expect("first connect founds the store");
     assert_eq!(
-        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         Some(owner_pk.clone()),
-        "the owner is pinned in sync_state",
+        "the owner is pinned in protocol_state",
     );
-    let entries = storage.list_membership_entries().await.unwrap();
+    let entries = storage.discover_membership_entries().await;
     assert_eq!(entries.len(), 1, "the founder entry is written to storage");
     assert!(
         download_chain(&storage, &entries)
@@ -411,10 +541,10 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     );
 
     // Second connect on the same storage + db: anchors fine (founder == owner).
-    ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
+    ensure_owner_anchored_chain(&storage, &db, &genesis, &owner)
         .await
         .expect("re-connect anchors to the pinned owner");
-    let entries = storage.list_membership_entries().await.unwrap();
+    let entries = storage.discover_membership_entries().await;
     assert!(
         download_chain(&storage, &entries)
             .await
@@ -422,30 +552,35 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
             .is_founded_by(&owner_pk),
         "the persisted chain is still founded by the owner after re-connect",
     );
-    let owner_before = db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap();
+    let owner_before = db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap();
     let floor_key = format!("membership_head_seq/{owner_pk}");
-    let floor_before = db.get_sync_state(&floor_key).await.unwrap();
+    let floor_before = db.get_protocol_state(&floor_key).await.unwrap();
 
     // Wiped membership/* with the owner still pinned → refuse (do not re-found).
-    let wiped = MockSyncStorage::new();
+    let wiped = MockSyncStorage::with_keypair(owner.clone());
+    let wiped_genesis = wiped.protocol_genesis();
     assert!(
-        ensure_owner_anchored_chain(&wiped, &db, &owner, &hlc)
+        ensure_owner_anchored_chain(&wiped, &db, &wiped_genesis, &owner)
             .await
             .is_err(),
         "an empty chain with a pinned owner is tampering, not a fresh store",
     );
     assert_eq!(
-        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         owner_before,
     );
-    assert_eq!(db.get_sync_state(&floor_key).await.unwrap(), floor_before);
+    assert_eq!(
+        db.get_protocol_state(&floor_key).await.unwrap(),
+        floor_before
+    );
 
     // Refounded under an attacker's key with the owner pinned → refuse.
     let attacker = UserKeypair::generate();
-    let forged = MockSyncStorage::new();
-    let forged_founder = founder_entry(&attacker, "2026-03-01T00:00:00Z");
+    let forged = MockSyncStorage::with_keypair(attacker.clone());
+    let forged_genesis = forged.protocol_genesis();
+    let forged_founder = founder_entry("test-store", &attacker, "2026-03-01T00:00:00Z");
     forged
-        .put_membership_entry(
+        .append_membership_entry_bytes(
             &hex::encode(attacker.public_key()),
             1,
             serde_json::to_vec(&forged_founder).unwrap(),
@@ -453,32 +588,44 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         .await
         .unwrap();
     assert!(
-        ensure_owner_anchored_chain(&forged, &db, &owner, &hlc)
+        ensure_owner_anchored_chain(&forged, &db, &forged_genesis, &owner)
             .await
             .is_err(),
         "a chain refounded under a different key is a takeover attempt",
     );
     assert_eq!(
-        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         owner_before,
     );
-    assert_eq!(db.get_sync_state(&floor_key).await.unwrap(), floor_before);
+    assert_eq!(
+        db.get_protocol_state(&floor_key).await.unwrap(),
+        floor_before
+    );
 
-    let committed_foreign = MockSyncStorage::new();
-    write_founder_entry(&committed_foreign, &attacker, "0000000001000-0000-attacker")
-        .await
-        .unwrap();
+    let committed_foreign = MockSyncStorage::with_keypair(attacker.clone());
+    let committed_foreign_genesis = committed_foreign.protocol_genesis();
+    write_founder_entry(
+        &committed_foreign,
+        "test-store",
+        &attacker,
+        "0000000001000-0000-attacker",
+    )
+    .await
+    .unwrap();
     assert!(
-        ensure_owner_anchored_chain(&committed_foreign, &db, &owner, &hlc)
+        ensure_owner_anchored_chain(&committed_foreign, &db, &committed_foreign_genesis, &owner,)
             .await
             .is_err(),
         "a committed foreign founder must not replace the pinned owner",
     );
     assert_eq!(
-        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         owner_before,
     );
-    assert_eq!(db.get_sync_state(&floor_key).await.unwrap(), floor_before);
+    assert_eq!(
+        db.get_protocol_state(&floor_key).await.unwrap(),
+        floor_before
+    );
 }
 
 /// Founding writes the cloud founder entry before pinning the owner, so a crash
@@ -495,24 +642,23 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
-    let hlc = Hlc::new("owner-dev".to_string());
-
     // Cloud-first crash: our founder is in storage, but the pin never landed. The
     // next connect completes it (founder == our key) and anchors.
     let db = open_test_db();
-    let storage = MockSyncStorage::new();
-    write_founder_entry(&storage, &owner, "0000000001000-0000-owner")
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+    let genesis = storage.protocol_genesis();
+    write_founder_entry(&storage, "test-store", &owner, &genesis.founder.created_at)
         .await
         .unwrap();
-    ensure_owner_anchored_chain(&storage, &db, &owner, &hlc)
+    ensure_owner_anchored_chain(&storage, &db, &genesis, &owner)
         .await
         .expect("completes our own half-done founding");
     assert_eq!(
-        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         Some(owner_pk.clone()),
         "the pin is completed from our own founder",
     );
-    let entries = storage.list_membership_entries().await.unwrap();
+    let entries = storage.discover_membership_entries().await;
     assert!(
         download_chain(&storage, &entries)
             .await
@@ -525,12 +671,18 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
     // we ever connected. We neither founded it nor pinned an owner → refuse.
     let attacker = UserKeypair::generate();
     let fresh_db = open_test_db();
-    let seeded = MockSyncStorage::new();
-    write_founder_entry(&seeded, &attacker, "0000000001000-0000-attacker")
-        .await
-        .unwrap();
+    let seeded = MockSyncStorage::with_keypair(attacker.clone());
+    let seeded_genesis = seeded.protocol_genesis();
+    write_founder_entry(
+        &seeded,
+        "test-store",
+        &attacker,
+        "0000000001000-0000-attacker",
+    )
+    .await
+    .unwrap();
     assert!(
-        ensure_owner_anchored_chain(&seeded, &fresh_db, &owner, &hlc)
+        ensure_owner_anchored_chain(&seeded, &fresh_db, &seeded_genesis, &owner)
             .await
             .is_err(),
         "a foreign chain with no pinned owner must be refused, not adopted on trust",
@@ -556,7 +708,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
     let owner_pk = pubkey_hex(&owner);
     let db = open_test_db();
     let cipher = CloudCipher::Plaintext;
-    let storage = CloudSyncStorage::new(
+    let storage = cycle_cloud_storage(
         Arc::new(home.clone()),
         cipher.clone(),
         BlobPathScheme::Plain,
@@ -564,88 +716,142 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         owner.clone(),
     );
 
-    cycle::init_sync_over_storage(&db, storage)
+    cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
         .await
         .expect("initialize plaintext storage");
 
-    assert!(
-        home.get(&format!("membership/{owner_pk}/1")).is_some(),
-        "plaintext initialization publishes the founder entry",
-    );
-    assert!(
-        home.get(&format!("membership/{owner_pk}/head")).is_some(),
-        "plaintext initialization publishes the signed founder head",
+    let entry_prefix = format!("store-v1/membership/entries/{owner_pk}/");
+    let head_prefix = format!("store-v1/membership/heads/{owner_pk}/");
+    let entry_keys: Vec<_> = home
+        .appended_keys()
+        .into_iter()
+        .filter(|key| key.starts_with(&entry_prefix))
+        .collect();
+    let head_keys: Vec<_> = home
+        .appended_keys()
+        .into_iter()
+        .filter(|key| key.starts_with(&head_prefix))
+        .collect();
+    assert_eq!(
+        entry_keys.len(),
+        1,
+        "initialization publishes one founder entry"
     );
     assert_eq!(
-        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        head_keys.len(),
+        1,
+        "initialization publishes one founder head"
+    );
+    assert_eq!(
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         Some(owner_pk.clone()),
     );
+    let head_slot = crate::sync::store_commit::parse_membership_head_copy_key(&head_keys[0])
+        .expect("parse founder head copy key");
+    let founder_head: crate::sync::membership::AuthorHead = serde_json::from_slice(
+        &home
+            .get_appended(&head_keys[0])
+            .expect("read founder head copy"),
+    )
+    .expect("parse founder head copy");
+    let floor: crate::sync::membership::MembershipCoord = serde_json::from_str(
+        &db.get_protocol_state(&format!(
+            "membership_head_seq/{}",
+            head_slot.author_owner_grant
+        ))
+        .await
+        .unwrap()
+        .expect("persisted exact founder floor"),
+    )
+    .expect("parse persisted founder floor");
     assert_eq!(
-        db.get_sync_state(&format!("membership_head_seq/{owner_pk}"))
-            .await
-            .unwrap(),
-        Some("1".to_string()),
-        "the owner pin and committed head floor are both persisted",
+        floor,
+        crate::sync::membership::MembershipCoord {
+            author_pubkey: head_slot.author,
+            author_owner_grant: head_slot.author_owner_grant,
+            seq: head_slot.sequence,
+            entry_hash: founder_head.tip_hash,
+        },
+        "the owner pin and exact committed head floor are both persisted",
     );
 }
 
 #[tokio::test]
-async fn initialization_completes_a_listed_self_founder_without_a_head() {
+async fn initialization_refuses_a_founder_entry_without_its_genesis() {
     use crate::sync::membership::founder_entry;
     use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
-    let storage = CloudSyncStorage::new(
+    let storage = cycle_cloud_storage(
         Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
         "test-lib",
         owner.clone(),
     );
-    let founder_bytes = serde_json::to_vec(&founder_entry(
-        &owner,
-        "0000000001000-0000-interrupted-founder",
-    ))
-    .unwrap();
-    storage
-        .put_membership_entry(&owner_pk, 1, founder_bytes.clone())
-        .await
-        .unwrap();
-
     let db = open_test_db();
-    cycle::init_sync_over_storage(&db, storage)
+    let founder = founder_entry("test-lib", &owner, "0000000001000-0000-interrupted-founder");
+    let genesis = ProtocolGenesis::signed(
+        "test-lib".to_string(),
+        founder.clone(),
+        db.schema_version(),
+        &owner,
+    )
+    .expect("sign interrupted protocol genesis");
+    db.stage_protocol_genesis(genesis)
         .await
-        .expect("complete the interrupted self-founding operation");
+        .expect("stage interrupted protocol genesis");
+    let founder_bytes = serde_json::to_vec(&founder).expect("serialize founder");
+    crate::sync::test_helpers::append_membership_entry_bytes(
+        &storage,
+        &owner_pk,
+        1,
+        founder_bytes.clone(),
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(
-        home.get(&format!("membership/{owner_pk}/1")),
-        Some(founder_bytes),
-        "the existing self-founder entry is preserved byte-for-byte",
-    );
-    assert!(home.get(&format!("membership/{owner_pk}/head")).is_some());
-    assert_eq!(
-        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
-        Some(owner_pk.clone()),
-    );
-    assert_eq!(
-        db.get_sync_state(&format!("membership_head_seq/{owner_pk}"))
+    let error =
+        match cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
             .await
-            .unwrap(),
-        Some("1".to_string()),
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a nonempty Store layout without genesis must fail loud"),
+        };
+    assert!(
+        matches!(error, cycle::InitSyncError::ProtocolGenesis(ref message) if message.contains("nonempty but has no supported genesis")),
+        "{error}"
+    );
+
+    let entry_prefix = format!("store-v1/membership/entries/{owner_pk}/");
+    let entry_keys: Vec<_> = home
+        .appended_keys()
+        .into_iter()
+        .filter(|key| key.starts_with(&entry_prefix))
+        .collect();
+    assert_eq!(entry_keys.len(), 1);
+    assert_eq!(home.get_appended(&entry_keys[0]), Some(founder_bytes));
+    assert!(home
+        .appended_keys()
+        .iter()
+        .all(|key| !key.starts_with(&format!("store-v1/membership/heads/{owner_pk}/"))));
+    assert_eq!(
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        None,
     );
 }
 
 #[tokio::test]
-async fn initialization_ignores_a_listed_foreign_founder_without_a_head() {
+async fn initialization_refuses_a_foreign_founder_without_genesis() {
     use crate::sync::membership::founder_entry;
     use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
     let home = InMemoryCloudHome::new();
     let attacker = UserKeypair::generate();
     let attacker_pk = pubkey_hex(&attacker);
-    let attacker_storage = CloudSyncStorage::new(
+    let attacker_storage = cycle_cloud_storage(
         Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -653,18 +859,22 @@ async fn initialization_ignores_a_listed_foreign_founder_without_a_head() {
         attacker.clone(),
     );
     let foreign_bytes = serde_json::to_vec(&founder_entry(
+        "test-lib",
         &attacker,
         "0000000001000-0000-uncommitted-foreign-founder",
     ))
     .unwrap();
-    attacker_storage
-        .put_membership_entry(&attacker_pk, 1, foreign_bytes.clone())
-        .await
-        .unwrap();
+    crate::sync::test_helpers::append_membership_entry_bytes(
+        &attacker_storage,
+        &attacker_pk,
+        1,
+        foreign_bytes.clone(),
+    )
+    .await
+    .unwrap();
 
     let owner = UserKeypair::generate();
-    let owner_pk = pubkey_hex(&owner);
-    let storage = CloudSyncStorage::new(
+    let storage = cycle_cloud_storage(
         Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
@@ -672,66 +882,110 @@ async fn initialization_ignores_a_listed_foreign_founder_without_a_head() {
         owner,
     );
     let db = open_test_db();
-    cycle::init_sync_over_storage(&db, storage)
-        .await
-        .expect("unsigned foreign entries do not establish store ownership");
-
-    assert_eq!(
-        home.get(&format!("membership/{attacker_pk}/1")),
-        Some(foreign_bytes),
-        "initialization does not rewrite an unrelated uncommitted entry",
-    );
-    assert!(home
-        .get(&format!("membership/{attacker_pk}/head"))
-        .is_none());
-    assert!(home.get(&format!("membership/{owner_pk}/head")).is_some());
-    assert_eq!(
-        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
-        Some(owner_pk.clone()),
-    );
-    assert_eq!(
-        db.get_sync_state(&format!("membership_head_seq/{owner_pk}"))
+    let error =
+        match cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
             .await
-            .unwrap(),
-        Some("1".to_string()),
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a nonempty Store layout without genesis must fail loud"),
+        };
+    assert!(
+        matches!(error, cycle::InitSyncError::ProtocolGenesis(ref message) if message.contains("nonempty but has no supported genesis")),
+        "{error}"
+    );
+
+    let entry_prefix = format!("store-v1/membership/entries/{attacker_pk}/");
+    let entry_keys: Vec<_> = home
+        .appended_keys()
+        .into_iter()
+        .filter(|key| key.starts_with(&entry_prefix))
+        .collect();
+    assert_eq!(entry_keys.len(), 1);
+    assert_eq!(home.get_appended(&entry_keys[0]), Some(foreign_bytes));
+    assert_eq!(
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        None,
     );
 }
 
 #[tokio::test]
 async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
-    use crate::sync::membership_ops::{write_founder_entry, OWNER_PUBKEY_STATE_KEY};
+    use crate::sync::membership::{founder_entry, MembershipChain};
+    use crate::sync::membership_ops::{publish_membership_head, OWNER_PUBKEY_STATE_KEY};
 
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
-    let storage = CloudSyncStorage::new(
+    let storage = cycle_cloud_storage(
         Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
         "test-lib",
         owner.clone(),
     );
-    write_founder_entry(&storage, &owner, "0000000001000-0000-founder")
+    let db = open_test_db();
+    let founder = founder_entry("test-lib", &owner, "0000000001000-0000-founder");
+    let genesis = ProtocolGenesis::signed(
+        "test-lib".to_string(),
+        founder.clone(),
+        db.schema_version(),
+        &owner,
+    )
+    .expect("sign protocol genesis");
+    let genesis_hash = genesis.object_hash();
+    db.stage_protocol_genesis(genesis.clone())
         .await
-        .unwrap();
+        .expect("stage protocol genesis");
+    crate::sync::store_objects::append_and_verify(
+        &storage,
+        &crate::sync::store_commit::genesis_semantic_prefix(genesis_hash),
+        ".json",
+        &genesis.to_bytes(),
+    )
+    .await
+    .expect("publish protocol genesis");
+    db.complete_protocol_genesis(genesis_hash)
+        .await
+        .expect("complete protocol genesis");
+
+    let coord = founder.coord();
+    let mut chain = MembershipChain::new();
+    chain
+        .add_entry_at(coord, founder.clone())
+        .expect("add protocol founder");
+    crate::sync::test_helpers::append_membership_entry_bytes(
+        &storage,
+        &owner_pk,
+        1,
+        serde_json::to_vec(&founder).expect("serialize protocol founder"),
+    )
+    .await
+    .expect("publish protocol founder");
+    publish_membership_head(&storage, &chain, &owner)
+        .await
+        .expect("publish protocol founder head");
     let cloud_before = cloud_objects(&home);
 
-    let db = open_test_db();
-    cycle::init_sync_over_storage(&db, storage)
+    cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
         .await
         .expect("accept the identity's committed founder");
 
     assert_eq!(cloud_objects(&home), cloud_before);
     assert_eq!(
-        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         Some(owner_pk.clone()),
     );
-    assert_eq!(
-        db.get_sync_state(&format!("membership_head_seq/{owner_pk}"))
-            .await
-            .unwrap(),
-        Some("1".to_string()),
-    );
+    let floor: crate::sync::membership::MembershipCoord = serde_json::from_str(
+        &db.get_protocol_state(&format!(
+            "membership_head_seq/{}",
+            founder.author_owner_grant
+        ))
+        .await
+        .unwrap()
+        .expect("persist exact founder floor"),
+    )
+    .expect("parse exact founder floor");
+    assert_eq!(floor, founder.coord());
 }
 
 #[tokio::test]
@@ -740,23 +994,28 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
 
     let home = InMemoryCloudHome::new();
     let attacker = UserKeypair::generate();
-    let attacker_storage = CloudSyncStorage::new(
+    let attacker_storage = cycle_cloud_storage(
         Arc::new(home.clone()),
         CloudCipher::Plaintext,
         BlobPathScheme::Plain,
         "test-lib",
         attacker.clone(),
     );
-    write_founder_entry(&attacker_storage, &attacker, "0000000001000-0000-attacker")
-        .await
-        .unwrap();
+    write_founder_entry(
+        &attacker_storage,
+        "test-lib",
+        &attacker,
+        "0000000001000-0000-attacker",
+    )
+    .await
+    .unwrap();
     let cloud_before = cloud_objects(&home);
 
     let victim = UserKeypair::generate();
     let victim_pk = pubkey_hex(&victim);
     let db = open_test_db();
     let cipher = CloudCipher::Plaintext;
-    let victim_storage = CloudSyncStorage::new(
+    let victim_storage = cycle_cloud_storage(
         Arc::new(home.clone()),
         cipher.clone(),
         BlobPathScheme::Plain,
@@ -765,17 +1024,17 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
     );
 
     assert!(
-        cycle::init_sync_over_storage(&db, victim_storage)
+        cycle::init_sync_over_storage(&db, victim_storage, cycle::StoreInitialization::CreateStore)
             .await
             .is_err(),
         "a committed foreign founder prevents initialization",
     );
     assert_eq!(
-        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         None,
     );
     assert_eq!(
-        db.get_sync_state(&format!("membership_head_seq/{victim_pk}"))
+        db.get_protocol_state(&format!("membership_head_seq/{victim_pk}"))
             .await
             .unwrap(),
         None,
@@ -796,25 +1055,27 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
         let home = InMemoryCloudHome::new();
         let owner = UserKeypair::generate();
         let db = open_test_db();
-        let storage = CloudSyncStorage::new(
+        let storage = cycle_cloud_storage(
             Arc::new(home.clone()),
             cipher.clone(),
             blob_paths,
             "test-lib",
             owner.clone(),
         );
-        db.set_sync_state(crate::sync::cloud_storage::PENDING_ROTATION_STATE_KEY, "9")
+        db.set_protocol_state(crate::sync::cloud_storage::PENDING_ROTATION_STATE_KEY, "9")
             .await
             .unwrap();
         let pending_rotation = storage.shared_pending_rotation();
 
         assert!(
-            cycle::init_sync_over_storage(&db, storage).await.is_err(),
+            cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
+                .await
+                .is_err(),
             "incoherent at-rest representation must be refused",
         );
         assert!(home.is_empty(), "the cloud is unchanged");
         assert_eq!(
-            db.get_sync_state("owner_pubkey").await.unwrap(),
+            db.get_protocol_state("owner_pubkey").await.unwrap(),
             None,
             "the local owner is not pinned",
         );
@@ -824,7 +1085,7 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
             "the in-memory pending-rotation marker is not restored",
         );
         assert_eq!(
-            db.get_sync_state(crate::sync::cloud_storage::PENDING_ROTATION_STATE_KEY)
+            db.get_protocol_state(crate::sync::cloud_storage::PENDING_ROTATION_STATE_KEY)
                 .await
                 .unwrap(),
             Some("9".to_string()),
@@ -839,12 +1100,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 
-use crate::sync::storage::{MinSchemaVersion, StorageError};
+use crate::sync::storage::StorageError;
 
 /// A [`SyncStorage`] that injects a host write at a cycle `await` point — the
 /// moment the cycle fetches an incoming changeset to apply — by running a host
 /// INSERT through the same `Database` the cycle holds, once, before delegating
-/// `get_changeset` to the inner mock.
+/// the immutable package read to the inner mock.
 ///
 /// This models the real hazard in issue #92: a host edit committed while the
 /// cycle is in its network phase. The write goes through the actor's one
@@ -872,34 +1133,46 @@ impl HostWriteInjector {
 
 #[async_trait]
 impl SyncStorage for HostWriteInjector {
-    async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-        // Fire the host write exactly once, at this `await` inside the pull's
-        // network phase.
-        if !self.fired.swap(true, Ordering::SeqCst) {
-            host_exec(&self.db, &self.write_sql).await;
-        }
-        self.inner.get_changeset(device_id, seq).await
+    async fn append_protocol_object(
+        &self,
+        semantic_prefix: &str,
+        extension: &str,
+        data: Vec<u8>,
+    ) -> Result<crate::sync::storage::ProtocolObjectLocator, StorageError> {
+        self.inner
+            .append_protocol_object(semantic_prefix, extension, data)
+            .await
     }
 
-    async fn list_heads(&self) -> Result<crate::sync::storage::HeadListing, StorageError> {
-        self.inner.list_heads().await
-    }
-    async fn put_changeset(
+    async fn list_protocol_objects(
         &self,
-        device_id: &str,
-        seq: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        self.inner.put_changeset(device_id, seq, data).await
+        prefix: &str,
+    ) -> Result<crate::sync::storage::ProtocolObjectListing, StorageError> {
+        self.inner.list_protocol_objects(prefix).await
     }
-    async fn put_head(
+
+    async fn read_protocol_object(
         &self,
-        device_id: &str,
-        seq: u64,
-        timestamp: &str,
-    ) -> Result<(), StorageError> {
-        self.inner.put_head(device_id, seq, timestamp).await
+        object: &crate::sync::storage::ProtocolObjectLocator,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        if semantic_prefix.starts_with("store-v1/packages/")
+            && !self.fired.swap(true, Ordering::SeqCst)
+        {
+            host_exec(&self.db, &self.write_sql).await;
+        }
+        self.inner
+            .read_protocol_object(object, semantic_prefix)
+            .await
     }
+
+    async fn delete_protocol_object(
+        &self,
+        object: &crate::sync::storage::ProtocolObjectLocator,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_protocol_object(object).await
+    }
+
     async fn put_blob(
         &self,
         namespace: &str,
@@ -1006,65 +1279,6 @@ impl SyncStorage for HostWriteInjector {
     fn own_uploader(&self) -> Option<String> {
         self.inner.own_uploader()
     }
-    async fn put_snapshot(
-        &self,
-        author: &str,
-        seq: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        self.inner.put_snapshot(author, seq, data).await
-    }
-    async fn get_snapshot(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-        self.inner.get_snapshot(author, seq).await
-    }
-    async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError> {
-        self.inner.delete_changeset(device_id, seq).await
-    }
-    async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError> {
-        self.inner.list_changesets(device_id).await
-    }
-    async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError> {
-        self.inner.put_ack(device_id, data).await
-    }
-    async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError> {
-        self.inner.get_ack(device_id).await
-    }
-    async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
-        self.inner.get_min_schema_version().await
-    }
-    async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError> {
-        self.inner.set_min_schema_version(version).await
-    }
-    async fn put_membership_entry(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .put_membership_entry(author_pubkey, seq, data)
-            .await
-    }
-    async fn get_membership_entry(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.inner.get_membership_entry(author_pubkey, seq).await
-    }
-    async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
-        self.inner.list_membership_entries().await
-    }
-    async fn put_membership_head(
-        &self,
-        author_pubkey: &str,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        self.inner.put_membership_head(author_pubkey, data).await
-    }
-    async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError> {
-        self.inner.get_membership_head(author_pubkey).await
-    }
     async fn put_wrapped_key(
         &self,
         owner_pubkey: &str,
@@ -1093,29 +1307,6 @@ impl SyncStorage for HostWriteInjector {
             .delete_wrapped_key(owner_pubkey, recipient_pubkey)
             .await
     }
-    async fn put_snapshot_meta(
-        &self,
-        author: &str,
-        seq: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        self.inner.put_snapshot_meta(author, seq, data).await
-    }
-    async fn get_snapshot_meta(&self, author: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-        self.inner.get_snapshot_meta(author, seq).await
-    }
-    async fn put_snapshot_pointer(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        self.inner.put_snapshot_pointer(data).await
-    }
-    async fn get_snapshot_pointer(&self) -> Result<Vec<u8>, StorageError> {
-        self.inner.get_snapshot_pointer().await
-    }
-    async fn list_own_snapshot_generations(&self, author: &str) -> Result<Vec<u64>, StorageError> {
-        self.inner.list_own_snapshot_generations(author).await
-    }
-    async fn delete_snapshot_generation(&self, author: &str, seq: u64) -> Result<(), StorageError> {
-        self.inner.delete_snapshot_generation(author, seq).await
-    }
 }
 
 /// A host write made WHILE a cycle is in its push/pull network phase
@@ -1124,7 +1315,7 @@ impl SyncStorage for HostWriteInjector {
 ///
 /// Setup: a peer "A" has a changeset in shared storage. Device "M" runs a cycle
 /// that pulls it; the storage wrapper injects a host INSERT into M at the
-/// `get_changeset` await inside the pull. We then assert the
+/// immutable package-read await inside the pull. We then assert the
 /// injected row is (a) present locally on M and (b) carried in M's next outgoing
 /// changeset — proven by pulling that changeset into a fresh peer.
 ///
@@ -1154,7 +1345,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     .await;
     inner.store_changeset("A", 1, &a_cs, SCHEMA_VERSION);
 
-    // M's database. The injector runs this INSERT into M at the get_changeset
+    // M's database. The injector runs this INSERT into M at the package-read
     // await, mid-pull.
     let db_m = open_test_db();
     let storage = HostWriteInjector::new(
@@ -1180,7 +1371,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     run_cycle_m_storage(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
 
     let db_c = open_test_db();
-    pull_into(&db_c, &storage, "C", &ld).await;
+    pull_into(&db_c, &storage.inner, "C", &ld).await;
     assert_eq!(
         query_text(&db_c, "SELECT title FROM notes WHERE id = 'm_mid'").await,
         "WrittenMidCycle",
@@ -1227,36 +1418,20 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         "M applied A's changeset",
     );
 
-    // Cycle 2: M pushes whatever it captured since. The applied row must not be in
-    // it. A third device C pulls from a storage view containing only M's stream
-    // and must not receive 'a1' from M.
+    // Cycle 2 has no host write to stage. The applied row must not create an M
+    // commit because apply bypasses the pending journal.
     run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
-
-    let m_only = MockSyncStorage::new();
-    let m_sequences = storage
-        .list_changesets("M")
-        .await
-        .expect("list M changesets");
-    for seq in &m_sequences {
-        let packed = storage
-            .get_changeset("M", *seq)
-            .await
-            .expect("read M changeset");
-        m_only
-            .put_changeset("M", *seq, packed)
-            .await
-            .expect("copy M changeset");
-    }
-    m_only
-        .put_head("M", m_sequences.last().copied().unwrap_or(0), T0)
-        .await
-        .expect("publish isolated M head");
-    let db_c = open_test_db();
-    pull_into(&db_c, &m_only, "C", &ld).await;
     assert!(
-        !row_exists(&db_c, "SELECT 1 FROM notes WHERE id = 'a1'").await,
-        "the row M applied from A must NOT echo back through M's own changeset \
-         (an apply is never journaled)",
+        crate::sync::store_objects::load_commit_slot(
+            &storage,
+            storage.protocol_genesis_hash(),
+            "M",
+            1,
+        )
+        .await
+        .expect("load M Store commit slot")
+        .is_none(),
+        "the row M applied from A must not create an outgoing M commit",
     );
 }
 
@@ -1269,10 +1444,6 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         [8u8; 32],
     )));
     let storage = MockSyncStorage::new();
-    storage
-        .put_head("peer-lagging", 0, T0)
-        .await
-        .expect("seed an un-acked peer head");
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -1295,6 +1466,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         .expect("store host-provided blob");
 
     storage.fail_next_blob_puts(1);
+    bind_mock_store_protocol(&db, &storage, "M").await;
     let failed = match run_single_sync_cycle(
         &storage,
         "test-lib",
@@ -1380,6 +1552,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
 
     let pending_rotation = PendingRotation::none();
     pending_rotation.mark_committed(2);
+    bind_mock_store_protocol(&db, &storage, "M").await;
 
     run_single_sync_cycle(
         &storage,
@@ -1472,6 +1645,7 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
 
     let pending_rotation = PendingRotation::none();
     pending_rotation.mark_committed(2);
+    bind_mock_store_protocol(&db, &storage, "M").await;
 
     run_single_sync_cycle(
         &storage,
@@ -1539,10 +1713,6 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         [18u8; 32],
     )));
     let storage = MockSyncStorage::new();
-    storage
-        .put_head("peer-lagging", 0, T0)
-        .await
-        .expect("seed an un-acked peer head");
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -1570,6 +1740,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         .expect("store second host-provided blob");
 
     storage.fail_blob_put_on_call(2);
+    bind_mock_store_protocol(&db, &storage, "M").await;
     let failed = match run_single_sync_cycle(
         &storage,
         "test-lib",
@@ -1611,7 +1782,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        storage.get_changeset("M", 1).await.is_ok(),
+        store_package_exists(&storage, "M", 1).await,
         "the retry publishes instead of wedging on the first blob's missing local copy"
     );
 }
@@ -1625,10 +1796,6 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         [19u8; 32],
     )));
     let storage = MockSyncStorage::new();
-    storage
-        .put_head("peer-lagging", 0, T0)
-        .await
-        .expect("seed an un-acked peer head");
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -1660,7 +1827,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     storage.fail_next_blob_puts(1);
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        storage.get_changeset("M", 1).await.is_ok(),
+        store_package_exists(&storage, "M", 1).await,
         "an already-durable cloud blob publishes without reading a local copy"
     );
 }
@@ -1674,10 +1841,6 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         [20u8; 32],
     )));
     let storage = MockSyncStorage::new();
-    storage
-        .put_head("peer-lagging", 0, T0)
-        .await
-        .expect("seed an un-acked peer head");
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -1700,10 +1863,23 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         .expect("store cache-lazy host-provided blob");
 
     storage.fail_next_changeset_puts(1);
-    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    let error = run_cycle_m_result(&storage, &db, &enc, &keypair, &hlc, &ld)
+        .await
+        .expect_err("the first Store package append fails");
     assert!(
-        storage.get_changeset("M", 1).await.is_err(),
-        "the first push attempt did not publish the changeset"
+        error.contains("forced Store package append failure"),
+        "cycle surfaces the Store package append failure: {error}",
+    );
+    assert!(
+        !store_package_exists(&storage, "M", 1).await,
+        "the first push attempt does not publish the Store package"
+    );
+    assert!(
+        db.oldest_outbound_store_batch()
+            .await
+            .expect("read outbound Store queue")
+            .is_some(),
+        "the exact outbound Store batch remains durable",
     );
     assert!(
         crate::blob::local_files::read(&ld, "photos", "lazyblob", 4)
@@ -1715,8 +1891,8 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        storage.get_changeset("M", 1).await.is_ok(),
-        "the staged retry publishes the changeset"
+        store_package_exists(&storage, "M", 1).await,
+        "the staged retry publishes the Store package"
     );
     assert!(
         crate::blob::local_files::read(&ld, "photos", "lazyblob", 4)
@@ -1727,25 +1903,25 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     );
 }
 
-/// Every head the cycle wrote for our own device records its `last_sync` as an
-/// RFC 3339 wall-clock string — the format the `put_head` contract specifies —
-/// never the HLC string form the changeset envelope uses. An HLC string
+/// Every immutable head the cycle wrote for our own device records its publish
+/// time as an RFC 3339 wall-clock string, never the HLC string used to order
+/// row writes. An HLC string
 /// (`0000000001000-0000-M`) fails RFC 3339 parsing, so this distinguishes them.
-fn assert_own_head_timestamps_are_rfc3339(storage: &MockSyncStorage, device_id: &str) {
-    let stamps = storage.head_put_timestamps();
-    let ours: Vec<&String> = stamps
+async fn assert_own_head_timestamps_are_rfc3339(storage: &MockSyncStorage, device_id: &str) {
+    let heads = store_heads(storage).await;
+    let ours: Vec<&str> = heads
         .iter()
-        .filter(|(d, _)| d == device_id)
-        .map(|(_, ts)| ts)
+        .filter(|head| head.device_id == device_id)
+        .map(|head| head.published_at.as_str())
         .collect();
     assert!(
         !ours.is_empty(),
         "the cycle wrote at least one head for {device_id}",
     );
-    for ts in ours {
+    for timestamp in ours {
         assert!(
-            chrono::DateTime::parse_from_rfc3339(ts).is_ok(),
-            "head last_sync must be RFC 3339, got {ts:?}",
+            chrono::DateTime::parse_from_rfc3339(timestamp).is_ok(),
+            "head publish time must be RFC 3339, got {timestamp:?}",
         );
     }
 }
@@ -1763,13 +1939,6 @@ async fn push_cycle_writes_rfc3339_head_timestamps() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
-    // A lagging peer keeps the pushed changeset from being reclaimed by the
-    // snapshot the cycle also creates (local_seq 1, no snapshot yet), so the
-    // main-push head writer's changeset is still present to assert against.
-    storage
-        .put_head("peer-lagging", 0, T0)
-        .await
-        .expect("seed an un-acked peer head");
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -1779,15 +1948,15 @@ async fn push_cycle_writes_rfc3339_head_timestamps() {
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        storage.get_changeset("M", 1).await.is_ok(),
-        "the cycle pushed a changeset, exercising the main-push head writer",
+        store_package_exists(&storage, "M", 1).await,
+        "the cycle pushed a Store package and its immutable head",
     );
-    assert_own_head_timestamps_are_rfc3339(&storage, "M");
+    assert_own_head_timestamps_are_rfc3339(&storage, "M").await;
 }
 
-/// The snapshot head writer stamps the head with an RFC 3339 `last_sync`.
+/// Snapshot metadata records its creation time as RFC 3339.
 #[tokio::test]
-async fn snapshot_cycle_writes_rfc3339_head_timestamp() {
+async fn snapshot_cycle_writes_rfc3339_metadata_timestamp() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_store_dir();
@@ -1798,16 +1967,18 @@ async fn snapshot_cycle_writes_rfc3339_head_timestamp() {
     let hlc = Hlc::new("M".to_string());
 
     // local_seq past 0 with no snapshot yet → the snapshot policy fires this cycle.
-    db.set_sync_state("local_seq", "1")
+    db.set_protocol_state("local_seq", "1")
         .await
         .expect("seed local_seq");
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    let snapshots = store_snapshot_metas(&storage).await;
+    assert_eq!(snapshots.len(), 1, "the cycle published one snapshot");
     assert!(
-        SyncStorage::get_snapshot_pointer(&storage).await.is_ok(),
-        "the cycle published a snapshot, exercising the snapshot head writer",
+        chrono::DateTime::parse_from_rfc3339(&snapshots[0].created_at).is_ok(),
+        "snapshot creation time must be RFC 3339, got {:?}",
+        snapshots[0].created_at,
     );
-    assert_own_head_timestamps_are_rfc3339(&storage, "M");
 }
 
 /// The staged-retry head writer stamps the head with an RFC 3339 `last_sync`.
@@ -1822,12 +1993,6 @@ async fn staged_retry_writes_rfc3339_head_timestamp() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
-    // A lagging peer keeps the retried changeset from being reclaimed by the
-    // snapshot the retry cycle also creates, so it is still present to assert on.
-    storage
-        .put_head("peer-lagging", 0, T0)
-        .await
-        .expect("seed an un-acked peer head");
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -1838,19 +2003,24 @@ async fn staged_retry_writes_rfc3339_head_timestamp() {
     // The first push fails at the changeset put, so the changeset stages for retry
     // and no head is written for it yet.
     storage.fail_next_changeset_puts(1);
-    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    run_cycle_m_result(&storage, &db, &enc, &keypair, &hlc, &ld)
+        .await
+        .expect_err("the first Store package append fails");
     assert!(
-        cycle::read_staged_changeset(&ld).await.is_some(),
-        "the changeset stages after the push write fails",
+        db.oldest_outbound_store_batch()
+            .await
+            .expect("read outbound Store queue")
+            .is_some(),
+        "the exact Store batch remains durable after append failure",
     );
 
     // The next cycle retries the staged push, exercising the staged-retry writer.
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        storage.get_changeset("M", 1).await.is_ok(),
-        "the staged retry publishes the changeset",
+        store_package_exists(&storage, "M", 1).await,
+        "the staged retry publishes the Store package",
     );
-    assert_own_head_timestamps_are_rfc3339(&storage, "M");
+    assert_own_head_timestamps_are_rfc3339(&storage, "M").await;
 }
 
 #[tokio::test]
@@ -1891,15 +2061,17 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
     .await;
 
     storage.fail_next_changeset_puts(1);
-    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    run_cycle_m_result(&storage, &db, &enc, &keypair, &hlc, &ld)
+        .await
+        .expect_err("the first Store package append fails");
     assert!(
-        cycle::read_staged_changeset(&ld).await.is_some(),
-        "the packed changeset remains staged after the publish write fails"
+        db.oldest_outbound_store_batch()
+            .await
+            .expect("read outbound Store queue")
+            .is_some(),
+        "the exact Store batch remains queued after append failure"
     );
-    assert!(
-        storage.get_changeset("M", 1).await.is_err(),
-        "the failed publish did not write the changeset"
-    );
+    assert!(!store_package_exists(&storage, "M", 1).await);
 
     storage.delete_blob_object("audio", "audio1").await;
     let retry = run_single_sync_cycle(
@@ -1924,22 +2096,16 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
     };
 
     assert!(
-        err.contains("user-provided blob audio/audio1 is absent from remote storage"),
+        err.contains("outbound blob audio/audio1 is absent from storage"),
         "staged retry surfaces the missing blob: {err}",
     );
+    assert!(!store_package_exists(&storage, "M", 1).await);
     assert!(
-        storage.get_changeset("M", 1).await.is_err(),
-        "the retry aborts before writing the changeset"
-    );
-    assert!(
-        storage
-            .list_heads()
+        store_heads(&storage)
             .await
-            .expect("list heads")
-            .heads
             .into_iter()
-            .all(|head| head.seq == 0),
-        "the retry aborts before advancing a head"
+            .all(|head| head.device_id != "M"),
+        "the retry aborts before publishing an M head"
     );
 }
 
@@ -1953,11 +2119,6 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
     )));
     let storage = MockSyncStorage::new();
     let db = open_test_db();
-    storage
-        .put_head("peer-lagging", 0, T0)
-        .await
-        .expect("seed an un-acked peer head");
-
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -1965,13 +2126,17 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
     )
     .await;
 
-    let store_root = ld.as_ref().to_path_buf();
-    let writable_permissions = std::fs::metadata(&store_root)
-        .expect("store dir metadata")
-        .permissions();
-    let mut readonly_permissions = writable_permissions.clone();
-    readonly_permissions.set_readonly(true);
-    std::fs::set_permissions(&store_root, readonly_permissions).expect("block staging writes");
+    db.call(|conn| {
+        conn.execute_batch(
+            "CREATE TEMP TRIGGER fail_outbound_stage \
+             BEFORE INSERT ON outbound_store_batches \
+             BEGIN SELECT RAISE(ABORT, 'injected Store staging failure'); END;",
+        )
+        .map_err(crate::database::DbError::from)
+    })
+    .await
+    .expect("install Store staging fault");
+    bind_mock_store_protocol(&db, &storage, "M").await;
     let failed = match run_single_sync_cycle(
         &storage,
         "test-lib",
@@ -1993,7 +2158,7 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
         Err(error) => error,
     };
     assert!(
-        failed.contains("Failed to stage outgoing changeset"),
+        failed.contains("injected Store staging failure"),
         "cycle surfaces the outgoing staging failure: {failed}"
     );
     assert_eq!(
@@ -2001,16 +2166,18 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
         1,
         "the pending batch remains queued when outgoing staging fails"
     );
-    assert!(
-        storage.get_changeset("M", 1).await.is_err(),
-        "the unstaged changeset is not published"
-    );
+    assert!(!store_package_exists(&storage, "M", 1).await);
 
-    std::fs::set_permissions(&store_root, writable_permissions).expect("unblock staging writes");
+    db.call(|conn| {
+        conn.execute_batch("DROP TRIGGER fail_outbound_stage")
+            .map_err(crate::database::DbError::from)
+    })
+    .await
+    .expect("remove Store staging fault");
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        storage.get_changeset("M", 1).await.is_ok(),
-        "the same pending batch publishes after staging is available"
+        store_package_exists(&storage, "M", 1).await,
+        "the same pending batch publishes after staging succeeds"
     );
     assert_eq!(
         pending_changeset_count(&db).await,
@@ -2023,13 +2190,14 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
 /// host-write injector), still with no cloud home (no outbox drain, no auth
 /// refresh).
 async fn run_cycle_m_storage(
-    storage: &dyn SyncStorage,
+    storage: &HostWriteInjector,
     db: &Database,
     cipher: &RwLock<CloudCipher>,
     keypair: &UserKeypair,
     hlc: &Hlc,
     ld: &StoreDir,
 ) {
+    bind_mock_store_protocol(db, &storage.inner, "M").await;
     run_single_sync_cycle(
         storage,
         "test-lib",
@@ -2051,10 +2219,9 @@ async fn run_cycle_m_storage(
 
 // ---- changeset reclamation through a real cycle ----
 
-/// A changeset that becomes both snapshot-covered and acked by every current
-/// device is reclaimed by the cycle that publishes the snapshot. Peer A has pushed
-/// `changes/A/1`; M runs one cycle that pulls it (so M acks A->1), snapshots
-/// (covering A->1), and then reclaims — so `changes/A/1` is gone afterward.
+/// A package that becomes both snapshot-covered and acknowledged by every active
+/// device is reclaimed by the cycle that publishes the snapshot. Peer A has
+/// pushed A/1; M pulls it, acknowledges it, snapshots it, and reclaims its package.
 ///
 /// The mock is built with M's keypair so the head it signs for M and the ack M
 /// publishes share an author, the same identity a real device's storage and ack
@@ -2069,6 +2236,7 @@ async fn cycle_reclaims_a_fully_acked_changeset() {
         [11u8; 32],
     )));
     let hlc = Hlc::new("M".to_string());
+    publish_mock_founder_membership(&storage).await;
 
     // Peer A's changeset 1 (a shareable note).
     let a_src = open_test_db();
@@ -2080,24 +2248,28 @@ async fn cycle_reclaims_a_fully_acked_changeset() {
         ],
     )
     .await;
-    storage.store_changeset("A", 1, &a_cs, SCHEMA_VERSION);
+    storage.store_changeset_with_grant(
+        "A",
+        1,
+        &a_cs,
+        SCHEMA_VERSION,
+        Some(storage.protocol_founder_coord()),
+    );
 
     // M's cycle pulls A->1, acks A->1, snapshots covering A->1, then reclaims.
     run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
 
     assert!(
-        storage.get_changeset("A", 1).await.is_err(),
-        "a snapshot-covered, fully-acked changeset is reclaimed by the cycle",
+        !store_package_exists(&storage, "A", 1).await,
+        "a snapshot-covered, fully-acknowledged package is reclaimed by the cycle",
     );
 }
 
-/// A changeset a behind peer still needs is NOT reclaimed, even after a snapshot
-/// covers it. Peer A has pushed `changes/A/1` and `changes/A/2`; a peer B is parked
-/// at A->1 (its ack reports only A->1). M pulls both, snapshots covering A->2, and
-/// reclaims — but B's ack pins the floor at 1, so `changes/A/2` survives and B pulls
-/// it forward.
+/// Reclamation refuses the whole snapshot proof while any active device is behind
+/// that snapshot. Peer A has pushed A/1 and A/2; active device B acknowledges only
+/// A/1. M snapshots A/2, so both packages remain and B can pull A/2.
 #[tokio::test]
-async fn cycle_keeps_a_behind_peers_changeset() {
+async fn cycle_preserves_packages_until_every_device_covers_the_snapshot() {
     let keypair = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db_m = open_test_db();
@@ -2106,6 +2278,7 @@ async fn cycle_keeps_a_behind_peers_changeset() {
         [12u8; 32],
     )));
     let hlc = Hlc::new("M".to_string());
+    publish_mock_founder_membership(&storage).await;
 
     // Peer A's two changesets (two independent shareable notes).
     let a_src = open_test_db();
@@ -2117,7 +2290,13 @@ async fn cycle_keeps_a_behind_peers_changeset() {
         ],
     )
     .await;
-    storage.store_changeset("A", 1, &cs1, SCHEMA_VERSION);
+    storage.store_changeset_with_grant(
+        "A",
+        1,
+        &cs1,
+        SCHEMA_VERSION,
+        Some(storage.protocol_founder_coord()),
+    );
     let cs2 = capture_bytes(
         &a_src,
         &[
@@ -2126,32 +2305,35 @@ async fn cycle_keeps_a_behind_peers_changeset() {
         ],
     )
     .await;
-    storage.store_changeset("A", 2, &cs2, SCHEMA_VERSION);
+    storage.store_changeset_with_grant(
+        "A",
+        2,
+        &cs2,
+        SCHEMA_VERSION,
+        Some(storage.protocol_founder_coord()),
+    );
 
-    // A behind peer B: a head (so it counts as a current device) and an ack that
-    // reports it has pulled A only through seq 1. Both are signed by the mock's
-    // keypair so B's ack author matches B's head author.
-    storage
-        .put_head("B", 0, T0)
-        .await
-        .expect("seed behind peer head");
-    let b_ack = AckJson::signed("B", BTreeMap::from([("A".to_string(), 1u64)]), &keypair);
-    storage
-        .put_ack("B", serde_json::to_vec(&b_ack).expect("serialize ack"))
-        .await
-        .expect("seed behind peer ack");
+    // B is an active device for the owner and reports the exact A/1 commit hash.
+    append_active_store_device(&storage, "B", &keypair).await;
+    append_store_ack(
+        &storage,
+        "B",
+        BTreeMap::from([("A".to_string(), storage.store_commit_position("A", 1))]),
+        &keypair,
+    )
+    .await;
 
-    // M's cycle pulls A->2, acks A->2, snapshots covering A->2, then reclaims. The
-    // floor is min(snapshot A->2, min(M ack A->2, B ack A->1)) = 1.
+    // M's cycle pulls A/2, acknowledges A/2, and snapshots A/2. B does not cover
+    // that snapshot position, so the reclamation proof is incomplete.
     run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
 
     assert!(
-        storage.get_changeset("A", 1).await.is_err(),
-        "the changeset below the floor (everyone has it) is reclaimed",
+        store_package_exists(&storage, "A", 1).await,
+        "reclamation does not delete part of a snapshot whose proof is incomplete",
     );
     assert!(
-        storage.get_changeset("A", 2).await.is_ok(),
-        "the changeset the behind peer still needs is kept",
+        store_package_exists(&storage, "A", 2).await,
+        "the package the behind peer still needs is kept",
     );
 
     // And the behind peer pulls the kept changeset forward.
@@ -2163,11 +2345,18 @@ async fn cycle_keeps_a_behind_peers_changeset() {
                  '0000000001000-0000-A', '2026-01-01')",
     )
     .await;
-    exec(
-        &db_b,
-        "INSERT INTO sync_cursors (device_id, last_seq) VALUES ('A', 1)",
-    )
-    .await;
+    let position = storage.store_commit_position("A", 1);
+    db_b.call(move |conn| {
+        conn.execute(
+            "INSERT INTO materialized_commits (device_id, seq, commit_hash) \
+                 VALUES ('A', 1, ?1)",
+            [position.commit_hash.to_string()],
+        )
+        .map_err(crate::database::DbError::from)?;
+        Ok(())
+    })
+    .await
+    .expect("seed B's exact A/1 materialized position");
     pull_into(&db_b, &storage, "B", &ld).await;
     assert!(
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'a2'").await,
@@ -2181,10 +2370,11 @@ async fn cycle_keeps_a_behind_peers_changeset() {
 /// catalog — yet its rows still reach the cloud through the changeset push.
 #[tokio::test]
 async fn member_device_does_not_create_a_snapshot() {
-    use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
+    use crate::sync::membership::{MemberRole, MembershipChain};
     use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
-    let storage = MockSyncStorage::new();
+    let owner = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
     let db = open_test_db();
     let (_tmp, ld) = temp_store_dir();
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
@@ -2192,27 +2382,27 @@ async fn member_device_does_not_create_a_snapshot() {
     )));
     let hlc = Hlc::new("M".to_string());
 
-    let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
 
     // The owner founds the chain and adds this device as a write-capable Member.
     let owner_pk = pubkey_hex(&owner);
     let mut chain = MembershipChain::new();
-    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    let founder = storage.protocol_genesis().founder;
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    let add = make_linked_entry(
-        &chain,
-        &owner,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "0000000002000-0000-owner",
-    );
+    let add = chain
+        .signed_set_member(
+            &owner,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "0000000002000-0000-owner".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &owner_pk, 2, add).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
     // This device pins the owner (set on join in production) — an opaque store.
-    db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
+    db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
         .await
         .expect("pin owner");
 
@@ -2228,20 +2418,15 @@ async fn member_device_does_not_create_a_snapshot() {
 
     run_cycle_m(&storage, &db, &cipher, &member, &hlc, &ld).await;
 
-    // The Member's row reached the cloud as a changeset...
-    assert_eq!(
-        SyncStorage::list_changesets(&storage, "M").await.unwrap(),
-        vec![1],
-        "the member's rows still propagate via the changeset push",
-    );
-    // ...but no catalog snapshot was authored — the pointer is absent, not merely
-    // unreadable.
+    // The Member's row reached the cloud as an immutable Store package.
     assert!(
-        matches!(
-            SyncStorage::get_snapshot_pointer(&storage).await,
-            Err(crate::sync::storage::StorageError::NotFound(_))
-        ),
-        "a non-owner device must not author a catalog snapshot (no pointer written)",
+        store_package_exists(&storage, "M", 1).await,
+        "the member's rows still propagate via the Store commit",
+    );
+    // No catalog snapshot metadata was authored.
+    assert!(
+        store_snapshot_metas(&storage).await.is_empty(),
+        "a non-owner device must not author catalog snapshot metadata",
     );
 }
 
@@ -2253,7 +2438,8 @@ async fn owner_device_creates_a_snapshot() {
     use crate::sync::membership::MembershipChain;
     use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
-    let storage = MockSyncStorage::new();
+    let owner = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
     let db = open_test_db();
     let (_tmp, ld) = temp_store_dir();
     let cipher = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
@@ -2261,13 +2447,12 @@ async fn owner_device_creates_a_snapshot() {
     )));
     let hlc = Hlc::new("M".to_string());
 
-    let owner = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
     let mut chain = MembershipChain::new();
-    let founder = founder_entry(&owner, "0000000001000-0000-owner");
+    let founder = storage.protocol_genesis().founder;
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
-    db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
+    db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
         .await
         .expect("pin owner");
 
@@ -2280,7 +2465,9 @@ async fn owner_device_creates_a_snapshot() {
 
     run_cycle_m(&storage, &db, &cipher, &owner, &hlc, &ld).await;
 
-    SyncStorage::get_snapshot_pointer(&storage)
-        .await
-        .expect("an owner device must author the catalog snapshot");
+    assert_eq!(
+        store_snapshot_metas(&storage).await.len(),
+        1,
+        "an owner device must author catalog snapshot metadata",
+    );
 }

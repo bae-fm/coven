@@ -16,7 +16,7 @@ use tracing::warn;
 use crate::id_provider::{IdRef, UuidProvider};
 
 use super::{
-    CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
     RevokeOutcome,
 };
 
@@ -42,6 +42,10 @@ pub trait CloudKitOps: Send + Sync {
     ) -> Result<Vec<String>, CloudHomeError>;
     fn delete_record(&self, scope: &CloudKitScope, key: &str) -> Result<(), CloudHomeError>;
     fn record_exists(&self, scope: &CloudKitScope, key: &str) -> Result<bool, CloudHomeError>;
+    fn share_for_member(
+        &self,
+        member_pubkey: &str,
+    ) -> Result<Option<CloudKitShare>, CloudHomeError>;
     fn grant_share(&self, member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError>;
     fn revoke_share(&self, member_pubkey: &str) -> Result<(), CloudHomeError>;
     fn accept_share(&self, share_url: &str) -> Result<CloudKitShare, CloudHomeError>;
@@ -734,30 +738,69 @@ impl CloudHome for CloudKitCloudHome {
         .await
     }
 
-    async fn grant_access(
+    async fn set_access(
         &self,
-        grant: CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        // provider_account_email is ignored for CloudKit: shares bind the joiner's
-        // identity at URL-accept time, so no invitee email is required.
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
         let ops = self.ops.clone();
-        let member_pubkey = grant.member_pubkey;
-        let share = blocking(move || ops.grant_share(&member_pubkey)).await?;
-        Ok(CloudHomeJoinInfo::CloudKitShare {
-            share_url: share.share_url,
-            owner_name: share.owner_name,
-            zone_name: share.zone_name,
-        })
-    }
-
-    async fn revoke_access(
-        &self,
-        revoke: CloudAccessRevoke,
-    ) -> Result<RevokeOutcome, CloudHomeError> {
-        let ops = self.ops.clone();
-        let member_pubkey = revoke.member_pubkey;
-        blocking(move || ops.revoke_share(&member_pubkey)).await?;
-        Ok(RevokeOutcome::Revoked)
+        match desired {
+            CloudAccessState::Present { member_pubkey, .. } => {
+                // CloudKit shares bind the joiner's identity at URL-accept time,
+                // so no provider email is required.
+                let lookup_ops = ops.clone();
+                let lookup_member = member_pubkey.clone();
+                let existing =
+                    blocking(move || lookup_ops.share_for_member(&lookup_member)).await?;
+                let expected = match existing {
+                    Some(share) => share,
+                    None => {
+                        let grant_ops = ops.clone();
+                        let grant_member = member_pubkey.clone();
+                        blocking(move || grant_ops.grant_share(&grant_member)).await?
+                    }
+                };
+                let verified = blocking(move || ops.share_for_member(&member_pubkey))
+                    .await?
+                    .ok_or_else(|| {
+                        CloudHomeError::Transport(
+                            "CloudKit member share is absent after setting it present".to_string(),
+                        )
+                    })?;
+                if verified != expected {
+                    return Err(CloudHomeError::Transport(
+                        "CloudKit member share changed while verifying present access".to_string(),
+                    ));
+                }
+                Ok(CloudAccessOutcome::Present(
+                    CloudHomeJoinInfo::CloudKitShare {
+                        share_url: verified.share_url,
+                        owner_name: verified.owner_name,
+                        zone_name: verified.zone_name,
+                    },
+                ))
+            }
+            CloudAccessState::Absent { member_pubkey, .. } => {
+                let lookup_ops = ops.clone();
+                let lookup_member = member_pubkey.clone();
+                if blocking(move || lookup_ops.share_for_member(&lookup_member))
+                    .await?
+                    .is_some()
+                {
+                    let revoke_ops = ops.clone();
+                    let revoke_member = member_pubkey.clone();
+                    blocking(move || revoke_ops.revoke_share(&revoke_member)).await?;
+                }
+                if blocking(move || ops.share_for_member(&member_pubkey))
+                    .await?
+                    .is_some()
+                {
+                    return Err(CloudHomeError::Transport(
+                        "CloudKit member share remains after setting access absent".to_string(),
+                    ));
+                }
+                Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
+            }
+        }
     }
 }
 
@@ -785,6 +828,9 @@ mod tests {
         fail_deletes: Mutex<HashSet<String>>,
         fail_writes: Mutex<HashSet<String>>,
         record_exists_calls: AtomicUsize,
+        grant_share_calls: AtomicUsize,
+        revoke_share_calls: AtomicUsize,
+        shares: Mutex<HashMap<String, CloudKitShare>>,
     }
 
     impl MockCloudKitOps {
@@ -795,6 +841,9 @@ mod tests {
                 fail_deletes: Mutex::new(HashSet::new()),
                 fail_writes: Mutex::new(HashSet::new()),
                 record_exists_calls: AtomicUsize::new(0),
+                grant_share_calls: AtomicUsize::new(0),
+                revoke_share_calls: AtomicUsize::new(0),
+                shares: Mutex::new(HashMap::new()),
             }
         }
 
@@ -897,14 +946,29 @@ mod tests {
         }
 
         fn grant_share(&self, member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError> {
-            Ok(CloudKitShare {
+            self.grant_share_calls.fetch_add(1, Ordering::Relaxed);
+            let share = CloudKitShare {
                 share_url: format!("https://share.example/{member_pubkey}"),
                 owner_name: "owner-name".to_string(),
                 zone_name: "bae-store".to_string(),
-            })
+            };
+            self.shares
+                .lock()
+                .unwrap()
+                .insert(member_pubkey.to_string(), share.clone());
+            Ok(share)
         }
 
-        fn revoke_share(&self, _member_pubkey: &str) -> Result<(), CloudHomeError> {
+        fn share_for_member(
+            &self,
+            member_pubkey: &str,
+        ) -> Result<Option<CloudKitShare>, CloudHomeError> {
+            Ok(self.shares.lock().unwrap().get(member_pubkey).cloned())
+        }
+
+        fn revoke_share(&self, member_pubkey: &str) -> Result<(), CloudHomeError> {
+            self.revoke_share_calls.fetch_add(1, Ordering::Relaxed);
+            self.shares.lock().unwrap().remove(member_pubkey);
             Ok(())
         }
 
@@ -1544,7 +1608,7 @@ mod tests {
         // CloudKit shares bind identity at URL-accept time, so no invitee email
         // is supplied and the grant still succeeds.
         let join_info = ch
-            .grant_access(CloudAccessGrant {
+            .set_access(CloudAccessState::Present {
                 member_pubkey: "member-pubkey".to_string(),
                 provider_account_email: None,
             })
@@ -1552,11 +1616,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             join_info,
-            CloudHomeJoinInfo::CloudKitShare {
+            CloudAccessOutcome::Present(CloudHomeJoinInfo::CloudKitShare {
                 share_url: "https://share.example/member-pubkey".to_string(),
                 owner_name: "owner-name".to_string(),
                 zone_name: "bae-store".to_string(),
-            }
+            })
         );
     }
 
@@ -1564,7 +1628,7 @@ mod tests {
     async fn revoke_access_unshares_and_reports_revoked() {
         let ch = make_cloud_home();
         let outcome = ch
-            .revoke_access(CloudAccessRevoke {
+            .set_access(CloudAccessState::Absent {
                 member_pubkey: "member-pubkey".to_string(),
                 provider_account_email: None,
             })
@@ -1572,7 +1636,42 @@ mod tests {
             .unwrap();
         // CloudKit removes the member's share participation, so it reports the
         // credential actually withdrawn rather than Unsupported.
-        assert_eq!(outcome, RevokeOutcome::Revoked);
+        assert_eq!(outcome, CloudAccessOutcome::Absent(RevokeOutcome::Revoked));
+    }
+
+    #[tokio::test]
+    async fn repeated_present_access_reuses_the_verified_share() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let desired = CloudAccessState::Present {
+            member_pubkey: "member-pubkey".to_string(),
+            provider_account_email: None,
+        };
+
+        let first = home.set_access(desired.clone()).await.unwrap();
+        let second = home.set_access(desired).await.unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(ops.grant_share_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_absent_access_does_not_revoke_twice() {
+        let (home, ops) = make_cloud_home_with_ops();
+        home.set_access(CloudAccessState::Present {
+            member_pubkey: "member-pubkey".to_string(),
+            provider_account_email: None,
+        })
+        .await
+        .unwrap();
+        let desired = CloudAccessState::Absent {
+            member_pubkey: "member-pubkey".to_string(),
+            provider_account_email: None,
+        };
+
+        home.set_access(desired.clone()).await.unwrap();
+        home.set_access(desired).await.unwrap();
+
+        assert_eq!(ops.revoke_share_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -856,14 +856,12 @@ mod tests {
     use crate::keys::test_keyring;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
-        BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
-        CloudHomeJoinInfo, RevokeOutcome,
+        BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
     };
     use crate::store_dir::StoreDir;
     use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
     use crate::sync::hlc::Hlc;
     use crate::sync::session::BlobDecl;
-    use crate::sync::storage::SyncStorage;
     use crate::sync::test_helpers::run_test_cycle as drive_test_cycle;
     use crate::sync::test_helpers::{
         capture_bytes, pull_into, query_text, row_exists, MockSyncStorage,
@@ -1020,11 +1018,17 @@ mod tests {
     ) {
         let cipher = RwLock::new(CloudCipher::Plaintext);
         let hlc = Hlc::new("device-test".to_string());
+        crate::sync::test_helpers::bind_mock_store_protocol(handle.db(), storage, "device-test")
+            .await;
         handle
             .db()
-            .set_sync_state("snapshot_seq", "0")
+            .set_protocol_state(
+                crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
+                &crate::sync::store_commit::ObjectHash::digest(b"existing-test-snapshot")
+                    .to_string(),
+            )
             .await
-            .expect("seed snapshot floor");
+            .expect("seed Store snapshot state");
         drive_test_cycle(
             storage,
             "lib-test",
@@ -1180,6 +1184,8 @@ mod tests {
             .expect("write before failed push");
         let keypair = crate::keys::UserKeypair::generate();
         let storage = MockSyncStorage::with_keypair(keypair.clone());
+        crate::sync::test_helpers::bind_mock_store_protocol(handle.db(), &storage, "device-test")
+            .await;
         storage.fail_next_changeset_puts(1);
 
         let first = drive_test_cycle(
@@ -1199,15 +1205,33 @@ mod tests {
         )
         .await;
         assert!(
-            first.is_ok(),
-            "the first cycle records the failed push for retry",
+            first
+                .as_ref()
+                .is_err_and(|error| error.contains("forced Store package append failure")),
+            "the first cycle must report the append failure while preserving its outbox: {first:?}",
         );
-        assert!(storage.get_changeset("device-test", 1).await.is_err());
+        assert!(crate::sync::store_objects::load_commit_slot(
+            &storage,
+            storage.protocol_genesis_hash(),
+            "device-test",
+            1,
+        )
+        .await
+        .expect("inspect Store commit slot after failed append")
+        .is_none());
 
         run_test_cycle(&storage, &handle, &keypair).await;
         assert!(
-            storage.get_changeset("device-test", 1).await.is_ok(),
-            "the pending write is still published after the failed push",
+            crate::sync::store_objects::load_commit_slot(
+                &storage,
+                storage.protocol_genesis_hash(),
+                "device-test",
+                1,
+            )
+            .await
+            .expect("inspect Store commit slot after retry")
+            .is_some(),
+            "the pending write is published as an immutable Store commit after retry",
         );
     }
 
@@ -1241,7 +1265,7 @@ mod tests {
         let has_coven_table: i64 = handle
             .sql(|sql| {
                 sql.tx().query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'sync_state'",
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'protocol_state'",
                     [],
                     |row| row.get(0),
                 ).map_err(CovenError::from)
@@ -2236,20 +2260,12 @@ mod tests {
             self.inner.exists(key).await
         }
 
-        async fn grant_access(
+        async fn set_access(
             &self,
-            grant: CloudAccessGrant,
-        ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
+            desired: CloudAccessState,
+        ) -> Result<CloudAccessOutcome, CloudHomeError> {
             self.gate().await;
-            self.inner.grant_access(grant).await
-        }
-
-        async fn revoke_access(
-            &self,
-            revoke: CloudAccessRevoke,
-        ) -> Result<RevokeOutcome, CloudHomeError> {
-            self.gate().await;
-            self.inner.revoke_access(revoke).await
+            self.inner.set_access(desired).await
         }
     }
 

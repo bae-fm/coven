@@ -58,6 +58,8 @@ pub enum SyncError {
     Key(#[from] KeyError),
     #[error("sync initialization error: {0}")]
     Init(#[from] InitSyncError),
+    #[error("Store protocol state: {0}")]
+    Protocol(String),
     #[error("{0}")]
     Setup(#[from] SetupError),
     #[error("membership error: {0}")]
@@ -241,9 +243,11 @@ impl SyncManager {
             error => SyncError::StorageSetup(error),
         })?;
 
-        let components = crate::sync::cycle::init_sync_over_storage(&self.db, storage)
-            .await
-            .map_err(SyncError::from)?;
+        let initialization = self.store_initialization().await?;
+        let components =
+            crate::sync::cycle::init_sync_over_storage(&self.db, storage, initialization)
+                .await
+                .map_err(SyncError::from)?;
 
         let _handle = self.install_sync_loop(components, config)?;
         *self.cloud_home.write().unwrap() = Some(cloud_home);
@@ -321,16 +325,47 @@ impl SyncManager {
             blob_paths,
             config.store_id.clone(),
             keypair,
-        );
+        )
+        .with_copy_ids(Arc::new(crate::storage::cloud::RandomCopyIdGenerator));
 
-        let components = crate::sync::cycle::init_sync_over_storage(&self.db, storage)
-            .await
-            .map_err(SyncError::from)?;
+        let initialization = self.store_initialization().await?;
+        let components =
+            crate::sync::cycle::init_sync_over_storage(&self.db, storage, initialization)
+                .await
+                .map_err(SyncError::from)?;
 
         let _handle = self.install_sync_loop(components, config)?;
         *self.cloud_home.write().unwrap() = Some(home);
 
         Ok(())
+    }
+
+    async fn store_initialization(
+        &self,
+    ) -> Result<crate::sync::cycle::StoreInitialization, SyncError> {
+        let Some(raw_hash) = self
+            .db
+            .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+            .await?
+        else {
+            return Ok(crate::sync::cycle::StoreInitialization::CreateStore);
+        };
+        let expected_genesis_hash = raw_hash
+            .parse()
+            .map_err(|error| SyncError::Protocol(format!("protocol genesis hash: {error}")))?;
+        let expected_founder = self
+            .db
+            .get_protocol_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
+            .await?
+            .ok_or_else(|| {
+                SyncError::Protocol(
+                    "protocol genesis is pinned but its founder is absent".to_string(),
+                )
+            })?;
+        Ok(crate::sync::cycle::StoreInitialization::OpenStore {
+            expected_genesis_hash,
+            expected_founder,
+        })
     }
 
     /// Test-only: stand the sync loop over an injected `home` while resolving the
@@ -558,6 +593,7 @@ impl SyncManager {
         crate::sync::membership_ops::get_members(
             storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
+            &self.db,
         )
         .await
         .map_err(SyncError::Membership)
@@ -612,8 +648,18 @@ impl SyncManager {
 
         let pinned_owner = self
             .db
-            .get_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
+            .get_protocol_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
             .await?;
+        let founder_pubkey = pinned_owner.clone().ok_or({
+            SyncError::Membership(crate::sync::membership_ops::MembershipOpsError::NoFounderChain)
+        })?;
+        let genesis_hash = self
+            .db
+            .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+            .await?
+            .ok_or_else(|| SyncError::Protocol("protocol genesis hash is absent".to_string()))?
+            .parse()
+            .map_err(|error| SyncError::Protocol(format!("protocol genesis hash: {error}")))?;
         let membership_floor = crate::sync::membership_ops::current_membership_floor(
             storage,
             pinned_owner.as_deref(),
@@ -627,6 +673,8 @@ impl SyncManager {
             &self.key_service,
             self.custody.as_ref(),
             self.identity_custody.as_ref(),
+            genesis_hash,
+            founder_pubkey,
             membership_floor,
         )
         .map_err(SyncError::from)
@@ -1051,14 +1099,17 @@ mod tests {
             BlobPathScheme::Plain,
             store_id,
             attacker.clone(),
-        );
-        crate::sync::test_helpers::publish_test_founder(
+        )
+        .with_copy_ids(Arc::new(
+            crate::storage::cloud::SequentialCopyIdGenerator::new("foreign-founder"),
+        ));
+        crate::sync::test_helpers::publish_test_protocol_roots(
             &attacker_storage,
+            store_id,
             &attacker,
             "0000000001000-0000-attacker",
         )
-        .await
-        .expect("publish foreign founder");
+        .await;
 
         let victim = crate::keys::UserKeypair::generate();
         let db = crate::sync::test_helpers::open_test_db();
@@ -1081,13 +1132,13 @@ mod tests {
             .await
             .expect_err("foreign founder must prevent sync startup");
         assert!(
-            matches!(error, SyncError::Init(InitSyncError::MembershipAnchor(_))),
+            matches!(error, SyncError::Init(InitSyncError::ProtocolGenesis(_))),
             "unexpected startup error: {error:?}",
         );
         assert!(manager.sync_loop_handle().is_none());
         assert!(manager.cloud_home().is_none());
         assert_eq!(
-            db.get_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
+            db.get_protocol_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
                 .await
                 .unwrap(),
             None,

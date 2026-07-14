@@ -91,8 +91,8 @@ pub const BLOB_TOMBSTONE_GRACE: chrono::Duration = chrono::Duration::days(7);
 /// The cloud key-prefix under which tombstones live. A tombstone for blob
 /// `cloud_key` is stored at `blob_tombstones/{cloud_key}{suffix}` (suffix being the
 /// cipher's: `.enc` encrypted, empty plaintext). Blob keys carry no suffix of their
-/// own (unlike heads/snapshot/membership objects), so stripping the cipher suffix
-/// and this prefix recovers the exact `cloud_key`.
+/// own (unlike Store protocol, membership, and wrapped-key objects), so stripping
+/// the cipher suffix and this prefix recovers the exact `cloud_key`.
 const TOMBSTONE_PREFIX: &str = "blob_tombstones/";
 
 /// The cloud object key a tombstone for `cloud_key` is stored at, under the
@@ -124,8 +124,7 @@ enum ExistingTombstone {
 ///
 /// `author_pubkey`/`signature` cover the [`BlobTombstoneFields`] canonical payload
 /// — including `cloud_key` (the slot the tombstone lives under, so a valid
-/// tombstone can't be relocated to delete a different blob, mirroring how
-/// [`crate::sync::signed_control`]'s `HeadJson` binds its `device_id`) and
+/// tombstone can't be relocated to delete a different blob) and
 /// `deleted_at` (so the age can't be forged to dodge or shorten the grace). The
 /// GC verifies this signature and authorizes the author against the membership
 /// chain before deleting anything.
@@ -136,7 +135,7 @@ enum ExistingTombstone {
 /// the other's — re-verifying under the second store's id fails, because the
 /// signature was taken over the first's.
 ///
-/// `author_pubkey` *is* stored (like `HeadJson` / the snapshot meta): a tombstone's
+/// `author_pubkey` *is* stored: a tombstone's
 /// author varies device to device, so the verifier learns who signed it and then
 /// checks that author against the chain (the authorization step).
 #[derive(Serialize, Deserialize)]

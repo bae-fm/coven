@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
-use crate::database::{Database, DbError, PendingChangesetBatch};
+use crate::database::{Database, DbError};
 use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
@@ -25,48 +25,32 @@ use super::cloud_storage::{
     RotationPending,
 };
 use super::hlc::Hlc;
-use super::publish_blobs::{ensure_publishable_changeset_blobs, PublishBlobError};
-use super::pull::HeldChangeset;
 use super::service::DeferredLocalBlobDisposition;
 use super::status::DeviceActivity;
 use super::storage::SyncStorage;
+use super::store_pull::HeldStorePosition;
 
 /// Result of a single sync cycle.
 #[derive(Debug)]
 pub struct SyncCycleResult {
     /// Number of remote changesets that were applied.
     pub changesets_applied: u64,
-    /// Changesets from a newer schema version that we couldn't apply. The cursor
-    /// is held at the first such seq for each device until the app updates.
-    pub skipped_schema: u64,
-    /// Changesets skipped because their author is not a write-capable member,
-    /// judged against the exact membership entry they are signed under (forged or
-    /// revoked, not a propagation lag). The cursor advanced past them so the
-    /// device isn't stuck; the count is per-cycle and surfaces as a warning.
-    pub rejected_unauthorized: u64,
-    /// Changesets whose signature did not verify (forged or corrupt). The cursor
-    /// is held at the bad seq for that device, and the count surfaces as a warning.
-    pub invalid_signatures: u64,
     /// Changesets whose present cloud object failed validation or apply. The
-    /// cursor is held at the bad seq for that device. Carries per-changeset
+    /// position is held at the bad seq for that device. Carries per-changeset
     /// detail (device, seq, reason) so a host can say which changesets are
     /// stalled, not only how many.
-    pub held_changesets: Vec<HeldChangeset>,
-    /// Changesets rejected because SQLite reported a non-retryable constraint
-    /// conflict. Their rows and cursor rolled back; the count is per-cycle and
-    /// surfaces as a warning.
-    pub constraint_conflicts: u64,
+    pub held_positions: Vec<HeldStorePosition>,
     /// Per-device activity of the other devices seen in the sync storage —
     /// device id, its member's author key, latest seq, and RFC 3339 last-sync
     /// time — so a host can render which devices synced and when.
     pub device_activity: Vec<DeviceActivity>,
     /// RFC 3339 timestamp of when this cycle completed.
     pub sync_time: String,
-    /// Blobs needed before apply failed to download; their changesets and cursors
+    /// Blobs needed before apply failed to download; their changesets and positions
     /// remain pending.
     pub asset_downloads_failed: bool,
     /// Post-commit local blob cleanup still has durable filesystem work pending.
-    /// Its corresponding rows and cursors are already durable.
+    /// Its corresponding rows and positions are already durable.
     pub local_blob_cleanup_pending: bool,
     /// Row changes from applied changesets, for the host to map to domain events.
     pub row_changes: Vec<RowChange>,
@@ -84,48 +68,12 @@ pub struct SyncCycleResult {
     pub rotation_pending: Option<RotationPending>,
 }
 
-/// Path for staging outgoing changeset bytes that survived a push failure.
-pub fn staging_path(store_dir: &StoreDir) -> PathBuf {
-    store_dir.join("sync_staging.bin")
-}
-
-const STAGED_PENDING_CHANGESET_ID_KEY: &str = "staged_pending_changeset_id";
-
-/// Clear the staged changeset after a successful push.
-pub async fn clear_staged_changeset(store_dir: &StoreDir) {
-    let _ = crate::local_blob::remove_file(&staging_path(store_dir)).await;
-}
-
-/// Read a previously staged changeset (if any) for retry.
-pub async fn read_staged_changeset(store_dir: &StoreDir) -> Option<Vec<u8>> {
-    let path = staging_path(store_dir);
-    match crate::local_blob::exists(&path).await {
-        Ok(true) => match crate::local_blob::read(&path).await {
-            Ok(data) if !data.is_empty() => Some(data),
-            Ok(_) => {
-                clear_staged_changeset(store_dir).await;
-                None
-            }
-            Err(e) => {
-                warn!("Failed to read staged changeset: {e}");
-                clear_staged_changeset(store_dir).await;
-                None
-            }
-        },
-        Ok(false) => None,
-        Err(e) => {
-            warn!("Failed to check staged changeset: {e}");
-            None
-        }
-    }
-}
-
-async fn read_sync_state<T>(db: &Database, key: &str) -> Result<Option<T>, String>
+async fn read_protocol_state<T>(db: &Database, key: &str) -> Result<Option<T>, String>
 where
     T: FromStr,
     T::Err: std::fmt::Display,
 {
-    match db.get_sync_state(key).await {
+    match db.get_protocol_state(key).await {
         Ok(Some(value)) => value
             .parse::<T>()
             .map(Some)
@@ -133,120 +81,6 @@ where
         Ok(None) => Ok(None),
         Err(e) => Err(format!("Failed to read {key}: {e}")),
     }
-}
-
-async fn delete_sync_state(db: &Database, key: &'static str) -> Result<(), String> {
-    db.delete_sync_state(key)
-        .await
-        .map_err(|e| format!("Failed to delete {key}: {e}"))
-}
-
-fn parse_sync_state<T>(key: &str, value: &str) -> Result<T, String>
-where
-    T: FromStr,
-    T::Err: std::fmt::Display,
-{
-    value
-        .parse::<T>()
-        .map_err(|e| format!("Corrupt {key} value: {e}"))
-}
-
-/// Errors from publishing a changeset and its head.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ChangesetPublishError {
-    #[error("{0}")]
-    BlobPreflight(#[from] PublishBlobError),
-    #[error("{0}")]
-    Storage(#[from] super::storage::StorageError),
-}
-
-/// Push a changeset to the sync storage and update the device head.
-pub(crate) async fn push_changeset(
-    storage: &dyn SyncStorage,
-    db: &Database,
-    device_id: &str,
-    seq: u64,
-    packed: Vec<u8>,
-    timestamp: &str,
-) -> Result<(), ChangesetPublishError> {
-    ensure_publishable_changeset_blobs(db, storage, &packed).await?;
-    storage.put_changeset(device_id, seq, packed).await?;
-    storage.put_head(device_id, seq, timestamp).await?;
-    Ok(())
-}
-
-/// Commit a successful changeset push: advance `local_seq`, then clear the
-/// staging record. The order matters — `local_seq` is persisted BEFORE the
-/// staged_seq marker and the staged file are cleared, so a crash between them
-/// leaves the staged changeset for an idempotent re-push at the same seq while
-/// `local_seq` is already advanced, so no later changeset can reuse it and
-/// overwrite the pushed one on the remote. Shared by the staged-retry and
-/// direct-push arms so the ordering can't drift between them.
-async fn commit_push_success(
-    db: &Database,
-    store_dir: &StoreDir,
-    seq: u64,
-    pending_changeset_max_id: Option<i64>,
-    local_seq: &mut u64,
-) -> Result<(), String> {
-    *local_seq = seq;
-    db.set_sync_state("local_seq", &seq.to_string())
-        .await
-        .map_err(|e| format!("Failed to persist local_seq after push: {e}"))?;
-    if let Some(max_id) = pending_changeset_max_id {
-        db.clear_pending_changesets_through(max_id)
-            .await
-            .map_err(|e| format!("Failed to clear pending changesets after push: {e}"))?;
-    }
-    delete_sync_state(db, STAGED_PENDING_CHANGESET_ID_KEY).await?;
-    db.set_sync_state("staged_seq", "")
-        .await
-        .map_err(|e| format!("Failed to clear staged_seq after push: {e}"))?;
-    clear_staged_changeset(store_dir).await;
-    drain_published_blob_drop_intents(db, store_dir, seq).await?;
-    Ok(())
-}
-
-async fn persist_staged_push_state(
-    db: &Database,
-    seq: u64,
-    pending_changeset_max_id: i64,
-    deferred_local_blob_drops: &[super::service::DeferredLocalBlobDrop],
-    consumed_make_remote_intents: &[(String, String)],
-) -> Result<(), String> {
-    let drops = deferred_local_blob_drops.to_vec();
-    let consumed = consumed_make_remote_intents.to_vec();
-    db.call(move |conn| {
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        tx.execute(
-            "INSERT INTO sync_state (key, value) VALUES ('staged_seq', ?1) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [seq.to_string()],
-        )
-        .map_err(DbError::from)?;
-        tx.execute(
-            "INSERT INTO sync_state (key, value) VALUES (?1, ?2) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![
-                STAGED_PENDING_CHANGESET_ID_KEY,
-                pending_changeset_max_id.to_string()
-            ],
-        )
-        .map_err(DbError::from)?;
-        for drop in &drops {
-            insert_published_blob_drop_intent(&tx, seq, drop)?;
-        }
-        // Consume the make_remote intents in the same transaction that records the
-        // drop intents carrying their pin choice: the intent's deletion and the
-        // disposition record commit together, so no crash can drop the intent while
-        // leaving the disposition unrecorded (the retry would then default it).
-        for (root_table, root_id) in &consumed {
-            Database::delete_make_remote_intent_on(&tx, root_table, root_id)?;
-        }
-        tx.commit().map_err(DbError::from)
-    })
-    .await
-    .map_err(|e| format!("Failed to persist staged push state: {e}"))
 }
 
 #[derive(Clone)]
@@ -427,7 +261,7 @@ fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String
 
 struct SnapshotCut {
     snapshot: super::snapshot::CreatedSnapshot,
-    applied_cursors: std::collections::HashMap<String, u64>,
+    coverage: std::collections::BTreeMap<String, super::store_commit::CommitPosition>,
 }
 
 async fn capture_snapshot_cut(
@@ -436,13 +270,29 @@ async fn capture_snapshot_cut(
     tables: Vec<super::session::SyncedTable>,
 ) -> Result<SnapshotCut, DbError> {
     db.call(move |conn| {
+        let pending: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pending_changesets)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        let outbound: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM outbound_store_batches)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if pending != 0 || outbound != 0 {
+            return Err(DbError(
+                "snapshot cut refused while pending or outbound Store batches exist".to_string(),
+            ));
+        }
         let snapshot = super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
             .map_err(|e| DbError(e.to_string()))?;
-        let applied_cursors = Database::get_all_sync_cursors_on(conn)?;
-        Ok(SnapshotCut {
-            snapshot,
-            applied_cursors,
-        })
+        let coverage = Database::materialized_frontier_on(conn, None)?;
+        Ok(SnapshotCut { snapshot, coverage })
     })
     .await
 }
@@ -454,7 +304,7 @@ async fn capture_snapshot_cut(
 /// durable pending-changeset journal; the pull's apply is a plain connection
 /// write that is never journaled, so applied rows are never republished as this
 /// device's own changes.
-/// Loads/persists all cycle state (local_seq, cursors, staging, snapshots) through
+/// Loads/persists all cycle state (local_seq, positions, staging, snapshots) through
 /// `db`'s bookkeeping API rather than keeping mutable state across calls.
 pub(crate) async fn run_single_sync_cycle(
     storage: &dyn SyncStorage,
@@ -534,34 +384,34 @@ pub(crate) async fn run_single_sync_cycle(
         );
     }
 
-    // Load persisted sync state — DB errors abort the cycle (a transient SQLite
-    // error must not make us treat the device as brand-new at seq 0). None (key
-    // not set yet) legitimately defaults to 0 / None.
-    let mut local_seq = read_sync_state(db, "local_seq").await?.unwrap_or(0);
-    let snapshot_seq: Option<u64> = read_sync_state(db, "snapshot_seq").await?;
+    let local_seq = db
+        .latest_local_store_position()
+        .await
+        .map_err(|error| format!("read local Store position: {error}"))?
+        .map_or(0, |position| position.seq);
     let last_snapshot_time: Option<chrono::DateTime<chrono::Utc>> =
-        read_sync_state::<chrono::DateTime<chrono::FixedOffset>>(db, "last_snapshot_time")
+        read_protocol_state::<chrono::DateTime<chrono::FixedOffset>>(db, "last_snapshot_time")
             .await?
             .map(|time| time.with_timezone(&chrono::Utc));
-    let staged_seq: Option<u64> = read_sync_state::<String>(db, "staged_seq")
-        .await?
-        .filter(|value| !value.is_empty())
-        .map(|value| parse_sync_state("staged_seq", &value))
+    let last_snapshot_position: Option<super::store_commit::CommitPosition> = db
+        .get_protocol_state("last_snapshot_local_position")
+        .await
+        .map_err(|error| format!("read last snapshot position: {error}"))?
+        .map(|raw| {
+            serde_json::from_str(&raw)
+                .map_err(|error| format!("last snapshot position is invalid: {error}"))
+        })
         .transpose()?;
-    let staged_pending_changeset_id: Option<i64> =
-        read_sync_state::<String>(db, STAGED_PENDING_CHANGESET_ID_KEY)
-            .await?
-            .filter(|value| !value.is_empty())
-            .map(|value| parse_sync_state(STAGED_PENDING_CHANGESET_ID_KEY, &value))
-            .transpose()?;
+    let has_snapshot = db
+        .get_protocol_state(crate::database::LAST_SNAPSHOT_HASH_STATE_KEY)
+        .await
+        .map_err(|error| format!("read last snapshot hash: {error}"))?
+        .is_some();
     drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
 
-    // One wall-clock reading for this whole cycle. Every head this cycle writes
-    // records it as the device's `last_sync` (RFC 3339, per the `put_head`
-    // contract), and the status built at the end reports the same instant — so a
-    // device's published head and its own status agree on when it last synced. The
-    // changeset envelope timestamp is a separate HLC stamp (`timestamp` below); it
-    // orders causally and must not be confused with this display time.
+    // One wall-clock reading for this whole cycle. Store acknowledgements and
+    // the status built at the end record the same instant. Store batch commits
+    // carry a separate HLC stamp (`timestamp` below) for causal ordering.
     let sync_time = clock.now().to_rfc3339();
 
     // The cloud handle + object-key suffix the inline host-provided upload path uses to
@@ -620,54 +470,21 @@ pub(crate) async fn run_single_sync_cycle(
         }
     }
 
-    // Retry a staged changeset left behind by a failed push in an earlier cycle.
-    // Staging holds the gated, push-ready bytes so a lost push can re-push exactly
-    // them next cycle without re-deriving; the span below stages-then-pushes.
-    if let Some(seq) = staged_seq {
-        if rotation_pending.is_some() {
-            debug!(
-                seq,
-                "rotation pending; leaving the staged changeset queued until adoption"
-            );
-        } else if let Some(staged_data) = read_staged_changeset(store_dir).await {
-            info!(seq, "Retrying staged changeset push");
-
-            match push_changeset(storage, db, device_id, seq, staged_data, &sync_time).await {
-                Ok(()) => {
-                    info!(seq, "Staged changeset push succeeded");
-                    commit_push_success(
-                        db,
-                        store_dir,
-                        seq,
-                        staged_pending_changeset_id,
-                        &mut local_seq,
-                    )
-                    .await?;
-                }
-                Err(e) => return Err(format!("Staged changeset push failed: {e}")),
-            }
-        } else {
-            // staged_seq set but the file is absent: the push never committed.
-            // The staging write is directory-durable (its parent is fsynced
-            // after the rename), so a committed stage always leaves a
-            // recoverable file — this branch cannot be reached by power loss
-            // dropping the rename's directory entry, only by a stage that never
-            // completed. The success path persists local_seq before clearing the
-            // file, so it can't produce this state either. The seq was never
-            // consumed on the remote — drop the marker, keep local_seq. Abnormal:
-            // the changeset those bytes held is gone, so surface it.
-            warn!(
-                seq,
-                "Stale staged_seq with no staged file; dropping the marker"
-            );
-            db.set_sync_state("staged_seq", "")
-                .await
-                .map_err(|e| format!("Failed to clear stale staged_seq: {e}"))?;
-            delete_sync_state(db, STAGED_PENDING_CHANGESET_ID_KEY).await?;
+    if rotation_pending.is_none() {
+        let published = super::store_outbound::drain_outbound_store_batches(db, storage)
+            .await
+            .map_err(|error| format!("publish queued Store batches: {error}"))?;
+        if published > 0 {
+            info!(published, "Published queued Store batches");
         }
     }
 
     let timestamp = hlc.now().to_string();
+    let local_seq_before_stage = db
+        .latest_local_store_position()
+        .await
+        .map_err(|error| format!("read local Store position: {error}"))?
+        .map_or(0, |position| position.seq);
 
     if rotation_pending.is_some() {
         debug!(
@@ -679,7 +496,7 @@ pub(crate) async fn run_single_sync_cycle(
         storage,
         &timestamp,
         store_dir,
-        local_seq,
+        local_seq_before_stage,
         host_upload_cancel.as_ref(),
     )
     .await
@@ -688,143 +505,66 @@ pub(crate) async fn run_single_sync_cycle(
         resume_drain_promptly = true;
     }
 
-    let pending_changesets = db
-        .pending_changeset_batch()
+    let genesis_hash = db
+        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
         .await
-        .map_err(|e| format!("Failed to load pending changesets: {e}"))?;
-    let (pending_changeset_max_id, outgoing_changeset) = match &pending_changesets {
-        PendingChangesetBatch::Empty => (None, Vec::new()),
-        PendingChangesetBatch::Pending { max_id, changeset } => (Some(*max_id), changeset.clone()),
-    };
-
-    // Run the core gate + push-prep + pull.
-    let sync_result = super::service::sync(
-        device_id,
+        .map_err(|error| format!("read protocol genesis hash: {error}"))?
+        .ok_or_else(|| "protocol genesis hash is absent".to_string())?
+        .parse()
+        .map_err(|error| format!("protocol genesis hash is invalid: {error}"))?;
+    if rotation_pending.is_none() {
+        super::store_registration::ensure_active_registration(db, storage, user_keypair)
+            .await
+            .map_err(|error| format!("publish Store device registration: {error}"))?;
+    }
+    let store_pull = super::store_pull::pull_store_commits(
         db,
         tables,
-        outgoing_changeset,
-        local_seq,
         storage,
-        &timestamp,
-        "background sync",
-        user_keypair,
+        genesis_hash,
+        device_id,
         store_dir,
         membership.chain.as_ref(),
-        membership.pinned_owner.as_deref(),
-        host_upload_cancel.as_ref(),
-        rotation_pending.is_some(),
     )
     .await
-    .map_err(|e| format!("Sync cycle error: {e}"))?;
+    .map_err(|error| format!("pull Store commits: {error}"))?;
 
-    // Propagate the pending changesets. The gate already cut any row whose
-    // gate column is off (the host keeps a blob-bearing row gated until its
-    // blobs upload), so whatever the gate emitted is safe to publish now —
-    // there is no global upload deferral. Stage the bytes before pushing so a
-    // push failure re-pushes exactly these gated bytes; the staged-retry above
-    // re-pushes on the next cycle.
-    if let Some(outgoing) = &sync_result.outgoing {
-        if rotation_pending.is_some() {
-            debug!(
-                seq = outgoing.seq,
-                "rotation pending; leaving the outgoing changeset queued until adoption"
-            );
-        } else {
-            let seq = outgoing.seq;
-            let pending_changeset_max_id = pending_changeset_max_id
-                .ok_or_else(|| "outgoing changeset without pending journal rows".to_string())?;
-
-            // The staged file is the sole record that seq N's exact bytes may
-            // already be on the remote, so it must be directory-durable: the
-            // recovery branch below reads its presence to decide whether the
-            // push committed, and that inference has to hold across power loss,
-            // not only a process crash. (Cache blobs are re-fetchable and use
-            // the cheaper `write_atomic`, which skips the parent-directory
-            // fsync.)
-            crate::local_blob::write_atomic_durable(&staging_path(store_dir), &outgoing.packed)
-                .await
-                .map_err(|e| format!("Failed to stage outgoing changeset: {e}"))?;
-            persist_staged_push_state(
-                db,
-                seq,
-                pending_changeset_max_id,
-                &outgoing.deferred_local_blob_drops,
-                &outgoing.consumed_make_remote_intents,
-            )
-            .await?;
-
-            match push_changeset(
-                storage,
-                db,
-                device_id,
-                seq,
-                outgoing.packed.clone(),
-                &sync_time,
-            )
+    let staged_store_batch = if rotation_pending.is_none() {
+        let staged = super::store_outbound::stage_pending_store_batch(
+            db,
+            storage,
+            device_id,
+            &sync_time,
+            user_keypair,
+            store_dir,
+            membership.chain.as_ref(),
+            host_upload_cancel.as_ref(),
+        )
+        .await
+        .map_err(|error| format!("stage Store batch: {error}"))?;
+        let published = super::store_outbound::drain_outbound_store_batches(db, storage)
             .await
-            {
-                Ok(()) => {
-                    commit_push_success(
-                        db,
-                        store_dir,
-                        seq,
-                        Some(pending_changeset_max_id),
-                        &mut local_seq,
-                    )
-                    .await?;
-                    info!(seq, "Pushed changeset");
-                }
-                Err(e) => {
-                    warn!(seq, "Push failed, changeset staged for retry: {e}");
-                }
-            }
+            .map_err(|error| format!("publish Store batches: {error}"))?;
+        if published > 0 {
+            info!(published, "Published Store batches");
         }
-    } else if let Some(max_id) = pending_changeset_max_id {
-        db.clear_pending_changesets_through(max_id)
-            .await
-            .map_err(|e| format!("Failed to clear gated-empty pending changesets: {e}"))?;
-    }
+        staged
+    } else {
+        false
+    };
 
-    // Publish this device's signed pull-ack: how far it has pulled every other
-    // device, the cursor vector each accepted apply persisted with its rows.
-    // Changeset reclamation reads it
-    // to compute a floor that strands no member; nothing else consumes it. A stale
-    // or failed ack only narrows the next reclamation — it never blocks a pull or a
-    // push — so a failure here is logged, not fatal. Runs every cycle so the acked
-    // cursors track pull progress whether or not a snapshot is published.
-    let ack = super::signed_control::AckJson::signed(
-        device_id,
-        sync_result.updated_cursors.clone().into_iter().collect(),
-        user_keypair,
-    );
-    match serde_json::to_vec(&ack) {
-        Ok(bytes) => {
-            if let Err(e) = storage.put_ack(device_id, bytes).await {
-                warn!(device_id = %device_id, "Failed to publish pull-ack: {e}");
-            }
-        }
-        Err(e) => warn!(device_id = %device_id, "Failed to serialize pull-ack: {e}"),
-    }
+    let local_seq = db
+        .latest_local_store_position()
+        .await
+        .map_err(|error| format!("read local Store position after publish: {error}"))?
+        .map_or(0, |position| position.seq);
+    drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
 
-    // Republish our head every cycle, even when we pushed no changeset of our
-    // own. push_changeset writes the head only when this device produces a
-    // changeset — so a device that only pulls would otherwise never refresh
-    // its head. The head's last-sync time is what the sync-status view reads
-    // to show how recently each device synced; writing it here after the pull
-    // keeps that current. Best-effort: a transient failure leaves last cycle's
-    // head, and the next cycle republishes unconditionally, so we log rather
-    // than abort.
-    if let Err(e) = storage.put_head(device_id, local_seq, &sync_time).await {
-        warn!("Failed to republish head after pull: {e}");
-    }
-
-    // Flush the clock's high-water mark so a restart re-seeds past it. The pull
-    // already advanced the clock in the row-and-cursor commit closure, so
-    // `high_water` here reflects both that
-    // advance and any host stamps minted this cycle (e.g. the changeset envelope
-    // timestamp), since it reads the clock's current state. A persist error aborts
-    // the cycle rather than risking a backward jump after restart.
-    db.set_sync_state(
+    // Flush the clock's high-water mark so a restart re-seeds past it. Store pull
+    // advances the clock in the row-and-materialized-position commit closure, so
+    // `high_water` reflects remote commits and host stamps minted this cycle. A
+    // persist error aborts the cycle rather than risking a backward jump.
+    db.set_protocol_state(
         crate::sync::hlc::HIGHWATER_STATE_KEY,
         &hlc.high_water().to_string(),
     )
@@ -906,8 +646,7 @@ pub(crate) async fn run_single_sync_cycle(
     // Initial sync: store has data but the pending journal produced no changeset
     // (data was inserted before the cycle ran — e.g. user connected a provider to
     // an existing store). Push a snapshot so the existing data reaches the cloud.
-    let is_initial_sync =
-        local_seq == 0 && snapshot_seq.is_none() && sync_result.outgoing.is_none();
+    let is_initial_sync = local_seq == 0 && !has_snapshot && !staged_store_batch;
 
     // The snapshot is the second channel that propagates rows to peers. It
     // applies the same row-level gate as the changeset push (create_snapshot runs
@@ -921,8 +660,25 @@ pub(crate) async fn run_single_sync_cycle(
     // (the VACUUM), so a non-owner never builds an image, publishes one readers
     // would reject, or runs the reclaim a publish triggers. A non-owner's rows still
     // propagate via the changeset push above.
-    let snapshot_due = is_initial_sync
-        || super::snapshot::should_create_snapshot(local_seq, snapshot_seq, hours_since);
+    let resumed_snapshot = super::store_snapshot::drain_outbound_store_snapshot(storage, db)
+        .await
+        .map_err(|error| format!("publish pending Store snapshot: {error}"))?
+        .is_some();
+    let snapshot_due = !resumed_snapshot
+        && (is_initial_sync
+            || super::snapshot::should_create_snapshot(
+                local_seq,
+                if has_snapshot {
+                    Some(
+                        last_snapshot_position
+                            .as_ref()
+                            .map_or(0, |position| position.seq),
+                    )
+                } else {
+                    None
+                },
+                hours_since,
+            ));
     let may_snapshot = if rotation_pending.is_some() {
         // A snapshot restates and re-seals the whole catalog under the store key —
         // exactly the kind of new cloud content the pending rotation must block.
@@ -982,96 +738,71 @@ pub(crate) async fn run_single_sync_cycle(
                 .await
                 .map_err(|e| format!("Snapshot host-provided blob upload failed: {e}"))?;
 
-                match super::snapshot::push_snapshot(
+                let meta = super::store_snapshot::push_store_snapshot(
                     storage,
-                    store_id,
-                    cut.snapshot.db_image,
-                    device_id,
-                    cut.applied_cursors,
-                    local_seq,
+                    genesis_hash,
+                    cut.snapshot,
+                    cut.coverage,
                     db.schema_version(),
                     user_keypair,
-                    clock,
-                    super::snapshot::SnapshotBlobPreflight {
-                        db,
-                        blobs: &cut.snapshot.publish_blobs,
-                    },
+                    sync_time.clone(),
+                    membership.chain.as_ref(),
+                    db,
                 )
                 .await
-                {
-                    Ok(()) => {
-                        db.set_sync_state("snapshot_seq", &local_seq.to_string())
-                            .await
-                            .map_err(|e| format!("Failed to persist snapshot_seq: {e}"))?;
-                        db.set_sync_state("last_snapshot_time", &clock.now().to_rfc3339())
-                            .await
-                            .map_err(|e| format!("Failed to persist last_snapshot_time: {e}"))?;
-
-                        info!(local_seq, "Snapshot created and pushed");
-
-                        // Reclaim changeset logs the fresh snapshot now covers and
-                        // every current device has acked. A fresh snapshot most
-                        // relaxes the snapshot-cursor floor term, so this runs at
-                        // snapshot cadence to maximize reclaim. Anchor authorization
-                        // to the device's pinned owner (the same pin the tombstone GC
-                        // reads); a read failure skips reclaim this cycle rather than
-                        // falling back to trust-on-first-use. Logged-not-fatal: a
-                        // leftover changeset is unreferenced storage the next snapshot's
-                        // reclaim sweeps, never a wrong state a reader observes.
-                        match db
-                            .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
-                            .await
-                        {
-                            Ok(pinned_owner) => {
-                                match super::snapshot::reclaim_superseded_changesets(
-                                    storage,
-                                    store_id,
-                                    pinned_owner.as_deref(),
-                                    Some(db),
-                                )
-                                .await
-                                {
-                                    Ok(r) if r.deleted > 0 || r.errors > 0 => info!(
-                                        deleted = r.deleted,
-                                        errors = r.errors,
-                                        "Reclaimed superseded changesets"
-                                    ),
-                                    Ok(_) => {}
-                                    Err(e) => warn!("Changeset reclamation error: {e}"),
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Changeset reclamation skipped: failed to read pinned owner: {e}")
-                            }
-                        }
-                    }
-                    Err(e) => warn!("Failed to push snapshot: {e}"),
-                }
+                .map_err(|error| format!("publish Store snapshot: {error}"))?;
+                info!(local_seq, snapshot = %meta.snapshot_hash(), "Snapshot created and pushed");
             }
             Err(e) => warn!("Failed to create snapshot: {e}"),
         }
     }
 
+    if rotation_pending.is_none() {
+        super::store_ack::drain_outbound_store_acks(db, storage)
+            .await
+            .map_err(|error| format!("publish queued Store acknowledgement: {error}"))?;
+        let frontier = db
+            .materialized_frontier()
+            .await
+            .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?;
+        super::store_ack::stage_store_ack(db, frontier, sync_time.clone(), user_keypair)
+            .await
+            .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
+        super::store_ack::drain_outbound_store_acks(db, storage)
+            .await
+            .map_err(|error| format!("publish Store acknowledgement: {error}"))?;
+        if let Some(chain) = membership.chain.as_ref() {
+            match super::store_reclaim::reclaim_store_packages(
+                storage,
+                genesis_hash,
+                chain,
+                membership.listing_proof,
+            )
+            .await
+            {
+                Ok(result) if result.packages_deleted > 0 => info!(
+                    packages = result.packages_deleted,
+                    copies = result.physical_copies_deleted,
+                    "Reclaimed snapshot-covered Store packages"
+                ),
+                Ok(_) => {}
+                Err(error) => warn!(%error, "Store package reclamation refused"),
+            }
+        }
+    }
+
     // Build status from remote heads. Reuse this cycle's `sync_time` so the
     // status's `last_sync_time` matches the head this cycle wrote.
-    let core_status = super::status::build_sync_status(
-        &sync_result.pull.remote_heads,
-        device_id,
-        Some(&sync_time),
-    );
-
+    let core_status =
+        super::status::build_sync_status(&store_pull.visible_heads, device_id, Some(&sync_time));
     Ok(SyncCycleResult {
-        changesets_applied: sync_result.pull.changesets_applied,
-        skipped_schema: sync_result.pull.skipped_schema,
-        rejected_unauthorized: sync_result.pull.rejected_unauthorized.len() as u64,
-        invalid_signatures: sync_result.pull.invalid_signatures.len() as u64,
-        held_changesets: sync_result.pull.held_changesets,
-        constraint_conflicts: sync_result.pull.constraint_conflicts.len() as u64,
+        changesets_applied: store_pull.changesets_applied,
+        held_positions: store_pull.held_positions,
         device_activity: core_status.other_devices,
         sync_time,
-        asset_downloads_failed: sync_result.pull.asset_downloads_failed,
-        local_blob_cleanup_pending: sync_result.pull.local_blob_cleanup_pending,
-        row_changes: sync_result.pull.row_changes,
+        asset_downloads_failed: store_pull.asset_downloads_failed,
+        local_blob_cleanup_pending: store_pull.local_blob_cleanup_pending,
+        row_changes: store_pull.row_changes,
         resume_drain_promptly,
         rotation_pending,
     })
@@ -1153,14 +884,7 @@ async fn refresh_authorization_state(
     // The visible activation coordinates are the cycle's raw membership LIST — an
     // entry is "visible" as soon as it is listed, which is the view the wrapped-key
     // activation gate checks against (distinct from the committed chain above).
-    let visible_membership_coords = membership
-        .listed_entries
-        .iter()
-        .map(|(author_pubkey, seq)| super::membership::MembershipCoord {
-            author_pubkey: author_pubkey.clone(),
-            seq: *seq,
-        })
-        .collect::<Vec<_>>();
+    let visible_membership_coords = chain.author_heads();
 
     // 2. Adopt a rotated store key. Scan the current Owners' prefixes for this
     //    device's re-wrapped key (`keys/{owner}/{self}`), authenticating each
@@ -1279,6 +1003,8 @@ pub enum InitSyncError {
     NoSyncedTables,
     #[error("cloud cipher and blob path scheme describe different storage modes")]
     IncoherentStorageRepresentation,
+    #[error("Store protocol genesis failed: {0}")]
+    ProtocolGenesis(String),
     #[error("membership chain bootstrap/anchor failed: {0}")]
     MembershipAnchor(String),
     #[error("restoring the persisted pending rotation failed: {0}")]
@@ -1287,9 +1013,19 @@ pub enum InitSyncError {
 
 /// Establish the storage representation and signed owner anchor over an
 /// already-built [`CloudSyncStorage`], returning the only runnable sync session.
+#[derive(Debug, Clone)]
+pub enum StoreInitialization {
+    CreateStore,
+    OpenStore {
+        expected_genesis_hash: super::store_commit::ObjectHash,
+        expected_founder: String,
+    },
+}
+
 pub async fn init_sync_over_storage(
     db: &Database,
     storage: CloudSyncStorage,
+    initialization: StoreInitialization,
 ) -> Result<SyncComponents, InitSyncError> {
     // Integration guard. The host declared its synced tables on the builder; an
     // empty set means a synced store would attach nothing, every changeset would
@@ -1311,7 +1047,34 @@ pub async fn init_sync_over_storage(
 
     let hlc = db.hlc();
     let user_keypair = storage.user_keypair().clone();
-    ensure_owner_anchored_chain(&storage, db, &user_keypair, &hlc)
+    let store_id = storage.store_id().to_string();
+    let genesis = match initialization {
+        StoreInitialization::CreateStore => {
+            super::store_genesis::create_store(
+                db,
+                &storage,
+                &store_id,
+                &hlc.now().to_string(),
+                &user_keypair,
+            )
+            .await
+        }
+        StoreInitialization::OpenStore {
+            expected_genesis_hash,
+            expected_founder,
+        } => {
+            super::store_genesis::open_store(
+                db,
+                &storage,
+                expected_genesis_hash,
+                &store_id,
+                &expected_founder,
+            )
+            .await
+        }
+    }
+    .map_err(|error| InitSyncError::ProtocolGenesis(error.to_string()))?;
+    ensure_owner_anchored_chain(&storage, db, &genesis, &user_keypair)
         .await
         .map_err(InitSyncError::MembershipAnchor)?;
 
@@ -1328,7 +1091,6 @@ pub async fn init_sync_over_storage(
         .map_err(|e| InitSyncError::PendingRotationRestore(e.to_string()))?;
     }
 
-    let store_id = storage.store_id().to_string();
     let device_id = hlc.device_id().to_string();
     let pending_rotation = storage.shared_pending_rotation();
     info!("Sync initialized (device: {device_id})");
@@ -1356,26 +1118,38 @@ pub async fn init_sync_over_storage(
 pub async fn ensure_owner_anchored_chain(
     storage: &dyn SyncStorage,
     db: &Database,
+    genesis: &super::store_commit::ProtocolGenesis,
     owner_keypair: &UserKeypair,
-    hlc: &Hlc,
 ) -> Result<(), String> {
     use super::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
     let our_pk = hex::encode(owner_keypair.public_key());
     let pinned = db
-        .get_sync_state(OWNER_PUBKEY_STATE_KEY)
+        .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|e| format!("read pinned owner: {e}"))?;
-    let entries = storage
-        .list_membership_entries()
+    let entries = super::membership_ops::list_membership_entries(storage)
         .await
         .map_err(|e| format!("list membership entries: {e}"))?;
-    let expected_owner = pinned.as_deref().unwrap_or(&our_pk);
+    if pinned
+        .as_deref()
+        .is_some_and(|owner| owner != genesis.author_pubkey)
+    {
+        return Err(format!(
+            "pinned owner {:?} does not match protocol genesis founder {:?}",
+            pinned.as_deref(),
+            genesis.author_pubkey
+        ));
+    }
+    let expected_owner = &genesis.author_pubkey;
     let loaded =
         super::membership_ops::load_and_persist_owner_anchor(storage, &entries, expected_owner, db)
             .await
             .map_err(|error| error.to_string())?;
-    if loaded.is_some() {
+    if let Some(chain) = loaded {
+        if chain.entries().first() != Some(&genesis.founder) {
+            return Err("membership founder does not match protocol genesis".to_string());
+        }
         return Ok(());
     }
     if let Some(pinned) = pinned {
@@ -1385,9 +1159,15 @@ pub async fn ensure_owner_anchored_chain(
         ));
     }
 
-    publish_or_complete_founder(storage, owner_keypair, hlc).await?;
-    let committed_entries = storage
-        .list_membership_entries()
+    if our_pk != genesis.author_pubkey {
+        return Err(format!(
+            "membership root is absent and local identity {our_pk} cannot republish founder {}",
+            genesis.author_pubkey
+        ));
+    }
+
+    publish_or_complete_founder(storage, &genesis.founder, owner_keypair).await?;
+    let committed_entries = super::membership_ops::list_membership_entries(storage)
         .await
         .map_err(|e| format!("list membership entries after founder publish: {e}"))?;
     super::membership_ops::load_and_persist_owner_anchor(storage, &committed_entries, &our_pk, db)
@@ -1402,29 +1182,34 @@ pub async fn ensure_owner_anchored_chain(
 
 async fn publish_or_complete_founder(
     storage: &dyn SyncStorage,
+    genesis_founder: &super::membership::MembershipEntry,
     owner_keypair: &UserKeypair,
-    hlc: &Hlc,
 ) -> Result<(), String> {
-    use super::membership::{MembershipChain, MembershipCoord};
-    use super::storage::StorageError;
+    use super::membership::MembershipChain;
+    use super::store_objects::{append_membership_entry_object, load_membership_entry_slot};
 
     let owner_pubkey = hex::encode(owner_keypair.public_key());
-    let coord = MembershipCoord {
-        author_pubkey: owner_pubkey.clone(),
-        seq: 1,
-    };
-    match storage.get_membership_entry(&owner_pubkey, 1).await {
-        Ok(bytes) => {
+    let founder_coord = genesis_founder.coord();
+    match load_membership_entry_slot(storage, &owner_pubkey, &founder_coord.author_owner_grant, 1)
+        .await
+    {
+        Ok(Some(verified)) => {
+            let bytes = verified.bytes;
+            let entry = verified.value;
+            let coord = entry.coord();
             let entry = super::membership_ops::parse_membership_entry_at(&coord, &bytes)?;
-            let chain = MembershipChain::from_entries_with_coords(vec![(coord, entry)])
-                .map_err(|error| format!("invalid interrupted founder entry: {error}"))?;
+            let chain =
+                MembershipChain::from_entries_with_coords(vec![(coord.clone(), entry.clone())])
+                    .map_err(|error| format!("invalid interrupted founder entry: {error}"))?;
             if !chain.is_founded_by(&owner_pubkey) {
                 return Err(
                     "interrupted founder entry is not this storage identity's founder".to_string(),
                 );
             }
-            storage
-                .put_membership_entry(&owner_pubkey, 1, bytes)
+            if chain.entries().first() != Some(genesis_founder) {
+                return Err("interrupted founder entry does not match protocol genesis".to_string());
+            }
+            append_membership_entry_object(storage, &coord, &entry)
                 .await
                 .map_err(|error| format!("re-publish interrupted founder entry: {error}"))?;
             super::membership_ops::publish_membership_head(storage, &chain, owner_keypair)
@@ -1432,9 +1217,18 @@ async fn publish_or_complete_founder(
                 .map_err(|error| format!("publish interrupted founder head: {error}"))?;
             Ok(())
         }
-        Err(StorageError::NotFound(_)) => {
-            let timestamp = hlc.now().to_string();
-            super::membership_ops::write_founder_entry(storage, owner_keypair, &timestamp).await
+        Ok(None) => {
+            let coord = founder_coord;
+            append_membership_entry_object(storage, &coord, genesis_founder)
+                .await
+                .map_err(|error| format!("publish protocol genesis founder entry: {error}"))?;
+            let chain =
+                MembershipChain::from_entries_with_coords(vec![(coord, genesis_founder.clone())])
+                    .map_err(|error| format!("protocol genesis founder is invalid: {error}"))?;
+            super::membership_ops::publish_membership_head(storage, &chain, owner_keypair)
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("publish protocol genesis founder head: {error}"))
         }
         Err(error) => Err(format!("read interrupted founder entry: {error}")),
     }
@@ -1525,6 +1319,7 @@ impl SyncComponents {
             &encryption,
             &self.store_id,
             store_name,
+            &self.db,
         )
         .await
     }
@@ -1548,6 +1343,7 @@ impl SyncComponents {
             custody,
             &self.cipher,
             &self.pending_rotation,
+            &self.db,
         )
         .await
     }
@@ -1592,70 +1388,5 @@ impl SyncComponents {
             observer,
         )
         .await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn snapshot_image_and_cursor_vector_share_one_database_cut() {
-        let db = crate::sync::test_helpers::open_test_db();
-        db.call(|conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            tx.execute(
-                "INSERT INTO notes \
-                 (id, title, body, shared, _updated_at, created_at) \
-                 VALUES ('n1', 'covered-at-one', NULL, 1, \
-                         '0000000001000-0000-dev1', '2026-01-01')",
-                [],
-            )
-            .map_err(DbError::from)?;
-            Database::advance_sync_cursor_on(&tx, "dev1", 0, 1)?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-        .expect("seed covered state");
-
-        let temp = tempfile::tempdir().expect("snapshot temp dir");
-        let cut = capture_snapshot_cut(&db, temp.path().to_path_buf(), db.synced_tables().to_vec())
-            .await
-            .expect("capture snapshot cut");
-
-        db.call(|conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            tx.execute(
-                "UPDATE notes SET title = 'covered-at-two', \
-                 _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'",
-                [],
-            )
-            .map_err(DbError::from)?;
-            Database::advance_sync_cursor_on(&tx, "dev1", 1, 2)?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-        .expect("advance live state after snapshot cut");
-
-        let image_path = temp.path().join("captured.db");
-        std::fs::write(&image_path, &cut.snapshot.db_image).expect("write captured image");
-        let image = rusqlite::Connection::open(&image_path).expect("open captured image");
-        let captured_title: String = image
-            .query_row("SELECT title FROM notes WHERE id = 'n1'", [], |row| {
-                row.get(0)
-            })
-            .expect("captured row");
-
-        assert_eq!(captured_title, "covered-at-one");
-        assert_eq!(cut.applied_cursors.get("dev1"), Some(&1));
-        assert_eq!(
-            crate::sync::test_helpers::query_text(&db, "SELECT title FROM notes WHERE id = 'n1'",)
-                .await,
-            "covered-at-two",
-        );
-        assert_eq!(
-            db.get_all_sync_cursors().await.unwrap().get("dev1"),
-            Some(&2)
-        );
     }
 }

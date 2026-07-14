@@ -1,9 +1,11 @@
 //! coven's bookkeeping schema and the cloud-outbox row types.
 //!
-//! coven owns nine device-local bookkeeping tables — `sync_cursors`,
-//! `sync_state`, `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents`,
-//! `local_cleanup_intents`, `published_blob_drop_intents`, `pending_changesets`,
-//! `blob_uploaders` — all created STRICT by [`apply_coven_schema`], which coven
+//! coven owns its device-local bookkeeping tables — `protocol_state`,
+//! `materialized_commits`, `snapshot_coverage`, `outbound_store_batches`,
+//! `outbound_membership_mutation`, `outbound_store_snapshot`,
+//! `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents`,
+//! `local_cleanup_intents`, `pending_changesets`, and `blob_uploaders` — all
+//! created STRICT by [`apply_coven_schema`], which coven
 //! runs against the connection it owns during open. The host does not implement
 //! any of this; native app SQL goes through [`crate::CovenHandle::sql`] or
 //! [`crate::CovenHandle::write`].
@@ -11,17 +13,28 @@
 macro_rules! coven_tables {
     ($visit:ident) => {
         $visit!(
-            sync_cursors,
-            "
-    device_id TEXT PRIMARY KEY,
-    last_seq INTEGER NOT NULL
-"
-        );
-        $visit!(
-            sync_state,
+            protocol_state,
             "
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+"
+        );
+        $visit!(
+            materialized_commits,
+            "
+    device_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    commit_hash TEXT NOT NULL CHECK (length(commit_hash) = 64),
+    PRIMARY KEY (device_id, seq)
+"
+        );
+        $visit!(
+            snapshot_coverage,
+            "
+    device_id TEXT PRIMARY KEY,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    commit_hash TEXT NOT NULL CHECK (length(commit_hash) = 64),
+    snapshot_hash TEXT NOT NULL CHECK (length(snapshot_hash) = 64)
 "
         );
         $visit!(
@@ -81,10 +94,10 @@ macro_rules! coven_tables {
         $visit!(
             published_blob_drop_intents,
             "
-    seq INTEGER NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq > 0),
     namespace TEXT NOT NULL,
     blob_id TEXT NOT NULL,
-    size INTEGER NOT NULL,
+    size INTEGER NOT NULL CHECK (size >= 0),
     disposition TEXT NOT NULL CHECK (disposition IN ('drop', 'cache', 'pin')),
     PRIMARY KEY (seq, namespace, blob_id)
 "
@@ -93,7 +106,81 @@ macro_rules! coven_tables {
             pending_changesets,
             "
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    changeset BLOB NOT NULL
+    changeset BLOB NOT NULL,
+    dependencies TEXT NOT NULL
+"
+        );
+        $visit!(
+            outbound_store_batches,
+            "
+    seq INTEGER PRIMARY KEY CHECK (seq > 0),
+    commit_hash TEXT NOT NULL UNIQUE CHECK (length(commit_hash) = 64),
+    previous_commit_hash TEXT,
+    dependencies TEXT NOT NULL,
+    package_bytes BLOB NOT NULL,
+    package_hash TEXT NOT NULL CHECK (length(package_hash) = 64),
+    commit_bytes BLOB NOT NULL,
+    head_hash TEXT NOT NULL CHECK (length(head_hash) = 64),
+    head_bytes BLOB NOT NULL,
+    max_pending_id INTEGER NOT NULL,
+    blob_manifest TEXT NOT NULL,
+    local_cleanup_metadata TEXT NOT NULL,
+    completion_metadata TEXT NOT NULL
+"
+        );
+        $visit!(
+            outbound_membership_mutation,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    intent_hash TEXT NOT NULL CHECK (length(intent_hash) = 64),
+    plan_bytes BLOB NOT NULL,
+    progress_bytes BLOB NOT NULL
+"
+        );
+        $visit!(
+            outbound_store_snapshot,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    snapshot_hash TEXT NOT NULL CHECK (length(snapshot_hash) = 64),
+    image_hash TEXT NOT NULL CHECK (length(image_hash) = 64),
+    image_bytes BLOB NOT NULL,
+    meta_bytes BLOB NOT NULL
+"
+        );
+        $visit!(
+            published_store_acks,
+            "
+    revision INTEGER PRIMARY KEY CHECK (revision > 0),
+    ack_hash TEXT NOT NULL UNIQUE CHECK (length(ack_hash) = 64)
+"
+        );
+        $visit!(
+            outbound_store_acks,
+            "
+    revision INTEGER PRIMARY KEY CHECK (revision > 0),
+    ack_hash TEXT NOT NULL UNIQUE CHECK (length(ack_hash) = 64),
+    previous_ack_hash TEXT,
+    ack_bytes BLOB NOT NULL
+"
+        );
+        $visit!(
+            local_protocol_genesis,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    genesis_hash TEXT NOT NULL CHECK (length(genesis_hash) = 64),
+    genesis_bytes BLOB NOT NULL,
+    published INTEGER NOT NULL CHECK (published IN (0, 1))
+"
+        );
+        $visit!(
+            local_store_device_registration,
+            "
+    revision INTEGER PRIMARY KEY CHECK (revision > 0),
+    registration_hash TEXT NOT NULL UNIQUE CHECK (length(registration_hash) = 64),
+    previous_registration_hash TEXT,
+    state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+    registration_bytes BLOB NOT NULL,
+    published INTEGER NOT NULL CHECK (published IN (0, 1))
 "
         );
         $visit!(

@@ -20,15 +20,15 @@ use crate::clock::FixedClock;
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError, CloudHomeJoinInfo};
+use crate::storage::cloud::{no_progress, CloudHome, CloudHomeError};
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
-use crate::sync::membership::{MemberRole, MembershipAction, MembershipChain};
+use crate::sync::membership::{founder_entry, MemberRole, MembershipChain};
 use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 use crate::sync::session::BlobDecl;
 use crate::sync::test_helpers::{
-    append_membership_entry, exec, founder_entry, make_linked_entry, open_test_db_with_blob,
-    pubkey_hex, publish_membership_chain_head, MockSyncStorage,
+    append_membership_entry, exec, open_test_db_with_blob, pubkey_hex,
+    publish_membership_chain_head, MockSyncStorage,
 };
 use rusqlite::OptionalExtension;
 
@@ -110,7 +110,7 @@ async fn gc_tombstones_as(
     grace: chrono::Duration,
 ) -> Result<usize, String> {
     if let Some(owner) = pinned_owner {
-        db.set_sync_state(OWNER_PUBKEY_STATE_KEY, owner)
+        db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, owner)
             .await
             .expect("pin owner");
     }
@@ -216,23 +216,24 @@ fn plaintext_cipher() -> RwLock<CloudCipher> {
 async fn storage_with_chain() -> (MockSyncStorage, UserKeypair, UserKeypair) {
     let founder = UserKeypair::generate();
     let member = UserKeypair::generate();
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(founder.clone());
 
     // The founder entry and the member's Add are both authored by the founder, so
     // they live under `membership/{founder}/{seq}` where `list_membership_entries`
     // finds them.
-    let f_entry = founder_entry(&founder, "0000000001000-0000-dev1");
+    let f_entry = storage.protocol_genesis().founder.clone();
     let founder_pk = pubkey_hex(&founder);
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &founder_pk, 1, f_entry).await;
-    let m_entry = make_linked_entry(
-        &chain,
-        &founder,
-        MembershipAction::Add,
-        &member,
-        MemberRole::Member,
-        "0000000002000-0000-dev1",
-    );
+    let m_entry = chain
+        .signed_set_member(
+            &founder,
+            pubkey_hex(&member),
+            None,
+            MemberRole::Member,
+            "0000000002000-0000-dev1".to_string(),
+        )
+        .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &founder_pk, 2, m_entry).await;
     publish_membership_chain_head(&storage, &chain, &founder).await;
 
@@ -314,18 +315,11 @@ impl CloudHome for CancelTombstoneOnExists<'_> {
         self.inner.exists(key).await
     }
 
-    async fn grant_access(
+    async fn set_access(
         &self,
-        grant: crate::storage::cloud::CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        self.inner.grant_access(grant).await
-    }
-
-    async fn revoke_access(
-        &self,
-        revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
-        self.inner.revoke_access(revoke).await
+        desired: crate::storage::cloud::CloudAccessState,
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
+        self.inner.set_access(desired).await
     }
 }
 
@@ -430,18 +424,11 @@ impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
         self.inner.exists(key).await
     }
 
-    async fn grant_access(
+    async fn set_access(
         &self,
-        grant: crate::storage::cloud::CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        self.inner.grant_access(grant).await
-    }
-
-    async fn revoke_access(
-        &self,
-        revoke: crate::storage::cloud::CloudAccessRevoke,
-    ) -> Result<crate::storage::cloud::RevokeOutcome, CloudHomeError> {
-        self.inner.revoke_access(revoke).await
+        desired: crate::storage::cloud::CloudAccessState,
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
+        self.inner.set_access(desired).await
     }
 }
 
@@ -1643,8 +1630,8 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
     // founder under their OWN key — a valid chain in isolation, but founded by the
     // wrong key.
     let attacker = UserKeypair::generate();
-    let storage = MockSyncStorage::new();
-    let forged_founder = founder_entry(&attacker, "0000000001000-0000-evil");
+    let storage = MockSyncStorage::with_keypair(attacker.clone());
+    let forged_founder = founder_entry("test-store", &attacker, "0000000001000-0000-evil");
     let attacker_pk = pubkey_hex(&attacker);
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &attacker_pk, 1, forged_founder).await;

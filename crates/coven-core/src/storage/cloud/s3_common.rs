@@ -99,8 +99,8 @@ mod tests {
     #[test]
     fn strip_listed_key_prefix_no_configured_prefix_keeps_key() {
         assert_eq!(
-            strip_listed_key_prefix(None, "heads/", "heads/dev1.json"),
-            Some("heads/dev1.json")
+            strip_listed_key_prefix(None, "objects/", "objects/dev1.json"),
+            Some("objects/dev1.json")
         );
     }
 
@@ -109,17 +109,21 @@ mod tests {
         assert_eq!(
             strip_listed_key_prefix(
                 Some("libs/abc"),
-                "libs/abc/heads/",
-                "libs/abc/heads/dev1.json"
+                "libs/abc/objects/",
+                "libs/abc/objects/dev1.json"
             ),
-            Some("heads/dev1.json")
+            Some("objects/dev1.json")
         );
     }
 
     #[test]
     fn strip_listed_key_prefix_skips_key_outside_configured_prefix() {
         assert_eq!(
-            strip_listed_key_prefix(Some("libs/abc"), "libs/abc/heads/", "other/heads/dev1.json"),
+            strip_listed_key_prefix(
+                Some("libs/abc"),
+                "libs/abc/objects/",
+                "other/objects/dev1.json"
+            ),
             None
         );
     }
@@ -127,13 +131,13 @@ mod tests {
     #[test]
     fn strip_listed_key_prefix_skips_key_outside_queried_prefix() {
         assert_eq!(
-            strip_listed_key_prefix(None, "heads/", "membership/owner/1.enc"),
+            strip_listed_key_prefix(None, "objects/", "membership/owner/1.enc"),
             None
         );
         assert_eq!(
             strip_listed_key_prefix(
                 Some("libs/abc"),
-                "libs/abc/heads/",
+                "libs/abc/objects/",
                 "libs/abc/membership/owner/1.enc"
             ),
             None

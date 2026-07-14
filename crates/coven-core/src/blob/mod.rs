@@ -295,7 +295,7 @@ pub enum CacheFill {
 /// three.
 ///
 /// It exists because a cloud object must never be rewritten with different bytes. The
-/// pull verifies an object against its row's content hash and a cursor advances only over
+/// pull verifies an object against its row's content hash and a position advances only over
 /// a fully-realized changeset, so a key whose content can change leaves a device that
 /// pulls an older changeset unable to satisfy it — wedged there for good, not merely
 /// missing a blob. Two declarations reach that guarantee by different routes, and coven

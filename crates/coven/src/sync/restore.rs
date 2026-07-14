@@ -168,6 +168,8 @@ async fn build_cloud_home(
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_from_cloud(
     store_id: &str,
+    genesis_hash: crate::sync::store_commit::ObjectHash,
+    founder_pubkey: &str,
     encryption_key_hex: Option<&str>,
     store_name: &str,
     synced_tables: &[SyncedTable],
@@ -251,7 +253,10 @@ pub async fn restore_from_cloud(
             blob_paths,
             store_id.to_string(),
             keypair.clone(),
-        );
+        )
+        .with_copy_ids(std::sync::Arc::new(
+            crate::storage::cloud::RandomCopyIdGenerator,
+        ));
 
         // Create the store directory under `stores/` (its non-existence was
         // checked up front, so this create and the failure-cleanup below own
@@ -266,7 +271,11 @@ pub async fn restore_from_cloud(
             &store_dir,
             store_id,
             &device_id,
-            crate::sync::join::BootstrapContext::Restore { keypair },
+            genesis_hash,
+            crate::sync::join::BootstrapContext::Restore {
+                founder_pubkey,
+                keypair,
+            },
             membership_floor,
             synced_tables,
             migrations,
@@ -275,7 +284,6 @@ pub async fn restore_from_cloud(
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
-            clock.as_ref(),
             &on_status,
             cancel,
         )
@@ -360,6 +368,8 @@ pub async fn restore_from_code(
     // custody. Nothing identity-related is left for this caller to do.
     restore_from_cloud(
         &parsed.sid,
+        parsed.genesis_hash,
+        &parsed.founder_pubkey,
         parsed.ek.as_deref(),
         &parsed.name,
         synced_tables,

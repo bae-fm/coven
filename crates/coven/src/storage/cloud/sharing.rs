@@ -1,4 +1,4 @@
-//! Revoke-by-email sharing shared by Google Drive and OneDrive.
+//! Absolute permission-state helpers shared by Google Drive and OneDrive.
 //!
 //! Both revoke a member the same way: list the folder's permissions, find the
 //! entry whose email matches the member, and DELETE it (tolerating a 404 if it is
@@ -11,14 +11,44 @@ use super::http::{ensure_ok, ok_json, NotFound};
 use super::oauth_session::OAuthSession;
 use super::CloudHomeError;
 
-/// Revoke `member_id`'s access by email. `list_url` lists the folder's
-/// permissions; `permissions_field` is the JSON array holding them
-/// (`"permissions"` for Drive, `"value"` for OneDrive); `email_of` pulls a
-/// permission entry's email; `delete_url` builds the DELETE URL for a permission
-/// id; `next_page` extracts the next permissions URL from a page. A member with
-/// no matching permission is an error (nothing to revoke); a 404 on the delete
-/// is success (already gone).
-pub(super) async fn revoke_by_email(
+pub(super) async fn permission_by_email(
+    session: &OAuthSession,
+    member_id: &str,
+    list_url: &str,
+    permissions_field: &str,
+    email_of: &impl Fn(&serde_json::Value) -> Option<String>,
+    next_page: &impl Fn(&serde_json::Value) -> Result<Option<String>, CloudHomeError>,
+) -> Result<Option<serde_json::Value>, CloudHomeError> {
+    let mut page_url = list_url.to_string();
+    loop {
+        let resp = session
+            .api_call(|token| session.client().get(&page_url).bearer_auth(token))
+            .await?;
+        let resp = ensure_ok(resp, "list permissions", NotFound::Status).await?;
+        let json: serde_json::Value = ok_json(resp, "parse permissions").await?;
+
+        if let Some(permission) = json[permissions_field].as_array().and_then(|perms| {
+            perms.iter().find_map(|p| {
+                if email_of(p).map(|e| e.eq_ignore_ascii_case(member_id)) == Some(true) {
+                    Some(p.clone())
+                } else {
+                    None
+                }
+            })
+        }) {
+            return Ok(Some(permission));
+        }
+
+        let Some(next_url) = next_page(&json)? else {
+            return Ok(None);
+        };
+        page_url = next_url;
+    }
+}
+
+/// Drive the provider permission for `member_id` to absent, accepting an
+/// already-absent state and verifying absence after deletion.
+pub(super) async fn ensure_absent_by_email(
     session: &OAuthSession,
     member_id: &str,
     list_url: &str,
@@ -27,35 +57,23 @@ pub(super) async fn revoke_by_email(
     delete_url: impl Fn(&str) -> String,
     next_page: impl Fn(&serde_json::Value) -> Result<Option<String>, CloudHomeError>,
 ) -> Result<(), CloudHomeError> {
-    let mut page_url = list_url.to_string();
-    let permission_id = loop {
-        let resp = session
-            .api_call(|token| session.client().get(&page_url).bearer_auth(token))
-            .await?;
-        let resp = ensure_ok(resp, "list permissions", NotFound::Status).await?;
-        let json: serde_json::Value = ok_json(resp, "parse permissions").await?;
-
-        if let Some(permission_id) = json[permissions_field].as_array().and_then(|perms| {
-            perms.iter().find_map(|p| {
-                if email_of(p).map(|e| e.eq_ignore_ascii_case(member_id)) == Some(true) {
-                    p["id"].as_str().map(String::from)
-                } else {
-                    None
-                }
-            })
-        }) {
-            break permission_id;
-        }
-
-        let Some(next_url) = next_page(&json)? else {
-            return Err(CloudHomeError::Transport(format!(
-                "no permission found for {member_id}"
-            )));
-        };
-        page_url = next_url;
+    let Some(permission) = permission_by_email(
+        session,
+        member_id,
+        list_url,
+        permissions_field,
+        &email_of,
+        &next_page,
+    )
+    .await?
+    else {
+        return Ok(());
     };
+    let permission_id = permission["id"].as_str().ok_or_else(|| {
+        CloudHomeError::Transport(format!("permission for {member_id} has no string id"))
+    })?;
 
-    let url = delete_url(&permission_id);
+    let url = delete_url(permission_id);
     let resp = session
         .api_call(|token| session.client().delete(&url).bearer_auth(token))
         .await?;
@@ -66,13 +84,28 @@ pub(super) async fn revoke_by_email(
     )
     .await
     {
-        Ok(_) => Ok(()),
+        Ok(_) => {}
         Err(CloudHomeError::NotFound(_)) => {
             tracing::debug!("revoke for {member_id}: permission already absent (404 on delete)");
-            Ok(())
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(e),
     }
+    if permission_by_email(
+        session,
+        member_id,
+        list_url,
+        permissions_field,
+        &email_of,
+        &next_page,
+    )
+    .await?
+    .is_some()
+    {
+        return Err(CloudHomeError::Transport(format!(
+            "permission for {member_id} remains after deletion"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth-providers"))]
@@ -87,6 +120,7 @@ mod tests {
     use axum::http::{Method, Response, StatusCode, Uri};
     use axum::Router;
     use chrono::{TimeZone, Utc};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
@@ -94,6 +128,7 @@ mod tests {
         requests: Arc<Mutex<Vec<String>>>,
         target_on_second_page: bool,
         delete_status: StatusCode,
+        deleted: Arc<AtomicBool>,
     }
 
     async fn fake_permissions_endpoint(
@@ -116,7 +151,9 @@ mod tests {
                 ))
                 .expect("build page one response"),
             (Method::GET, "/permissions", Some("page=2")) => {
-                let body = if state.target_on_second_page {
+                let body = if state.target_on_second_page
+                    && !state.deleted.load(Ordering::SeqCst)
+                {
                     r#"{"permissions":[{"id":"target","email":"target@example.com"}]}"#
                 } else {
                     r#"{"permissions":[{"id":"second","email":"second@example.com"}]}"#
@@ -127,10 +164,13 @@ mod tests {
                     .body(Body::from(body))
                     .expect("build page two response")
             }
-            (Method::DELETE, "/permissions/target", None) => Response::builder()
-                .status(state.delete_status)
-                .body(Body::empty())
-                .expect("build delete response"),
+            (Method::DELETE, "/permissions/target", None) => {
+                state.deleted.store(true, Ordering::SeqCst);
+                Response::builder()
+                    .status(state.delete_status)
+                    .body(Body::empty())
+                    .expect("build delete response")
+            }
             _ => Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::from(format!("unexpected request: {uri}")))
@@ -156,6 +196,7 @@ mod tests {
             requests: requests.clone(),
             target_on_second_page,
             delete_status,
+            deleted: Arc::new(AtomicBool::new(false)),
         };
         let app = Router::new()
             .fallback(fake_permissions_endpoint)
@@ -198,7 +239,7 @@ mod tests {
         let session = session(label);
         let list_url = format!("{endpoint}/permissions");
         let next_base = endpoint.clone();
-        revoke_by_email(
+        ensure_absent_by_email(
             &session,
             "target@example.com",
             &list_url,
@@ -216,7 +257,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoke_by_email_finds_permission_on_second_page() {
+    async fn ensure_absent_finds_permission_on_second_page_and_verifies_removal() {
         let (requests, shutdown) = revoke_against_fake("found", true, StatusCode::NO_CONTENT)
             .await
             .expect("revoke target on second page");
@@ -227,26 +268,27 @@ mod tests {
                 "GET /permissions",
                 "GET /permissions?page=2",
                 "DELETE /permissions/target",
+                "GET /permissions",
+                "GET /permissions?page=2",
             ]
         );
         let _ = shutdown.send(());
     }
 
     #[tokio::test]
-    async fn revoke_by_email_absent_member_scans_all_pages() {
-        let err = revoke_against_fake("absent", false, StatusCode::NO_CONTENT)
+    async fn ensure_absent_accepts_absent_member_after_scanning_all_pages() {
+        let (requests, shutdown) = revoke_against_fake("absent", false, StatusCode::NO_CONTENT)
             .await
-            .expect_err("absent target returns an error");
-        let msg = err.to_string();
-
-        assert!(
-            msg.contains("no permission found for target@example.com"),
-            "unexpected error: {msg}"
+            .expect("already absent is the desired state");
+        assert_eq!(
+            requests.lock().unwrap().as_slice(),
+            ["GET /permissions", "GET /permissions?page=2"]
         );
+        let _ = shutdown.send(());
     }
 
     #[tokio::test]
-    async fn revoke_by_email_delete_404_is_success_after_pagination() {
+    async fn ensure_absent_accepts_delete_404_then_verifies_absence() {
         let (requests, shutdown) = revoke_against_fake("delete-404", true, StatusCode::NOT_FOUND)
             .await
             .expect("404 delete means already absent");
@@ -257,6 +299,8 @@ mod tests {
                 "GET /permissions",
                 "GET /permissions?page=2",
                 "DELETE /permissions/target",
+                "GET /permissions",
+                "GET /permissions?page=2",
             ]
         );
         let _ = shutdown.send(());

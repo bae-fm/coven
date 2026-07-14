@@ -20,8 +20,8 @@ use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{
-    BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    RevokeOutcome,
+    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, SequentialCopyIdGenerator,
 };
 use crate::sync::cloud_storage::{
     cloud_aad_context, BlobPathScheme, CloudCipher, CloudCipherAccess, CloudSyncStorage,
@@ -30,9 +30,12 @@ use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::membership::MemberRole;
 use crate::sync::membership_ops::{
-    invite_member, remove_member, write_founder_entry, MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
+    invite_member, remove_member, MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
 };
-use crate::sync::test_helpers::{host_exec, open_test_db, pubkey_hex, temp_store_dir, TestCustody};
+use crate::sync::test_helpers::{
+    host_exec, open_test_db, pubkey_hex, publish_test_founder_membership,
+    publish_test_store_genesis, temp_store_dir, TestCustody,
+};
 
 const LIB_ID: &str = "rotation-pending-test";
 const DEVICE_ID: &str = "owner-device";
@@ -45,6 +48,9 @@ fn storage_for(home: &InMemoryCloudHome, key: [u8; 32], keypair: &UserKeypair) -
         LIB_ID,
         keypair.clone(),
     )
+    .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
+        "rotation-pending-copy",
+    )))
 }
 
 /// `InMemoryCloudHome` refuses `grant_access` — it models a backend with no
@@ -86,24 +92,23 @@ impl CloudHome for GrantingCloudHome {
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
         self.0.exists(key).await
     }
-    async fn grant_access(
+    async fn set_access(
         &self,
-        _grant: CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        Ok(CloudHomeJoinInfo::S3 {
-            bucket: "test-bucket".to_string(),
-            region: "us-east-1".to_string(),
-            endpoint: None,
-            access_key: "test-access-key".to_string(),
-            secret_key: "test-secret-key".to_string(),
-            key_prefix: None,
-        })
-    }
-    async fn revoke_access(
-        &self,
-        revoke: CloudAccessRevoke,
-    ) -> Result<RevokeOutcome, CloudHomeError> {
-        self.0.revoke_access(revoke).await
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
+        match desired {
+            CloudAccessState::Present { .. } => {
+                Ok(CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
+                    bucket: "test-bucket".to_string(),
+                    region: "us-east-1".to_string(),
+                    endpoint: None,
+                    access_key: "test-access-key".to_string(),
+                    secret_key: "test-secret-key".to_string(),
+                    key_prefix: None,
+                }))
+            }
+            absent => self.0.set_access(absent).await,
+        }
     }
 }
 
@@ -118,11 +123,20 @@ async fn insert_shareable_row(db: &crate::database::Database, id: &str, stamp: &
     .await;
 }
 
-/// Every `changes/` object currently in `home`.
+async fn mark_snapshot_floor(db: &crate::database::Database) {
+    db.set_protocol_state(
+        crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
+        &crate::sync::store_commit::ObjectHash::digest(b"snapshot-floor").to_string(),
+    )
+    .await
+    .expect("persist snapshot floor");
+}
+
+/// Every immutable Store package object currently in `home`.
 fn changeset_keys(home: &InMemoryCloudHome) -> Vec<String> {
-    home.keys()
+    home.appended_keys()
         .into_iter()
-        .filter(|k| k.starts_with("changes/"))
+        .filter(|k| k.starts_with("store-v1/packages/"))
         .collect()
 }
 
@@ -132,6 +146,7 @@ fn changeset_keys(home: &InMemoryCloudHome) -> Vec<String> {
 /// whose cipher and pending-rotation marker a later cycle or a retried removal
 /// reads, and the `Hlc` used throughout.
 async fn found_add_and_fail_to_adopt_a_removal(
+    db: &crate::database::Database,
     home: &InMemoryCloudHome,
     owner: &UserKeypair,
     member: &UserKeypair,
@@ -139,11 +154,12 @@ async fn found_add_and_fail_to_adopt_a_removal(
     old_key: [u8; 32],
 ) -> (CloudSyncStorage, Hlc) {
     let storage = storage_for(home, old_key, owner);
-    let hlc = Hlc::new(DEVICE_ID.to_string());
-
-    write_founder_entry(&storage, owner, &hlc.now().to_string())
+    publish_test_store_genesis(db, &storage, LIB_ID, DEVICE_ID, owner).await;
+    publish_test_founder_membership(&storage, LIB_ID, owner).await;
+    db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(owner))
         .await
-        .expect("found store");
+        .expect("pin test Store founder");
+    let hlc = Hlc::new(DEVICE_ID.to_string());
     let granting_home = GrantingCloudHome(home.clone());
     invite_member(
         &storage,
@@ -156,6 +172,7 @@ async fn found_add_and_fail_to_adopt_a_removal(
         &EncryptionService::from_key(old_key),
         LIB_ID,
         "Test Store",
+        db,
     )
     .await
     .expect("invite member");
@@ -175,6 +192,7 @@ async fn found_add_and_fail_to_adopt_a_removal(
         custody,
         &cipher_lock,
         &pending_rotation,
+        db,
     )
     .await
     .expect_err("adoption fails while custody is unwritable");
@@ -202,19 +220,19 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
     let old_key: [u8; 32] = [40u8; 32];
     let custody = TestCustody::default();
     let home = InMemoryCloudHome::new();
+    let db = open_test_db();
 
     let (storage, hlc) =
-        found_add_and_fail_to_adopt_a_removal(&home, &owner, &member, &custody, old_key).await;
+        found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
 
-    let db = open_test_db();
-    db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
+    db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
         .await
         .unwrap();
     // Seed the snapshot floor so this device's first cycle takes the ordinary
     // changeset path rather than the initial-sync snapshot coven pushes when a
     // store has pre-existing local data and no snapshot yet — these tests are
     // about the changeset push specifically.
-    db.set_sync_state("snapshot_seq", "0").await.unwrap();
+    mark_snapshot_floor(&db).await;
     insert_shareable_row(&db, "n1", "0000000005000-0000-owner-device").await;
 
     let (_tmp, store_dir) = temp_store_dir();
@@ -250,7 +268,7 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
         changeset_keys(&home),
     );
     assert_eq!(
-        db.get_sync_state("local_seq").await.unwrap(),
+        db.get_protocol_state("local_seq").await.unwrap(),
         None,
         "local_seq does not advance — the pending changeset stays queued, not lost",
     );
@@ -267,19 +285,19 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     let old_key: [u8; 32] = [41u8; 32];
     let custody = TestCustody::default();
     let home = InMemoryCloudHome::new();
+    let db = open_test_db();
 
     let (storage, hlc) =
-        found_add_and_fail_to_adopt_a_removal(&home, &owner, &member, &custody, old_key).await;
+        found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
 
-    let db = open_test_db();
-    db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
+    db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
         .await
         .unwrap();
     // Seed the snapshot floor so this device's first cycle takes the ordinary
     // changeset path rather than the initial-sync snapshot coven pushes when a
     // store has pre-existing local data and no snapshot yet — these tests are
     // about the changeset push specifically.
-    db.set_sync_state("snapshot_seq", "0").await.unwrap();
+    mark_snapshot_floor(&db).await;
     insert_shareable_row(&db, "n1", "0000000005000-0000-owner-device").await;
 
     let (_tmp, store_dir) = temp_store_dir();
@@ -319,6 +337,7 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
         &custody,
         &cipher_lock,
         &pending_rotation,
+        &db,
     )
     .await
     .expect("retrying the removal converges");
@@ -363,19 +382,19 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     let old_key: [u8; 32] = [42u8; 32];
     let custody = TestCustody::default();
     let home = InMemoryCloudHome::new();
+    let db = open_test_db();
 
     let (storage, hlc) =
-        found_add_and_fail_to_adopt_a_removal(&home, &owner, &member, &custody, old_key).await;
+        found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
 
-    let db = open_test_db();
-    db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
+    db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
         .await
         .unwrap();
     // Seed the snapshot floor so this device's first cycle takes the ordinary
     // changeset path rather than the initial-sync snapshot coven pushes when a
     // store has pre-existing local data and no snapshot yet — these tests are
     // about the changeset push specifically.
-    db.set_sync_state("snapshot_seq", "0").await.unwrap();
+    mark_snapshot_floor(&db).await;
     insert_shareable_row(&db, "n1", "0000000005000-0000-owner-device").await;
 
     let (_tmp, store_dir) = temp_store_dir();
@@ -439,8 +458,14 @@ fn assert_generation_two_opens_but_generation_one_does_not(
     cipher: &dyn CloudCipherAccess,
     old_key: [u8; 32],
 ) {
-    let sealed = home.get(key).expect("changeset object present at rest");
-    let aad = cloud_aad_context(LIB_ID, key);
+    let sealed = home
+        .get_appended(key)
+        .expect("Store package object present at rest");
+    let semantic_prefix = key
+        .split_once("/copies/")
+        .map(|(prefix, _)| prefix)
+        .expect("Store package copy path");
+    let aad = cloud_aad_context(LIB_ID, semantic_prefix);
 
     let current = cipher.snapshot();
     current

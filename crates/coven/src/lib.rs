@@ -403,6 +403,12 @@ pub(crate) mod storage {
                 ) -> Result<CloudKitShare, CloudHomeError> {
                     unimplemented!("not exercised by these tests")
                 }
+                fn share_for_member(
+                    &self,
+                    _member_pubkey: &str,
+                ) -> Result<Option<CloudKitShare>, CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
                 fn revoke_share(&self, _member_pubkey: &str) -> Result<(), CloudHomeError> {
                     unimplemented!("not exercised by these tests")
                 }
@@ -611,19 +617,19 @@ pub use coven_core::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_core::CloudCipher;
 
-// Cloud provider trait surface a provider implementor needs, the thread-safety
-// floor those traits carry, and the pull-result rejection reports.
+// Cloud provider trait surface a provider implementor needs and its
+// thread-safety floor.
 pub use coven_core::{
-    BlobBody, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, InvalidSignature, MaybeThreadSafe, PartSink, RejectedUnauthorized,
-    UploadProgress,
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, MaybeThreadSafe, PartSink, UploadProgress,
 };
 
 // Sync-status surface a host renders from `CovenHandle::subscribe_sync_status`:
 // the status enum, its completed-cycle success payload, the per-cycle alert
 // bundle, the per-device activity, and the held-changeset detail the alerts carry.
 pub use coven_core::{
-    DeviceActivity, HeldChangeset, HeldChangesetReason, SyncLoopAlerts, SyncLoopSuccess,
+    DeviceActivity, HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason,
+    SyncLoopAlerts, SyncLoopSuccess,
 };
 pub use sync::sync_loop::SyncLoopStatus;
 

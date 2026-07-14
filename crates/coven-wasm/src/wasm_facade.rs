@@ -74,6 +74,34 @@ struct OpenConfig {
     #[serde(default)]
     encryption_key_hex: Option<String>,
     device_id: String,
+    initialization: JsStoreInitialization,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum JsStoreInitialization {
+    CreateStore,
+    OpenStore {
+        genesis_hash: String,
+        founder_pubkey: String,
+    },
+}
+
+impl JsStoreInitialization {
+    fn into_core(self) -> Result<crate::sync::cycle::StoreInitialization, String> {
+        match self {
+            Self::CreateStore => Ok(crate::sync::cycle::StoreInitialization::CreateStore),
+            Self::OpenStore {
+                genesis_hash,
+                founder_pubkey,
+            } => Ok(crate::sync::cycle::StoreInitialization::OpenStore {
+                expected_genesis_hash: genesis_hash
+                    .parse()
+                    .map_err(|error| format!("invalid genesis_hash: {error}"))?,
+                expected_founder: founder_pubkey,
+            }),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -164,6 +192,10 @@ impl CovenStore {
             .map_err(|e| JsValue::from_str(&format!("invalid migrations: {e}")))?;
         let synced_tables = parse_synced_tables(synced_tables)
             .map_err(|e| JsValue::from_str(&format!("invalid synced tables: {e}")))?;
+        let initialization = config
+            .initialization
+            .into_core()
+            .map_err(|e| JsValue::from_str(&format!("invalid initialization: {e}")))?;
 
         // Build the cipher first so a bad/missing encryption key fails before any
         // storage or database side effects.
@@ -195,10 +227,12 @@ impl CovenStore {
             cipher,
             config.storage,
             &config.store_id,
+            &config.store_id,
             config.device_id,
             migrations,
             synced_tables,
             user_keypair,
+            initialization,
             production_schedule(),
         )
         .await
@@ -289,8 +323,8 @@ impl CovenStore {
     /// `open` builds an [`S3WasmCloudHome`] and passes it here; the test passes an
     /// in-memory home so the full Database + storage + runtime assembly is exercised
     /// without a live, CORS-configured S3 bucket. It installs the OPFS VFS, opens
-    /// the database at the `store_id`-derived SQLite path that the browser VFS
-    /// hashes into an OPFS storage name, with the demo schema + synced set, and
+    /// the database at the `database_id`-derived SQLite path that the browser VFS
+    /// hashes into an OPFS storage name, and
     /// builds (but does not start) the [`WasmSyncRuntime`] on `schedule`.
     /// `open` passes [`production_schedule`]; the headless test passes a short one
     /// so it converges quickly.
@@ -304,14 +338,17 @@ impl CovenStore {
         cipher: CloudCipher,
         storage_mode: HomeStorage,
         store_id: &str,
+        database_id: &str,
         device_id: String,
         migrations: Vec<Migration>,
         synced_tables: Vec<SyncedTable>,
         user_keypair: UserKeypair,
+        initialization: crate::sync::cycle::StoreInitialization,
         schedule: WasmSyncSchedule,
     ) -> Result<CovenStore, String> {
         validate_store_id(store_id)?;
-        let open_guard = WasmStoreOpenGuard::acquire(store_id)?;
+        validate_store_id(database_id)?;
+        let open_guard = WasmStoreOpenGuard::acquire(database_id)?;
 
         install_browser_storage()
             .await
@@ -320,7 +357,7 @@ impl CovenStore {
         // The browser VFS hashes this SQLite path into a flat OPFS filename
         // (`coven-<hash>.db`), so distinct store ids produce distinct storage
         // files on one origin.
-        let path = format!("{store_id}.db");
+        let path = format!("{database_id}.db");
         let (db, _stamper) = Database::open(
             std::path::Path::new(&path),
             synced_tables,
@@ -339,15 +376,16 @@ impl CovenStore {
             BlobPathScheme::for_storage(storage_mode),
             store_id,
             user_keypair.clone(),
-        );
-        let components = crate::sync::cycle::init_sync_over_storage(&db, storage)
+        )
+        .with_copy_ids(std::sync::Arc::new(
+            crate::storage::cloud::RandomCopyIdGenerator,
+        ));
+        let components = crate::sync::cycle::init_sync_over_storage(&db, storage, initialization)
             .await
             .map_err(|error| format!("initialize sync: {error}"))?;
 
-        // A store dir that never touches disk: the browser has none. The
-        // changeset path's only fs touch is best-effort changeset staging, which
-        // logs and continues on failure. This demo syncs rows only — its notes
-        // schema carries no blobs — so the dir is never read or written.
+        // This row-only facade schema has no blobs and creates no snapshot image,
+        // so the runtime does not access this browser placeholder directory.
         let store_dir = StoreDir::new(std::path::Path::new("/coven-browser"));
 
         let runtime = WasmSyncRuntime::new(
@@ -385,6 +423,19 @@ impl CovenStore {
         &self,
     ) -> Option<std::rc::Rc<std::cell::Cell<bool>>> {
         self.runtime.active_token_for_test()
+    }
+
+    #[cfg(all(test, target_arch = "wasm32"))]
+    pub(crate) async fn protocol_genesis_hash_for_test(
+        &self,
+    ) -> crate::sync::store_commit::ObjectHash {
+        self.db
+            .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+            .await
+            .expect("read protocol genesis state")
+            .expect("initialized store has protocol genesis state")
+            .parse()
+            .expect("protocol genesis state is a valid object hash")
     }
 }
 

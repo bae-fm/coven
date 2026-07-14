@@ -393,7 +393,7 @@ mod tests {
     #[tokio::test]
     async fn write_atomic_durable_leaves_a_readable_file() {
         let tmp = tempfile::tempdir().expect("temp dir");
-        let path = tmp.path().join("nested").join("sync_staging.bin");
+        let path = tmp.path().join("nested").join("upload_staging.bin");
         let bytes = b"packed outgoing changeset".to_vec();
 
         NativeLocalBlobBackend

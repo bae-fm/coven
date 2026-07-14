@@ -17,7 +17,7 @@ use super::oauth_rest::{
 use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
 use super::{
-    sharing, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
+    sharing, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
     CloudHomeJoinInfo, RevokeOutcome,
 };
 use crate::clock::ClockRef;
@@ -294,61 +294,112 @@ impl CloudHome for OneDriveCloudHome {
         exists_from_response(resp, &format!("exists {key}"), NotFound::Status).await
     }
 
-    async fn grant_access(
+    async fn set_access(
         &self,
-        grant: CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        let email = grant.require_provider_email("OneDrive")?;
-        let url = format!(
-            "{}/drives/{}/items/{}/invite",
-            GRAPH_API, self.drive_id, self.folder_id
-        );
-        let invite = serde_json::json!({
-            "recipients": [{"email": email}],
-            "roles": ["write"],
-            "requireSignIn": true,
-        });
-        let resp = self
-            .session
-            .api_call(|token| self.client().post(&url).bearer_auth(token).json(&invite))
-            .await?;
-        ensure_ok(resp, &format!("grant access to {email}"), NotFound::Status).await?;
-        Ok(CloudHomeJoinInfo::OneDrive {
-            drive_id: self.drive_id.clone(),
-            folder_id: self.folder_id.clone(),
-        })
-    }
-
-    async fn revoke_access(
-        &self,
-        revoke: CloudAccessRevoke,
-    ) -> Result<RevokeOutcome, CloudHomeError> {
-        let email = revoke.require_provider_email("OneDrive")?;
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
+        let email = desired.require_provider_email("OneDrive")?.to_string();
         let perms_url = format!(
             "{}/drives/{}/items/{}/permissions",
             GRAPH_API, self.drive_id, self.folder_id
         );
-        let delete_base = perms_url.clone();
-        sharing::revoke_by_email(
-            &self.session,
-            email,
-            &perms_url,
-            "value",
-            |p| {
-                p["grantedToV2"]["user"]["email"]
-                    .as_str()
-                    .or_else(|| p["grantedTo"]["user"]["email"].as_str())
-                    .map(String::from)
-            },
-            |perm_id| format!("{delete_base}/{perm_id}"),
-            |page| {
-                Ok(page["@odata.nextLink"]
-                    .as_str()
-                    .map(std::string::ToString::to_string))
-            },
-        )
-        .await?;
-        Ok(RevokeOutcome::Revoked)
+        let email_of = |permission: &serde_json::Value| {
+            permission["grantedToV2"]["user"]["email"]
+                .as_str()
+                .or_else(|| permission["grantedTo"]["user"]["email"].as_str())
+                .map(String::from)
+        };
+        let next_page = |page: &serde_json::Value| {
+            Ok(page["@odata.nextLink"]
+                .as_str()
+                .map(std::string::ToString::to_string))
+        };
+        match desired {
+            CloudAccessState::Present { .. } => {
+                let current = sharing::permission_by_email(
+                    &self.session,
+                    &email,
+                    &perms_url,
+                    "value",
+                    &email_of,
+                    &next_page,
+                )
+                .await?;
+                if current.as_ref().is_some_and(|permission| {
+                    permission["roles"].as_array().is_some_and(|roles| {
+                        roles.iter().any(|role| role.as_str() == Some("write"))
+                    })
+                }) {
+                    return Ok(CloudAccessOutcome::Present(CloudHomeJoinInfo::OneDrive {
+                        drive_id: self.drive_id.clone(),
+                        folder_id: self.folder_id.clone(),
+                    }));
+                }
+                if current.is_some() {
+                    let delete_base = perms_url.clone();
+                    sharing::ensure_absent_by_email(
+                        &self.session,
+                        &email,
+                        &perms_url,
+                        "value",
+                        &email_of,
+                        |permission_id| format!("{delete_base}/{permission_id}"),
+                        &next_page,
+                    )
+                    .await?;
+                }
+                let url = format!(
+                    "{}/drives/{}/items/{}/invite",
+                    GRAPH_API, self.drive_id, self.folder_id
+                );
+                let invite = serde_json::json!({
+                    "recipients": [{"email": email}],
+                    "roles": ["write"],
+                    "requireSignIn": true,
+                });
+                let resp = self
+                    .session
+                    .api_call(|token| self.client().post(&url).bearer_auth(token).json(&invite))
+                    .await?;
+                ensure_ok(resp, &format!("grant access to {email}"), NotFound::Status).await?;
+                let verified = sharing::permission_by_email(
+                    &self.session,
+                    &email,
+                    &perms_url,
+                    "value",
+                    &email_of,
+                    &next_page,
+                )
+                .await?;
+                if !verified.as_ref().is_some_and(|permission| {
+                    permission["roles"].as_array().is_some_and(|roles| {
+                        roles.iter().any(|role| role.as_str() == Some("write"))
+                    })
+                }) {
+                    return Err(CloudHomeError::Transport(format!(
+                        "write permission for {email} is not visible after creation"
+                    )));
+                }
+                Ok(CloudAccessOutcome::Present(CloudHomeJoinInfo::OneDrive {
+                    drive_id: self.drive_id.clone(),
+                    folder_id: self.folder_id.clone(),
+                }))
+            }
+            CloudAccessState::Absent { .. } => {
+                let delete_base = perms_url.clone();
+                sharing::ensure_absent_by_email(
+                    &self.session,
+                    &email,
+                    &perms_url,
+                    "value",
+                    &email_of,
+                    |permission_id| format!("{delete_base}/{permission_id}"),
+                    &next_page,
+                )
+                .await?;
+                Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
+            }
+        }
     }
 }
 
@@ -376,8 +427,8 @@ mod tests {
     #[test]
     fn item_path_url_encodes_key() {
         assert_eq!(
-            home().item_path_url("changes/dev1/42.enc"),
-            "https://graph.microsoft.com/v1.0/drives/drive123/items/folder456:/6368616e6765732f646576312f34322e656e63:"
+            home().item_path_url("objects/dev1/42.enc"),
+            "https://graph.microsoft.com/v1.0/drives/drive123/items/folder456:/6f626a656374732f646576312f34322e656e63:"
         );
     }
 
@@ -391,18 +442,18 @@ mod tests {
 
     #[test]
     fn parse_list_page_skips_malformed_flat_names() {
-        let valid = encode_key("changes/dev1/1.enc");
-        let malformed = format!("{}zz", encode_key("changes/"));
+        let valid = encode_key("objects/dev1/1.enc");
+        let malformed = format!("{}zz", encode_key("objects/"));
         let body = format!(
             r#"{{"value":[{{"name":"{valid}"}},{{"name":"{malformed}"}},{{"name":"{}"}}]}}"#,
-            encode_key("heads/dev1.json.enc"),
+            encode_key("snapshots/dev1.json.enc"),
         );
 
         let page = home()
-            .parse_list_page(&body, "changes/")
+            .parse_list_page(&body, "objects/")
             .expect("parse list page");
 
-        assert_eq!(page.keys, vec!["changes/dev1/1.enc"]);
+        assert_eq!(page.keys, vec!["objects/dev1/1.enc"]);
     }
 
     #[test]
@@ -428,7 +479,7 @@ mod tests {
     fn classify_write_error_quota_message_names_provider_and_recovery() {
         let body = r#"{"error":{"code":"quotaLimitReached"}}"#;
         let err =
-            classify_write_error(reqwest::StatusCode::INSUFFICIENT_STORAGE, body, "changes/1");
+            classify_write_error(reqwest::StatusCode::INSUFFICIENT_STORAGE, body, "objects/1");
         let msg = err.to_string();
         assert!(msg.contains("OneDrive storage is full"), "{msg}");
         assert!(msg.contains("Free up space"), "{msg}");
@@ -437,10 +488,10 @@ mod tests {
     #[test]
     fn classify_write_error_keeps_raw_for_non_quota_errors() {
         let body = r#"{"error":{"code":"itemNotFound","message":"..."}}"#;
-        let err = classify_write_error(reqwest::StatusCode::NOT_FOUND, body, "changes/dev1/1.enc");
+        let err = classify_write_error(reqwest::StatusCode::NOT_FOUND, body, "objects/dev1/1.enc");
         let msg = err.to_string();
         assert!(msg.contains("HTTP 404"), "{msg}");
-        assert!(msg.contains("changes/dev1/1.enc"), "{msg}");
+        assert!(msg.contains("objects/dev1/1.enc"), "{msg}");
         assert!(!msg.contains("storage is full"), "{msg}");
     }
 }

@@ -1,19 +1,10 @@
-/// Sync storage: reads/writes to the layout used for changeset sync.
-///
-/// The `{suffix}` is `.enc` for an encrypted home and empty for a plaintext one,
-/// so an encrypted home's keys carry `.enc` (`snapshot/{author}/0.db.enc`,
-/// `heads/{device}.json.enc`, …) and a plaintext home's are bare
-/// (`snapshot/{author}/0.db`, `heads/{device}.json`, …).
+/// Storage access for immutable Store protocol objects and mutable blob/key data.
 ///
 /// Layout:
 /// ```text
-/// changes/{device_id}/{seq}{suffix}              -- changeset envelopes
-/// heads/{device_id}.json{suffix}                 -- head pointers
+/// store-v1/...                                   -- immutable protocol copies
 /// {namespace}/{uploader}/{ab}/{cd}/{id}          -- blobs, hashed scheme (opaque home)
 /// {namespace}/{cloud_path}                       -- blobs, plain scheme (browsable home)
-/// snapshot/{author}/{publish_id}.db{suffix}      -- a generation's full DB snapshot
-/// snapshot/{author}/{publish_id}_meta.json{suffix} -- a generation's per-device cursors
-/// snapshot/current.json{suffix}                  -- signed pointer naming the live {author, publish_id}
 /// membership/{author_pubkey}/{seq}{suffix}       -- membership entries
 /// membership/{author_pubkey}/head{suffix}        -- that author's signed head
 /// keys/{owner_pubkey}/{recipient_pubkey}{suffix} -- store key wrapped by an owner for a member
@@ -21,13 +12,9 @@
 ///
 /// The layout is aligned to one storage-access rule a provider ACL can enforce:
 /// **a member writes (and deletes) only under its own public key; an owner may
-/// write and delete anywhere.** Every writable surface sits under a prefix keyed
-/// by the writing member's identity — its changes (`changes/{device}/`), snapshots
-/// (`snapshot/{author}/`), membership entries and head (`membership/{author}/`),
-/// the wrapped keys it authors as an owner (`keys/{owner}/`), and the blobs it
-/// uploads (`{namespace}/{uploader}/`) on an opaque home. Deletion follows the
-/// same rule: a member's GC reclaims only its own-prefix blobs, and an owner
-/// sweeps absent members' orphans (owners retain bucket-wide delete).
+/// write and delete anywhere.** Signed immutable Store objects bind each object
+/// to its semantic slot; blobs and wrapped keys retain their dedicated mutable
+/// paths.
 ///
 /// A read that must span writers dispatches on where the object lives, never a
 /// blind search: a member resolving its rotated store key reads
@@ -39,20 +26,6 @@
 /// finds. The browsable plain scheme keeps human-readable `{namespace}/{cloud_path}`
 /// keys with no uploader segment. It still has an owner-anchored membership chain;
 /// plain object naming does not use the per-member encrypted-home path layout.
-///
-/// A snapshot is published as a generation under the publishing device's
-/// `{author}` (its hex public key): the `{author}/{publish_id}.db` and then the
-/// `{author}/{publish_id}_meta.json` object are written first, then the single
-/// `current.json` pointer last. The pointer carries the live generation's
-/// `{author_pubkey, publish_id}`, so a reader resolves the pointer, then the
-/// generation it names — always a whole, self-consistent generation. `publish_id`
-/// is the author's per-publish monotonic counter (bumped before each attempt's
-/// first write), so a retry after a failed publish keys a fresh object and never
-/// overwrites the DB image the live pointer still names; keying under `{author}`
-/// keeps two devices' generations distinct even at the same publish id. Superseded
-/// generations are reclaimed by their author: a device lists and deletes only
-/// objects under its own `{author}` prefix, so ownership is structural — it never
-/// touches a peer's keyspace.
 ///
 /// Blob keys follow the home's
 /// [`BlobPathScheme`](crate::sync::cloud_storage::BlobPathScheme): the default
@@ -69,54 +42,39 @@
 use async_trait::async_trait;
 use std::path::Path;
 
-/// Per-device head: the latest sequence number for a device.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeviceHead {
-    pub device_id: String,
-    pub seq: u64,
-    /// RFC 3339 timestamp of when this head was last updated (i.e., when
-    /// the device last synced). None for heads written before this field
-    /// was added.
-    pub last_sync: Option<String>,
-    /// Hex-encoded Ed25519 public key the head's signature verified against, set
-    /// by [`SyncStorage::list_heads`] once the embedded signature is checked. The
-    /// caller uses it to decide whether the head's author is a current member (the
-    /// authorization check the chain backs). Every head is signed regardless of the
-    /// at-rest cipher, so a head read from storage always carries its author.
-    pub author_pubkey: String,
-}
+use crate::storage::cloud::{AppendedObject, ListingCoverage};
 
-/// The outcome of listing device heads: the fully verified heads, plus a count of
-/// head slots that held an object the reader could not turn into a verified head
-/// (present but undecryptable, unparseable, or failing its signature). A slot key
-/// that does not name a device head at all (an unexpected key format) is not a
-/// slot and is not counted.
+/// Runtime locator for one physical copy of a Store protocol object.
 ///
-/// The two consumers read this differently on purpose. The pull uses `heads` and
-/// ignores `unreadable`: one member's bad head must never wedge every device's
-/// sync — the slot's owner republishes a good head on its next cycle. Changeset
-/// reclamation uses both: an unreadable head is a real device whose ack it cannot
-/// see, so any unreadable slot makes reclamation fail closed rather than compute a
-/// floor that could delete a changeset that device still needs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeadListing {
-    /// Heads whose object opened, parsed, and verified against their slot.
-    pub heads: Vec<DeviceHead>,
-    /// How many head slots held an object that could not be opened, parsed, or
-    /// verified.
-    pub unreadable: usize,
+/// The raw provider locator is deliberately private and never serialized into a
+/// signed object or database row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtocolObjectLocator {
+    logical_key: String,
+    physical: AppendedObject,
 }
 
-/// A verified `min_schema_version`: the version plus the public key its
-/// signature verified against. [`SyncStorage::get_min_schema_version`] returns
-/// this only when the embedded signature checks out, so the caller can decide
-/// whether the author is a current owner before honoring the floor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MinSchemaVersion {
-    pub version: u32,
-    /// Hex-encoded Ed25519 public key the signature verified against. A floor read
-    /// from storage is always signed, so it always carries its author.
-    pub author_pubkey: String,
+impl ProtocolObjectLocator {
+    pub(crate) fn new(logical_key: String, physical: AppendedObject) -> Self {
+        Self {
+            logical_key,
+            physical,
+        }
+    }
+
+    pub fn logical_key(&self) -> &str {
+        &self.logical_key
+    }
+
+    pub(crate) fn physical(&self) -> &AppendedObject {
+        &self.physical
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtocolObjectListing {
+    pub objects: Vec<ProtocolObjectLocator>,
+    pub coverage: ListingCoverage,
 }
 
 /// Error type for storage operations.
@@ -164,38 +122,56 @@ impl From<crate::store_dir::PathTokenError> for StorageError {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait SyncStorage: crate::MaybeThreadSafe {
-    /// List all device heads (one LIST call to `heads/`). Returns the verified
-    /// heads alongside a count of slots holding an object that could not be
-    /// verified — see [`HeadListing`] for why the pull and reclamation read that
-    /// count differently.
-    async fn list_heads(&self) -> Result<HeadListing, StorageError>;
-
-    /// Fetch a single changeset by device_id and seq.
-    ///
-    /// Returns the **opened** envelope bytes from `changes/{device_id}/{seq}{suffix}`.
-    /// Implementations download the stored blob and open it (decrypt on an
-    /// encrypted home, pass through on a plaintext one) before returning. Callers
-    /// receive plaintext ready for `envelope::unpack()`.
-    async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError>;
-
-    /// Upload a changeset blob (plaintext — the implementation seals it).
-    /// Writes to `changes/{device_id}/{seq}{suffix}`.
-    async fn put_changeset(
+    /// Append one physical copy beneath a signed semantic prefix. `extension`
+    /// includes the leading dot (`.json`, `.pkg`, or `.db`). The implementation
+    /// injects a fresh copy id and applies its at-rest suffix below this API.
+    async fn append_protocol_object(
         &self,
-        device_id: &str,
-        seq: u64,
+        semantic_prefix: &str,
+        extension: &str,
         data: Vec<u8>,
-    ) -> Result<(), StorageError>;
+    ) -> Result<ProtocolObjectLocator, StorageError> {
+        let _ = (semantic_prefix, extension, data);
+        Err(StorageError::Storage(
+            "Store protocol append is not implemented by this storage".to_string(),
+        ))
+    }
 
-    /// Update the head pointer for a device.
-    /// Writes to `heads/{device_id}.json{suffix}`. `timestamp` is the RFC 3339
-    /// time of this sync (used by the sync status UI).
-    async fn put_head(
+    /// List all physical Store protocol copies under `prefix`, preserving
+    /// duplicate provider ids.
+    async fn list_protocol_objects(
         &self,
-        device_id: &str,
-        seq: u64,
-        timestamp: &str,
-    ) -> Result<(), StorageError>;
+        prefix: &str,
+    ) -> Result<ProtocolObjectListing, StorageError> {
+        let _ = prefix;
+        Err(StorageError::Storage(
+            "Store protocol listing is not implemented by this storage".to_string(),
+        ))
+    }
+
+    /// Read and open one exact physical Store protocol copy using the signed
+    /// semantic prefix as encryption AAD.
+    async fn read_protocol_object(
+        &self,
+        object: &ProtocolObjectLocator,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        let _ = (object, semantic_prefix);
+        Err(StorageError::Storage(
+            "Store protocol locator read is not implemented by this storage".to_string(),
+        ))
+    }
+
+    /// Delete one exact physical Store protocol copy.
+    async fn delete_protocol_object(
+        &self,
+        object: &ProtocolObjectLocator,
+    ) -> Result<(), StorageError> {
+        let _ = object;
+        Err(StorageError::Storage(
+            "Store protocol locator delete is not implemented by this storage".to_string(),
+        ))
+    }
 
     /// Upload a blob. Under the hashed (default) scheme it is keyed
     /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}` under this device's own
@@ -328,104 +304,6 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
     /// index.
     fn own_uploader(&self) -> Option<String>;
 
-    /// Upload one snapshot generation's DB image under its publishing device.
-    /// Writes to `snapshot/{author}/{publish_id}.db{suffix}`. Written before the
-    /// generation's metadata, and the pointer names `{author, publish_id}` only
-    /// after both, so a reader never resolves a half-written generation.
-    /// `publish_id` is the author's per-publish monotonic counter, so each attempt
-    /// keys a fresh object and a retry never overwrites the live pointer's
-    /// generation; keying under `{author}` (the publisher's hex public key) keeps a
-    /// publish from ever touching a peer's generation.
-    async fn put_snapshot(
-        &self,
-        author: &str,
-        publish_id: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError>;
-
-    /// Download a snapshot generation's DB image.
-    /// Returns bytes from `snapshot/{author}/{publish_id}.db{suffix}`.
-    async fn get_snapshot(&self, author: &str, publish_id: u64) -> Result<Vec<u8>, StorageError>;
-
-    /// Delete a single changeset from storage.
-    /// Removes `changes/{device_id}/{seq}{suffix}`. Driven by changeset GC
-    /// ([`crate::sync::snapshot::reclaim_superseded_changesets`]) to reclaim a
-    /// changeset below the safe reclaim floor.
-    async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError>;
-
-    /// List all changeset keys for a device.
-    /// Returns the sequence numbers that exist in `changes/{device_id}/`. Driven by
-    /// changeset GC to enumerate a device's log before reclaiming below the floor.
-    async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError>;
-
-    /// Publish this device's signed pull-ack (plaintext -- the implementation
-    /// seals it). Writes to `acks/{device_id}.json{suffix}`. The bytes are a signed
-    /// [`AckJson`](crate::sync::signed_control::AckJson) reporting how far this
-    /// device has pulled every other device; changeset GC reads it to compute the
-    /// safe reclaim floor.
-    async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError>;
-
-    /// Download a device's pull-ack (opened).
-    /// Reads from `acks/{device_id}.json{suffix}`. Returns NotFound if the device
-    /// has not published an ack yet; GC treats that (and any ack that fails to
-    /// verify) as the device contributing cursor 0, which only pauses reclamation.
-    async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError>;
-
-    /// Get the minimum schema version required to sync with this storage, with
-    /// the public key its signature verified against.
-    ///
-    /// Returns `None` if no minimum has been set, or if the stored object's
-    /// signature is invalid (a forged floor is treated as absent, not trusted).
-    /// Reads from `min_schema_version.json{suffix}`. The caller checks the
-    /// returned `author_pubkey` is a current owner before honoring the version.
-    async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError>;
-
-    /// Set the minimum schema version required to sync with this storage.
-    ///
-    /// Writes to `min_schema_version.json{suffix}`. Used when a breaking migration
-    /// bumps the schema and all devices must upgrade before syncing.
-    /// Test-only: the write side of the schema floor has no production caller
-    /// (the read side, [`Self::get_min_schema_version`], is live).
-    #[cfg(any(test, feature = "test-utils"))]
-    async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError>;
-
-    /// Upload a membership entry.
-    /// Writes to `membership/{author_pubkey_hex}/{seq}{suffix}`.
-    async fn put_membership_entry(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError>;
-
-    /// Download a membership entry.
-    /// Reads from `membership/{author_pubkey_hex}/{seq}{suffix}`.
-    async fn get_membership_entry(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-    ) -> Result<Vec<u8>, StorageError>;
-
-    /// List all membership entry keys.
-    /// Returns tuples of (author_pubkey, seq).
-    async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError>;
-
-    /// Publish one author's signed membership head.
-    /// Writes to `membership/{author_pubkey}/head{suffix}`. The head is that
-    /// author's commit marker: its entries are written first, then the head names
-    /// how far a reader may trust that author's prefix. Each owner writes only its
-    /// own head under its own prefix, so concurrent owners never contend.
-    async fn put_membership_head(
-        &self,
-        author_pubkey: &str,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError>;
-
-    /// Download one author's signed membership head.
-    /// Reads from `membership/{author_pubkey}/head{suffix}`. Returns NotFound if
-    /// that author has not committed a head yet (its entries are uncommitted).
-    async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError>;
-
     /// Upload a wrapped store key that `owner_pubkey` sealed for `recipient_pubkey`.
     /// Writes to `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`. An owner
     /// wraps only into its own prefix, so a recipient can hold a wrap from each
@@ -459,65 +337,5 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         &self,
         owner_pubkey: &str,
         recipient_pubkey: &str,
-    ) -> Result<(), StorageError>;
-
-    /// Upload one snapshot generation's metadata (plaintext -- the implementation
-    /// seals it). Writes to `snapshot/{author}/{publish_id}_meta.json{suffix}`.
-    /// Written *after* the DB image and *before* the pointer: the meta is what keys
-    /// a generation in
-    /// [`list_own_snapshot_generations`](Self::list_own_snapshot_generations), so a
-    /// listed generation always has its DB image already whole. The `{author}`
-    /// prefix is the publishing device's hex public key, so a device's own sweep
-    /// lists only its own generations by listing under its own prefix.
-    async fn put_snapshot_meta(
-        &self,
-        author: &str,
-        publish_id: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError>;
-
-    /// Download a snapshot generation's metadata (opened).
-    /// Reads from `snapshot/{author}/{publish_id}_meta.json{suffix}`. Returns
-    /// NotFound if that generation's metadata does not exist.
-    async fn get_snapshot_meta(
-        &self,
-        author: &str,
-        publish_id: u64,
-    ) -> Result<Vec<u8>, StorageError>;
-
-    /// Publish the snapshot pointer (plaintext -- the implementation seals it).
-    /// Writes to `snapshot/current.json{suffix}`. This is the commit of an atomic
-    /// publish: it is written *last*, after the generation's metadata and DB image
-    /// are fully uploaded, so it never names an incomplete generation.
-    async fn put_snapshot_pointer(&self, data: Vec<u8>) -> Result<(), StorageError>;
-
-    /// Download the snapshot pointer (opened).
-    /// Reads from `snapshot/current.json{suffix}`. Returns NotFound if no snapshot
-    /// has been published yet.
-    async fn get_snapshot_pointer(&self) -> Result<Vec<u8>, StorageError>;
-
-    /// List the publish ids of every snapshot generation `author` has published,
-    /// including superseded ones the pointer no longer names. A generation is keyed
-    /// by its `snapshot/{author}/{publish_id}_meta.json{suffix}` object (written
-    /// after the DB image), so a generation appears here only once its DB image is
-    /// already whole. The sweep lists under its OWN `{author}` prefix, so ownership
-    /// is structural: it only ever sees generations it published and never a peer's,
-    /// which live under a different prefix.
-    async fn list_own_snapshot_generations(&self, author: &str) -> Result<Vec<u64>, StorageError>;
-
-    /// Delete one snapshot generation's objects
-    /// (`snapshot/{author}/{publish_id}.db{suffix}` then
-    /// `snapshot/{author}/{publish_id}_meta.json{suffix}` — the DB image first, the
-    /// meta last, since the meta is what keys the generation in
-    /// [`list_own_snapshot_generations`](Self::list_own_snapshot_generations), so a
-    /// crash between the two leaves it still listed and re-deletable, never a
-    /// meta-less db). The caller passes its own `{author}` and must have confirmed
-    /// `publish_id` is neither the live generation nor the one it just published, so
-    /// a delete never strands a generation a reader could adopt. A device can only
-    /// name objects under its own prefix, so it structurally cannot delete a peer's.
-    async fn delete_snapshot_generation(
-        &self,
-        author: &str,
-        publish_id: u64,
     ) -> Result<(), StorageError>;
 }

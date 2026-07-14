@@ -6,14 +6,30 @@
 //! that enable the `test-utils` feature.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use super::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
+use super::{
+    AppendedListing, AppendedObject, BlobBody, BoxPartSink, CloudHome, CloudHomeError,
+    ListingCoverage, PartSink, UploadProgress,
+};
+
+#[derive(Clone)]
+struct MemoryAppendedObject {
+    locator: AppendedObject,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct AppendPause {
+    call: usize,
+    reached: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
 
 /// In-memory CloudHome backed by a HashMap. `Clone` shares one backing store, so
 /// clones act as separate devices reading and writing the same cloud bucket, and
@@ -29,20 +45,38 @@ use super::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink}
 #[derive(Clone)]
 pub struct InMemoryCloudHome {
     writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    appended: Arc<Mutex<Vec<MemoryAppendedObject>>>,
+    next_appended_id: Arc<AtomicU64>,
     deletes: Arc<Mutex<Vec<String>>>,
     fail_writes: Arc<AtomicBool>,
     fail_next_range_reads: Arc<AtomicUsize>,
     sort_listings: Arc<AtomicBool>,
+    append_count: Arc<AtomicUsize>,
+    fail_append_before: Arc<AtomicUsize>,
+    fail_append_after: Arc<AtomicUsize>,
+    append_pause: Arc<Mutex<Option<AppendPause>>>,
+    listing_coverage: Arc<Mutex<ListingCoverage>>,
+    appended_delete_count: Arc<AtomicUsize>,
+    fail_appended_delete_on: Arc<AtomicUsize>,
 }
 
 impl InMemoryCloudHome {
     pub fn new() -> Self {
         Self {
             writes: Arc::new(Mutex::new(HashMap::new())),
+            appended: Arc::new(Mutex::new(Vec::new())),
+            next_appended_id: Arc::new(AtomicU64::new(0)),
             deletes: Arc::new(Mutex::new(Vec::new())),
             fail_writes: Arc::new(AtomicBool::new(false)),
             fail_next_range_reads: Arc::new(AtomicUsize::new(0)),
             sort_listings: Arc::new(AtomicBool::new(false)),
+            append_count: Arc::new(AtomicUsize::new(0)),
+            fail_append_before: Arc::new(AtomicUsize::new(0)),
+            fail_append_after: Arc::new(AtomicUsize::new(0)),
+            append_pause: Arc::new(Mutex::new(None)),
+            listing_coverage: Arc::new(Mutex::new(ListingCoverage::CompleteAtScan)),
+            appended_delete_count: Arc::new(AtomicUsize::new(0)),
+            fail_appended_delete_on: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -71,6 +105,54 @@ impl InMemoryCloudHome {
         self.fail_next_range_reads.store(n, Ordering::SeqCst);
     }
 
+    /// Reset the immutable-append counter and fail before the selected call
+    /// stores a physical copy.
+    pub fn fail_append_before_call(&self, call: usize) {
+        assert!(call > 0, "append call numbers are 1-based");
+        self.append_count.store(0, Ordering::SeqCst);
+        self.fail_append_before.store(call, Ordering::SeqCst);
+    }
+
+    /// Reset the immutable-append counter and fail after the selected call has
+    /// stored its physical copy, modeling an ambiguous provider response.
+    pub fn fail_append_after_call(&self, call: usize) {
+        assert!(call > 0, "append call numbers are 1-based");
+        self.append_count.store(0, Ordering::SeqCst);
+        self.fail_append_after.store(call, Ordering::SeqCst);
+    }
+
+    /// Pause after the selected immutable append is physically visible. The
+    /// returned notifications report that visibility and release the call.
+    pub fn pause_after_append_call(
+        &self,
+        call: usize,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        assert!(call > 0, "append call numbers are 1-based");
+        self.append_count.store(0, Ordering::SeqCst);
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *self.append_pause.lock().unwrap() = Some(AppendPause {
+            call,
+            reached: reached.clone(),
+            release: release.clone(),
+        });
+        (reached, release)
+    }
+
+    pub fn append_count(&self) -> usize {
+        self.append_count.load(Ordering::SeqCst)
+    }
+
+    pub fn set_listing_coverage(&self, coverage: ListingCoverage) {
+        *self.listing_coverage.lock().unwrap() = coverage;
+    }
+
+    pub fn fail_appended_delete_on_call(&self, call: usize) {
+        assert!(call > 0, "append-delete call numbers are 1-based");
+        self.appended_delete_count.store(0, Ordering::SeqCst);
+        self.fail_appended_delete_on.store(call, Ordering::SeqCst);
+    }
+
     /// Drop `key`'s bytes out of band — as if the object vanished from the
     /// bucket on its own, without a `delete` (which `deletes_seen` would
     /// record). Drives missing-blob read failures.
@@ -82,6 +164,26 @@ impl InMemoryCloudHome {
     /// that don't want to hold the lock across an await.
     pub fn keys(&self) -> Vec<String> {
         self.writes.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// Snapshot of every immutable physical-copy key currently in the cloud.
+    pub fn appended_keys(&self) -> Vec<String> {
+        self.appended
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate.locator.logical_key().to_string())
+            .collect()
+    }
+
+    /// Snapshot of one immutable physical copy's stored bytes.
+    pub fn get_appended(&self, logical_key: &str) -> Option<Vec<u8>> {
+        self.appended
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate.locator.logical_key() == logical_key)
+            .map(|candidate| candidate.bytes.clone())
     }
 
     /// Snapshot of the bytes at `key`, or `None` if absent. Cloned so the
@@ -104,6 +206,41 @@ impl InMemoryCloudHome {
     /// Snapshot of every delete that's been requested, in arrival order.
     pub fn deletes_seen(&self) -> Vec<String> {
         self.deletes.lock().unwrap().clone()
+    }
+
+    /// Insert a physical append candidate with caller-selected bytes. This is
+    /// the collision/fork test hook; it does not pass through protocol parsing.
+    pub fn insert_appended_candidate(&self, logical_key: &str, bytes: Vec<u8>) -> AppendedObject {
+        let id = self.next_appended_id.fetch_add(1, Ordering::SeqCst);
+        let locator = AppendedObject::from_provider(
+            logical_key.to_string(),
+            format!("in-memory-append-{id}"),
+        );
+        self.appended.lock().unwrap().push(MemoryAppendedObject {
+            locator: locator.clone(),
+            bytes,
+        });
+        locator
+    }
+
+    /// Remove exactly one appended physical object without recording a protocol
+    /// delete, simulating provider-side disappearance.
+    pub fn remove_appended_candidate(&self, locator: &AppendedObject) {
+        self.appended
+            .lock()
+            .unwrap()
+            .retain(|candidate| candidate.locator != *locator);
+    }
+
+    /// Replace the bytes at one exact physical locator without changing its
+    /// logical key or provider id.
+    pub fn replace_appended_candidate(&self, locator: &AppendedObject, bytes: Vec<u8>) {
+        let mut appended = self.appended.lock().unwrap();
+        let candidate = appended
+            .iter_mut()
+            .find(|candidate| candidate.locator == *locator)
+            .expect("appended locator exists");
+        candidate.bytes = bytes;
     }
 }
 
@@ -183,6 +320,102 @@ impl CloudHome for InMemoryCloudHome {
         super::PROGRESS_CHUNK_SIZE as u64
     }
 
+    async fn append_object(
+        &self,
+        full_logical_key: &str,
+        body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(CloudHomeError::Transport(
+                "InMemoryCloudHome: armed write failure".into(),
+            ));
+        }
+        let call = self.append_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_append_before.load(Ordering::SeqCst) == call {
+            self.fail_append_before.store(0, Ordering::SeqCst);
+            return Err(CloudHomeError::Transport(format!(
+                "InMemoryCloudHome: forced failure before append call {call}"
+            )));
+        }
+        let bytes = body.collect().await?;
+        progress(bytes.len() as u64);
+        let appended = self.insert_appended_candidate(full_logical_key, bytes);
+        let pause = self
+            .append_pause
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|pause| pause.call == call);
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+            self.append_pause.lock().unwrap().take();
+        }
+        if self.fail_append_after.load(Ordering::SeqCst) == call {
+            self.fail_append_after.store(0, Ordering::SeqCst);
+            return Err(CloudHomeError::Transport(format!(
+                "InMemoryCloudHome: forced failure after append call {call}"
+            )));
+        }
+        Ok(appended)
+    }
+
+    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        let mut objects: Vec<AppendedObject> = self
+            .appended
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|candidate| candidate.locator.logical_key().starts_with(prefix))
+            .map(|candidate| candidate.locator.clone())
+            .collect();
+        if self.sort_listings.load(Ordering::SeqCst) {
+            objects.sort_by(|left, right| {
+                left.logical_key()
+                    .cmp(right.logical_key())
+                    .then_with(|| left.opaque_provider_id().cmp(right.opaque_provider_id()))
+            });
+        }
+        Ok(AppendedListing {
+            objects,
+            coverage: *self.listing_coverage.lock().unwrap(),
+        })
+    }
+
+    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        self.appended
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate.locator == *object)
+            .map(|candidate| candidate.bytes.clone())
+            .ok_or_else(|| CloudHomeError::NotFound(object.opaque_provider_id().to_string()))
+    }
+
+    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        let call = self.appended_delete_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_appended_delete_on.load(Ordering::SeqCst) == call {
+            self.fail_appended_delete_on.store(0, Ordering::SeqCst);
+            return Err(CloudHomeError::Transport(format!(
+                "InMemoryCloudHome: forced appended delete failure on call {call}"
+            )));
+        }
+        let mut appended = self.appended.lock().unwrap();
+        let before = appended.len();
+        appended.retain(|candidate| candidate.locator != *object);
+        if appended.len() == before {
+            return Err(CloudHomeError::NotFound(
+                object.opaque_provider_id().to_string(),
+            ));
+        }
+        self.deletes
+            .lock()
+            .unwrap()
+            .push(object.logical_key().to_string());
+        Ok(())
+    }
+
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         self.writes
             .lock()
@@ -239,20 +472,18 @@ impl CloudHome for InMemoryCloudHome {
         Ok(self.writes.lock().unwrap().contains_key(key))
     }
 
-    async fn grant_access(
+    async fn set_access(
         &self,
-        _grant: super::CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        Err(CloudHomeError::Transport(
-            "InMemoryCloudHome does not grant access".into(),
-        ))
-    }
-
-    async fn revoke_access(
-        &self,
-        _revoke: super::CloudAccessRevoke,
-    ) -> Result<super::RevokeOutcome, CloudHomeError> {
-        Ok(super::RevokeOutcome::Unsupported)
+        desired: super::CloudAccessState,
+    ) -> Result<super::CloudAccessOutcome, CloudHomeError> {
+        match desired {
+            super::CloudAccessState::Present { .. } => Err(CloudHomeError::Transport(
+                "InMemoryCloudHome does not grant access".into(),
+            )),
+            super::CloudAccessState::Absent { .. } => Ok(super::CloudAccessOutcome::Absent(
+                super::RevokeOutcome::Unsupported,
+            )),
+        }
     }
 }
 
@@ -401,5 +632,39 @@ mod tests {
         ));
         // Out-of-band removal is not a delete, so it leaves no delete record.
         assert!(h.deletes_seen().is_empty());
+    }
+
+    #[tokio::test]
+    async fn append_harness_pauses_after_visibility_and_can_inspect_replace_and_remove() {
+        let h = InMemoryCloudHome::new();
+        let (reached, release) = h.pause_after_append_call(1);
+        let writer = h.clone();
+        let task = tokio::spawn(async move {
+            writer
+                .append_object(
+                    "store-v1/test/copies/one.json",
+                    BlobBody::from_bytes(b"first".to_vec()),
+                    &no_progress(),
+                )
+                .await
+        });
+
+        reached.notified().await;
+        assert_eq!(h.append_count(), 1);
+        assert_eq!(
+            h.get_appended("store-v1/test/copies/one.json"),
+            Some(b"first".to_vec()),
+            "the physical copy is inspectable while the append call is paused",
+        );
+        release.notify_one();
+        let locator = task.await.unwrap().unwrap();
+
+        h.replace_appended_candidate(&locator, b"replacement".to_vec());
+        assert_eq!(
+            h.get_appended(locator.logical_key()),
+            Some(b"replacement".to_vec())
+        );
+        h.remove_appended_candidate(&locator);
+        assert_eq!(h.get_appended(locator.logical_key()), None);
     }
 }

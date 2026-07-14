@@ -1,219 +1,16 @@
-/// Pull changesets from the sync storage and apply them to the local database.
-///
-/// Protocol:
-/// 1. List heads from the sync storage (one S3 LIST call).
-/// 2. Compare each device's seq to our local `sync_cursors` table.
-/// 3. For each device that's ahead of our cursor, fetch new changesets.
-/// 4. Unpack envelope, check schema_version, apply — resolving conflicts by
-///    row arbitration on `_updated_at` plus a column-level premerge.
-/// 5. Update sync_cursors for that device.
-///
-/// After all changesets are applied, any that had FK violations are retried once
-/// -- the parent rows should now exist from other devices'
-/// changesets applied in the same batch.
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+/// Membership and blob helpers shared by Store pull and bootstrap.
+use tracing::{debug, error, warn};
 
-use tracing::{debug, error, info, warn};
-
-use super::apply::resolve_and_apply_changeset_with_schema_on;
 use super::conflict::TableSchema;
-use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
-use super::membership::{MemberRole, MembershipChain, MembershipCoord};
-use super::session::SyncedTable;
-use super::storage::{DeviceHead, StorageError, SyncStorage};
+use super::membership::MembershipChain;
+use super::storage::SyncStorage;
 use crate::blob::decl::BlobDecls;
-use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
+use crate::blob::local_cleanup::LocalBlobCleanupIntent;
 use crate::blob::{CacheFill, Provenance};
 use crate::changeset::RowChange;
 use crate::database::Database;
 use crate::store_dir::StoreDir;
-
-/// Cursor value meaning "we have applied no changesets from this device".
-/// Per the sync protocol, device sequence numbers start at 1 (the first
-/// changeset a device produces is `local_seq + 1` where `local_seq` is
-/// initially 0), so a cursor of 0 selects every changeset that device has
-/// ever produced. A missing entry in the `sync_cursors` table is equivalent
-/// to this initial value — the device is simply one we've never pulled from.
-const INITIAL_CURSOR: u64 = 0;
-
-/// Look up our applied seq for a remote device, returning the protocol's
-/// initial cursor (0) and logging when we encounter the device for the first
-/// time. The log line is the visible trace that distinguishes "never seen"
-/// from "seen and at seq 0" (which is impossible — device seqs start at 1).
-fn cursor_for_device(cursors: &HashMap<String, u64>, device_id: &str) -> u64 {
-    match cursors.get(device_id) {
-        Some(seq) => *seq,
-        None => {
-            debug!(%device_id, "no cursor for device, starting from initial");
-            INITIAL_CURSOR
-        }
-    }
-}
-
-/// Durably skip one authenticated changeset, then reflect that committed
-/// position in this pull's returned cursor vector.
-async fn advance_skipped_changeset(
-    db: &Database,
-    updated_cursors: &mut HashMap<String, u64>,
-    device_id: &str,
-    seq: u64,
-) -> Result<(), crate::database::DbError> {
-    db.advance_sync_cursor(device_id, seq - 1, seq).await?;
-    updated_cursors.insert(device_id.to_string(), seq);
-    Ok(())
-}
-
-fn is_current_owner(members: &[(String, MemberRole)], pubkey: &str) -> bool {
-    members
-        .iter()
-        .any(|(pk, role)| pk == pubkey && *role == MemberRole::Owner)
-}
-
-/// A changeset skipped because its author is not a write-capable member, judged
-/// against the exact membership entry the changeset is signed under (so it is
-/// forged or revoked, not merely a propagation lag). Surfaced so the host can
-/// warn the user, the way `skipped_schema` surfaces a newer-version skip.
-#[derive(Debug, Clone)]
-pub struct RejectedUnauthorized {
-    pub device_id: String,
-    pub seq: u64,
-    /// Hex-encoded author pubkey, or `None` for an unsigned changeset in a chain
-    /// store (which nothing can authorize).
-    pub author: Option<String>,
-}
-
-/// A changeset rejected because its signature did not verify — forged or corrupt,
-/// not a propagation lag. The cursor is held at this seq so the bad object stalls
-/// only its device stream instead of suppressing data permanently. The author
-/// claim is unverifiable (the signature is invalid), so only the object's
-/// location identifies it. Surfaced so the host can warn the user, the way
-/// `RejectedUnauthorized` does.
-#[derive(Debug, Clone)]
-pub struct InvalidSignature {
-    pub device_id: String,
-    pub seq: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HeldChangesetReason {
-    /// The object decrypted but its bytes are not a valid envelope (no null
-    /// separator, or the JSON metadata did not parse). Present-but-invalid cloud
-    /// data, held like a size mismatch so one bad object stalls only its own
-    /// stream instead of failing the whole pull.
-    MalformedEnvelope {
-        error: String,
-    },
-    /// The envelope's signature covers its self-declared position
-    /// (`device_id`, `seq`), but that position does not match the storage location
-    /// the object was fetched from. The bytes are authentic for a *different*
-    /// position, so an object relocated here would replay one changeset in
-    /// another's place (and, by advancing the cursor, suppress the real occupant).
-    /// Held so the host sees the relocation as tamper rather than a generic stall.
-    PositionMismatch {
-        declared_device_id: String,
-        declared_seq: u64,
-    },
-    SizeMismatch {
-        expected: usize,
-        actual: usize,
-    },
-    ApplyFailed {
-        error: String,
-    },
-    /// The object at this seq is absent from storage: its changeset was reclaimed
-    /// (deleted as superseded) past this device's cursor. The cursor holds at the
-    /// gap rather than advancing over it, and this device stream stops here;
-    /// surfaced so the host reports reclaimed history instead of a generic stall.
-    /// Reclamation pins its floor at every current reader's cursors and fails
-    /// closed on a head it cannot read, so a reader that still needs this seq never
-    /// has it deleted — this state should therefore be unreachable, and surfacing
-    /// it loudly is what proves that.
-    MissingChangeset,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeldChangeset {
-    pub device_id: String,
-    pub seq: u64,
-    pub reason: HeldChangesetReason,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConstraintConflict {
-    pub device_id: String,
-    pub seq: u64,
-    pub table: String,
-}
-
-/// Summary of a pull operation.
-#[derive(Debug)]
-pub struct PullResult {
-    /// Total changesets successfully applied.
-    pub changesets_applied: u64,
-    /// Number of distinct remote devices we pulled from.
-    pub devices_pulled: u64,
-    /// A blob needed before apply failed to download. The affected changeset and
-    /// its cursor remain pending.
-    pub asset_downloads_failed: bool,
-    /// A post-commit local blob cleanup could not remove its files. The row and
-    /// cursor are already durable; the cleanup intent remains durable too.
-    pub local_blob_cleanup_pending: bool,
-    /// Changesets skipped due to schema version being newer than ours.
-    pub skipped_schema: u64,
-    /// Changesets skipped because their author is not a write-capable member,
-    /// judged against the exact membership entry the changeset is signed under
-    /// (forged or revoked). The cursor advanced past each so the client is not
-    /// stuck; surfaced so the host can warn. Per-cycle, like `skipped_schema`.
-    pub rejected_unauthorized: Vec<RejectedUnauthorized>,
-    /// Changesets whose signature did not verify (forged or corrupt). The cursor
-    /// is held and this device stream stops at the bad seq; surfaced so the host
-    /// can warn. Per-cycle, like `skipped_schema`.
-    pub invalid_signatures: Vec<InvalidSignature>,
-    /// Changesets whose envelope or apply step failed after the object was present
-    /// and readable. The cursor is held and this device stream stops at the bad
-    /// seq; other device streams continue.
-    pub held_changesets: Vec<HeldChangeset>,
-    /// Changesets that hit a non-retryable SQLite constraint conflict while
-    /// applying. The whole changeset rolls back and its cursor stays put;
-    /// surfaced so the host can warn about the unresolved clash.
-    pub constraint_conflicts: Vec<ConstraintConflict>,
-    /// All device heads fetched during this pull (including our own).
-    /// Used by the sync status UI to show other devices' activity.
-    pub remote_heads: Vec<DeviceHead>,
-    /// Row changes from applied changesets, for the host to map to domain events.
-    /// A refresh *hint*, not an exhaustive log: several accepted changesets can
-    /// touch the same row, so a host maps these to which rows to refresh and then
-    /// re-reads each by primary key rather than treating the list as final row
-    /// state. Empty if nothing was applied.
-    pub row_changes: Vec<RowChange>,
-}
-
-/// A changeset that had FK violations on first apply and needs retry.
-struct DeferredChangeset {
-    device_id: String,
-    seq: u64,
-    changeset: Vec<u8>,
-    changes: Vec<RowChange>,
-    /// The `(namespace, blob_id, uploader)` records the retry re-applies alongside
-    /// the rows, so a deferred changeset records its blobs' uploaders on the pass
-    /// that finally commits it.
-    blob_uploads: Vec<(String, String, String)>,
-    cleanup_intents: Vec<LocalBlobCleanupIntent>,
-}
-
-struct CompletedChangeset<'a> {
-    device_id: &'a str,
-    seq: u64,
-    changes: &'a [RowChange],
-}
-
-enum RemoteApplyOutcome {
-    Applied,
-    DeferredForeignKey,
-    ConstraintConflict(Vec<String>),
-}
 
 /// The membership state one sync cycle judges every authorization against, loaded
 /// and anchored once at the top of the cycle and threaded to the pull, the
@@ -237,7 +34,40 @@ pub struct CycleMembership {
     /// The key refresh reads the visible activation coordinates from it, which is
     /// the LIST view (an entry is visible as soon as it is listed), distinct from
     /// the committed chain (an entry is committed only once a head certifies it).
-    pub listed_entries: Vec<(String, u64)>,
+    pub listed_entries: Vec<super::membership::MembershipCoord>,
+    pub listing_proof: MembershipListingProof,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MembershipListingProof {
+    entry_coverage: crate::storage::cloud::ListingCoverage,
+    head_coverage: crate::storage::cloud::ListingCoverage,
+}
+
+impl MembershipListingProof {
+    pub fn is_complete(self) -> bool {
+        self.entry_coverage == crate::storage::cloud::ListingCoverage::CompleteAtScan
+            && self.head_coverage == crate::storage::cloud::ListingCoverage::CompleteAtScan
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_for_test() -> Self {
+        Self {
+            entry_coverage: crate::storage::cloud::ListingCoverage::CompleteAtScan,
+            head_coverage: crate::storage::cloud::ListingCoverage::CompleteAtScan,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        entry_coverage: crate::storage::cloud::ListingCoverage,
+        head_coverage: crate::storage::cloud::ListingCoverage,
+    ) -> Self {
+        Self {
+            entry_coverage,
+            head_coverage,
+        }
+    }
 }
 
 /// Load and anchor the cycle's membership chain once. Every successful listing
@@ -253,28 +83,39 @@ pub async fn load_cycle_membership(
     // An initialized plaintext or encrypted store has `Some`; `None` is reserved
     // for bootstrap callers that run before owner establishment.
     let pinned_owner = db
-        .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|e| PullError::Apply(format!("read pinned owner: {e}")))?;
 
-    let listed_entries = match storage.list_membership_entries().await {
-        Ok(entries) => entries,
-        Err(e) => {
-            // Can't even list membership. For an owner-pinned store we cannot
-            // verify authorship, so fail closed (abort, retry next cycle) rather
-            // than apply changesets unvalidated. Only an unpinned
-            // pre-initialization caller can proceed without a chain.
-            if pinned_owner.is_some() {
-                return Err(PullError::Storage(e));
+    let membership_listing =
+        match super::store_objects::list_membership_entry_objects(storage).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                // Can't even list membership. For an owner-pinned store we cannot
+                // verify authorship, so fail closed (abort, retry next cycle) rather
+                // than apply changesets unvalidated. Only an unpinned
+                // pre-initialization caller can proceed without a chain.
+                if pinned_owner.is_some() {
+                    return Err(PullError::MembershipTampered(e.to_string()));
+                }
+                warn!("failed to list membership entries for validation: {e}");
+                return Ok(CycleMembership {
+                    chain: None,
+                    pinned_owner,
+                    listed_entries: Vec::new(),
+                    listing_proof: MembershipListingProof {
+                        entry_coverage: crate::storage::cloud::ListingCoverage::BestEffort,
+                        head_coverage: crate::storage::cloud::ListingCoverage::BestEffort,
+                    },
+                });
             }
-            warn!("failed to list membership entries for validation: {e}");
-            return Ok(CycleMembership {
-                chain: None,
-                pinned_owner,
-                listed_entries: Vec::new(),
-            });
-        }
-    };
+        };
+    let entry_coverage = membership_listing.coverage;
+    let listed_entries: Vec<super::membership::MembershipCoord> = membership_listing
+        .entries
+        .into_iter()
+        .map(|(coord, _)| coord)
+        .collect();
 
     // Load + validate the chain and anchor it to the pinned owner. Every
     // successful LIST result, including an empty one, reaches the same optional
@@ -284,7 +125,7 @@ pub async fn load_cycle_membership(
     // owner pin: an unpinned database may already hold accepted author floors,
     // whose missing or regressed state must not turn authorization off. The
     // database makes this load monotonic per author.
-    let chain = match super::membership_ops::load_anchored_chain_if_known(
+    let loaded = match super::membership_ops::load_anchored_chain_if_known_with_proof(
         storage,
         &listed_entries,
         pinned_owner.as_deref(),
@@ -292,875 +133,21 @@ pub async fn load_cycle_membership(
     )
     .await
     {
-        Ok(chain) => chain,
+        Ok(loaded) => loaded,
         Err(error) => return Err(PullError::MembershipTampered(error.to_string())),
+    };
+    let chain = loaded.chain;
+    let listing_proof = MembershipListingProof {
+        entry_coverage,
+        head_coverage: loaded.head_coverage,
     };
 
     Ok(CycleMembership {
         chain,
         pinned_owner,
         listed_entries,
+        listing_proof,
     })
-}
-
-/// Pull and apply all new changesets from the sync storage.
-///
-/// `db` is the owned connection handle; all apply and schema reads run through
-/// it. The apply of incoming rows is a plain `db.call` — only a host write wrapped
-/// in a journaled transaction is ever captured, so applied rows are never recorded
-/// into the next outgoing changeset, while a host write landing during this pull's
-/// network phases journals normally.
-///
-/// `tables` is the host's declared synced set; call sites pass
-/// `db.synced_tables()`. The durable `sync_cursors` table is the sole pull
-/// position. `membership_chain` and `owner_pubkey` are the cycle's once-loaded
-/// membership (see [`CycleMembership`]).
-///
-/// Returns the updated cursors map and a summary of what was applied.
-pub async fn pull_changes(
-    db: &Database,
-    tables: &[SyncedTable],
-    storage: &dyn SyncStorage,
-    our_device_id: &str,
-    store_dir: &StoreDir,
-    mut membership_chain: Option<MembershipChain>,
-    owner_pubkey: Option<String>,
-) -> Result<(HashMap<String, u64>, PullResult), PullError> {
-    let cursors = db
-        .get_all_sync_cursors()
-        .await
-        .map_err(|e| PullError::Apply(e.0))?;
-
-    // The opened database handle already resolved blob declarations from the final
-    // synced set + live schema. Pull reuses that model for download-before-apply of
-    // CacheEager blobs and apply-side cache drops for deleted blob-bearing rows.
-    let blob_decls = db.blob_decls();
-    // The receiver's current wall-clock millis, read once from the register clock
-    // and passed down to bound an incoming `_updated_at`'s physical component. A
-    // stamp grossly beyond this (plus a generous offline allowance) is a broken
-    // clock or buggy client: it must not win last-writer-wins (the apply's conflict
-    // handler refuses it) nor ratchet the local clock (`advance_max_updated_at`
-    // skips it). Read once here, not sampled per row, so the bound is stable across
-    // the whole pull.
-    let receiver_wall_ms = db.receive_wall_ms();
-    // The membership chain to validate changeset authorship against, loaded and
-    // anchored once for the whole cycle by `load_cycle_membership` and handed in
-    // here (with the store's pinned owner). `resolve_membership_authorization`
-    // may still refresh it mid-pull to catch an authorizing entry the cycle-start
-    // listing lagged, so it stays mutable.
-    let membership_members = membership_chain
-        .as_ref()
-        .map(MembershipChain::current_members);
-
-    // Check min_schema_version before processing any changesets. The floor is an
-    // untrusted control object, so it is honored only when its verified author is
-    // a current *owner*: a non-owner-signed (or, with a chain present, unsigned)
-    // floor is a freeze/downgrade attempt and is ignored. `get_min_schema_version`
-    // already verified the signature and surfaced the author; this is the
-    // authorization half. With no chain (only before initialization) any
-    // verified floor is honored because no owner has been established yet.
-    if let Some(min) = storage
-        .get_min_schema_version()
-        .await
-        .map_err(PullError::Storage)?
-    {
-        let honor = match membership_members.as_ref() {
-            Some(members) => is_current_owner(members, &min.author_pubkey),
-            None => true,
-        };
-        if honor {
-            if db.schema_version() < min.version {
-                return Err(PullError::SchemaVersionTooOld {
-                    local_version: db.schema_version(),
-                    min_version: min.version,
-                });
-            }
-        } else {
-            warn!(
-                author = ?min.author_pubkey,
-                version = min.version,
-                "ignoring min_schema_version not signed by a current owner"
-            );
-        }
-    }
-
-    // List every verified head. Membership authorization happens on each signed
-    // envelope because a newly-added member's head can become visible before this
-    // cycle's membership listing exposes its committed grant. Filtering the head
-    // against the cycle-start chain would discard that stream before the grant's
-    // signed author head can be resolved.
-    // The pull uses the verified heads and ignores the unreadable-slot count: one
-    // member's bad head must not wedge every device's sync. (Changeset reclamation
-    // reads that same count to fail closed — a different, destructive decision.)
-    let heads = storage
-        .list_heads()
-        .await
-        .map_err(PullError::Storage)?
-        .heads;
-
-    // Per-table `_updated_at` column index map. Built once from the live schema
-    // (so column additions stay safe) and shared by both the apply — every
-    // changeset in this pull reuses it instead of re-querying `PRAGMA table_info`
-    // — and the HLC advance over applied rows. `Arc` so it moves into each apply's
-    // `'static` conflict closure without re-deriving it.
-    let schema: Arc<TableSchema> = {
-        let tables = tables.to_vec();
-        Arc::new(
-            db.call(move |conn| {
-                let table_refs: Vec<&str> = tables.iter().map(|t| t.name()).collect();
-                TableSchema::from_db(conn, &table_refs)
-            })
-            .await
-            .map_err(|e| PullError::Apply(e.0))?,
-        )
-    };
-
-    let mut updated_cursors = cursors.clone();
-    let mut result = PullResult {
-        changesets_applied: 0,
-        devices_pulled: 0,
-        asset_downloads_failed: false,
-        local_blob_cleanup_pending: false,
-        skipped_schema: 0,
-        rejected_unauthorized: Vec::new(),
-        invalid_signatures: Vec::new(),
-        held_changesets: Vec::new(),
-        constraint_conflicts: Vec::new(),
-        remote_heads: heads.clone(),
-        row_changes: Vec::new(),
-    };
-    result.local_blob_cleanup_pending = local_cleanup::drain(db, store_dir)
-        .await
-        .map_err(|e| PullError::Apply(e.0))?;
-    let mut deferred: Vec<DeferredChangeset> = Vec::new();
-    let mut applied_devices: HashSet<String> = HashSet::new();
-
-    for head in &heads {
-        // Skip our own device.
-        if head.device_id == our_device_id {
-            continue;
-        }
-
-        let local_seq = cursor_for_device(&cursors, &head.device_id);
-        if head.seq <= local_seq {
-            continue;
-        }
-
-        info!(
-            device_id = %head.device_id,
-            local_seq,
-            remote_seq = head.seq,
-            "pulling changesets"
-        );
-
-        for seq in (local_seq + 1)..=head.seq {
-            // The storage client returns already-decrypted bytes per its trait
-            // contract. Implementations handle download + decryption internally.
-            let envelope_bytes = match storage.get_changeset(&head.device_id, seq).await {
-                Ok(data) => data,
-                Err(StorageError::NotFound(_)) => {
-                    // The changeset is gone — history was reclaimed past this
-                    // device's cursor. Hold the cursor at the gap (never advance
-                    // over a changeset this device has not applied) and name it, so
-                    // the host reports reclaimed history rather than a generic
-                    // stall. Other device streams continue.
-                    warn!(
-                        device_id = %head.device_id,
-                        seq,
-                        "changeset missing — history reclaimed past this cursor; holding"
-                    );
-                    result.held_changesets.push(HeldChangeset {
-                        device_id: head.device_id.clone(),
-                        seq,
-                        reason: HeldChangesetReason::MissingChangeset,
-                    });
-                    break;
-                }
-                Err(e) => {
-                    warn!(
-                        device_id = %head.device_id,
-                        seq,
-                        error = %e,
-                        "failed to fetch changeset, stopping pull for this device"
-                    );
-                    break;
-                }
-            };
-
-            // A present but unparseable envelope is bad cloud data, not a reason to
-            // fail the whole pull. Hold this device's cursor and surface it, the same
-            // as a size mismatch or apply failure; other device streams continue.
-            let (env, changeset_bytes) = match envelope::unpack(&envelope_bytes) {
-                Ok(unpacked) => unpacked,
-                Err(e) => {
-                    error!(
-                        device_id = %head.device_id,
-                        seq,
-                        error = %e,
-                        "changeset envelope is malformed; holding cursor for this device"
-                    );
-                    result.held_changesets.push(HeldChangeset {
-                        device_id: head.device_id.clone(),
-                        seq,
-                        reason: HeldChangesetReason::MalformedEnvelope {
-                            error: e.to_string(),
-                        },
-                    });
-                    break;
-                }
-            };
-
-            // The signature covers the envelope's self-declared position
-            // (device_id, seq). Bind that to the position this object was actually
-            // fetched from BEFORE anything else reads the envelope: an object whose
-            // authentic bytes belong to a different position was relocated here, and
-            // applying it would replay that changeset in this slot while the cursor
-            // advance suppresses the real occupant. Anyone holding the store key can
-            // re-seal a peer's changeset under another key's authenticated data, so
-            // this is the only check that ties the signed content to its location.
-            // It precedes the schema gate so a relocated object cannot be laundered
-            // into the benign skipped-schema count; hold the cursor and stop this
-            // device's stream, the same discipline as a malformed or size-mismatched
-            // object.
-            if env.device_id != head.device_id || env.seq != seq {
-                error!(
-                    device_id = %head.device_id,
-                    seq,
-                    declared_device_id = %env.device_id,
-                    declared_seq = env.seq,
-                    "changeset envelope declares a different position than it was \
-                     fetched from; holding cursor for this device"
-                );
-                result.held_changesets.push(HeldChangeset {
-                    device_id: head.device_id.clone(),
-                    seq,
-                    reason: HeldChangesetReason::PositionMismatch {
-                        declared_device_id: env.device_id.clone(),
-                        declared_seq: env.seq,
-                    },
-                });
-                break;
-            }
-
-            // Signature check: reject changesets with invalid signatures. A bad
-            // signature is forged or corrupt; hold the cursor and stop this device
-            // stream at the bad seq so it surfaces as a bounded stall instead of
-            // silently suppressing the seq's data. This runs before the schema gate
-            // so that only an authentic envelope's schema_version steers control
-            // flow: a forged object with a large schema_version must surface as
-            // tamper, not be laundered into the benign skipped-schema count as
-            // routine version skew.
-            if !verify_changeset_signature(&env, &changeset_bytes) {
-                error!(
-                    device_id = %head.device_id,
-                    seq,
-                    "changeset has invalid signature; holding cursor for this device"
-                );
-                result.invalid_signatures.push(InvalidSignature {
-                    device_id: head.device_id.clone(),
-                    seq,
-                });
-                break;
-            }
-
-            // The verified device head commits this stream to one signer. The
-            // envelope must carry the same signer: another member's authentic
-            // changeset cannot be relocated into this stream, and an unsigned
-            // envelope cannot occupy a signed member stream. This mismatch is
-            // permanent attacker-controlled content, so reject and advance rather
-            // than letting it hold the stream forever.
-            if env.author_pubkey.as_deref() != Some(head.author_pubkey.as_str()) {
-                error!(
-                    device_id = %head.device_id,
-                    seq,
-                    head_author = %head.author_pubkey,
-                    envelope_author = ?env.author_pubkey,
-                    "changeset signer does not match the verified device-head signer; rejecting"
-                );
-                result.rejected_unauthorized.push(RejectedUnauthorized {
-                    device_id: head.device_id.clone(),
-                    seq,
-                    author: env.author_pubkey.clone(),
-                });
-                advance_skipped_changeset(db, &mut updated_cursors, &head.device_id, seq)
-                    .await
-                    .map_err(|e| PullError::Apply(e.0))?;
-                continue;
-            }
-
-            // Schema version check: skip changesets from a newer schema. The
-            // envelope is authenticated above, so this schema_version is the one the
-            // author actually wrote against.
-            if env.schema_version > db.schema_version() {
-                warn!(
-                    device_id = %head.device_id,
-                    seq,
-                    remote_version = env.schema_version,
-                    local_version = db.schema_version(),
-                    "skipping changeset with newer schema version"
-                );
-                result.skipped_schema += 1;
-                // Do NOT advance the cursor. This changeset is genuine and
-                // becomes applicable once the local app updates past this schema;
-                // advancing past it would strand its rows forever, because an
-                // already-running device never re-bootstraps from a snapshot in a
-                // normal cycle. Stop pulling this device here — every later seq it
-                // produced is at least this schema version too, so nothing after
-                // it could apply anyway, and leaving the cursor put makes the next
-                // cycle re-fetch from this seq once we've upgraded.
-                break;
-            }
-
-            // The envelope's declared changeset_size must match the trailing bytes.
-            // A mismatch is present-but-invalid cloud data. Hold this device's
-            // cursor and surface it; do not advance past bytes whose integrity check
-            // failed.
-            if env.changeset_size != changeset_bytes.len() {
-                error!(
-                    device_id = %head.device_id,
-                    seq,
-                    expected = env.changeset_size,
-                    actual = changeset_bytes.len(),
-                    "changeset_size mismatch in envelope; holding cursor for this device"
-                );
-                result.held_changesets.push(HeldChangeset {
-                    device_id: head.device_id.clone(),
-                    seq,
-                    reason: HeldChangesetReason::SizeMismatch {
-                        expected: env.changeset_size,
-                        actual: changeset_bytes.len(),
-                    },
-                });
-                break;
-            }
-
-            // Every initialized-store changeset binds itself to its exact effective
-            // write grant. Current membership alone is insufficient: the coordinate
-            // is what ties the signed envelope to the committed membership prefix.
-            // A newly-added author is resolved by reloading the signed author heads
-            // with the named grant's author included as a discovery candidate.
-            if let Some(current) = membership_chain.as_ref() {
-                match resolve_membership_authorization(
-                    storage,
-                    db,
-                    current,
-                    owner_pubkey.as_deref(),
-                    env.author_pubkey.as_deref(),
-                    env.membership_grant.as_ref(),
-                )
-                .await
-                {
-                    MembershipJudgment::Authorized(refreshed) => {
-                        // Adopt any newly committed membership state for later
-                        // changesets in this cycle.
-                        membership_chain = Some(refreshed);
-                    }
-                    MembershipJudgment::Unauthorized => {
-                        // We hold the exact entry the author claims authorizes
-                        // them (or it provably does not exist) and it does not
-                        // grant write — forged or revoked. Skip and advance so
-                        // the client is not stuck, and surface it.
-                        error!(
-                            device_id = %head.device_id,
-                            seq,
-                            author = ?env.author_pubkey,
-                            "changeset author is not a write-capable member \
-                             against the membership entry it is signed under; \
-                             skipping (forged or revoked)"
-                        );
-                        result.rejected_unauthorized.push(RejectedUnauthorized {
-                            device_id: head.device_id.clone(),
-                            seq,
-                            author: env.author_pubkey.clone(),
-                        });
-                        advance_skipped_changeset(db, &mut updated_cursors, &head.device_id, seq)
-                            .await
-                            .map_err(|e| PullError::Apply(e.0))?;
-                        continue;
-                    }
-                    MembershipJudgment::Indeterminate => {
-                        // Membership isn't consistently readable yet, so we
-                        // can't tell behind-vs-forged. Leave the cursor and stop
-                        // this device's pull so the next cycle retries rather
-                        // than skipping a possibly-legitimate changeset.
-                        warn!(
-                            device_id = %head.device_id,
-                            seq,
-                            "cannot yet authorize changeset author (membership \
-                             not readable); leaving cursor for retry"
-                        );
-                        break;
-                    }
-                }
-            }
-
-            if changeset_bytes.is_empty() {
-                advance_skipped_changeset(db, &mut updated_cursors, &head.device_id, seq)
-                    .await
-                    .map_err(|e| PullError::Apply(e.0))?;
-                continue;
-            }
-
-            // Walk the changeset BEFORE applying it: the walk both drives blob
-            // downloads and is surfaced to the host for domain-event mapping, and a
-            // row must never be applied before its blobs are durable on disk
-            // (#111). A walk failure means we cannot know which blobs the changeset
-            // needs, so we cannot safely apply it -- skip it without applying or
-            // advancing the cursor (it surfaces, and retries next cycle). This is
-            // the bug the old "walk -> Vec::new()" substitution hid: it applied the
-            // rows and silently dropped their blobs.
-            let changes = match crate::changeset::walk(&changeset_bytes) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(
-                        device_id = %head.device_id,
-                        seq,
-                        "failed to walk changeset, skipping without applying: {e}"
-                    );
-                    result.asset_downloads_failed = true;
-                    break;
-                }
-            };
-            let old_changes = match crate::changeset::walk_old(&changeset_bytes) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(
-                        device_id = %head.device_id,
-                        seq,
-                        "failed to walk old changeset values, skipping without applying: {e}"
-                    );
-                    result.asset_downloads_failed = true;
-                    break;
-                }
-            };
-
-            // Download + fsync every CacheEager blob BEFORE applying any row. If
-            // any fails, skip the whole changeset -- nothing applied, cursor not
-            // advanced -- and stop this device's pull so a later seq's success
-            // can't carry the cursor past the failed seq (its blobs would then
-            // never be re-fetched). The next cycle resumes at this seq. CacheLazy
-            // blobs are not downloaded here — they are fetched on first read.
-            let cache_eager = match cache_eager_blobs(&blob_decls, &old_changes, &changes) {
-                Ok(blobs) => blobs,
-                Err(e) => {
-                    warn!(
-                        device_id = %head.device_id,
-                        seq,
-                        "failed to scan blob declarations from changeset, skipping without applying: {e}"
-                    );
-                    result.asset_downloads_failed = true;
-                    break;
-                }
-            };
-            // The author of this changeset uploaded the blobs it introduces, so it
-            // is the prefix they live under.
-            let blobs_ok = download_blobs(
-                db,
-                cache_eager,
-                storage,
-                store_dir,
-                env.author_pubkey.as_deref(),
-            )
-            .await;
-            if !blobs_ok {
-                warn!(
-                    "Blob download failed for {}/{}, not applying; cursor not advanced",
-                    head.device_id, seq
-                );
-                result.asset_downloads_failed = true;
-                break;
-            }
-
-            // Every referenced blob is now durable on disk: apply the changeset.
-            // A plain `call` — applied rows are never journaled (only a
-            // `run_pending_journaled_transaction_on` host write is), so they can't
-            // echo as this device's own outgoing changes.
-            // The blobs this changeset introduces are keyed under its author (who
-            // uploaded them); record that atomically with the applied rows.
-            let blob_uploads = match introduced_blob_uploads(
-                &blob_decls,
-                &old_changes,
-                &changes,
-                env.author_pubkey.as_deref(),
-            ) {
-                Ok(uploads) => uploads,
-                Err(e) => {
-                    warn!(
-                        device_id = %head.device_id,
-                        seq,
-                        "failed to enumerate introduced blobs, skipping without applying: {e}"
-                    );
-                    result.asset_downloads_failed = true;
-                    break;
-                }
-            };
-            let cleanup_intents =
-                match local_blob_cleanup_intents(&blob_decls, &old_changes, &changes) {
-                    Ok(intents) => intents,
-                    Err(e) => {
-                        error!(
-                            device_id = %head.device_id,
-                            seq,
-                            error = %e,
-                            "failed to derive local blob cleanup intents; holding cursor"
-                        );
-                        result.held_changesets.push(HeldChangeset {
-                            device_id: head.device_id.clone(),
-                            seq,
-                            reason: HeldChangesetReason::ApplyFailed {
-                                error: e.to_string(),
-                            },
-                        });
-                        break;
-                    }
-                };
-            let apply_outcome = match commit_remote_changeset(
-                db,
-                &head.device_id,
-                seq,
-                &changeset_bytes,
-                &changes,
-                schema.clone(),
-                receiver_wall_ms,
-                &blob_uploads,
-                &cleanup_intents,
-            )
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    error!(
-                        device_id = %head.device_id,
-                        seq,
-                        error = %e.0,
-                        "changeset apply failed; holding cursor for this device"
-                    );
-                    result.held_changesets.push(HeldChangeset {
-                        device_id: head.device_id.clone(),
-                        seq,
-                        reason: HeldChangesetReason::ApplyFailed { error: e.0 },
-                    });
-                    break;
-                }
-            };
-
-            #[cfg(any(test, feature = "test-utils"))]
-            db.reach_test_point(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
-                device_id: head.device_id.clone(),
-                seq,
-            })
-            .await;
-
-            match apply_outcome {
-                RemoteApplyOutcome::Applied => {}
-                RemoteApplyOutcome::DeferredForeignKey => {
-                    deferred.push(DeferredChangeset {
-                        device_id: head.device_id.clone(),
-                        seq,
-                        changeset: changeset_bytes.clone(),
-                        changes,
-                        blob_uploads,
-                        cleanup_intents,
-                    });
-                    break;
-                }
-                RemoteApplyOutcome::ConstraintConflict(tables) => {
-                    record_constraint_conflicts(&mut result, &head.device_id, seq, tables);
-                    break;
-                }
-            }
-
-            finish_applied_changeset(
-                &mut result,
-                &mut updated_cursors,
-                &mut applied_devices,
-                CompletedChangeset {
-                    device_id: &head.device_id,
-                    seq,
-                    changes: &changes,
-                },
-                db,
-                store_dir,
-            )
-            .await
-            .map_err(|e| PullError::Apply(e.0))?;
-        }
-    }
-
-    // Retry changesets that had FK violations. After applying all changesets
-    // from all devices, the parent rows should now exist.
-    if !deferred.is_empty() {
-        info!(
-            count = deferred.len(),
-            "retrying changesets with FK violations"
-        );
-
-        for d in &deferred {
-            let retry_outcome = match commit_remote_changeset(
-                db,
-                &d.device_id,
-                d.seq,
-                &d.changeset,
-                &d.changes,
-                schema.clone(),
-                receiver_wall_ms,
-                &d.blob_uploads,
-                &d.cleanup_intents,
-            )
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    error!(
-                        device_id = %d.device_id,
-                        seq = d.seq,
-                        error = %e.0,
-                        "deferred changeset apply failed; holding cursor for this device"
-                    );
-                    result.held_changesets.push(HeldChangeset {
-                        device_id: d.device_id.clone(),
-                        seq: d.seq,
-                        reason: HeldChangesetReason::ApplyFailed { error: e.0 },
-                    });
-                    continue;
-                }
-            };
-
-            #[cfg(any(test, feature = "test-utils"))]
-            db.reach_test_point(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
-                device_id: d.device_id.clone(),
-                seq: d.seq,
-            })
-            .await;
-
-            match retry_outcome {
-                RemoteApplyOutcome::Applied => {}
-                RemoteApplyOutcome::DeferredForeignKey => {
-                    warn!(
-                        device_id = %d.device_id,
-                        seq = d.seq,
-                        "changeset still has FK violations after retry; cursor not advanced"
-                    );
-                    continue;
-                }
-                RemoteApplyOutcome::ConstraintConflict(tables) => {
-                    record_constraint_conflicts(&mut result, &d.device_id, d.seq, tables);
-                    continue;
-                }
-            }
-            finish_applied_changeset(
-                &mut result,
-                &mut updated_cursors,
-                &mut applied_devices,
-                CompletedChangeset {
-                    device_id: &d.device_id,
-                    seq: d.seq,
-                    changes: &d.changes,
-                },
-                db,
-                store_dir,
-            )
-            .await
-            .map_err(|e| PullError::Apply(e.0))?;
-        }
-    }
-
-    result.devices_pulled = applied_devices.len() as u64;
-
-    Ok((updated_cursors, result))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn commit_remote_changeset(
-    db: &Database,
-    device_id: &str,
-    seq: u64,
-    changeset: &[u8],
-    changes: &[RowChange],
-    schema: Arc<TableSchema>,
-    receiver_wall_ms: u64,
-    blob_uploads: &[(String, String, String)],
-    cleanup_intents: &[LocalBlobCleanupIntent],
-) -> Result<RemoteApplyOutcome, crate::database::DbError> {
-    let device_id = device_id.to_string();
-    let changeset = changeset.to_vec();
-    let blob_uploads = blob_uploads.to_vec();
-    let cleanup_intents = cleanup_intents.to_vec();
-    let mut changeset_max = None;
-    advance_max_updated_at(&mut changeset_max, changes, &schema, receiver_wall_ms);
-    let hlc = db.hlc();
-    let blob_decls = db.blob_decls();
-    db.call(move |conn| {
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(crate::database::DbError::from)?;
-        let apply = resolve_and_apply_changeset_with_schema_on(
-            &tx,
-            &changeset,
-            schema,
-            receiver_wall_ms,
-            &blob_uploads,
-        )?;
-        if !apply.constraint_conflict_tables.is_empty() {
-            tx.rollback().map_err(crate::database::DbError::from)?;
-            return Ok(RemoteApplyOutcome::ConstraintConflict(
-                apply.constraint_conflict_tables,
-            ));
-        }
-        if apply.had_fk_violations {
-            tx.rollback().map_err(crate::database::DbError::from)?;
-            return Ok(RemoteApplyOutcome::DeferredForeignKey);
-        }
-        for intent in cleanup_intents {
-            local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
-        }
-        Database::advance_sync_cursor_on(&tx, &device_id, seq - 1, seq)?;
-        tx.commit().map_err(crate::database::DbError::from)?;
-        if let Some(max_applied) = &changeset_max {
-            hlc.advance_past(max_applied);
-        }
-        Ok(RemoteApplyOutcome::Applied)
-    })
-    .await
-}
-
-async fn finish_applied_changeset(
-    result: &mut PullResult,
-    updated_cursors: &mut HashMap<String, u64>,
-    applied_devices: &mut HashSet<String>,
-    applied: CompletedChangeset<'_>,
-    db: &Database,
-    store_dir: &StoreDir,
-) -> Result<(), crate::database::DbError> {
-    result.changesets_applied += 1;
-    result.row_changes.extend(applied.changes.to_vec());
-    applied_devices.insert(applied.device_id.to_string());
-    updated_cursors.insert(applied.device_id.to_string(), applied.seq);
-
-    // Cleanup obligations were committed beside the row and cursor. Draining them
-    // does not control whether the changeset is materialized; a failed filesystem
-    // operation leaves its durable intent for the next drain. Keep this after the
-    // row-and-cursor transaction advanced the shared clock before returning, so
-    // awaited filesystem work cannot expose a committed row under an older clock.
-    result.local_blob_cleanup_pending = local_cleanup::drain(db, store_dir).await?;
-    Ok(())
-}
-
-fn record_constraint_conflicts(
-    result: &mut PullResult,
-    device_id: &str,
-    seq: u64,
-    tables: Vec<String>,
-) {
-    for table in tables {
-        error!(
-            device_id = %device_id,
-            seq,
-            table = %table,
-            "changeset hit a non-retryable SQLite constraint conflict; changeset rolled back"
-        );
-        result.constraint_conflicts.push(ConstraintConflict {
-            device_id: device_id.to_string(),
-            seq,
-            table,
-        });
-    }
-}
-
-/// Outcome of deciding whether a changeset's author may write, when the
-/// cycle-start membership chain did not already authorize them.
-enum MembershipJudgment {
-    /// Authorized against a refreshed chain (and, if needed, the exact grant entry
-    /// the changeset names). Carries the chain to adopt for the rest of the cycle.
-    Authorized(MembershipChain),
-    /// Genuinely not authorized: forged, revoked, the wrong role, or a grant
-    /// coordinate that does not exist. Skip and advance the cursor.
-    Unauthorized,
-    /// Can't be determined yet — membership storage is transiently unavailable or
-    /// not consistently readable. Don't advance; retry next cycle.
-    Indeterminate,
-}
-
-/// Decide whether the envelope names the exact committed entry that currently
-/// grants `author` write access. A grant already present in `current` is decided
-/// without storage reads. Otherwise the chain is reloaded through signed author
-/// heads, including the grant coordinate's author as a discovery candidate, so a
-/// lagging LIST cannot hide a committed grant and a bare stored entry can never
-/// authorize a write.
-///
-/// `owner_pubkey` is the store's pinned owner after initialization, for either
-/// storage representation. Any chain this adopts or merges must still be founded
-/// by that owner; a refreshed/merged chain that is not is a takeover attempt and
-/// does not authorize anyone, so it is treated as unauthorized — never adopted.
-async fn resolve_membership_authorization(
-    storage: &dyn SyncStorage,
-    db: &Database,
-    current: &MembershipChain,
-    owner_pubkey: Option<&str>,
-    author: Option<&str>,
-    grant: Option<&MembershipCoord>,
-) -> MembershipJudgment {
-    let Some(author) = author else {
-        // Unsigned changeset in a chain store: nothing can authorize it.
-        return MembershipJudgment::Unauthorized;
-    };
-
-    let Some(coord) = grant else {
-        return MembershipJudgment::Unauthorized;
-    };
-    if current.can_write_now(author) && current.write_grant_coord(author).as_ref() == Some(coord) {
-        return MembershipJudgment::Authorized(current.clone());
-    }
-
-    let entries = match storage.list_membership_entries().await {
-        Ok(entries) => entries,
-        Err(error) => {
-            warn!(
-                error = %error,
-                "membership listing unavailable while resolving a changeset grant"
-            );
-            return MembershipJudgment::Indeterminate;
-        }
-    };
-
-    let fresh = match super::membership_ops::load_anchored_chain_with_candidates(
-        storage,
-        &entries,
-        std::slice::from_ref(coord),
-        owner_pubkey,
-        Some(db),
-    )
-    .await
-    {
-        Ok(Some(chain)) => chain,
-        Ok(None) => return MembershipJudgment::Unauthorized,
-        Err(super::membership_ops::AnchoredChainError::StorageUnavailable {
-            operation,
-            source,
-        }) => {
-            warn!(
-                %operation,
-                error = %source,
-                "membership storage unavailable while resolving a changeset grant"
-            );
-            return MembershipJudgment::Indeterminate;
-        }
-        Err(error) => {
-            warn!(
-                grant_author = %coord.author_pubkey,
-                grant_seq = coord.seq,
-                error = %error,
-                "named membership grant is not in a valid committed chain; rejecting changeset"
-            );
-            return MembershipJudgment::Unauthorized;
-        }
-    };
-
-    if fresh.can_write_now(author) && fresh.write_grant_coord(author).as_ref() == Some(coord) {
-        MembershipJudgment::Authorized(fresh)
-    } else {
-        MembershipJudgment::Unauthorized
-    }
 }
 
 /// Advance `max` past the greatest `_updated_at` among `changes`, parsing each
@@ -1175,7 +162,7 @@ async fn resolve_membership_authorization(
 /// such a stamp was already refused by the apply, but a *non-conflicting* INSERT
 /// (no local row to conflict with) reaches here as an applied row, so this is the
 /// gate that stops it from dragging the clock forward.
-fn advance_max_updated_at(
+pub(super) fn advance_max_updated_at(
     max: &mut Option<Timestamp>,
     changes: &[RowChange],
     schema: &TableSchema,
@@ -1444,7 +431,7 @@ pub(crate) fn cache_eager_blobs(
 /// object and introduces nothing, so it is not recorded here. Empty when the
 /// author is unknown, which is possible only before membership initialization.
 /// Returns `(namespace, blob_id, uploader)` for the local uploader index.
-fn introduced_blob_uploads(
+pub(super) fn introduced_blob_uploads(
     blob_decls: &BlobDecls,
     old_changes: &[RowChange],
     changes: &[RowChange],
@@ -1513,10 +500,10 @@ pub(crate) fn host_provided_blobs(
 
 /// Derive every local-blob cleanup obligation from a changeset before its rows
 /// apply. The caller stores these intents in the same transaction as the rows and
-/// cursor, so filesystem cleanup may happen afterward without leaving an
+/// position, so filesystem cleanup may happen afterward without leaving an
 /// unrecorded obligation. A DELETE removes its old blob; an UPDATE does so only
 /// when it repoints or clears the blob reference.
-fn local_blob_cleanup_intents(
+pub(super) fn local_blob_cleanup_intents(
     blob_decls: &BlobDecls,
     old_changes: &[RowChange],
     new_changes: &[RowChange],
@@ -1641,7 +628,7 @@ pub(crate) async fn download_blobs(
 
         // Already on disk in either cache folder — don't re-download. A failed
         // existence check is a local-disk fault, not a missing blob — and the
-        // download's own write would hit the same fault. Hold the cursor and retry
+        // download's own write would hit the same fault. Hold the position and retry
         // next cycle rather than treat the error as absence.
         match cached_in_either_folder(&dest, &pinned).await {
             Ok(true) => continue,
@@ -1782,166 +769,3 @@ impl std::fmt::Display for PullError {
 }
 
 impl std::error::Error for PullError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sync::session::{BlobDecl, SyncedTable};
-    use crate::sync::test_helpers::{capture_bytes, exec, open_test_db_with_blob, temp_store_dir};
-
-    #[test]
-    fn cleanup_intent_derivation_rejects_mismatched_lengths() {
-        let old_changes = vec![RowChange {
-            table: "files".to_string(),
-            op: crate::changeset::ChangeOp::Update,
-            columns: vec![Some("file-1".to_string())],
-        }];
-        let new_changes = Vec::new();
-        let conn = rusqlite::Connection::open_in_memory().expect("db");
-        let decls = BlobDecls::from_tables(&conn, &[]).expect("decls");
-
-        let err = local_blob_cleanup_intents(&decls, &old_changes, &new_changes)
-            .expect_err("mismatched changeset walks fail");
-
-        assert!(matches!(
-            err,
-            crate::blob::decl::BlobDeclError::ChangesetWalkMismatch {
-                old_count: 1,
-                new_count: 0
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn cleanup_guard_rejects_remote_row_re_reference_without_advancing_cursor() {
-        let blob_decl = || {
-            BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy)
-                .with_id_column("blob_id")
-        };
-        let source = open_test_db_with_blob(blob_decl());
-        exec(
-            &source,
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'Parent', NULL, \
-                     '0000000001000-0000-dev1', '2026-01-01')",
-        )
-        .await;
-        let changeset = capture_bytes(
-            &source,
-            &["INSERT INTO note_photos \
-               (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
-               VALUES ('remote-row', 'n1', 'cover', 9, NULL, 'guarded-blob', \
-                       '0000000002000-0000-dev1', '2026-01-01')"],
-        )
-        .await;
-        let changes = crate::changeset::walk(&changeset).expect("walk remote changeset");
-
-        let target = open_test_db_with_blob(blob_decl());
-        exec(
-            &target,
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'Parent', NULL, \
-                     '0000000001000-0000-dev2', '2026-01-01')",
-        )
-        .await;
-        target
-            .call(|conn| {
-                conn.execute(
-                    "INSERT INTO local_cleanup_intents (namespace, blob_id) \
-                     VALUES ('photos', 'guarded-blob')",
-                    [],
-                )
-                .map(|_| ())
-                .map_err(crate::database::DbError::from)
-            })
-            .await
-            .unwrap();
-        let direct_write = target
-            .call(|conn| {
-                conn.execute(
-                    "INSERT INTO note_photos \
-                     (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
-                     VALUES ('direct-row', 'n1', 'cover', 9, NULL, 'guarded-blob', \
-                             '0000000002000-0000-dev2', '2026-01-01')",
-                    [],
-                )
-                .map(|_| ())
-                .map_err(crate::database::DbError::from)
-            })
-            .await;
-        assert!(
-            direct_write.is_err(),
-            "the TEMP guard rejects equivalent direct SQL on this connection"
-        );
-        let schema = {
-            let tables = target.synced_tables().to_vec();
-            Arc::new(
-                target
-                    .call(move |conn| {
-                        let names: Vec<&str> = tables.iter().map(SyncedTable::name).collect();
-                        TableSchema::from_db(conn, &names)
-                    })
-                    .await
-                    .unwrap(),
-            )
-        };
-
-        let rejected = commit_remote_changeset(
-            &target,
-            "dev1",
-            1,
-            &changeset,
-            &changes,
-            schema.clone(),
-            target.receive_wall_ms(),
-            &[],
-            &[],
-        )
-        .await
-        .unwrap();
-        assert!(
-            matches!(
-                rejected,
-                RemoteApplyOutcome::ConstraintConflict(ref tables)
-                    if tables == &["note_photos".to_string()]
-            ),
-            "the TEMP guard rejects the remote row as a constraint conflict"
-        );
-        assert!(!target
-            .call(|conn| {
-                conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM note_photos WHERE id = 'remote-row')",
-                    [],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(crate::database::DbError::from)
-            })
-            .await
-            .unwrap());
-        assert_eq!(
-            target.get_all_sync_cursors().await.unwrap().get("dev1"),
-            None
-        );
-
-        let (_tmp, store_dir) = temp_store_dir();
-        assert!(!local_cleanup::drain(&target, &store_dir).await.unwrap());
-        let applied = commit_remote_changeset(
-            &target,
-            "dev1",
-            1,
-            &changeset,
-            &changes,
-            schema,
-            target.receive_wall_ms(),
-            &[],
-            &[],
-        )
-        .await
-        .unwrap();
-        assert!(matches!(applied, RemoteApplyOutcome::Applied));
-        assert_eq!(
-            target.get_all_sync_cursors().await.unwrap().get("dev1"),
-            Some(&1)
-        );
-    }
-}

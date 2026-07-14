@@ -25,7 +25,7 @@ pub(super) enum NotFound {
 /// Send-and-check: return the response on 2xx, else a `CloudHomeError`. A response
 /// matching `not_found` becomes [`CloudHomeError::NotFound`]; any other non-2xx
 /// becomes a [`CloudHomeError::Transport`] carrying the status and body. `ctx` names
-/// the operation (e.g. `"read heads/dev1.json"`). The one definition of the
+/// the operation (e.g. `"read objects/dev1.json"`). The one definition of the
 /// `let status = resp.status(); if !status.is_success() { … }` block that was
 /// copied ~30× across the OAuth backends.
 pub(super) async fn ensure_ok(

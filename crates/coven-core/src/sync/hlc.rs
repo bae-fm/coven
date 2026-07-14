@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// `sync_state` key under which the clock's high-water mark is persisted, so it
+/// `protocol_state` key under which the clock's high-water mark is persisted, so it
 /// cannot regress across restarts (see [`Hlc::seed`]). Written whenever the
 /// clock advances (host stamp flushed at cycle end, and on apply-merge).
 pub const HIGHWATER_STATE_KEY: &str = "hlc_highwater";

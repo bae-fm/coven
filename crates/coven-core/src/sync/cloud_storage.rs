@@ -12,12 +12,11 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 use tracing::warn;
 
-use super::signed_control::{AckJson, HeadJson, MinSchemaVersionJson};
-use super::storage::{DeviceHead, HeadListing, MinSchemaVersion, StorageError, SyncStorage};
+use super::storage::{ProtocolObjectListing, ProtocolObjectLocator, StorageError, SyncStorage};
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
 use crate::local_blob::PlatformPlaintextReader;
-use crate::storage::cloud::{BlobBody, CloudHome};
+use crate::storage::cloud::{BlobBody, CloudHome, CopyIdRef};
 
 /// Every encrypted object carries this cleartext prefix naming the key it was
 /// sealed under, by 8-byte fingerprint: magic, then the fingerprint. A read
@@ -267,7 +266,7 @@ impl PendingRotation {
     }
 }
 
-/// The `sync_state` key under which a device durably records that a committed
+/// The `protocol_state` key under which a device durably records that a committed
 /// store-key rotation is outstanding (the committed generation as decimal). Set
 /// when [`PendingRotation`] is marked, deleted when the mark resolves. Restored
 /// into the in-memory marker at open so a restart cannot forget an unadopted
@@ -276,13 +275,13 @@ impl PendingRotation {
 /// not re-surface the rotation.
 pub const PENDING_ROTATION_STATE_KEY: &str = "pending_rotation_generation";
 
-/// Restore the in-memory [`PendingRotation`] from its durable `sync_state`
+/// Restore the in-memory [`PendingRotation`] from its durable `protocol_state`
 /// record, if one is set. Called at open, before the first cycle seals anything.
 pub async fn restore_pending_rotation(
     db: &crate::database::Database,
     pending_rotation: &PendingRotation,
 ) -> Result<(), crate::database::DbError> {
-    if let Some(value) = db.get_sync_state(PENDING_ROTATION_STATE_KEY).await? {
+    if let Some(value) = db.get_protocol_state(PENDING_ROTATION_STATE_KEY).await? {
         match value.parse::<u64>() {
             Ok(generation) => pending_rotation.mark_committed(generation),
             Err(_) => warn!("ignoring malformed persisted pending-rotation generation {value:?}"),
@@ -292,7 +291,7 @@ pub async fn restore_pending_rotation(
 }
 
 /// Write the in-memory [`PendingRotation`]'s current state to its durable
-/// `sync_state` record: the committed generation while a rotation is pending, or
+/// `protocol_state` record: the committed generation while a rotation is pending, or
 /// a delete once it has resolved.
 pub async fn persist_pending_rotation(
     db: &crate::database::Database,
@@ -300,10 +299,10 @@ pub async fn persist_pending_rotation(
 ) -> Result<(), crate::database::DbError> {
     match pending_rotation.pending_generation() {
         Some(generation) => {
-            db.set_sync_state(PENDING_ROTATION_STATE_KEY, &generation.to_string())
+            db.set_protocol_state(PENDING_ROTATION_STATE_KEY, &generation.to_string())
                 .await
         }
-        None => db.delete_sync_state(PENDING_ROTATION_STATE_KEY).await,
+        None => db.delete_protocol_state(PENDING_ROTATION_STATE_KEY).await,
     }
 }
 
@@ -356,10 +355,10 @@ impl CloudCipher {
         }
     }
 
-    /// Protect a control object (heads, changesets, snapshot, snapshot_meta,
-    /// min_schema, membership) for storage. Encrypted seals under the current
-    /// store-key generation and prefixes that generation in cleartext;
-    /// plaintext returns the bytes unchanged.
+    /// Protect an immutable Store object or mutable membership/key object for
+    /// storage. Encrypted homes seal under the current store-key generation and
+    /// prefix that generation in cleartext; plaintext homes return the bytes
+    /// unchanged.
     pub fn seal(&self, plaintext: Vec<u8>, aad_context: &[u8]) -> Vec<u8> {
         // A control object is always whole-home scoped; only blobs carry a scope.
         // This is exactly the master-scoped blob path: `encryption_for_scope`
@@ -472,6 +471,7 @@ pub struct CloudSyncStorage {
     /// over a home's life, so it is a plain field with no lock.
     blob_paths: BlobPathScheme,
     store_id: String,
+    copy_ids: Option<CopyIdRef>,
     /// The device's signing identity. The control objects this storage writes
     /// (its head, the min_schema floor) are signed with it so a reader can
     /// attribute and verify them; the at-rest cipher proves confidentiality, not
@@ -494,7 +494,15 @@ impl CloudSyncStorage {
             blob_paths,
             store_id: store_id.into(),
             keypair,
+            copy_ids: None,
         }
+    }
+
+    /// Install the composition root's physical-copy id source. Store protocol
+    /// appends fail loudly until this is supplied.
+    pub fn with_copy_ids(mut self, copy_ids: CopyIdRef) -> Self {
+        self.copy_ids = Some(copy_ids);
+        self
     }
 
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
@@ -556,80 +564,6 @@ impl CloudSyncStorage {
         let cipher = self.cipher();
         self.pending_rotation.check(&cipher)?;
         Ok(cipher)
-    }
-
-    async fn write_sealed(&self, key: &str, plaintext: Vec<u8>) -> Result<(), StorageError> {
-        let stored = self
-            .cipher_for_seal()?
-            .seal(plaintext, &self.aad_context(key));
-        self.home
-            .write(
-                key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn read_sealed(&self, key: &str, label: &str) -> Result<Vec<u8>, StorageError> {
-        let stored = self.home.read(key).await?;
-        self.open_stored(key, stored, label)
-    }
-
-    fn open_stored(
-        &self,
-        key: &str,
-        stored: Vec<u8>,
-        label: &str,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.cipher()
-            .open(stored, &self.aad_context(key))
-            .map_err(|e| StorageError::Decryption(format!("{label}: {e}")))
-    }
-
-    /// Publish this device's head (at `seq` 0 — a joiner has authored nothing) and
-    /// its pull-ack (seeded at `cursors`, the snapshot positions bootstrap adopted)
-    /// so a peer's changeset reclamation sees this reader before the local store
-    /// commits and pins every floor at what this device still needs to pull.
-    ///
-    /// Written head-first, then ack: a window with the head present but the ack
-    /// absent makes reclamation treat this device as un-acked (cursor 0), which
-    /// only pauses reclamation — the safe direction. The reverse order would leave
-    /// a window in which reclamation cannot see the device at all and could delete
-    /// a changeset it still needs.
-    ///
-    /// [`Self::delete_bootstrap_reader`] removes both on a handled bootstrap
-    /// failure. A hard crash (or a rollback after bootstrap already reported
-    /// success) can leave them behind: that stale ack pins reclamation at the
-    /// bootstrap cursors — storage growth, never a stranded reader. An owner can
-    /// delete a dead device's head/ack objects (owners retain bucket-wide delete).
-    pub async fn publish_bootstrap_reader(
-        &self,
-        device_id: &str,
-        cursors: &std::collections::HashMap<String, u64>,
-        timestamp: &str,
-    ) -> Result<(), StorageError> {
-        self.put_head(device_id, 0, timestamp).await?;
-        let cursors: std::collections::BTreeMap<String, u64> =
-            cursors.iter().map(|(id, seq)| (id.clone(), *seq)).collect();
-        let ack = AckJson::signed(device_id, cursors, &self.keypair);
-        let bytes = serde_json::to_vec(&ack)
-            .map_err(|e| StorageError::Parse(format!("serialize bootstrap ack: {e}")))?;
-        self.put_ack(device_id, bytes).await
-    }
-
-    /// Delete the head and ack [`Self::publish_bootstrap_reader`] wrote. Deletes
-    /// the ack first so any window leaves the head present and the device counted
-    /// as un-acked (reclamation paused — the safe direction) rather than invisible.
-    /// A missing object is not an error, so this is safe to call whether or not the
-    /// publish had written either object yet.
-    pub async fn delete_bootstrap_reader(&self, device_id: &str) -> Result<(), StorageError> {
-        let ack_key = format!("acks/{device_id}.json{}", self.suffix());
-        self.home.delete(&ack_key).await?;
-        let head_key = format!("heads/{device_id}.json{}", self.suffix());
-        self.home.delete(&head_key).await?;
-        Ok(())
     }
 
     fn aad_context(&self, key: &str) -> Vec<u8> {
@@ -1074,145 +1008,106 @@ impl BlobRangeReader {
     }
 }
 
-/// Parse `membership/{author_pubkey}/{seq}{suffix}` object keys into
-/// `(author_pubkey, seq)` coordinates. Shared by `list_membership_entries` and
-/// the join path, which lists the same keys straight off the cloud home (with
-/// the encrypted-home suffix) to resolve a wrapped key's activation. The
-/// per-author head (`{author}/head{suffix}`) is not an entry and is skipped.
-pub(crate) fn parse_membership_entry_keys(keys: &[String], suffix: &str) -> Vec<(String, u64)> {
-    let mut entries = Vec::new();
-    for key in keys {
-        let Some(rest) = key.strip_prefix("membership/") else {
-            warn!("skipping membership key without the expected prefix: {key}");
-            continue;
-        };
-        let Some(rest) = rest.strip_suffix(suffix) else {
-            warn!("skipping membership key without the expected suffix: {key}");
-            continue;
-        };
-        // The pubkey is hex (no slashes), so the last '/' separates it from seq.
-        let Some(slash_pos) = rest.rfind('/') else {
-            warn!("skipping membership key with no pubkey/seq separator: {key}");
-            continue;
-        };
-        let author = &rest[..slash_pos];
-        let tail = &rest[slash_pos + 1..];
-        if tail == "head" {
-            continue;
-        }
-        match tail.parse::<u64>() {
-            Ok(seq) => entries.push((author.to_string(), seq)),
-            Err(e) => warn!("skipping membership key {key} with non-numeric seq: {e}"),
-        }
-    }
-    entries
-}
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SyncStorage for CloudSyncStorage {
-    async fn list_heads(&self) -> Result<HeadListing, StorageError> {
-        let suffix = self.suffix();
-        let keys = self.home.list("heads/").await?;
-        let mut heads = Vec::new();
-        // Slots that held an object we could not open, parse, or verify. Counted
-        // (not just skipped) because changeset reclamation must fail closed on a
-        // present-but-unreadable head — see [`HeadListing`].
-        let mut unreadable = 0usize;
-
-        for key in &keys {
-            // key = "heads/{device_id}.json{suffix}"
-            let Some(device_id) = key
-                .strip_prefix("heads/")
-                .and_then(|s| s.strip_suffix(suffix))
-                .and_then(|s| s.strip_suffix(".json"))
-            else {
-                // Not a device-head slot at all — a stray key, not an unreadable
-                // head — so it neither drives the pull nor blocks reclamation.
-                warn!("skipping head with unexpected key format: {key}");
-                continue;
-            };
-
-            let stored = self.home.read(key).await?;
-            // A head we can't open, can't parse, or can't verify is skipped from
-            // the returned heads, not fatal. The bucket is untrusted: any member
-            // with the credential can seal garbage into their own head slot under
-            // the store key, and a different store reusing this bucket writes
-            // heads under its own key. Aborting on any one of them would wedge
-            // every sync cycle for this store — it would never pull, push its
-            // catalog or snapshot, or publish its own head. Skipping excludes the
-            // bad head and lets the rest drive the pull; the slot's owner
-            // republishes a good head on its next successful cycle. Each such slot
-            // is counted so reclamation, which reads the same listing for a
-            // destructive decision, can fail closed. A transient read error above
-            // still propagates (it retries next cycle).
-            let decoded = match self.open_stored(key, stored, &format!("head {device_id}")) {
-                Ok(d) => d,
-                Err(e) => {
-                    warn!("skipping head {device_id} this store cannot decrypt: {e}");
-                    unreadable += 1;
-                    continue;
-                }
-            };
-
-            let head_json: HeadJson = match serde_json::from_slice(&decoded) {
-                Ok(h) => h,
-                Err(e) => {
-                    warn!("skipping head {device_id} that does not parse: {e}");
-                    unreadable += 1;
-                    continue;
-                }
-            };
-
-            // A head whose signature doesn't verify against its embedded author
-            // is forged (the bucket is untrusted) -- skip it like one we can't
-            // decrypt, so it can't pollute sync status or drive a per-seq fetch
-            // loop. The author the signature is bound to is surfaced so the
-            // caller can run the membership (authorization) check.
-            if !head_json.verify(device_id) {
-                warn!("skipping head {device_id} with an invalid signature");
-                unreadable += 1;
-                continue;
-            }
-
-            heads.push(DeviceHead {
-                device_id: device_id.to_string(),
-                seq: head_json.seq,
-                last_sync: head_json.last_sync,
-                author_pubkey: head_json.author_pubkey,
-            });
-        }
-
-        Ok(HeadListing { heads, unreadable })
-    }
-
-    async fn get_changeset(&self, device_id: &str, seq: u64) -> Result<Vec<u8>, StorageError> {
-        let key = format!("changes/{device_id}/{seq}{}", self.suffix());
-        self.read_sealed(&key, &format!("changeset {device_id}/{seq}"))
-            .await
-    }
-
-    async fn put_changeset(
+    async fn append_protocol_object(
         &self,
-        device_id: &str,
-        seq: u64,
+        semantic_prefix: &str,
+        extension: &str,
         data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let key = format!("changes/{device_id}/{seq}{}", self.suffix());
-        self.write_sealed(&key, data).await
+    ) -> Result<ProtocolObjectLocator, StorageError> {
+        if !semantic_prefix.starts_with(crate::sync::store_commit::protocol_prefix())
+            || semantic_prefix.contains("/copies/")
+            || !matches!(extension, ".json" | ".pkg" | ".db")
+        {
+            return Err(StorageError::Parse(format!(
+                "invalid Store append path {semantic_prefix:?} with extension {extension:?}"
+            )));
+        }
+        let copy_id = self
+            .copy_ids
+            .as_ref()
+            .ok_or_else(|| {
+                StorageError::Storage(
+                    "Store protocol append has no injected CopyIdGenerator".to_string(),
+                )
+            })?
+            .next_copy_id();
+        let logical_key = format!("{semantic_prefix}/copies/{copy_id}{extension}");
+        let physical_key = format!("{logical_key}{}", self.suffix());
+        let stored = self
+            .cipher_for_seal()?
+            .seal(data, &self.aad_context(semantic_prefix));
+        let physical = self
+            .home
+            .append_object(
+                &physical_key,
+                BlobBody::from_bytes(stored),
+                &crate::storage::cloud::no_progress(),
+            )
+            .await?;
+        Ok(ProtocolObjectLocator::new(logical_key, physical))
     }
 
-    async fn put_head(
+    async fn list_protocol_objects(
         &self,
-        device_id: &str,
-        seq: u64,
-        timestamp: &str,
+        prefix: &str,
+    ) -> Result<ProtocolObjectListing, StorageError> {
+        if !prefix.starts_with(crate::sync::store_commit::protocol_prefix()) {
+            return Err(StorageError::Parse(format!(
+                "invalid Store listing prefix {prefix:?}"
+            )));
+        }
+        let suffix = self.suffix();
+        let listing = self.home.list_appended(prefix).await?;
+        let mut objects = Vec::with_capacity(listing.objects.len());
+        for physical in listing.objects {
+            let logical_key = physical
+                .logical_key()
+                .strip_suffix(suffix)
+                .ok_or_else(|| {
+                    StorageError::Parse(format!(
+                        "Store append key {:?} lacks expected storage suffix {suffix:?}",
+                        physical.logical_key()
+                    ))
+                })?
+                .to_string();
+            objects.push(ProtocolObjectLocator::new(logical_key, physical));
+        }
+        Ok(ProtocolObjectListing {
+            objects,
+            coverage: listing.coverage,
+        })
+    }
+
+    async fn read_protocol_object(
+        &self,
+        object: &ProtocolObjectLocator,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        let expected_physical_key = format!("{}{}", object.logical_key(), self.suffix());
+        if object.physical().logical_key() != expected_physical_key {
+            return Err(StorageError::Parse(format!(
+                "Store locator key {:?} does not match physical key {:?}",
+                object.logical_key(),
+                object.physical().logical_key()
+            )));
+        }
+        let stored = self.home.read_appended(object.physical()).await?;
+        self.cipher()
+            .open(stored, &self.aad_context(semantic_prefix))
+            .map_err(|error| {
+                StorageError::Decryption(format!("Store object {}: {error}", object.logical_key()))
+            })
+    }
+
+    async fn delete_protocol_object(
+        &self,
+        object: &ProtocolObjectLocator,
     ) -> Result<(), StorageError> {
-        let head = HeadJson::signed(device_id, seq, Some(timestamp.to_string()), &self.keypair);
-        let json = serde_json::to_vec(&head)
-            .map_err(|e| StorageError::Parse(format!("serialize head: {e}")))?;
-        let key = format!("heads/{device_id}.json{}", self.suffix());
-        self.write_sealed(&key, json).await
+        self.home.delete_appended(object.physical()).await?;
+        Ok(())
     }
 
     async fn put_blob(
@@ -1379,140 +1274,6 @@ impl SyncStorage for CloudSyncStorage {
         }
     }
 
-    async fn put_snapshot(
-        &self,
-        author: &str,
-        publish_id: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        crate::store_dir::validate_path_token(author)?;
-        let key = format!("snapshot/{author}/{publish_id}.db{}", self.suffix());
-        self.write_sealed(&key, data).await
-    }
-
-    async fn get_snapshot(&self, author: &str, publish_id: u64) -> Result<Vec<u8>, StorageError> {
-        crate::store_dir::validate_path_token(author)?;
-        let key = format!("snapshot/{author}/{publish_id}.db{}", self.suffix());
-        self.read_sealed(&key, &format!("snapshot {author}/{publish_id}"))
-            .await
-    }
-
-    async fn delete_changeset(&self, device_id: &str, seq: u64) -> Result<(), StorageError> {
-        let key = format!("changes/{device_id}/{seq}{}", self.suffix());
-        self.home.delete(&key).await?;
-        Ok(())
-    }
-
-    async fn list_changesets(&self, device_id: &str) -> Result<Vec<u64>, StorageError> {
-        let suffix = self.suffix();
-        let prefix = format!("changes/{device_id}/");
-        let keys = self.home.list(&prefix).await?;
-
-        let mut seqs = Vec::new();
-        for key in &keys {
-            let Some(seq_str) = key
-                .strip_prefix(&prefix)
-                .and_then(|s| s.strip_suffix(suffix))
-            else {
-                warn!("skipping changeset key with unexpected format: {key}");
-                continue;
-            };
-            match seq_str.parse::<u64>() {
-                Ok(seq) => seqs.push(seq),
-                Err(e) => warn!("skipping changeset key {key} with non-numeric seq: {e}"),
-            }
-        }
-        seqs.sort();
-        Ok(seqs)
-    }
-
-    async fn put_ack(&self, device_id: &str, data: Vec<u8>) -> Result<(), StorageError> {
-        let key = format!("acks/{device_id}.json{}", self.suffix());
-        self.write_sealed(&key, data).await
-    }
-
-    async fn get_ack(&self, device_id: &str) -> Result<Vec<u8>, StorageError> {
-        let key = format!("acks/{device_id}.json{}", self.suffix());
-        self.read_sealed(&key, &format!("ack {device_id}")).await
-    }
-
-    async fn get_min_schema_version(&self) -> Result<Option<MinSchemaVersion>, StorageError> {
-        let key = format!("min_schema_version.json{}", self.suffix());
-        let stored = match self.home.read(&key).await {
-            Ok(data) => data,
-            Err(crate::storage::cloud::CloudHomeError::NotFound(_)) => return Ok(None),
-            Err(e) => return Err(StorageError::from(e)),
-        };
-
-        let decoded = self.open_stored(&key, stored, "min_schema_version")?;
-
-        let parsed: MinSchemaVersionJson = serde_json::from_slice(&decoded)
-            .map_err(|e| StorageError::Parse(format!("parse min_schema_version: {e}")))?;
-
-        // The bucket is untrusted: a floor set by anyone with the credential can
-        // freeze the fleet or force a downgrade. Treat a value whose signature
-        // doesn't verify as absent (None) rather than honoring it; the caller
-        // separately checks the verified author is a current owner.
-        if !parsed.verify() {
-            warn!("ignoring min_schema_version with an invalid signature");
-            return Ok(None);
-        }
-
-        Ok(Some(MinSchemaVersion {
-            version: parsed.min_schema_version,
-            author_pubkey: parsed.author_pubkey,
-        }))
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    async fn set_min_schema_version(&self, version: u32) -> Result<(), StorageError> {
-        let payload = MinSchemaVersionJson::signed(version, &self.keypair);
-        let json = serde_json::to_vec(&payload)
-            .map_err(|e| StorageError::Parse(format!("serialize min_schema_version: {e}")))?;
-        let key = format!("min_schema_version.json{}", self.suffix());
-        self.write_sealed(&key, json).await
-    }
-
-    async fn put_membership_entry(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let key = format!("membership/{author_pubkey}/{seq}{}", self.suffix());
-        self.write_sealed(&key, data).await
-    }
-
-    async fn get_membership_entry(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        let key = format!("membership/{author_pubkey}/{seq}{}", self.suffix());
-        self.read_sealed(&key, &format!("membership {author_pubkey}/{seq}"))
-            .await
-    }
-
-    async fn list_membership_entries(&self) -> Result<Vec<(String, u64)>, StorageError> {
-        let keys = self.home.list("membership/").await?;
-        Ok(parse_membership_entry_keys(&keys, self.suffix()))
-    }
-
-    async fn put_membership_head(
-        &self,
-        author_pubkey: &str,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let key = format!("membership/{author_pubkey}/head{}", self.suffix());
-        self.write_sealed(&key, data).await
-    }
-
-    async fn get_membership_head(&self, author_pubkey: &str) -> Result<Vec<u8>, StorageError> {
-        let key = format!("membership/{author_pubkey}/head{}", self.suffix());
-        self.read_sealed(&key, &format!("membership head {author_pubkey}"))
-            .await
-    }
-
     async fn put_wrapped_key(
         &self,
         owner_pubkey: &str,
@@ -1556,102 +1317,6 @@ impl SyncStorage for CloudSyncStorage {
         self.home.delete(&key).await?;
         Ok(())
     }
-
-    async fn put_snapshot_meta(
-        &self,
-        author: &str,
-        publish_id: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        crate::store_dir::validate_path_token(author)?;
-        let key = format!("snapshot/{author}/{publish_id}_meta.json{}", self.suffix());
-        self.write_sealed(&key, data).await
-    }
-
-    async fn get_snapshot_meta(
-        &self,
-        author: &str,
-        publish_id: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        crate::store_dir::validate_path_token(author)?;
-        let key = format!("snapshot/{author}/{publish_id}_meta.json{}", self.suffix());
-        self.read_sealed(&key, &format!("snapshot_meta {author}/{publish_id}"))
-            .await
-    }
-
-    async fn put_snapshot_pointer(&self, data: Vec<u8>) -> Result<(), StorageError> {
-        let key = format!("snapshot/current.json{}", self.suffix());
-        self.write_sealed(&key, data).await
-    }
-
-    async fn get_snapshot_pointer(&self) -> Result<Vec<u8>, StorageError> {
-        let key = format!("snapshot/current.json{}", self.suffix());
-        self.read_sealed(&key, "snapshot_pointer").await
-    }
-
-    async fn list_own_snapshot_generations(&self, author: &str) -> Result<Vec<u64>, StorageError> {
-        crate::store_dir::validate_path_token(author)?;
-        let suffix = self.suffix();
-        let prefix = format!("snapshot/{author}/");
-        let keys = self.home.list(&prefix).await?;
-        let mut publish_ids = Vec::new();
-        for key in &keys {
-            // Under this device's own prefix, match only the metadata objects:
-            // `snapshot/{author}/{publish_id}_meta.json{suffix}`. A generation is
-            // keyed by its meta (written after the DB image), so listing it means the
-            // DB image is already whole. The `{publish_id}.db` sibling is skipped
-            // here. Only this `{author}`'s generations are listed — a peer's live
-            // under a different prefix — so ownership is structural, no per-object
-            // author check needed.
-            let Some(rest) = key
-                .strip_prefix(&prefix)
-                .and_then(|s| s.strip_suffix(suffix))
-            else {
-                warn!("snapshot listing: object {key} is not under the prefix with the expected suffix; skipping");
-                continue;
-            };
-            match rest.strip_suffix("_meta.json") {
-                Some(id_str) => match id_str.parse::<u64>() {
-                    Ok(publish_id) => publish_ids.push(publish_id),
-                    Err(e) => {
-                        warn!("snapshot listing: meta key {key} has a non-numeric publish id: {e}")
-                    }
-                },
-                // The `{publish_id}.db` sibling is each generation's expected
-                // complement, listed via its meta, so skip it silently; anything else
-                // under this author prefix is unexpected and surfaced rather than
-                // dropped.
-                None if rest.ends_with(".db") => {}
-                None => {
-                    warn!(
-                        "snapshot listing: unexpected object {key} under a snapshot author prefix"
-                    )
-                }
-            }
-        }
-        publish_ids.sort_unstable();
-        Ok(publish_ids)
-    }
-
-    async fn delete_snapshot_generation(
-        &self,
-        author: &str,
-        publish_id: u64,
-    ) -> Result<(), StorageError> {
-        crate::store_dir::validate_path_token(author)?;
-        let suffix = self.suffix();
-        // Delete the db first, then the meta: the meta object is what
-        // `list_own_snapshot_generations` keys a generation by, so removing it last
-        // means a crash between the two deletes leaves the generation still listed
-        // (its meta present) and re-deletable next sweep, never a meta-less db.
-        self.home
-            .delete(&format!("snapshot/{author}/{publish_id}.db{suffix}"))
-            .await?;
-        self.home
-            .delete(&format!("snapshot/{author}/{publish_id}_meta.json{suffix}"))
-            .await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -1661,14 +1326,14 @@ mod tests {
     use crate::config::HomeStorage;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
-        BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHomeError, CloudHomeJoinInfo,
-        RevokeOutcome,
+        BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHomeError,
+        SequentialCopyIdGenerator,
     };
     use crate::sync::test_helpers::{open_test_db, TestCustody};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A committed rotation this device has not adopted survives a restart. A
-    /// prior run marks it and persists to `sync_state`; a fresh run restores it
+    /// prior run marks it and persists to `protocol_state`; a fresh run restores it
     /// into a new in-memory marker, so sealing stays paused rather than resuming
     /// under the superseded generation a removed member still holds — even though
     /// the fresh marker started empty. Adopting the rotation and re-persisting
@@ -1682,7 +1347,7 @@ mod tests {
         marked.mark_committed(2);
         persist_pending_rotation(&db, &marked).await.unwrap();
 
-        // Fresh run: a brand-new marker restores the pause from sync_state.
+        // Fresh run: a brand-new marker restores the pause from protocol_state.
         let restored = PendingRotation::none();
         restore_pending_rotation(&db, &restored).await.unwrap();
         let live_gen_1 = CloudCipher::Encrypted(EncryptionService::from_key([1u8; 32]));
@@ -1789,18 +1454,11 @@ mod tests {
             self.inner.exists(key).await
         }
 
-        async fn grant_access(
+        async fn set_access(
             &self,
-            grant: CloudAccessGrant,
-        ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-            self.inner.grant_access(grant).await
-        }
-
-        async fn revoke_access(
-            &self,
-            revoke: CloudAccessRevoke,
-        ) -> Result<RevokeOutcome, CloudHomeError> {
-            self.inner.revoke_access(revoke).await
+            desired: CloudAccessState,
+        ) -> Result<CloudAccessOutcome, CloudHomeError> {
+            self.inner.set_access(desired).await
         }
     }
 
@@ -1974,16 +1632,25 @@ mod tests {
     #[tokio::test]
     async fn membership_entry_survives_key_generation_rotation() {
         let home = InMemoryCloudHome::new();
+        let owner = UserKeypair::generate();
         let storage = CloudSyncStorage::new(
             Arc::new(home.clone()),
             CloudCipher::Encrypted(EncryptionService::from_key_at_generation(1, [1u8; 32])),
             BlobPathScheme::Hashed,
             "test-lib",
-            UserKeypair::generate(),
-        );
+            owner.clone(),
+        )
+        .with_copy_ids(Arc::new(
+            crate::storage::cloud::SequentialCopyIdGenerator::new("membership-rotation"),
+        ));
 
-        storage
-            .put_membership_entry("owner", 1, b"generation-one-entry".to_vec())
+        let first =
+            crate::sync::membership::founder_entry("test-lib", &owner, "0000000000001-0000-owner");
+        let owner_pubkey = crate::keys::public_key_hex(&owner);
+        let first_coord = first.coord();
+        let mut chain = crate::sync::membership::MembershipChain::from_entries(vec![first.clone()])
+            .expect("found membership");
+        crate::sync::store_objects::append_membership_entry_object(&storage, &first_coord, &first)
             .await
             .expect("write generation one membership");
 
@@ -1997,25 +1664,57 @@ mod tests {
         .expect("adopt generation two");
 
         assert_eq!(
-            storage
-                .get_membership_entry("owner", 1)
-                .await
-                .expect("read generation one membership after rotation"),
-            b"generation-one-entry",
+            crate::sync::store_objects::load_membership_entry_slot(
+                &storage,
+                &owner_pubkey,
+                &first_coord.author_owner_grant,
+                1,
+            )
+            .await
+            .expect("read generation one membership after rotation")
+            .expect("generation one membership exists")
+            .value,
+            first,
         );
 
-        storage
-            .put_membership_entry("owner", 2, b"generation-two-entry".to_vec())
-            .await
-            .expect("write generation two membership");
+        let member = UserKeypair::generate();
+        let second = chain
+            .signed_set_member(
+                &owner,
+                crate::keys::public_key_hex(&member),
+                None,
+                crate::sync::membership::MemberRole::Member,
+                "0000000000002-0000-owner".to_string(),
+            )
+            .expect("owner adds member");
+        chain.add_entry(second.clone()).expect("valid member add");
+        let second_coord = second.coord();
+        crate::sync::store_objects::append_membership_entry_object(
+            &storage,
+            &second_coord,
+            &second,
+        )
+        .await
+        .expect("write generation two membership");
+        let semantic_prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
+            &owner_pubkey,
+            &second_coord.author_owner_grant,
+            2,
+            second_coord.entry_hash,
+        );
+        let generation_two_key = home
+            .appended_keys()
+            .into_iter()
+            .find(|key| key.starts_with(&semantic_prefix))
+            .expect("generation two object exists");
         let generation_two = home
-            .get("membership/owner/2.enc")
+            .get_appended(&generation_two_key)
             .expect("generation two object exists");
         assert!(
             CloudCipher::Encrypted(EncryptionService::from_key_at_generation(1, [1u8; 32]))
                 .open(
                     generation_two,
-                    &cloud_aad_context("test-lib", "membership/owner/2.enc"),
+                    &cloud_aad_context("test-lib", &semantic_prefix),
                 )
                 .is_err(),
             "a generation one key must not open a generation two object",
@@ -2088,277 +1787,10 @@ mod tests {
             "a blob substituted at another key must fail authentication",
         );
     }
-
-    /// A head this store cannot decrypt — e.g. one a *different* store wrote
-    /// when it reused the same bucket (its own encryption key) — must be skipped,
-    /// not abort `list_heads`. The sync cycle's pull calls `list_heads`, so an
-    /// abort there wedges every cycle: the store never pulls, never pushes its
-    /// catalog or snapshot, and never publishes its own head.
+    /// A plaintext home stores Store protocol objects and blobs in the clear
+    /// without adding an `.enc` suffix to their keys.
     #[tokio::test]
-    async fn list_heads_skips_a_head_it_cannot_decrypt() {
-        let storage = CloudSyncStorage::new(
-            Arc::new(InMemoryCloudHome::new()),
-            CloudCipher::Encrypted(EncryptionService::from_key([1u8; 32])),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-        );
-        storage
-            .put_head("ours", 5, "2026-01-01T00:00:00Z")
-            .await
-            .expect("put our head");
-
-        // A foreign head our key can't decrypt (not our ciphertext).
-        storage
-            .cloud_home()
-            .write(
-                "heads/foreign-device.json.enc",
-                BlobBody::from_bytes(
-                    b"a different store's head, encrypted with another key".to_vec(),
-                ),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await
-            .expect("write foreign head");
-
-        let heads = storage
-            .list_heads()
-            .await
-            .expect("list_heads must not abort on a head it cannot decrypt");
-        let ids: Vec<&str> = heads.heads.iter().map(|h| h.device_id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["ours"],
-            "the decryptable head is returned; the foreign one is skipped",
-        );
-        assert_eq!(
-            heads.unreadable, 1,
-            "the undecryptable head is counted so reclamation can fail closed",
-        );
-    }
-
-    /// A stray key under `heads/` that is not shaped like
-    /// `heads/{device_id}.json{suffix}` is not this store's head. A browsable
-    /// cloud folder can pick up conflicted-copy and editor files, and those must
-    /// not abort every sync cycle for the valid heads beside them.
-    #[tokio::test]
-    async fn list_heads_skips_keys_with_unexpected_format() {
-        let storage = CloudSyncStorage::new(
-            Arc::new(InMemoryCloudHome::new()),
-            CloudCipher::Encrypted(EncryptionService::from_key([1u8; 32])),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-        );
-        storage
-            .put_head("ours", 5, "2026-01-01T00:00:00Z")
-            .await
-            .expect("put our head");
-
-        for key in ["heads/.DS_Store", "heads/ours.json (conflicted copy).enc"] {
-            storage
-                .cloud_home()
-                .write(
-                    key,
-                    BlobBody::from_bytes(b"not a coven head".to_vec()),
-                    &crate::storage::cloud::no_progress(),
-                )
-                .await
-                .expect("write stray head key");
-        }
-
-        let heads = storage
-            .list_heads()
-            .await
-            .expect("list_heads must not abort on stray head keys");
-        let ids: Vec<&str> = heads.heads.iter().map(|h| h.device_id.as_str()).collect();
-        assert_eq!(ids, vec!["ours"]);
-        assert_eq!(
-            heads.unreadable, 0,
-            "a stray key is not a device-head slot, so it is not an unreadable head",
-        );
-    }
-
-    /// A head with a valid signature round-trips through `put_head` / `list_heads`
-    /// and surfaces its author; a head whose signature is invalid (written by
-    /// anyone with the bucket credential) is skipped, not returned — the bucket is
-    /// untrusted, so a forged head must not pollute sync status or drive a fetch
-    /// loop.
-    #[tokio::test]
-    async fn list_heads_verifies_signatures_and_skips_a_forged_head() {
-        let keypair = UserKeypair::generate();
-        let cipher = CloudCipher::Encrypted(EncryptionService::from_key([2u8; 32]));
-        let storage = CloudSyncStorage::new(
-            Arc::new(InMemoryCloudHome::new()),
-            cipher.clone(),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            keypair.clone(),
-        );
-
-        // Our own head is written signed by our keypair.
-        storage
-            .put_head("ours", 9, "2026-01-01T00:00:00Z")
-            .await
-            .expect("put our head");
-
-        // A forged head for another device: a structurally valid `HeadJson` whose
-        // signature does not match its author. It is sealed under the same store
-        // key (so it decrypts fine), proving the rejection is the *signature*
-        // check, not the cipher.
-        let forged = HeadJson {
-            seq: 100,
-            last_sync: None,
-            author_pubkey: hex::encode(UserKeypair::generate().public_key()),
-            signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
-        };
-        let sealed = cipher.seal(
-            serde_json::to_vec(&forged).expect("serialize forged head"),
-            &cloud_aad_context("test-lib", "heads/forged-device.json.enc"),
-        );
-        storage
-            .cloud_home()
-            .write(
-                "heads/forged-device.json.enc",
-                BlobBody::from_bytes(sealed),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await
-            .expect("write forged head");
-
-        let heads = storage.list_heads().await.expect("list_heads");
-        assert_eq!(
-            heads.heads.len(),
-            1,
-            "only the validly signed head is returned"
-        );
-        assert_eq!(heads.heads[0].device_id, "ours");
-        assert_eq!(heads.heads[0].seq, 9);
-        assert_eq!(
-            heads.heads[0].author_pubkey,
-            hex::encode(keypair.public_key()),
-            "the verified author is surfaced to the caller",
-        );
-        assert_eq!(
-            heads.unreadable, 1,
-            "the forged head is counted so reclamation can fail closed",
-        );
-    }
-
-    /// A head sealed under the valid store key but carrying a non-JSON payload
-    /// is skipped, not fatal. Parseability of a bucket-writable object is as
-    /// externally controlled as its signature, so an unparseable head must not
-    /// wedge `list_heads` — and thus every pull — for every member. The other
-    /// members' heads are still returned; the owner republishes its own head on
-    /// its next successful cycle.
-    #[tokio::test]
-    async fn list_heads_skips_an_unparseable_head() {
-        let cipher = CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32]));
-        let storage = CloudSyncStorage::new(
-            Arc::new(InMemoryCloudHome::new()),
-            cipher.clone(),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-        );
-
-        storage
-            .put_head("ours", 7, "2026-01-01T00:00:00Z")
-            .await
-            .expect("put our head");
-
-        // A head that decrypts fine (sealed under the store key) but whose
-        // plaintext is not a `HeadJson`.
-        let sealed = cipher.seal(
-            b"this is not json".to_vec(),
-            &cloud_aad_context("test-lib", "heads/garbled-device.json.enc"),
-        );
-        storage
-            .cloud_home()
-            .write(
-                "heads/garbled-device.json.enc",
-                BlobBody::from_bytes(sealed),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await
-            .expect("write unparseable head");
-
-        let heads = storage
-            .list_heads()
-            .await
-            .expect("list_heads must not abort on an unparseable head");
-        let ids: Vec<&str> = heads.heads.iter().map(|h| h.device_id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["ours"],
-            "the parseable head is returned; the unparseable one is skipped",
-        );
-        assert_eq!(
-            heads.unreadable, 1,
-            "the unparseable head is counted so reclamation can fail closed",
-        );
-    }
-
-    /// A validly signed `min_schema_version` round-trips and surfaces its author;
-    /// one whose signature is invalid is treated as absent (`None`), so a bucket
-    /// writer can't freeze the fleet or force a downgrade by planting a forged
-    /// floor.
-    #[tokio::test]
-    async fn get_min_schema_version_verifies_and_ignores_a_forged_floor() {
-        let keypair = UserKeypair::generate();
-        let cipher = CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32]));
-        let storage = CloudSyncStorage::new(
-            Arc::new(InMemoryCloudHome::new()),
-            cipher.clone(),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            keypair.clone(),
-        );
-
-        // A real floor we set verifies and carries our pubkey.
-        storage.set_min_schema_version(7).await.expect("set floor");
-        let got = storage.get_min_schema_version().await.expect("get floor");
-        let got = got.expect("a signed floor is present");
-        assert_eq!(got.version, 7);
-        assert_eq!(got.author_pubkey, hex::encode(keypair.public_key()));
-
-        // Overwrite it with a forged floor (valid shape, bad signature): it is
-        // treated as absent.
-        let forged = MinSchemaVersionJson {
-            min_schema_version: 9999,
-            author_pubkey: hex::encode(UserKeypair::generate().public_key()),
-            signature: hex::encode([0u8; crate::keys::SIGN_BYTES]),
-        };
-        let sealed = cipher.seal(
-            serde_json::to_vec(&forged).expect("serialize forged floor"),
-            &cloud_aad_context("test-lib", "min_schema_version.json.enc"),
-        );
-        storage
-            .cloud_home()
-            .write(
-                "min_schema_version.json.enc",
-                BlobBody::from_bytes(sealed),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await
-            .expect("write forged floor");
-        assert!(
-            storage
-                .get_min_schema_version()
-                .await
-                .expect("get forged floor")
-                .is_none(),
-            "a floor with an invalid signature is treated as absent",
-        );
-    }
-
-    /// A plaintext home stores every control object in the clear and drops the
-    /// `.enc` suffix from its keys. This round-trips a head, a changeset, the
-    /// snapshot, snapshot_meta, and a `Master`-scoped blob and asserts each lands
-    /// as the literal bytes (not ciphertext) under a bare key, while the
-    /// `.enc`-suffixed key is absent.
-    #[tokio::test]
-    async fn plaintext_home_stores_control_objects_in_the_clear_without_enc_suffix() {
+    async fn plaintext_home_stores_protocol_objects_and_blobs_without_encryption_suffix() {
         let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
             Arc::new(home.clone()),
@@ -2366,135 +1798,34 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             UserKeypair::generate(),
-        );
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("plaintext-copy")));
 
-        // Head: bare key present, `.enc` key absent, and it reads back.
-        storage
-            .put_head("dev1", 7, "2026-01-01T00:00:00Z")
+        let semantic_prefix = "store-v1/packages/dev1/1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let package = b"changeset-plaintext-bytes".to_vec();
+        let object = storage
+            .append_protocol_object(semantic_prefix, ".pkg", package.clone())
             .await
-            .expect("put_head");
-        assert!(
-            home.get("heads/dev1.json").is_some(),
-            "bare head key present"
-        );
-        assert!(
-            home.get("heads/dev1.json.enc").is_none(),
-            "no .enc head key"
-        );
-        let heads = storage.list_heads().await.expect("list_heads");
-        assert_eq!(heads.heads.len(), 1);
-        assert_eq!(heads.heads[0].device_id, "dev1");
-        assert_eq!(heads.heads[0].seq, 7);
-
-        // Changeset: at rest the bytes are the literal plaintext.
-        let cs = b"changeset-plaintext-bytes".to_vec();
-        storage
-            .put_changeset("dev1", 1, cs.clone())
-            .await
-            .expect("put_changeset");
+            .expect("append Store package");
         assert_eq!(
-            home.get("changes/dev1/1").as_deref(),
-            Some(cs.as_slice()),
-            "changeset stored verbatim under a bare key",
+            home.get_appended(object.physical().logical_key())
+                .as_deref(),
+            Some(package.as_slice()),
         );
-        assert!(
-            home.get("changes/dev1/1.enc").is_none(),
-            "no .enc changeset key"
-        );
-        assert_eq!(storage.get_changeset("dev1", 1).await.expect("get"), cs);
-        assert_eq!(
-            storage.list_changesets("dev1").await.expect("list"),
-            vec![1]
-        );
-
-        // Snapshot generation + meta + pointer: literal at rest, bare generational
-        // keys under the publishing device's `{author}` prefix.
-        let author = "abc123";
-        let snap = b"SQLite format 3\0 ... bytes".to_vec();
-        storage
-            .put_snapshot(author, 0, snap.clone())
-            .await
-            .expect("put_snapshot");
-        assert_eq!(
-            home.get("snapshot/abc123/0.db").as_deref(),
-            Some(snap.as_slice())
-        );
-        assert!(
-            home.get("snapshot/abc123/0.db.enc").is_none(),
-            "no .enc snapshot key"
-        );
-        assert_eq!(
-            storage.get_snapshot(author, 0).await.expect("get_snapshot"),
-            snap
-        );
-
-        let meta = b"{\"cursors\":{}}".to_vec();
-        storage
-            .put_snapshot_meta(author, 0, meta.clone())
-            .await
-            .expect("put_snapshot_meta");
-        assert_eq!(
-            home.get("snapshot/abc123/0_meta.json").as_deref(),
-            Some(meta.as_slice())
-        );
-        assert!(
-            home.get("snapshot/abc123/0_meta.json.enc").is_none(),
-            "no .enc meta key"
-        );
+        assert!(!object.physical().logical_key().ends_with(".enc"));
         assert_eq!(
             storage
-                .get_snapshot_meta(author, 0)
+                .read_protocol_object(&object, semantic_prefix)
                 .await
-                .expect("get_snapshot_meta"),
-            meta
+                .expect("read Store package"),
+            package,
         );
 
-        let pointer = b"{\"seq\":0}".to_vec();
-        storage
-            .put_snapshot_pointer(pointer.clone())
-            .await
-            .expect("put_snapshot_pointer");
-        assert_eq!(
-            home.get("snapshot/current.json").as_deref(),
-            Some(pointer.as_slice())
-        );
-        assert!(
-            home.get("snapshot/current.json.enc").is_none(),
-            "no .enc pointer key"
-        );
-        assert_eq!(
-            storage
-                .get_snapshot_pointer()
-                .await
-                .expect("get_snapshot_pointer"),
-            pointer
-        );
-
-        // The generation is listable by publish id under its author, and a delete
-        // removes both its objects.
-        assert_eq!(
-            storage
-                .list_own_snapshot_generations(author)
-                .await
-                .expect("list generations"),
-            vec![0],
-        );
-        storage
-            .delete_snapshot_generation(author, 0)
-            .await
-            .expect("delete generation");
-        assert!(
-            home.get("snapshot/abc123/0.db").is_none()
-                && home.get("snapshot/abc123/0_meta.json").is_none(),
-            "delete_snapshot_generation removes the generation's db and meta",
-        );
-
-        // A Master-scoped blob is stored verbatim too (no per-scope key).
         let blob = b"cover-art-plaintext".to_vec();
         storage
             .put_blob("photos", "p1cover", BlobScope::Master, None, blob.clone())
             .await
-            .expect("put_blob");
+            .expect("put blob");
         let uploader = storage.self_uploader();
         let hashed = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
@@ -2504,11 +1835,7 @@ mod tests {
             None,
         )
         .expect("hashed key");
-        assert_eq!(
-            home.get(&hashed).as_deref(),
-            Some(blob.as_slice()),
-            "blob stored verbatim in a plaintext home",
-        );
+        assert_eq!(home.get(&hashed).as_deref(), Some(blob.as_slice()));
         assert_eq!(
             storage
                 .get_blob(
@@ -2516,11 +1843,11 @@ mod tests {
                     Some(&uploader),
                     "p1cover",
                     BlobScope::Master,
-                    None
+                    None,
                 )
                 .await
-                .expect("get_blob"),
-            blob
+                .expect("get blob"),
+            blob,
         );
     }
 
@@ -2829,5 +2156,55 @@ mod tests {
             "a range past the blob length must error",
         );
         assert!(reader.read(0, 0).await.expect("empty read").is_empty());
+    }
+
+    #[tokio::test]
+    async fn encrypted_append_retries_keep_distinct_copies_with_one_semantic_aad() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+            BlobPathScheme::Hashed,
+            "append-store",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("append-copy")));
+        let semantic = format!(
+            "store-v1/genesis/{}",
+            crate::sync::store_commit::ObjectHash::digest(b"genesis")
+        );
+        let first = storage
+            .append_protocol_object(&semantic, ".json", b"same signed bytes".to_vec())
+            .await
+            .expect("first append");
+        let second = storage
+            .append_protocol_object(&semantic, ".json", b"same signed bytes".to_vec())
+            .await
+            .expect("retry append");
+
+        assert_ne!(first.logical_key(), second.logical_key());
+        assert_eq!(
+            storage
+                .read_protocol_object(&first, &semantic)
+                .await
+                .unwrap(),
+            b"same signed bytes"
+        );
+        assert_eq!(
+            storage
+                .read_protocol_object(&second, &semantic)
+                .await
+                .unwrap(),
+            b"same signed bytes"
+        );
+        let listing = storage
+            .list_protocol_objects(&semantic)
+            .await
+            .expect("list both copies");
+        assert_eq!(
+            listing.coverage,
+            crate::storage::cloud::ListingCoverage::CompleteAtScan
+        );
+        assert_eq!(listing.objects.len(), 2);
     }
 }

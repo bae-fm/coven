@@ -28,8 +28,10 @@ use crate::clock::{ClockRef, SystemClock};
 use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
+use crate::storage::cloud::RandomCopyIdGenerator;
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+use crate::sync::cycle::StoreInitialization;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables};
 use crate::sync::wasm_runtime::{WasmSyncRuntime, WasmSyncSchedule};
 
@@ -60,6 +62,7 @@ async fn runtime_for_device(
     db: Database,
     cloud: &InMemoryCloudHome,
     keypair: &UserKeypair,
+    initialization: StoreInitialization,
 ) -> WasmSyncRuntime {
     let storage = CloudSyncStorage::new(
         Arc::new(cloud.clone()),
@@ -67,13 +70,13 @@ async fn runtime_for_device(
         BlobPathScheme::Plain,
         "wasm-runtime-test",
         keypair.clone(),
-    );
-    let components = crate::sync::cycle::init_sync_over_storage(&db, storage)
+    )
+    .with_copy_ids(Arc::new(RandomCopyIdGenerator));
+    let components = crate::sync::cycle::init_sync_over_storage(&db, storage, initialization)
         .await
         .expect("initialize runtime sync session");
-    // A store dir that never touches disk: this runs the changeset path, whose
-    // only fs touch is best-effort changeset staging (logs and continues on
-    // failure). No blobs, no snapshot bytes are read back.
+    // This row-only test creates no blobs or snapshot images, so the runtime does
+    // not access this browser placeholder directory.
     let store_dir = StoreDir::new(std::path::Path::new("/coven-wasm-runtime-test"));
 
     let runtime = WasmSyncRuntime::new(
@@ -97,8 +100,9 @@ async fn start_runtime(
     db: Database,
     cloud: &InMemoryCloudHome,
     keypair: &UserKeypair,
+    initialization: StoreInitialization,
 ) -> WasmSyncRuntime {
-    let runtime = runtime_for_device(db, cloud, keypair).await;
+    let runtime = runtime_for_device(db, cloud, keypair, initialization).await;
     runtime.start();
     runtime
 }
@@ -142,8 +146,30 @@ async fn runtime_drives_two_devices_to_convergence() {
 
     // Start both runtimes; clone db_b so the test keeps a handle to read from while
     // the runtime owns its own clone (both share the one `:memory:` connection).
-    let runtime_a = start_runtime(db_a, &cloud, &identity).await;
-    let runtime_b = start_runtime(db_b.clone(), &cloud, &identity).await;
+    let runtime_a = start_runtime(
+        db_a.clone(),
+        &cloud,
+        &identity,
+        StoreInitialization::CreateStore,
+    )
+    .await;
+    let genesis_hash = db_a
+        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+        .await
+        .expect("read A's protocol genesis")
+        .expect("A initialized a protocol genesis")
+        .parse()
+        .expect("parse A's protocol genesis hash");
+    let runtime_b = start_runtime(
+        db_b.clone(),
+        &cloud,
+        &identity,
+        StoreInitialization::OpenStore {
+            expected_genesis_hash: genesis_hash,
+            expected_founder: crate::keys::public_key_hex(&identity),
+        },
+    )
+    .await;
 
     // Nudge A to push now and B to pull now, so we do not wait out the initial
     // delay for the first cycles. The bounded wait below tolerates any ordering:
@@ -201,6 +227,7 @@ async fn start_while_running_keeps_the_same_loop_token() {
         open_device("device-token-noop"),
         &cloud,
         &UserKeypair::generate(),
+        StoreInitialization::CreateStore,
     )
     .await;
 
@@ -230,6 +257,7 @@ async fn stop_then_start_uses_a_new_loop_token() {
         open_device("device-token-restart"),
         &cloud,
         &UserKeypair::generate(),
+        StoreInitialization::CreateStore,
     )
     .await;
 
@@ -267,6 +295,7 @@ async fn is_running_tracks_the_active_loop_token() {
         open_device("device-token-running"),
         &cloud,
         &UserKeypair::generate(),
+        StoreInitialization::CreateStore,
     )
     .await;
 
@@ -286,6 +315,7 @@ async fn dropping_the_runtime_stops_the_loop() {
         open_device("device-token-drop"),
         &cloud,
         &UserKeypair::generate(),
+        StoreInitialization::CreateStore,
     )
     .await;
 

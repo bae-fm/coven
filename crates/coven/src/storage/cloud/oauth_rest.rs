@@ -192,7 +192,7 @@ mod tests {
         fn parse_list_page(&self, body: &str, _prefix: &str) -> Result<ListPage, CloudHomeError> {
             assert_eq!(body, "PAGE1", "only the first page's body is ever parsed");
             Ok(ListPage {
-                keys: vec!["heads/dev1.json".to_string()],
+                keys: vec!["objects/dev1.json".to_string()],
                 next: Some("page2".to_string()),
             })
         }
@@ -205,7 +205,7 @@ mod tests {
         let home = MockListHome {
             first_page_status: 200,
         };
-        let err = rest_list(&home, "heads/")
+        let err = rest_list(&home, "objects/")
             .await
             .expect_err("a 404 on a continuation page must fail the listing");
         assert!(matches!(err, CloudHomeError::NotFound(_)), "got {err:?}");
@@ -218,7 +218,7 @@ mod tests {
         let home = MockListHome {
             first_page_status: 404,
         };
-        let keys = rest_list(&home, "heads/")
+        let keys = rest_list(&home, "objects/")
             .await
             .expect("a 404 on the first page yields an empty listing");
         assert!(keys.is_empty(), "expected empty, got {keys:?}");

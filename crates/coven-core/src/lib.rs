@@ -188,15 +188,13 @@ pub use id_provider::{IdProvider, IdRef, UuidProvider};
 
 // Managed local blob store: the host constructs it, coven never does (native-only).
 pub use storage::cloud::{
-    BlobBody, BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
     CloudHomeJoinInfo, PartSink, UploadProgress,
 };
 
 // Mobile OAuth: hosts whose OS captures the redirect drive the flow through
 // these instead of the desktop browser-callback `sign_in_*` above.
-// Pull-result rejection reports the host surfaces to the user, including the
-// per-changeset held detail (device, seq, reason) the sync-status alerts carry.
-pub use sync::pull::{HeldChangeset, HeldChangesetReason, InvalidSignature, RejectedUnauthorized};
+pub use sync::store_pull::{HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason};
 
 // Sync-status surface: the completed-cycle success payload, the per-cycle alert
 // bundle it carries, and the per-device activity a host renders "which devices

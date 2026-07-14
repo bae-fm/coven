@@ -2,13 +2,10 @@ use crate::blob::{BlobRef, Provenance};
 use crate::changeset::{ChangeOp, RowChange};
 use crate::database::Database;
 
-use super::envelope;
 use super::storage::{StorageError, SyncStorage};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PublishBlobError {
-    #[error("failed to unpack changeset envelope: {0}")]
-    PackedChangeset(envelope::UnpackError),
     #[error("failed to scan changeset blobs: {0}")]
     ChangesetScan(String),
     #[error("user-provided blob {namespace}/{id} still has a local external ref")]
@@ -42,18 +39,6 @@ pub(crate) fn publish_blobs_from_changes(
             Err(e) => Some(Err(PublishBlobError::ChangesetScan(e.to_string()))),
         })
         .collect()
-}
-
-pub(crate) async fn ensure_publishable_changeset_blobs(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    packed: &[u8],
-) -> Result<(), PublishBlobError> {
-    let (_envelope, changeset) =
-        envelope::unpack(packed).map_err(PublishBlobError::PackedChangeset)?;
-    let changes = crate::changeset::walk(&changeset).map_err(PublishBlobError::ChangesetScan)?;
-    let blobs = publish_blobs_from_changes(&db.blob_decls(), &changes)?;
-    ensure_publishable_blobs(db, storage, &blobs).await
 }
 
 pub(crate) async fn ensure_publishable_blobs(

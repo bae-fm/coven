@@ -118,7 +118,7 @@ pub fn resolve_and_apply_changeset_with_schema(
 
 /// Apply one changeset on a connection whose transaction boundary belongs to the
 /// caller. Rows, blob-uploader records, durable cleanup intents, and the receiver's
-/// cursor can therefore commit as one database operation. The caller must roll
+/// position can therefore commit as one database operation. The caller must roll
 /// back when the returned result reports an FK or non-FK constraint conflict.
 pub(crate) fn resolve_and_apply_changeset_with_schema_on(
     conn: &Connection,

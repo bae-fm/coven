@@ -78,7 +78,7 @@ use crate::database::{Database, DbError};
 use crate::store_dir::{PathTokenError, StoreDir};
 use crate::sync::storage::{StorageError, SyncStorage};
 
-/// Prefix for the `sync_state` keys holding each namespace's device-local cache-size
+/// Prefix for the `protocol_state` keys holding each namespace's device-local cache-size
 /// budget in bytes (a single decimal value per namespace, not per-blob accounting).
 /// The key for one namespace is [`cache_budget_state_key`]. A namespace with no such
 /// key has no budget ⇒ eviction off for it ⇒ that namespace's cache grows unbounded.
@@ -86,7 +86,7 @@ use crate::sync::storage::{StorageError, SyncStorage};
 /// [`Database::set_cache_budget`].
 pub const CACHE_BUDGET_STATE_KEY_PREFIX: &str = "cache_budget:";
 
-/// The `sync_state` key holding `namespace`'s cache-size budget. Namespaces are safe
+/// The `protocol_state` key holding `namespace`'s cache-size budget. Namespaces are safe
 /// path tokens (no `:`), so the `cache_budget:` prefix never collides with one.
 pub fn cache_budget_state_key(namespace: &str) -> String {
     format!("{CACHE_BUDGET_STATE_KEY_PREFIX}{namespace}")

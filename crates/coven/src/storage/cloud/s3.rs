@@ -15,7 +15,7 @@ use super::s3_common::{
     apply_prefix, is_not_found_code, normalize_prefix, probe_error, strip_listed_key_prefix,
 };
 use super::{
-    range_header, CloudAccessGrant, CloudAccessRevoke, CloudHome, CloudHomeError,
+    range_header, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
     CloudHomeJoinInfo, RevokeOutcome,
 };
 
@@ -636,25 +636,25 @@ impl CloudHome for S3CloudHome {
         .await
     }
 
-    async fn grant_access(
+    async fn set_access(
         &self,
-        _grant: CloudAccessGrant,
-    ) -> Result<CloudHomeJoinInfo, CloudHomeError> {
-        Ok(CloudHomeJoinInfo::S3 {
-            bucket: self.bucket.clone(),
-            region: self.region.clone(),
-            endpoint: self.endpoint.clone(),
-            access_key: self.access_key.clone(),
-            secret_key: self.secret_key.clone(),
-            key_prefix: self.key_prefix.clone(),
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
+        Ok(match desired {
+            CloudAccessState::Present { .. } => {
+                CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
+                    bucket: self.bucket.clone(),
+                    region: self.region.clone(),
+                    endpoint: self.endpoint.clone(),
+                    access_key: self.access_key.clone(),
+                    secret_key: self.secret_key.clone(),
+                    key_prefix: self.key_prefix.clone(),
+                })
+            }
+            CloudAccessState::Absent { .. } => {
+                CloudAccessOutcome::Absent(RevokeOutcome::Unsupported)
+            }
         })
-    }
-
-    async fn revoke_access(
-        &self,
-        _revoke: CloudAccessRevoke,
-    ) -> Result<RevokeOutcome, CloudHomeError> {
-        Ok(RevokeOutcome::Unsupported)
     }
 }
 
@@ -671,21 +671,21 @@ mod tests {
 
     #[test]
     fn full_key_prepends_prefix() {
-        let key = apply_prefix(Some("libs/abc"), "heads/dev1.json");
-        assert_eq!(key, "libs/abc/heads/dev1.json");
+        let key = apply_prefix(Some("libs/abc"), "objects/dev1.json");
+        assert_eq!(key, "libs/abc/objects/dev1.json");
     }
 
     #[test]
     fn full_key_no_prefix() {
-        let key = apply_prefix(None, "heads/dev1.json");
-        assert_eq!(key, "heads/dev1.json");
+        let key = apply_prefix(None, "objects/dev1.json");
+        assert_eq!(key, "objects/dev1.json");
     }
 
     #[test]
     fn normalized_prefix_drops_trailing_slash() {
         let prefix = normalize_prefix(Some("libs/abc/".to_string()));
-        let key = apply_prefix(prefix.as_deref(), "heads/dev1.json");
-        assert_eq!(key, "libs/abc/heads/dev1.json");
+        let key = apply_prefix(prefix.as_deref(), "objects/dev1.json");
+        assert_eq!(key, "libs/abc/objects/dev1.json");
     }
 
     #[derive(Clone)]
@@ -831,11 +831,11 @@ mod tests {
                 r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Name>coven-s3-list-test</Name>
-  <Prefix>heads/</Prefix>
+  <Prefix>objects/</Prefix>
   <KeyCount>1</KeyCount>
   <IsTruncated>true</IsTruncated>
   <Contents>
-    <Key>heads/dev1.json</Key>
+    <Key>objects/dev1.json</Key>
     <Size>10</Size>
   </Contents>
 </ListBucketResult>"#,
@@ -958,7 +958,7 @@ mod tests {
         .await
         .expect("construct S3CloudHome");
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), home.list("heads/"))
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), home.list("objects/"))
             .await
             .expect("list should return instead of refetching the first page");
         let err = result.expect_err("truncated response without token must fail");
@@ -990,7 +990,7 @@ mod tests {
         .expect("construct S3CloudHome");
 
         let outcome = home
-            .revoke_access(CloudAccessRevoke {
+            .set_access(CloudAccessState::Absent {
                 member_pubkey: "member-pubkey".to_string(),
                 provider_account_email: None,
             })
@@ -999,7 +999,7 @@ mod tests {
 
         assert_eq!(
             outcome,
-            RevokeOutcome::Unsupported,
+            CloudAccessOutcome::Absent(RevokeOutcome::Unsupported),
             "S3 hands out one static bucket credential that cannot be withdrawn per member, so it reports Unsupported rather than claiming a revocation it did not perform",
         );
     }
