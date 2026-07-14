@@ -185,8 +185,6 @@ pub async fn restore_from_cloud(
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
-    crate::install_platform();
-
     // Guard the destructive `stores/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
     crate::store_dir::validate_path_token(store_id)
@@ -331,8 +329,6 @@ pub async fn restore_from_code(
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
     use crate::sync::restore_code;
-
-    crate::install_platform();
 
     let parsed = restore_code::decode_restore_code(code)
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;

@@ -1,16 +1,13 @@
-//! Pure helpers shared by both S3 backends.
+//! Pure helpers for S3-compatible storage and related HTTP transports.
 //!
-//! S3-compatible backends must compute the same object keys, so a store
-//! created on one platform opens unchanged on the other. These free functions
-//! are that shared definition; backends call them rather than each holding its
-//! own copy.
+//! These free functions keep key normalization, error classification, and ranged
+//! response validation in one definition.
 
 use super::CloudHomeError;
 
 /// Normalize a configured key prefix ONCE, at construction: trim any trailing
-/// slash and drop an empty prefix. Both S3 backends store the normalized form, so
-/// neither re-trims in `full_key` or `list` — the divergence where the native
-/// backend left the prefix un-normalized and re-trimmed everywhere is fixed here.
+/// slash and drop an empty prefix. The S3 backend stores the normalized form, so
+/// neither `full_key` nor `list` re-trims it.
 pub fn normalize_prefix(prefix: Option<String>) -> Option<String> {
     prefix
         .map(|p| p.trim_end_matches('/').to_string())
@@ -60,8 +57,7 @@ pub fn is_not_found_code(code: Option<&str>) -> bool {
 /// Map a failed `probe` (HeadBucket) to a `CloudHomeError` from its HTTP status
 /// and optional S3 error code: 404 → the bucket doesn't exist; 403 or an
 /// auth-signalling code → credentials rejected; anything else → a generic probe
-/// failure. Shared so the native (typed SDK error) and wasm (raw status) backends
-/// classify a probe failure identically.
+/// failure.
 pub fn probe_error(status: u16, code: Option<&str>, bucket: &str) -> CloudHomeError {
     if status == 404 || code == Some("NoSuchBucket") {
         return CloudHomeError::Configuration(format!("bucket {bucket:?} does not exist"));
@@ -83,11 +79,9 @@ pub fn probe_error(status: u16, code: Option<&str>, bucket: &str) -> CloudHomeEr
 /// Whether a ranged GET response is a real partial read: HTTP 206 Partial
 /// Content, never 200. A 200 to a `Range` request means the server ignored the
 /// range and returned the whole object from byte 0, so serving that body as the
-/// requested range is silent corruption. The reqwest-based transports — the wasm
-/// S3 backend and the OAuth REST backends — gate on the status directly with
-/// this. The native aws-sdk S3 backend can't cheaply see the raw status, so it
-/// verifies the equivalent invariant by asserting the body length equals the
-/// requested byte count.
+/// requested range is silent corruption. OAuth REST transports gate on the status
+/// directly with this. The AWS SDK S3 backend verifies the equivalent invariant
+/// by asserting the body length equals the requested byte count.
 pub fn is_range_success(status: u16) -> bool {
     status == 206
 }

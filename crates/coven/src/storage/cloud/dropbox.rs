@@ -1,7 +1,7 @@
 //! Dropbox `CloudHome` implementation.
 //!
 //! Uses the Dropbox HTTP API v2 with OAuth 2.0 (PKCE) tokens. Files live under a
-//! folder using native path-based access — no filename encoding. The
+//! folder using path-based access — no filename encoding. The
 //! `read`/`read_range`/`list`/`delete` methods are the shared [`OAuthRestHome`]
 //! implementations; this file supplies only the Dropbox request shapes (POST with
 //! a `Dropbox-API-Arg` header), the page parser, the upload session, and sharing.

@@ -136,9 +136,9 @@ impl UserKeypair {
 
     /// Reconstruct a keypair from its 64-byte Ed25519 signing key (seed + public),
     /// deriving the public key from it and validating that the bytes are a real
-    /// keypair. The single place stored signing-key bytes become a `UserKeypair` —
-    /// the keyring loader and the browser keystore both round-trip through it, so a
-    /// torn or corrupt signing key fails the same way wherever it was persisted.
+    /// keypair. This is the single place stored signing-key bytes become a
+    /// `UserKeypair`, so a torn or corrupt signing key fails at the persistence
+    /// boundary.
     pub fn from_signing_key_bytes(
         signing_key: &[u8; SIGN_SECRETKEYBYTES],
     ) -> Result<Self, KeyError> {

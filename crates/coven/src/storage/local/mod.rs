@@ -3,14 +3,11 @@
 //! Files are stored at content-addressed paths under
 //! `storage/{ab}/{cd}/{file_id}` as plaintext. Local files are never encrypted —
 //! encryption happens only on upload to the cloud home.
-// `BlobStore` writes plaintext blobs to the native filesystem via `tokio::fs`,
-// which wasm has no equivalent for, and nothing in coven's core constructs it
-// (it's host-facing API), so it is native-only. `storage_path` below is pure and
-// stays on every target — the outbox uses it to compute cloud keys.
-#[cfg(not(target_arch = "wasm32"))]
+// `BlobStore` writes plaintext blobs to the filesystem via `tokio::fs`. Nothing
+// in coven's core constructs it; it is host-facing API. `storage_path` below is
+// also used by the outbox to compute cloud keys.
 mod traits;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub use traits::BlobStore;
 
 /// Hash-based storage path for a file: `storage/{ab}/{cd}/{file_id}`

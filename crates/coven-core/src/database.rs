@@ -5,19 +5,16 @@
 //! changeset capture and apply — runs against that one connection, so access is
 //! serialized.
 //!
-//! Native hosts open coven with [`crate::Coven::builder`] and run app SQL through
-//! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`]. Platform crates
-//! choose how a SQLite connection is opened and held.
+//! Hosts open coven with [`crate::Coven::builder`] and run app SQL through
+//! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
-use tracing::warn;
-// `error!` fires only from the native connection thread's shutdown path.
-#[cfg(not(target_arch = "wasm32"))]
 use tracing::error;
+use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
 use crate::db::{
@@ -296,7 +293,6 @@ impl DatabaseCore {
     /// db a newer binary migrated past this one (the writer's `SchemaTooNew`
     /// policy), since its models must understand the on-disk schema. Backs
     /// [`Database::open_read_only`]; see it for why a reader takes no store lock.
-    #[cfg(not(target_arch = "wasm32"))]
     fn open_read_only(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
@@ -365,17 +361,8 @@ impl DatabaseCore {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn connection(&self) -> &Connection {
         &self.conn
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn with_connection<R>(
-        &self,
-        f: impl FnOnce(&Connection) -> Result<R, DbError>,
-    ) -> Result<R, DbError> {
-        f(&self.conn)
     }
 }
 
@@ -384,7 +371,6 @@ impl DatabaseCore {
 /// to stop the thread. A `Run` closure carries its own reply channel, so it
 /// returns `()` — [`Database::on_connection_thread`] builds it to capture the
 /// caller's result and send it back.
-#[cfg(not(target_arch = "wasm32"))]
 enum DbJob {
     Run(Box<dyn FnOnce(&mut DatabaseCore) + Send>),
     Stop,
@@ -394,13 +380,11 @@ enum DbJob {
 /// [`Database`] clone through an `Arc`. The last clone to drop shuts the thread
 /// down and joins it, so the connection closes on the thread that owned it before
 /// control returns to the dropper.
-#[cfg(not(target_arch = "wasm32"))]
 struct ConnectionThread {
     jobs: tokio::sync::mpsc::UnboundedSender<DbJob>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Drop for ConnectionThread {
     fn drop(&mut self) {
         // Reached only when the last `Database` clone drops — no other clone can
@@ -437,7 +421,6 @@ impl Drop for ConnectionThread {
 /// Own the connection on this thread and run each queued job in send order until
 /// `Stop`. The channel's FIFO is the serialization the `tokio::Mutex` used to
 /// provide, and the connection never leaves this thread.
-#[cfg(not(target_arch = "wasm32"))]
 fn run_connection_thread(
     mut core: DatabaseCore,
     mut jobs: tokio::sync::mpsc::UnboundedReceiver<DbJob>,
@@ -455,23 +438,9 @@ fn run_connection_thread(
 /// A handle to the owned database. Cloneable; every clone sends work to the one
 /// connection thread over the same channel, so access serializes as the channel's
 /// FIFO.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct Database {
     thread: Arc<ConnectionThread>,
-    state: DatabaseState,
-}
-
-/// A handle to the owned database. Cloneable; every clone shares the one
-/// connection through the same `Rc`.
-///
-/// The browser is single-threaded (the connection lives on one Worker), so this
-/// holds the core directly behind `Rc<RefCell<…>>` instead of talking to a
-/// thread.
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone)]
-pub struct Database {
-    core: std::rc::Rc<std::cell::RefCell<DatabaseCore>>,
     state: DatabaseState,
 }
 
@@ -939,7 +908,6 @@ impl Database {
             migrations,
         )?;
 
-        #[cfg(not(target_arch = "wasm32"))]
         let database = {
             let (jobs_tx, jobs_rx) = tokio::sync::mpsc::unbounded_channel::<DbJob>();
             let join = std::thread::Builder::new()
@@ -953,12 +921,6 @@ impl Database {
                 }),
                 state,
             }
-        };
-
-        #[cfg(target_arch = "wasm32")]
-        let database = Database {
-            core: std::rc::Rc::new(std::cell::RefCell::new(core)),
-            state,
         };
 
         Ok((database, stamper))
@@ -979,7 +941,6 @@ impl Database {
     /// The caller takes no store open-lock for a read-only open: the exclusive
     /// advisory lock guards against a second *writer*, and a read-only connection
     /// cannot write, so multiple readers and one writer coexist under WAL.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_read_only(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
@@ -1083,11 +1044,8 @@ impl Database {
     /// [`Self::run_pending_journaled_transaction_on`] transaction (still through
     /// `call`) so it lands in the pending-changeset journal.
     ///
-    /// Native hands `f` to the connection thread and awaits its reply, so the SQL
-    /// runs off the async executor; wasm runs `f` directly on the borrowed
-    /// connection on this Worker and returns a ready future, so it needs no `Send`
-    /// — the closure never leaves the thread.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Hands `f` to the connection thread and awaits its reply, so the SQL runs
+    /// off the async executor.
     pub async fn call<F, R>(&self, f: F) -> Result<R, DbError>
     where
         F: FnOnce(&Connection) -> Result<R, DbError> + Send + 'static,
@@ -1112,7 +1070,6 @@ impl Database {
     /// a cancelled call as possibly-committed. Follow-ups that matter beyond that
     /// durable state — observer notifications, publish triggers — are not driven
     /// off this return value; the sync cycle re-derives them from durable state.
-    #[cfg(not(target_arch = "wasm32"))]
     async fn on_connection_thread<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut DatabaseCore) -> R + Send + 'static,
@@ -1137,18 +1094,6 @@ impl Database {
         }
     }
 
-    /// See the native `call`. wasm borrows the connection, runs `f`, drops the
-    /// borrow, and returns a ready future — the borrow never spans an `.await`.
-    #[cfg(target_arch = "wasm32")]
-    pub async fn call<F, R>(&self, f: F) -> Result<R, DbError>
-    where
-        F: FnOnce(&Connection) -> Result<R, DbError> + 'static,
-        R: 'static,
-    {
-        let core = self.core.borrow();
-        core.with_connection(f)
-    }
-
     fn start_host_change_journal_on<'c>(
         conn: &'c Connection,
         synced_tables: &[SyncedTable],
@@ -1171,8 +1116,8 @@ impl Database {
         if changeset.is_empty() {
             // A tripwire, not a routine event. An empty capture from a transaction
             // that also CHANGED NO ROWS is a pure read left on the write path —
-            // warn so it gets moved to the journal-free read path (native
-            // `CovenHandle::sql_read`, the wasm facade's `query`). An empty capture
+            // warn so it gets moved to the journal-free read path
+            // (`CovenHandle::sql_read`). An empty capture
             // from a transaction that DID change rows is a device-local-table
             // write (those tables aren't in the session) — a supported, routine
             // pattern that stays on `sql()` silently. The one case this misses:
@@ -3557,42 +3502,7 @@ fn capture_changeset(session: &mut rusqlite::session::Session<'_>) -> Result<Vec
         .map_err(DbError::from)
 }
 
-pub type PlatformConnectionOpener = fn(&Path) -> Result<Connection, DbError>;
-
-#[cfg(not(target_arch = "wasm32"))]
-static PLATFORM_CONNECTION_OPENER: std::sync::OnceLock<PlatformConnectionOpener> =
-    std::sync::OnceLock::new();
-
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static PLATFORM_CONNECTION_OPENER: std::cell::Cell<Option<PlatformConnectionOpener>> =
-        std::cell::Cell::new(None);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-static PLATFORM_READONLY_CONNECTION_OPENER: std::sync::OnceLock<PlatformConnectionOpener> =
-    std::sync::OnceLock::new();
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn register_platform_connection_opener(opener: PlatformConnectionOpener) {
-    let _ = PLATFORM_CONNECTION_OPENER.set(opener);
-}
-
-/// Register the opener a read-only open ([`Database::open_read_only`]) uses,
-/// separate from the read-write one so a platform can hand each the flags it
-/// needs (the native opener passes `SQLITE_OPEN_READ_ONLY`).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn register_platform_readonly_connection_opener(opener: PlatformConnectionOpener) {
-    let _ = PLATFORM_READONLY_CONNECTION_OPENER.set(opener);
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn register_platform_connection_opener(opener: PlatformConnectionOpener) {
-    PLATFORM_CONNECTION_OPENER.with(|slot| slot.set(Some(opener)));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn open_native_connection(path: &Path) -> Result<Connection, DbError> {
+fn open_connection(path: &Path) -> Result<Connection, DbError> {
     let conn = Connection::open(path).map_err(DbError::from)?;
     // WAL so a read-only connection in another process can read committed rows while
     // this writer commits. The mode is stored in the db header and persists, so a
@@ -3602,62 +3512,16 @@ pub fn open_native_connection(path: &Path) -> Result<Connection, DbError> {
     Ok(conn)
 }
 
-/// Open a `SQLITE_OPEN_READONLY` connection: the native opener behind
-/// [`Database::open_read_only`]. `NO_MUTEX` because coven serializes every access
+/// Open a `SQLITE_OPEN_READONLY` connection for [`Database::open_read_only`].
+/// `NO_MUTEX` because coven serializes every access
 /// on its one connection thread; the connection sets no journal mode (a read-only
 /// connection cannot, and the writer already put the db in WAL).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn open_native_connection_read_only(path: &Path) -> Result<Connection, DbError> {
+fn open_connection_read_only(path: &Path) -> Result<Connection, DbError> {
     use rusqlite::OpenFlags;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_URI;
     Connection::open_with_flags(path, flags).map_err(DbError::from)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn open_connection(path: &Path) -> Result<Connection, DbError> {
-    if let Some(opener) = PLATFORM_CONNECTION_OPENER.get() {
-        opener(path)
-    } else {
-        #[cfg(any(test, feature = "test-utils"))]
-        {
-            open_native_connection(path)
-        }
-        #[cfg(not(any(test, feature = "test-utils")))]
-        {
-            Err(DbError(
-                "platform SQLite connection opener is not registered".to_string(),
-            ))
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn open_connection_read_only(path: &Path) -> Result<Connection, DbError> {
-    if let Some(opener) = PLATFORM_READONLY_CONNECTION_OPENER.get() {
-        opener(path)
-    } else {
-        #[cfg(any(test, feature = "test-utils"))]
-        {
-            open_native_connection_read_only(path)
-        }
-        #[cfg(not(any(test, feature = "test-utils")))]
-        {
-            Err(DbError(
-                "platform read-only SQLite connection opener is not registered".to_string(),
-            ))
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn open_connection(path: &Path) -> Result<Connection, DbError> {
-    PLATFORM_CONNECTION_OPENER
-        .with(|slot| slot.get())
-        .ok_or_else(|| DbError("platform SQLite connection opener is not registered".to_string()))?(
-        path,
-    )
 }
 
 #[cfg(test)]

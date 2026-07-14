@@ -56,15 +56,9 @@ use crate::sync::hlc::Hlc;
 use crate::sync::service::DeferredLocalBlobDrop;
 use crate::sync::session::SyncedTable;
 
-// `make_local` (the foreground op with a cancel signal) is native-only; its types
-// are too, so they don't warn unused on the wasm build that omits it.
-#[cfg(not(target_arch = "wasm32"))]
 use crate::blob::BlobTransitionObserver;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::sync::storage::SyncStorage;
-#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
-#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::watch;
 
 /// Why a make_remote (or its cancel) could not be started.
@@ -97,7 +91,6 @@ pub enum MakeRemoteError {
 }
 
 /// Why a make_local could not complete.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, thiserror::Error)]
 pub enum MakeLocalError {
     #[error("sync is not running, so a transition cannot start")]
@@ -556,50 +549,14 @@ pub(crate) fn commit_make_remote_flip(
     })
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pending_upload_exists_excludes_the_named_row() {
-        let conn = Connection::open_in_memory().expect("open sqlite");
-        crate::db::apply_coven_schema(&conn).expect("create bookkeeping schema");
-        for (id, operation, file_id, cloud_key) in [
-            (1, "upload", "blob-a", "key-a-current"),
-            (2, "upload", "blob-a", "key-a-other"),
-            (3, "upload", "blob-b", "key-b"),
-            (4, "delete", "blob-a", "key-a-delete"),
-        ] {
-            conn.execute(
-                "INSERT INTO cloud_outbox (id, operation, file_id, cloud_key, scope, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, 'master', '2024-01-01T00:00:00Z')",
-                (id, operation, file_id, cloud_key),
-            )
-            .expect("insert outbox row");
-        }
-
-        let blob_ids = vec!["blob-a".to_string()];
-        // Row 2 is another pending upload for blob-a, so excluding row 1 still finds it;
-        // the `delete` row (4) never counts.
-        assert!(pending_upload_exists(&conn, &blob_ids, Some(1)).expect("query"));
-        // Drop row 2: excluding row 1 now leaves only the delete row, so nothing pending.
-        conn.execute("DELETE FROM cloud_outbox WHERE id = 2", [])
-            .expect("delete row");
-        assert!(!pending_upload_exists(&conn, &blob_ids, Some(1)).expect("query"));
-        // With no exclusion, the remaining row 1 upload for blob-a counts.
-        assert!(pending_upload_exists(&conn, &blob_ids, None).expect("query"));
-    }
-}
-
 // ===========================================================================
-// make_local — native-only (foreground op with a cancel signal)
+// make_local — foreground operation with a cancel signal
 // ===========================================================================
 
 /// One blob materialized back to a local file by [`make_local`], carrying what the
 /// single commit needs. `dest` is present for a user-provided blob whose local
 /// home is the user's path; absent for a host-provided blob whose local home is
 /// coven's local store.
-#[cfg(not(target_arch = "wasm32"))]
 struct Materialized {
     blob: BlobRef,
     dest: Option<PathBuf>,
@@ -612,7 +569,6 @@ struct Materialized {
 /// harmless stray (a warning), but a local-store leftover is presence-read by
 /// [`cache::read_blob`] AND budget-exempt, so a failed removal of one is surfaced loud
 /// (see [`cleanup_partial`]).
-#[cfg(not(target_arch = "wasm32"))]
 enum WrittenFile {
     /// A user-provided blob's materialized file at the user's chosen path.
     UserPath(PathBuf),
@@ -639,7 +595,6 @@ enum WrittenFile {
 /// a write error) before the commit, deletes the partial local copies already
 /// written and aborts: the gate is still on and the cloud is intact, so the root
 /// stays Remote and a retry re-materializes cleanly.
-#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 pub async fn make_local(
     db: &Database,
@@ -838,7 +793,6 @@ pub async fn make_local(
 /// store (no dest). Any error (cancel, a missing user-provided dest, a read or write
 /// failure, a key-derivation failure) returns early; the caller rolls back `written`.
 /// Separated from the commit so every error path runs that one rollback.
-#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 async fn materialize_blobs(
     db: &Database,
@@ -966,7 +920,6 @@ async fn materialize_blobs(
 /// the cloud blob is tombstoned, so a directory-fsync failure is a hard error here:
 /// it aborts the make_local (the cloud copy is still intact) rather than commit a
 /// tombstone over a destination whose entry might not survive a crash.
-#[cfg(not(target_arch = "wasm32"))]
 async fn verify_durable(dest: &std::path::Path, expected_size: u64) -> Result<(), String> {
     let len = crate::local_blob::file_len(dest).await?;
     if len != expected_size {
@@ -982,7 +935,6 @@ async fn verify_durable(dest: &std::path::Path, expected_size: u64) -> Result<()
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn prepare_parent_dir(dest: &std::path::Path) -> Result<(), String> {
     let parent = dest
         .parent()
@@ -995,7 +947,6 @@ async fn prepare_parent_dir(dest: &std::path::Path) -> Result<(), String> {
 /// the rollback itself fails to remove a local-store leftover it returns THAT
 /// instead — the more urgent signal, since that leftover is a readable, budget-exempt
 /// copy of a still-Remote blob (a retry re-materializes over it).
-#[cfg(not(target_arch = "wasm32"))]
 async fn roll_back(written: &[WrittenFile], abort_err: MakeLocalError) -> MakeLocalError {
     match cleanup_partial(written).await {
         Ok(()) => abort_err,
@@ -1013,7 +964,6 @@ async fn roll_back(written: &[WrittenFile], abort_err: MakeLocalError) -> MakeLo
 /// ([`MakeLocalError::CleanupLocalStore`]) rather than swallowed — the caller retries
 /// (the retry re-materializes over it). An already-absent file is not an error
 /// ([`crate::local_blob::remove_file`] reports `Ok(false)`).
-#[cfg(not(target_arch = "wasm32"))]
 async fn cleanup_partial(written: &[WrittenFile]) -> Result<(), MakeLocalError> {
     for file in written {
         match file {
@@ -1036,4 +986,39 @@ async fn cleanup_partial(written: &[WrittenFile]) -> Result<(), MakeLocalError> 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_upload_exists_excludes_the_named_row() {
+        let conn = Connection::open_in_memory().expect("open sqlite");
+        crate::db::apply_coven_schema(&conn).expect("create bookkeeping schema");
+        for (id, operation, file_id, cloud_key) in [
+            (1, "upload", "blob-a", "key-a-current"),
+            (2, "upload", "blob-a", "key-a-other"),
+            (3, "upload", "blob-b", "key-b"),
+            (4, "delete", "blob-a", "key-a-delete"),
+        ] {
+            conn.execute(
+                "INSERT INTO cloud_outbox (id, operation, file_id, cloud_key, scope, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, 'master', '2024-01-01T00:00:00Z')",
+                (id, operation, file_id, cloud_key),
+            )
+            .expect("insert outbox row");
+        }
+
+        let blob_ids = vec!["blob-a".to_string()];
+        // Row 2 is another pending upload for blob-a, so excluding row 1 still finds it;
+        // the `delete` row (4) never counts.
+        assert!(pending_upload_exists(&conn, &blob_ids, Some(1)).expect("query"));
+        // Drop row 2: excluding row 1 now leaves only the delete row, so nothing pending.
+        conn.execute("DELETE FROM cloud_outbox WHERE id = 2", [])
+            .expect("delete row");
+        assert!(!pending_upload_exists(&conn, &blob_ids, Some(1)).expect("query"));
+        // With no exclusion, the remaining row 1 upload for blob-a counts.
+        assert!(pending_upload_exists(&conn, &blob_ids, None).expect("query"));
+    }
 }

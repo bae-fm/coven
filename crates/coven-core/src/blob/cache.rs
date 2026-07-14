@@ -24,9 +24,8 @@
 //! `readdir`s can't answer, so no metadata sidecar to keep in sync with the disk.
 //! Reads verify the file length against the blob's declared row size before
 //! trusting cached bytes; a short or long cache file is treated as a miss and
-//! re-fetched from the cloud. Pin/unpin are a `rename` within `storage/` (one
-//! filesystem, atomic on native) so a blob never appears in both folders or
-//! neither mid-move on native.
+//! re-fetched from the cloud. Pin/unpin are an atomic `rename` within `storage/`
+//! (one filesystem), so a blob never appears in both folders or neither mid-move.
 //!
 //! Both reads **dispatch on coven's own authoritative state** — they never probe
 //! every store and take the first hit. The discriminator is the **locality root**
@@ -1135,9 +1134,8 @@ async fn lookup_external_ref(
 }
 
 /// The cache folder path that currently holds a Remote blob's plaintext, checking
-/// `pinned/` then `cache/`. The order matters: a pinned copy is the kept truth if a
-/// non-atomic wasm rename leaves both folders visible. A failure to check either
-/// path is surfaced, never collapsed into a miss.
+/// `pinned/` then `cache/`. A failure to check either path is surfaced, never
+/// collapsed into a miss.
 enum CachedBlobPath {
     Pinned(std::path::PathBuf),
     Cache(std::path::PathBuf),
@@ -1494,7 +1492,7 @@ pub(crate) async fn row_cloud_path(
 }
 
 /// Move a blob file from one cache folder to the other (`cache/`↔`pinned/`). Both
-/// roots are under `storage/`, so on native the `rename` is within one filesystem
+/// roots are under `storage/`, so the `rename` is within one filesystem
 /// and atomic — the blob is never visible in both folders or neither. Creates the
 /// destination's `{ab}/{cd}` shard directory first (a folder a blob has never lived
 /// in yet).

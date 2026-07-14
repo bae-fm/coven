@@ -1,5 +1,5 @@
 pub mod apply;
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod blob_content_hash_tests;
 // Shared backoff math: the sync loop and blob engine's per-upload wait
 // (`crate::blob::upload`) both count attempts in multiples of one base interval,
@@ -8,13 +8,12 @@ pub mod backoff;
 pub mod cloud_storage;
 pub mod conflict;
 pub mod cycle;
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod cycle_tests;
 pub mod gate;
 pub mod hlc;
-// Exercises the register clock through `Database::hlc()`, a native-only accessor
-// (its sole consumer is the native-only SyncManager), so it builds only on native.
-#[cfg(all(test, not(target_arch = "wasm32")))]
+// Exercises the register clock through `Database::hlc()`.
+#[cfg(test)]
 mod hlc_register_tests;
 pub mod invite;
 pub mod loop_policy;
@@ -22,7 +21,7 @@ pub mod membership;
 pub mod membership_ops;
 pub(crate) mod publish_blobs;
 pub mod pull;
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod pull_tests;
 #[cfg(test)]
 mod refresh_tests;

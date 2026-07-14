@@ -3,7 +3,7 @@ name = "coven-core"
 version = "1.0.0-rc.1"
 edition = "2021"
 license = "Apache-2.0"
-description = "Engine crate for coven: changeset capture, encryption, membership, and sync shared by platform packages"
+description = "Engine crate for coven: changeset capture, encryption, membership, and sync"
 repository = "https://github.com/bae-fm/coven"
 readme = "../../README.md"
 
@@ -34,12 +34,8 @@ bytes = "1.11"
 futures-util = "0.3"
 tracing = "0.1.41"
 tempfile = { version = "3.8", optional = true }
-rusqlite = { version = "0.40", default-features = false, features = ["session"] }
-tokio = { version = "1.0", features = ["io-util", "macros", "rt", "sync", "time"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1.0", features = ["fs"] }
-libsqlite3-sys = { version = "0.38.0", features = ["session", "bundled"] }
+rusqlite = { version = "0.40", default-features = false, features = ["session", "bundled"] }
+tokio = { version = "1.0", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
@@ -48,7 +44,6 @@ tempfile = "3.27.0"
 
 [features]
 test-utils = ["dep:tempfile"]
-oauth-providers = []
 
 [lints]
 workspace = true

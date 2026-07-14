@@ -259,8 +259,7 @@ struct InMemoryPartSink {
     buf: Vec<u8>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[async_trait]
 impl PartSink for InMemoryPartSink {
     fn part_size(&self) -> usize {
         super::PROGRESS_CHUNK_SIZE
@@ -282,8 +281,7 @@ impl PartSink for InMemoryPartSink {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[async_trait]
 impl CloudHome for InMemoryCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         if self.fail_writes.load(Ordering::SeqCst) {

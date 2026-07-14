@@ -1,6 +1,6 @@
 /// Hybrid Logical Clock (HLC) for causal ordering of writes across devices.
 ///
-/// This clock is coven's `_updated_at` register: native hosts stamp every synced
+/// This clock is coven's `_updated_at` register: hosts stamp every synced
 /// row's `_updated_at` with [`crate::SqlContext::stamp`], and pull records every
 /// applied row's `_updated_at` as a floor so a subsequent local write sorts causally
 /// after anything just pulled. The row arbiter (`conflict.rs`) picks a conflict
@@ -22,7 +22,6 @@
 /// from it alone could let the first post-restart stamp sort below the device's
 /// own un-flushed rows.
 use std::sync::{Arc, Mutex};
-#[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `protocol_state` key under which the clock's high-water mark is persisted, so it
@@ -257,7 +256,7 @@ impl Hlc {
 /// before any [`crate::sync::sync_manager::SyncManager`] exists. The manager,
 /// built later, borrows the same `Arc<Hlc>`: coven advances that clock past every
 /// pulled row, and because the stamper shares the instance, that advance reaches
-/// every native [`crate::SqlContext::stamp`] call, so a later local write never
+/// every [`crate::SqlContext::stamp`] call, so a later local write never
 /// sorts behind a pulled row and loses last-writer-wins. Every clone shares one
 /// `Arc<Hlc>`, so coven's seeding and advance-on-pull are reflected in every
 /// stamp.
@@ -304,33 +303,11 @@ pub fn now_wall_ms() -> u64 {
 }
 
 /// Epoch milliseconds for the HLC's physical component.
-#[cfg(not(target_arch = "wasm32"))]
 fn wall_clock_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
         .as_millis() as u64
-}
-
-#[cfg(target_arch = "wasm32")]
-type PlatformWallClock = fn() -> u64;
-
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static PLATFORM_WALL_CLOCK: std::cell::Cell<Option<PlatformWallClock>> =
-        std::cell::Cell::new(None);
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn register_platform_wall_clock(clock: PlatformWallClock) {
-    PLATFORM_WALL_CLOCK.with(|slot| slot.set(Some(clock)));
-}
-
-#[cfg(target_arch = "wasm32")]
-fn wall_clock_ms() -> u64 {
-    PLATFORM_WALL_CLOCK
-        .with(|slot| slot.get())
-        .expect("platform wall clock is not registered")()
 }
 
 #[cfg(test)]

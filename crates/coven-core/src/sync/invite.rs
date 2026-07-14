@@ -1910,8 +1910,7 @@ mod tests {
     /// Minimal CloudHome mock that returns a dummy S3 JoinInfo.
     struct MockCloudHome;
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[async_trait]
     impl CloudHome for MockCloudHome {
         async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
             Ok(())
@@ -2007,8 +2006,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[async_trait]
     impl CloudHome for RecordingCloudHome {
         async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
             Ok(())
@@ -2337,7 +2335,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn durable_invite_reuses_exact_plan_after_restart_and_lost_head_result() {
         let owner = gen_keypair();
@@ -2426,7 +2423,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn durable_remove_reuses_rotation_after_restart_and_lost_head_result() {
         let owner = gen_keypair();

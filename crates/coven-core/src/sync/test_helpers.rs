@@ -356,8 +356,7 @@ fn open_test_db_with(tables: Vec<SyncedTable>) -> Database {
 /// step run after the schema is created (to plant `protocol_state` rows or seeded
 /// `notes` rows before `Database::open` reads its floor).
 ///
-/// Used only by the native-only register-clock tests (`hlc_register_tests`).
-#[cfg(not(target_arch = "wasm32"))]
+/// Used only by the register-clock tests (`hlc_register_tests`).
 pub fn open_test_db_with_hlc(
     hlc: std::sync::Arc<crate::sync::hlc::Hlc>,
     seed: impl Fn(&Connection) -> Result<(), DbError> + Send + Sync + 'static,
@@ -1255,8 +1254,7 @@ impl MockSyncStorage {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[async_trait]
 impl SyncStorage for MockSyncStorage {
     async fn append_protocol_object(
         &self,
@@ -1665,8 +1663,7 @@ struct MockPartSink<'a> {
     buf: Vec<u8>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[async_trait]
 impl PartSink for MockPartSink<'_> {
     fn part_size(&self) -> usize {
         4 * 1024 * 1024
@@ -1690,8 +1687,7 @@ impl PartSink for MockPartSink<'_> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[async_trait]
 impl CloudHome for MockSyncStorage {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.objects.lock().unwrap().insert(key.to_string(), data);

@@ -116,12 +116,8 @@ impl From<crate::store_dir::PathTokenError> for StorageError {
     }
 }
 
-/// `Send + Sync` with `Send` method futures on native; `?Send` on wasm. See
-/// [`crate::MaybeThreadSafe`] for why the bound is cfg'd — the browser drives
-/// every sync future on one thread.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait SyncStorage: crate::MaybeThreadSafe {
+#[async_trait]
+pub trait SyncStorage: Send + Sync {
     /// Append one physical copy beneath a signed semantic prefix. `extension`
     /// includes the leading dot (`.json`, `.pkg`, or `.db`). The implementation
     /// injects a fresh copy id and applies its at-rest suffix below this API.

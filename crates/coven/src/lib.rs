@@ -1,6 +1,6 @@
-//! coven — the native host integration for end-to-end encrypted, multi-writer,
+//! coven — host integration for end-to-end encrypted, multi-writer,
 //! bring-your-own-storage SQLite sync. The engine lives in `coven-core`; this
-//! crate wires it to the filesystem, the platform keyring, and native cloud
+//! crate wires it to the filesystem, the platform keyring, and cloud
 //! providers, and re-exports the curated host API.
 //!
 //! The public API is exactly the crate-root re-exports below. The engine's
@@ -106,8 +106,6 @@ pub async fn fetch_account_email(
 pub(crate) mod store_dir {
     pub(crate) use coven_core::store_dir::*;
 }
-
-mod local_blob_backend;
 
 pub(crate) mod local_blob {
     pub(crate) use coven_core::local_blob::*;
@@ -533,15 +531,9 @@ pub(crate) mod sync {
 }
 
 mod coven;
-mod database_backend;
 mod handle;
 mod keyring_backend;
 mod read_handle;
-
-pub(crate) fn install_platform() {
-    database_backend::install_platform_connection_opener();
-    local_blob_backend::install_platform_backend();
-}
 
 // coven's public API is exactly the crate-root re-exports below. The
 // implementation modules are `pub(crate)`; a host reaches coven only through
@@ -621,7 +613,7 @@ pub use coven_core::CloudCipher;
 // thread-safety floor.
 pub use coven_core::{
     BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, MaybeThreadSafe, PartSink, UploadProgress,
+    CloudHomeJoinInfo, PartSink, UploadProgress,
 };
 
 // Sync-status surface a host renders from `CovenHandle::subscribe_sync_status`:
@@ -636,8 +628,6 @@ pub use sync::sync_loop::SyncLoopStatus;
 // In-memory cloud home and durable upload-queue rows for host integration tests.
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
-
-// --- Native additions and native-only re-exports. ---
 
 pub use blob::transition::{MakeLocalError, MakeRemoteError};
 pub use custody::{rewrap_passphrase_custody, KeyCustody, Passphrase};
@@ -678,7 +668,7 @@ pub use oauth::{
 // interactive sign-in the feature gates. Its re-export carries the same cfg, so
 // the type is reachable from the crate root exactly where it exists; gating it on
 // the feature alone left it `pub` but unreachable, which `unreachable_pub` denies.
-#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+#[cfg(any(test, feature = "oauth-providers"))]
 pub use oauth::OAuthError;
 
 #[cfg(feature = "oauth-providers")]

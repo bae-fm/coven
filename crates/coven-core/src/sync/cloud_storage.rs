@@ -15,7 +15,6 @@ use tracing::warn;
 use super::storage::{ProtocolObjectListing, ProtocolObjectLocator, StorageError, SyncStorage};
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
-use crate::local_blob::PlatformPlaintextReader;
 use crate::storage::cloud::{BlobBody, CloudHome, CopyIdRef};
 
 /// Every encrypted object carries this cleartext prefix naming the key it was
@@ -45,7 +44,7 @@ pub struct CloudCipherState {
 /// Read-only access to a session cipher snapshot. Production storage implements
 /// this with [`CloudCipherState`], whose mode cannot change. The test-utils
 /// implementation for a raw lock exists only for injected engine tests.
-pub trait CloudCipherAccess: crate::MaybeThreadSafe {
+pub trait CloudCipherAccess: Send + Sync {
     fn snapshot(&self) -> CloudCipher;
     fn merge_key_rotation(
         &self,
@@ -822,9 +821,8 @@ struct HashVerifyingPlaintextReader {
     key: String,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl PlatformPlaintextReader for HashVerifyingPlaintextReader {
+#[async_trait]
+impl crate::local_blob::PlaintextChunkReader for HashVerifyingPlaintextReader {
     async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
         if max == 0 {
             return Ok(Vec::new());
@@ -1008,8 +1006,7 @@ impl BlobRangeReader {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[async_trait]
 impl SyncStorage for CloudSyncStorage {
     async fn append_protocol_object(
         &self,
@@ -1408,8 +1405,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[async_trait]
     impl CloudHome for RecordingCloudHome {
         async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
             self.inner.put_object(key, data).await

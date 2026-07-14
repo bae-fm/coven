@@ -1,4 +1,4 @@
-//! The read-only native handle: a same-store secondary reader.
+//! The read-only handle: a same-store secondary reader.
 //!
 //! Where [`CovenHandle`](crate::CovenHandle) is the one full handle a host opens to
 //! drive rows, blobs, and sync, [`CovenReadHandle`] is the deliberately narrow

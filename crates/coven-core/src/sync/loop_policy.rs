@@ -1,8 +1,7 @@
 //! Shared sync-loop policy.
 //!
-//! Native and wasm loops have different wait primitives, but the decision after a
-//! cycle is the same: reset or increment the failure count, surface integrity /
-//! schema / asset alerts, and choose immediate, idle, or backoff wait.
+//! A cycle resets or increments the failure count, surfaces integrity / schema /
+//! asset alerts, and chooses an immediate, idle, or backoff wait.
 
 use crate::changeset::RowChange;
 
@@ -16,16 +15,6 @@ pub enum LoopWait {
     Immediate,
     Idle,
     BackoffSecs(u64),
-}
-
-impl LoopWait {
-    pub fn as_millis(self, idle_interval_ms: u32) -> u32 {
-        match self {
-            LoopWait::Immediate => 0,
-            LoopWait::Idle => idle_interval_ms,
-            LoopWait::BackoffSecs(secs) => secs.saturating_mul(1_000).min(u32::MAX as u64) as u32,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn alert_message_priority_matches_native_status() {
+    fn alert_message_priority_matches_sync_status() {
         let alerts = SyncLoopAlerts {
             rotation_pending: None,
             held_positions: held(4),

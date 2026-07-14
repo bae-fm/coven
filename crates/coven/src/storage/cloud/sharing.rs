@@ -108,7 +108,7 @@ pub(super) async fn ensure_absent_by_email(
     Ok(())
 }
 
-#[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(all(test, feature = "oauth-providers"))]
 mod tests {
     use super::*;
     use crate::clock::FixedClock;

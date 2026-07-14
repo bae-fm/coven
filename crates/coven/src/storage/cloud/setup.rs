@@ -3,22 +3,20 @@
 //! Contains the OAuth sign-in flows for Google Drive, Dropbox, and OneDrive,
 //! as well as managed service signup/login, disconnect, and account display logic.
 
-// `info` is used only by the native-only oauth sign-in flows (also gated on
-// `oauth-providers`); `warn` by the always-present account-display path.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+// `info` is used only by OAuth sign-in flows; `warn` by the always-present
+// account-display path.
+#[cfg(feature = "oauth-providers")]
 use tracing::info;
 
 use crate::config::{CloudProvider, Config};
 use crate::keys::{CloudHomeCredentials, DeviceIdentityCustody, MasterKeyCustody, StoreKeys};
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 use crate::oauth::OAuthTokens;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::sync::cloud_storage::BlobPathScheme;
 use crate::sync::cloud_storage::CloudCipher;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 fn save_oauth_tokens(key_service: &StoreKeys, tokens: &OAuthTokens) -> Result<(), SetupError> {
     key_service
         .set_cloud_home_oauth_tokens(tokens)
@@ -29,10 +27,10 @@ fn save_oauth_tokens(key_service: &StoreKeys, tokens: &OAuthTokens) -> Result<()
 /// tokens to the keyring. Returns the folder id for the host to persist in its
 /// own config (coven never writes the host's config).
 ///
-/// Native-only: drives coven's localhost-callback OAuth flow ([`crate::oauth::authorize`]),
-/// which binds a TCP port and opens a browser — neither exists on wasm. Also gated
-/// on `oauth-providers`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+/// Drives coven's localhost-callback OAuth flow ([`crate::oauth::authorize`]),
+/// which binds a TCP port and opens the system browser. Gated on
+/// `oauth-providers`.
+#[cfg(feature = "oauth-providers")]
 pub async fn sign_in_google_drive(
     key_service: &StoreKeys,
     store_name: &str,
@@ -120,8 +118,8 @@ pub async fn sign_in_google_drive(
 /// Dropbox OAuth sign-in: authorize, create the store folder, save tokens to
 /// the keyring. Returns the folder path for the host to persist in its config.
 ///
-/// Native-only (see [`sign_in_google_drive`]); also gated on `oauth-providers`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+/// Uses the localhost-callback flow; gated on `oauth-providers`.
+#[cfg(feature = "oauth-providers")]
 pub async fn sign_in_dropbox(
     key_service: &StoreKeys,
     store_name: &str,
@@ -172,8 +170,8 @@ pub async fn sign_in_dropbox(
 /// folder, save tokens to the keyring. Returns `(drive_id, folder_id)` for the
 /// host to persist in its config.
 ///
-/// Native-only (see [`sign_in_google_drive`]); also gated on `oauth-providers`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+/// Uses the localhost-callback flow; gated on `oauth-providers`.
+#[cfg(feature = "oauth-providers")]
 pub async fn sign_in_onedrive(
     key_service: &StoreKeys,
     oauth_cancel: tokio::sync::watch::Receiver<bool>,
@@ -438,7 +436,6 @@ pub(crate) fn build_cloud_cipher(
 /// `cipher` lets the caller reuse an already-built cipher (so the sync loop and
 /// storage share one instance for in-place key rotation); when `None` it is
 /// built from config via [`build_cloud_cipher`].
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn create_sync_storage_with_cloudkit(
     config: &Config,
     key_service: &StoreKeys,
@@ -463,7 +460,6 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
 /// Unlike [`create_sync_storage_with_cloudkit`], this needs no store-scoped
 /// cloud credentials (the home is already built) — only custody, for the
 /// `cipher = None` fallback's master-key read.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn create_sync_storage_with_home(
     config: &Config,
     custody: &dyn MasterKeyCustody,

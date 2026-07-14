@@ -2,7 +2,6 @@
 members = [
     "crates/coven-core",
     "crates/coven",
-    "crates/coven-wasm",
 ]
 resolver = "2"
 

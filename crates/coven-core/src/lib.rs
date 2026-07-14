@@ -73,10 +73,9 @@
 //! rides its subject's gate but never keeps the subject alive.
 
 // coven-core's documented public API is exactly the crate-root re-exports below.
-// The implementation modules are `#[doc(hidden)] pub`: reachable by the sibling
-// platform crates that compose this core — `coven` (native) and `coven-wasm`
-// (browser), which need its internals to build the native and browser engines —
-// but excluded from the documented surface and not part of the host API. A host
+// The implementation modules are `#[doc(hidden)] pub`: reachable by `coven`,
+// which needs the internals to build the public engine, but excluded from the
+// documented surface and not part of the host API. A host
 // depends on `coven`, whose own modules are `pub(crate)`, so it reaches the
 // engine only through the curated re-exports, never through `coven_core::sync::…`
 // or `coven::sync::…`.
@@ -113,12 +112,9 @@ pub mod store_dir;
 #[doc(hidden)]
 pub mod migration;
 // The device-local plaintext file behind each `BlobRef`: read on push, written on
-// pull. Native uses the filesystem; browser storage assembly lives in
-// `coven-wasm`.
+// pull, backed directly by the local filesystem.
 #[doc(hidden)]
 pub mod local_blob;
-#[cfg(all(any(test, feature = "test-utils"), not(target_arch = "wasm32")))]
-mod local_blob_tests;
 #[doc(hidden)]
 pub mod storage;
 #[doc(hidden)]
@@ -137,7 +133,6 @@ pub use rusqlite;
 
 // Blob descriptors, errors, the host-implemented observer.
 pub use blob::cache::BlobCacheError;
-// The Remote→Local transition (and its error) is native-only.
 pub use blob::{
     BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill, Provenance,
 };
@@ -166,7 +161,7 @@ pub use keys::{CloudHomeCredentials, KeyError, MasterKeyCustody, UserKeypair};
 pub use encryption::{EncryptionError, EncryptionService, MasterKeyring, SealError, CHUNK_SIZE};
 pub use store_dir::{StoreDir, StoreLayout};
 
-// Sync vocabulary exposed through the native handle.
+// Sync vocabulary exposed through the public handle.
 pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};
 pub use sync::membership::{MemberInfo, MemberRole};
 
@@ -190,7 +185,7 @@ pub use clock::{FixedClock, SteppingClock};
 pub use id_provider::SequentialIdProvider;
 pub use id_provider::{IdProvider, IdRef, UuidProvider};
 
-// Managed local blob store: the host constructs it, coven never does (native-only).
+// Managed local blob store: the host constructs it; coven never does.
 pub use storage::cloud::{
     BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
     CloudHomeJoinInfo, PartSink, UploadProgress,
@@ -214,27 +209,3 @@ pub use storage::cloud::test_utils::InMemoryCloudHome;
 // surface).
 #[cfg(any(test, feature = "test-utils"))]
 pub use db::{OutboxEntry, OutboxOperation};
-
-/// Thread-safety floor for coven's async storage traits ([`storage::cloud::CloudHome`],
-/// [`sync::storage::SyncStorage`], [`blob::BlobTransitionObserver`]).
-///
-/// Native sync runs the connection on a thread actor and awaits multi-threaded
-/// cloud SDKs, so those traits must be `Send + Sync` and their method futures
-/// `Send`. The browser runs one thread: reqwest's wasm `Response` and the wasm
-/// `Database`'s `Rc`-held state are `!Send`, and the engine drives every future
-/// on that single thread. So this bound is `Send + Sync` on native and empty on
-/// wasm, and the traits that carry it (plus their `#[async_trait]` futures) relax
-/// to `?Send` there. The blanket impl makes it transparent — every type that
-/// meets the native floor satisfies it, and on wasm it constrains nothing.
-#[cfg(not(target_arch = "wasm32"))]
-pub trait MaybeThreadSafe: Send + Sync {}
-#[cfg(not(target_arch = "wasm32"))]
-impl<T: Send + Sync + ?Sized> MaybeThreadSafe for T {}
-
-/// See the native [`MaybeThreadSafe`]. On wasm the engine drives every storage
-/// future on the browser's single thread, so the floor is empty and every type
-/// satisfies it.
-#[cfg(target_arch = "wasm32")]
-pub trait MaybeThreadSafe {}
-#[cfg(target_arch = "wasm32")]
-impl<T: ?Sized> MaybeThreadSafe for T {}

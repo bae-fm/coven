@@ -90,8 +90,7 @@ impl MasterKeyCustody for KeyringCustody {
 // InMemory preset
 // =============================================================================
 
-/// Supplied per session, never persisted by coven — the native sibling of
-/// what the wasm build already does (the page supplies the key per open).
+/// Supplied per session and never persisted by coven.
 struct InMemoryCustody {
     keyring: RwLock<Option<MasterKeyring>>,
 }

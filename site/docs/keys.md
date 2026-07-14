@@ -3,15 +3,10 @@
 coven runs entirely on the host's own device and the host's own storage;
 there is no coven server. Every key coven needs — the master key that
 encrypts a store's data, this device's signing identity for that store, a
-host's own secrets — lives on the device, and the only trustworthy place on a
-device to keep a secret is the platform's own key store. Getting that right
-across four platforms is real work: four different APIs, four different
-access-policy models, a decision about what never leaves the device, and a
-decision about what happens when a host wants something coven doesn't provide
-out of the box. Most cross-platform apps get some part of this wrong,
-silently — a key that works but isn't actually protected, an access policy
-more (or less) permissive than intended, a secret that migrates to a new
-device through a backup channel nobody meant to grant.
+host's own secrets — lives on the device, and the platform key store protects
+secrets that must persist. Each operating system exposes different APIs and
+access policies, so coven defines what may leave the device and how a host can
+supply a different custody implementation.
 
 This page is coven's position: the right default should require no decision
 from the host, and a host with a real reason to deviate should still be able
@@ -109,8 +104,7 @@ Coven::builder(config)
   (`master.keyring`), not a keyring entry.
 - [`KeyCustody::InMemory`](rustdoc:enum:coven::KeyCustody) — a
   [`MasterKeyring`](rustdoc:struct:coven::MasterKeyring) supplied for this
-  session, never persisted by coven — the native counterpart of what coven's
-  wasm build already does (the page supplies the key on every open).
+  session and never persisted by coven.
 - [`KeyCustody::Custom`](rustdoc:enum:coven::KeyCustody) — a host's own
   [`MasterKeyCustody`](rustdoc:trait:coven::MasterKeyCustody) implementation
   (`unlock` / `persist` / `forget`).

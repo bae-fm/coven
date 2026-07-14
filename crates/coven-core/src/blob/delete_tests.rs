@@ -269,8 +269,7 @@ struct CancelTombstoneOnExists<'a> {
     fired: AtomicBool,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[async_trait]
 impl CloudHome for CancelTombstoneOnExists<'_> {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.inner.put_object(key, data).await
@@ -365,8 +364,7 @@ impl<'a, H: CloudHome + ?Sized> FailCloudOpOnKey<'a, H> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[async_trait]
 impl<H: CloudHome + ?Sized> CloudHome for FailCloudOpOnKey<'_, H> {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         if self.should_fail(FailingCloudOp::PutObject, key) {

@@ -142,8 +142,7 @@ impl S3CloudHome {
             access_key,
             secret_key,
             // Normalize once here (trim trailing slash, drop empty), so neither
-            // full_key nor list re-trims — the same normalization the wasm backend
-            // does, now shared.
+            // full_key nor list re-trims it.
             key_prefix: normalize_prefix(key_prefix),
         })
     }

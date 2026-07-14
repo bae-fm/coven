@@ -182,9 +182,8 @@ impl TransferLimits {
 
 // The cache's own tests: real `Database` + `MockSyncStorage` over a temp store
 // dir, asserting hits/misses, the pinned/cache folder split, and pin/unpin/clear.
-// Native-only because they drive a real temp directory on the filesystem; the
-// Browser cache storage assembly lives in `coven-wasm`. See [`cache`].
-#[cfg(all(test, not(target_arch = "wasm32")))]
+// These drive a real temp directory on the filesystem. See [`cache`].
+#[cfg(test)]
 mod cache_tests;
 // The upload drain's tests: real `Database` (the `cloud_outbox` queue) driven
 // against `InMemoryCloudHome`/`FailingCloudHome`, asserting record-and-continue,
@@ -196,13 +195,13 @@ mod upload_tests;
 // make_remote + make_local through the real cycle, cancel both directions, the
 // drain's completion flip + cancel-in-gap, crash-idempotency at each commit
 // boundary, and a round-trip. Uses a `watch` cancel signal + `run_single_sync_cycle`,
-// both native-only. See [`transition`].
-#[cfg(all(test, not(target_arch = "wasm32")))]
+// See [`transition`].
+#[cfg(test)]
 mod transition_tests;
 // The local-files store's tests: store/read round-trip, a host-provided Local blob
-// surviving a budget sweep (the sweep never walks `local/`), and drop. Native-only
-// because they drive a real temp directory. See [`local_files`].
-#[cfg(all(test, not(target_arch = "wasm32")))]
+// surviving a budget sweep (the sweep never walks `local/`), and drop. These
+// drive a real temp directory. See [`local_files`].
+#[cfg(test)]
 mod local_files_tests;
 // The delete half's tests: tombstone signing, the drain that writes tombstones,
 // the graced GC that reclaims blobs, upload-cancels-delete at both layers, and the
@@ -392,12 +391,8 @@ pub struct BlobRef {
 /// accepts new entries but doesn't drain ([`upload::drain_uploads`] checks once at
 /// the top of each entry; in-flight uploads complete normally).
 ///
-/// `Send + Sync` with `Send` method futures on native; `?Send` on wasm. See
-/// [`crate::MaybeThreadSafe`] for why the bound is cfg'd — the browser drives every
-/// future on one thread.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait BlobTransitionObserver: crate::MaybeThreadSafe {
+#[async_trait::async_trait]
+pub trait BlobTransitionObserver: Send + Sync {
     /// An upload attempt for this blob is starting now.
     async fn on_blob_upload_started(&self, blob_id: &str);
 

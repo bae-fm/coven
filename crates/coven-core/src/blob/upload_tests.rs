@@ -164,8 +164,7 @@ impl RecordingObserver {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl BlobTransitionObserver for RecordingObserver {
     async fn on_blob_upload_started(&self, file_id: &str) {
         self.events
@@ -211,8 +210,7 @@ impl FailingCloudHome {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl CloudHome for FailingCloudHome {
     async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.write_calls.fetch_add(1, Ordering::SeqCst);
@@ -273,8 +271,7 @@ struct SlowPartSink {
     per_chunk_delay: std::time::Duration,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl crate::storage::cloud::PartSink for SlowPartSink {
     fn part_size(&self) -> usize {
         self.part_size
@@ -293,8 +290,7 @@ impl crate::storage::cloud::PartSink for SlowPartSink {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl CloudHome for SlowChunkedCloudHome {
     async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
         Ok(())
@@ -938,8 +934,7 @@ impl BarrierCloudHome {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl CloudHome for BarrierCloudHome {
     async fn put_object(&self, key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.gather(key).await;
@@ -1005,8 +1000,7 @@ impl PausingObserver {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[async_trait::async_trait]
 impl BlobTransitionObserver for PausingObserver {
     async fn on_blob_upload_started(&self, file_id: &str) {
         self.started.lock().unwrap().push(file_id.to_string());

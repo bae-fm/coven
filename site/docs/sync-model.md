@@ -281,7 +281,7 @@ is its own page: [Schema evolution](/docs/schema-evolution).
 
 ## Lifecycle
 
-`CovenHandle` owns the sync lifecycle natively. The host calls
+`CovenHandle` owns the sync lifecycle. The host calls
 `handle.connect_sync()` once a provider is connected; the handle builds the
 [cloud home](/docs/storage) and, if sync is enabled, spawns the loop.
 `handle.stop_sync()` stops the loop after the in-flight cycle but keeps the

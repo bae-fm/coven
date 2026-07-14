@@ -441,8 +441,6 @@ pub async fn join_from_invite_code(
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
-    crate::install_platform();
-
     let code = crate::join_code::decode(invite_code_str)
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
     let joiner_public_key = crate::join_code::decode_join_request(join_request_code)
@@ -538,8 +536,6 @@ pub(crate) async fn join_store(
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
-    crate::install_platform();
-
     // Guard the destructive `stores/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
     crate::store_dir::validate_path_token(&code.store_id)

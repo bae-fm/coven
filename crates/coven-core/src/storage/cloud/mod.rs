@@ -95,7 +95,7 @@ impl FromStr for CopyId {
 
 /// Injected source of copy ids. Storage asks for ids; it never reads ambient
 /// randomness while deciding protocol paths.
-pub trait CopyIdGenerator: crate::MaybeThreadSafe {
+pub trait CopyIdGenerator: Send + Sync {
     fn next_copy_id(&self) -> CopyId;
 }
 
@@ -401,8 +401,7 @@ pub fn no_progress() -> impl Fn(u64) + Send + Sync {
 
 /// A blob as a **sized stream of already-final bytes**: sealed chunks for an
 /// encrypted home, plaintext for a browsable one. Encryption-agnostic and
-/// concrete (no `dyn Stream`, so it sidesteps the native-`Send` / wasm-`?Send`
-/// split). [`next_part`](BlobBody::next_part) hands the bytes to a streaming
+/// concrete (no `dyn Stream`). [`next_part`](BlobBody::next_part) hands the bytes to a streaming
 /// upload in bounded windows so a large blob is never held whole in memory; the
 /// only [`collect`](BlobBody::collect) is the single-request path for blobs at or
 /// below a provider's multipart threshold.
@@ -589,9 +588,8 @@ impl BlobBody {
 /// parts and commits. The central [`write_blob`] driver opens one of these for a
 /// large blob and pumps [`BlobBody`] parts into it — no backend writes its own
 /// upload loop, collect, or progress call.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait PartSink {
+#[async_trait]
+pub trait PartSink: Send {
     /// Bytes per part. Every part except the last is exactly this; the last is the
     /// remainder. Encodes each provider's required part size (S3 ≥ 5 MiB, OneDrive
     /// 320 KiB multiples, Drive 256 KiB multiples, ...).
@@ -611,11 +609,7 @@ pub trait PartSink {
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError>;
 }
 
-/// A boxed [`PartSink`] borrowing its home for `'a`. Carries `Send` on native
-/// (the home is multi-threaded) and drops it on wasm (single-threaded browser).
-#[cfg(not(target_arch = "wasm32"))]
-pub type BoxPartSink<'a> = Box<dyn PartSink + Send + 'a>;
-#[cfg(target_arch = "wasm32")]
+/// A boxed [`PartSink`] borrowing its home for `'a`.
 pub type BoxPartSink<'a> = Box<dyn PartSink + 'a>;
 
 /// The central upload driver: pick single-request vs multipart by size and pump
@@ -654,15 +648,8 @@ async fn write_blob<C: CloudHome + ?Sized>(
 ///
 /// All methods deal in raw bytes. No encryption or path layout logic.
 ///
-/// The trait carries `Send + Sync` (and `Send` method futures) on native, where
-/// the DB lives on a thread actor and backends await multi-threaded SDKs, and
-/// drops them on wasm, where the browser is single-threaded, reqwest's `Response`
-/// is `!Send`, and the engine drives every future on that one thread. The
-/// supertrait bound is the cfg'd [`crate::MaybeThreadSafe`] marker and the
-/// futures are cfg'd by `async_trait`'s `?Send` mode on wasm.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait CloudHome: crate::MaybeThreadSafe {
+#[async_trait]
+pub trait CloudHome: Send + Sync {
     /// Verify the backend is reachable with the configured credentials.
     /// Setup flows call this *before* persisting credentials, so a typo or
     /// missing bucket fails fast at setup time instead of via a delayed

@@ -61,8 +61,7 @@ fn storage_for(home: &InMemoryCloudHome, key: [u8; 32], keypair: &UserKeypair) -
 /// provider access control) does not stand in the way of building the chain.
 struct GrantingCloudHome(InMemoryCloudHome);
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[async_trait]
 impl CloudHome for GrantingCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.0.put_object(key, data).await

@@ -16,9 +16,6 @@
 # `test-utils`. If a demoted-to-`pub(crate)` item's only caller lived in test
 # code, this is where it goes dead.
 #
-# coven-wasm doesn't need an entry here: `scripts/check-wasm.sh`, invoked bare
-# (no `--tests`, no `--all-features`) in wasm.yml, already is this same
-# lib-only, default-features shape for the wasm32 target.
 set -eu
 
 cargo check -p coven-core --lib

@@ -6,22 +6,22 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+#[cfg(any(test, feature = "oauth-providers"))]
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+#[cfg(any(test, feature = "oauth-providers"))]
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+#[cfg(any(test, feature = "oauth-providers"))]
 use sha2::{Digest, Sha256};
-#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+#[cfg(any(test, feature = "oauth-providers"))]
 use thiserror::Error;
-// `info`/`warn` are used only by the native-only localhost-callback `authorize`,
-// which is gated on `oauth-providers` too.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+// `info`/`warn` are used only by the localhost-callback `authorize`, which is
+// gated on `oauth-providers` too.
+#[cfg(feature = "oauth-providers")]
 use tracing::{info, warn};
 
 /// OAuth provider configuration.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 #[derive(Clone, Debug)]
 pub(crate) struct OAuthConfig {
     pub client_id: String,
@@ -82,7 +82,7 @@ pub fn set_oauth_client_creds(
 /// all, or the registered map has no entry for this provider. Surfaced at the
 /// OAuth-flow boundary so a mis-configured host gets a typed error naming the
 /// startup step, not an empty `client_id` that fails deep inside a provider flow.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 #[derive(Debug, thiserror::Error)]
 pub enum OAuthClientCredsError {
     #[error(
@@ -97,7 +97,7 @@ pub enum OAuthClientCredsError {
 
 /// The credentials registered for a provider. `Err` when the host never ran
 /// [`set_oauth_client_creds`], or ran it without an entry for this provider.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 pub(crate) fn oauth_client_creds(
     provider: &str,
 ) -> Result<OAuthClientCreds, OAuthClientCredsError> {
@@ -114,7 +114,7 @@ pub(crate) fn oauth_client_creds(
 /// backends' tests, which construct provider homes and so read creds. Idempotent
 /// — every caller registers the same map, so the process-global `OnceLock` is set
 /// once and later calls are no-ops.
-#[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(all(test, feature = "oauth-providers"))]
 pub(crate) fn install_test_client_creds() {
     let creds = HashMap::from([
         (
@@ -170,24 +170,24 @@ impl std::fmt::Debug for OAuthTokens {
     }
 }
 
-#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+#[cfg(any(test, feature = "oauth-providers"))]
 #[derive(Error, Debug)]
 pub enum OAuthError {
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[error("failed to open browser: {0}")]
     BrowserOpen(String),
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[error("callback server error: {0}")]
     Server(String),
     #[error("token exchange error: {0}")]
     TokenExchange(String),
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[error("account email fetch error: {0}")]
     AccountFetch(String),
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[error("authorization denied: {0}")]
     Denied(String),
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[error("timeout waiting for authorization callback")]
     Timeout,
     /// The refresh token is no longer accepted (revoked, expired, password
@@ -195,18 +195,17 @@ pub enum OAuthError {
     /// is no point retrying the refresh.
     #[error("re-authorization required: {0}")]
     Reauthorize(String),
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[error(transparent)]
     ClientCreds(#[from] OAuthClientCredsError),
 }
 
-/// Guards the localhost OAuth-callback server task — native-only, like
-/// [`authorize`], the only thing that spawns that task; also gated on
-/// `oauth-providers`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+/// Guards the localhost OAuth-callback server task. [`authorize`] is the only
+/// function that spawns it; both are gated on `oauth-providers`.
+#[cfg(feature = "oauth-providers")]
 struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 impl AbortOnDrop {
     fn new(handle: tokio::task::JoinHandle<()>) -> Self {
         Self(Some(handle))
@@ -220,7 +219,7 @@ impl AbortOnDrop {
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         if let Some(h) = self.0.take() {
@@ -235,7 +234,7 @@ impl Drop for AbortOnDrop {
 /// omit it — making it required forces parsing to fail before the typed
 /// error branch can classify the failure, surfacing every provider error as
 /// "parse response: missing field `access_token`".
-#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+#[cfg(any(test, feature = "oauth-providers"))]
 #[derive(Deserialize)]
 struct TokenResponse {
     #[serde(default)]
@@ -248,7 +247,7 @@ struct TokenResponse {
     error_description: Option<String>,
 }
 
-#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+#[cfg(any(test, feature = "oauth-providers"))]
 impl TokenResponse {
     /// Convert a parsed response into typed `OAuthTokens`, classifying the
     /// failure modes both exchange and refresh share: `invalid_grant` /
@@ -290,14 +289,14 @@ impl TokenResponse {
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 fn oauth_callback_html(title: &str, message: &str) -> String {
     include_str!("oauth_success.html")
         .replace("{{title}}", title)
         .replace("{{message}}", message)
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 async fn post_token_request(
     config: &OAuthConfig,
     params: Vec<(&str, String)>,
@@ -325,7 +324,7 @@ async fn post_token_request(
 }
 
 /// Generate a random PKCE code verifier (43-128 URL-safe characters).
-#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+#[cfg(any(test, feature = "oauth-providers"))]
 pub(crate) fn generate_code_verifier() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
@@ -333,7 +332,7 @@ pub(crate) fn generate_code_verifier() -> String {
 }
 
 /// Compute the S256 PKCE code challenge from a verifier.
-#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "oauth-providers")))]
+#[cfg(any(test, feature = "oauth-providers"))]
 pub(crate) fn code_challenge(verifier: &str) -> String {
     let hash = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(hash)
@@ -345,7 +344,7 @@ pub(crate) fn code_challenge(verifier: &str) -> String {
 /// mobile OS auth session (ASWebAuthenticationSession / Custom Tabs)
 /// redirecting to a custom URI scheme, where binding a localhost port and
 /// `open::that` don't apply.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 #[derive(Clone, Debug)]
 pub struct AuthorizeRequest {
     pub auth_url: String,
@@ -353,7 +352,7 @@ pub struct AuthorizeRequest {
     state: String,
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 impl AuthorizeRequest {
     pub fn verify_callback_state(&self, callback_state: Option<&str>) -> Result<(), OAuthError> {
         verify_callback_state(callback_state, &self.state).map_err(OAuthError::Denied)
@@ -365,7 +364,7 @@ impl AuthorizeRequest {
 /// from the redirect itself, then calls [`exchange_authorize_request`] with the
 /// same `redirect_uri` and returned request. [`authorize`] is this plus coven's
 /// localhost callback server for desktop.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 pub(crate) fn build_authorize_url(
     config: &OAuthConfig,
     redirect_uri: &str,
@@ -405,7 +404,7 @@ pub(crate) fn build_authorize_url(
     })
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 fn callback_code(params: &std::collections::HashMap<String, String>) -> Result<String, String> {
     if let Some(error) = params.get("error") {
         let desc = match params.get("error_description") {
@@ -423,7 +422,7 @@ fn callback_code(params: &std::collections::HashMap<String, String>) -> Result<S
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 fn verify_callback_state(callback_state: Option<&str>, expected_state: &str) -> Result<(), String> {
     match callback_state {
         Some(state) if state == expected_state => Ok(()),
@@ -442,12 +441,10 @@ fn verify_callback_state(callback_state: Option<&str>, expected_state: &str) -> 
 /// 4. Wait for the callback with the authorization code
 /// 5. Exchange the code for tokens at `token_url`
 ///
-/// Native-only: binds a localhost TCP port (`tokio::net`), serves the callback
-/// with axum, and opens the system browser (`open`) — none of which exist on
-/// wasm. The browser captures the redirect itself via the pure
-/// [`build_authorize_url`] + [`exchange_authorize_request`] pair. Also gated on
-/// `oauth-providers` (it pulls in `open`).
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+/// Binds a localhost TCP port (`tokio::net`), serves the callback with axum, and
+/// opens the system browser (`open`). Gated on `oauth-providers`, which pulls in
+/// `open`.
+#[cfg(feature = "oauth-providers")]
 pub(crate) async fn authorize(
     config: &OAuthConfig,
     cancel: tokio::sync::watch::Receiver<bool>,
@@ -577,7 +574,7 @@ pub(crate) async fn authorize(
     exchange_code(config, &code, &verifier, &redirect_uri, clock).await
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 async fn exchange_code(
     config: &OAuthConfig,
     code: &str,
@@ -601,7 +598,7 @@ async fn exchange_code(
 
 /// Verify the callback state from an [`AuthorizeRequest`] and exchange its code
 /// for tokens.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 pub(crate) async fn exchange_authorize_request(
     config: &OAuthConfig,
     code: &str,
@@ -615,7 +612,7 @@ pub(crate) async fn exchange_authorize_request(
 }
 
 /// Refresh an expired access token using a refresh token.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(feature = "oauth-providers")]
 pub(crate) async fn refresh(
     config: &OAuthConfig,
     refresh_token: &str,
@@ -644,9 +641,9 @@ pub(crate) async fn refresh(
 /// The OAuth config for a provider that uses OAuth, or an error for providers
 /// (S3, CloudKit) that don't.
 ///
-/// Native-only: reads each provider's config off its native-only backend type
-/// (`GoogleDriveCloudHome::oauth_config()` etc.); also gated on `oauth-providers`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+/// Reads each provider's config from its cloud backend; gated on
+/// `oauth-providers`.
+#[cfg(feature = "oauth-providers")]
 fn oauth_config_for_provider(
     provider: crate::config::CloudProvider,
 ) -> Result<OAuthConfig, OAuthError> {
@@ -667,9 +664,8 @@ fn oauth_config_for_provider(
 /// Returns tokens on success. Only Google Drive, Dropbox, and OneDrive support
 /// OAuth; other providers return an error.
 ///
-/// Native-only: uses [`authorize`]'s localhost-callback flow and the native-only
-/// [`oauth_config_for_provider`]; also gated on `oauth-providers`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+/// Uses [`authorize`]'s localhost-callback flow; gated on `oauth-providers`.
+#[cfg(feature = "oauth-providers")]
 pub async fn authorize_provider(
     provider: crate::config::CloudProvider,
     cancel: tokio::sync::watch::Receiver<bool>,
@@ -683,10 +679,8 @@ pub async fn authorize_provider(
 /// auth session). Pair the returned request, callback `code`, callback `state`,
 /// and same `redirect_uri` with [`exchange_code_for_provider`].
 ///
-/// Native-only: depends on [`oauth_config_for_provider`], whose per-provider
-/// config lives on the native-only cloud-backend types; also gated on
-/// `oauth-providers`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+/// The provider configuration and this function are gated on `oauth-providers`.
+#[cfg(feature = "oauth-providers")]
 pub fn build_authorize_request_for_provider(
     provider: crate::config::CloudProvider,
     redirect_uri: &str,
@@ -698,9 +692,8 @@ pub fn build_authorize_request_for_provider(
 /// tokens. `redirect_uri`, `request`, and `callback_state` must match the
 /// originating [`build_authorize_request_for_provider`] call.
 ///
-/// Native-only for the same reason as [`build_authorize_request_for_provider`];
-/// also gated on `oauth-providers`.
-#[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+/// Gated on `oauth-providers`.
+#[cfg(feature = "oauth-providers")]
 pub async fn exchange_code_for_provider(
     provider: crate::config::CloudProvider,
     code: &str,
@@ -720,7 +713,7 @@ pub async fn exchange_code_for_provider(
     .await
 }
 
-#[cfg(all(test, not(target_arch = "wasm32"), feature = "oauth-providers"))]
+#[cfg(all(test, feature = "oauth-providers"))]
 pub(crate) mod test_support {
     use super::OAuthConfig;
     use axum::{extract::Form, routing::post, Router};
@@ -796,7 +789,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     use test_support::{oauth_config, serve_token_response};
 
     #[test]
@@ -867,13 +860,13 @@ mod tests {
         serde_json::from_str(body).expect("parse TokenResponse")
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     fn authorize_url_params(auth_url: &str) -> HashMap<String, String> {
         let (_, query) = auth_url.split_once('?').expect("authorize URL has query");
         serde_urlencoded::from_str(query).expect("parse authorize query")
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[test]
     fn oauth_callback_html_renders_result_text() {
         let html = oauth_callback_html("Authorization denied", "Denied message");
@@ -884,7 +877,7 @@ mod tests {
         assert!(!html.contains("{{message}}"));
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[test]
     fn build_authorize_url_includes_matching_random_state() {
         let config = oauth_config("http://token.example/token".to_string());
@@ -918,7 +911,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[test]
     fn callback_rejects_missing_or_wrong_state() {
         let expected_state = "expected-state";
@@ -949,7 +942,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[tokio::test]
     async fn exchange_authorize_request_rejects_wrong_state_before_token_request() {
         let config = oauth_config("http://127.0.0.1:9/token".to_string());
@@ -972,7 +965,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[tokio::test]
     async fn exchange_code_posts_authorization_code_params() {
         let (token_url, request_body, server) = serve_token_response(
@@ -1015,7 +1008,7 @@ mod tests {
         assert_eq!(tokens.refresh_token.as_deref(), Some("new-refresh"));
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[tokio::test]
     async fn refresh_posts_refresh_token_params_and_reuses_existing_refresh_token() {
         let (token_url, request_body, server) =
@@ -1141,7 +1134,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth-providers"))]
+    #[cfg(feature = "oauth-providers")]
     #[tokio::test]
     async fn parse_failure_error_does_not_include_tokens() {
         let (token_url, _request_body, server) =

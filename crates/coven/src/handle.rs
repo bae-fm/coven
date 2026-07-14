@@ -1,4 +1,4 @@
-//! The native data handle: one object a host constructs once that owns coven's
+//! The data handle: one object a host constructs once that owns coven's
 //! pieces and exposes the whole data interface as methods.
 //!
 //! coven owns the store's data — SQL rows and blobs, on disk first, cloud
@@ -9,9 +9,8 @@
 //! caller passes only descriptors (a [`BlobRef`], SQL, a config) and coven does
 //! its own plumbing.
 //!
-//! It is the native counterpart of the browser `CovenStore` in `coven-wasm`:
-//! same role, different substrate. The native stack runs on tokio with a
-//! [`SyncManager`], `Send + Sync` throughout.
+//! The stack runs on Tokio with a [`SyncManager`] and is `Send + Sync`
+//! throughout.
 //!
 //! ## What it owns
 //!
@@ -85,7 +84,7 @@ pub(crate) fn app_data_cipher(
     Ok(EncryptionService::from(keyring))
 }
 
-/// The native handle over one coven store.
+/// The handle over one coven store.
 ///
 /// Open it once with [`Coven::builder`](crate::Coven::builder), then call methods. Cheap to
 /// [`clone`](Clone) — every field is shared (an `Arc`, a `Clone` handle, or a
@@ -167,7 +166,7 @@ pub struct CovenHandle {
     /// drain. `None` for a host that doesn't surface transition progress.
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
-    /// Holds the native store-directory lock for this handle and every clone,
+    /// Holds the store-directory lock for this handle and every clone,
     /// and is cloned into each [`SyncManager`] so a running sync loop keeps the
     /// lock alive until its own thread exits — the lock's lifetime tracks the
     /// last writer, not the host's drop timing.

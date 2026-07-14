@@ -11,7 +11,7 @@ them) reach teammates; the rest stay on the device that wrote them.
 
 ## Open the store
 
-coven owns the connections. The host opens one native handle with
+coven owns the connections. The host opens one handle with
 [`Coven::builder`](rustdoc:struct:coven::Coven), handing over the set of tables
 that sync and the [migration ladder](/docs/schema-evolution) that creates the
 app's own tables. coven runs its bookkeeping migration first, then any ladder

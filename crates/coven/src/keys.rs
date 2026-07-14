@@ -500,7 +500,7 @@ impl StoreKeys {
         self.set_cloud_home_credentials(&CloudHomeCredentials::OAuth { token_json })
     }
 
-    #[cfg(all(test, not(target_arch = "wasm32")))]
+    #[cfg(test)]
     pub(crate) fn cloud_home_credentials_entry_for_test(
         &self,
     ) -> Result<keyring_core::Entry, KeyError> {

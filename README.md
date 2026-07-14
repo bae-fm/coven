@@ -94,11 +94,8 @@ handle.sync_now();
 
 ## Workspace
 
-- `coven`: the native Rust package and public API.
-- `coven-core`: the shared engine crate used by platform packages.
-- `coven-wasm`: the browser package. Browser support is isolated there and
-  returns explicit unsupported errors for operations whose browser backend is
-  not implemented.
+- `coven`: the Rust package and public API.
+- `coven-core`: the sync engine used by `coven`.
 
 ## Development
 

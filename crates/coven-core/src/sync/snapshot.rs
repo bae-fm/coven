@@ -149,7 +149,7 @@ pub struct BootstrapResult {
     coverage: BTreeMap<String, super::store_commit::CommitPosition>,
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod bootstrap_capability_tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;

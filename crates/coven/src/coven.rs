@@ -1,4 +1,4 @@
-//! Native top-level API: open one handle and drive rows, blobs, sync, and
+//! Top-level API: open one handle and drive rows, blobs, sync, and
 //! membership through it.
 
 use std::num::NonZeroUsize;
@@ -300,7 +300,6 @@ impl CovenBuilder {
     /// that needs it ([`CovenHandle::connect_sync`],
     /// [`CovenHandle::master_key_fingerprint`], and similar).
     pub fn open(self) -> CovenResult<CovenHandle> {
-        crate::install_platform();
         let config = self.config.current();
         let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
@@ -376,7 +375,6 @@ impl CovenBuilder {
     /// cache (files written atomically), which is device scratch and touches no
     /// synced state.
     pub fn open_read_only(self) -> CovenResult<crate::read_handle::CovenReadHandle> {
-        crate::install_platform();
         let config = self.config.current();
         let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
@@ -1938,7 +1936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_write_drain_preserves_a_blob_still_referenced_after_remote_delete() {
+    async fn write_drain_preserves_a_blob_still_referenced_after_remote_delete() {
         let (_tmp, handle) = open_files_handle();
         let blob_id = "shared01";
         handle
@@ -2025,7 +2023,7 @@ mod tests {
                 },
             )
             .await
-            .expect("native write drains cleanup queue");
+            .expect("write drains cleanup queue");
         resume_pull.notify_one();
         pull.await.expect("pull task");
 
@@ -2738,7 +2736,6 @@ mod tests {
     /// file, never a torn interleave. This is the primitive requirement 6 rests on.
     #[tokio::test]
     async fn concurrent_same_blob_cache_writes_never_tear() {
-        crate::install_platform();
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let dest = dir

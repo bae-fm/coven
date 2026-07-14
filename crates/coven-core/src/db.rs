@@ -7,7 +7,7 @@
 //! `local_cleanup_intents`, `pending_changesets`, and `blob_uploaders` — all
 //! created STRICT by [`apply_coven_schema`], which coven
 //! runs against the connection it owns during open. The host does not implement
-//! any of this; native app SQL goes through [`crate::CovenHandle::sql`] or
+//! any of this; app SQL goes through [`crate::CovenHandle::sql`] or
 //! [`crate::CovenHandle::write`].
 
 macro_rules! coven_tables {

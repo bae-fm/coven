@@ -1,5 +1,4 @@
 /target
-/pkg
 *.db
 *.db-wal
 *.db-shm
