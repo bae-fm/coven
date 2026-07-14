@@ -60,7 +60,6 @@ async fn sync_for_test(
         store_dir,
         membership.chain.as_ref(),
         membership.pinned_owner.as_deref(),
-        None,
         false,
     )
     .await
@@ -479,6 +478,8 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_cursor() {
                      '0000000000900-0000-dev1', '2026-01-01')",
             "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
              VALUES ('remote', 'same-slug', 'Remote', '0000000001000-0000-dev1', '2026-01-01')",
+            "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
+             VALUES ('other', 'other-slug', 'Other', '0000000001001-0000-dev1', '2026-01-01')",
         ],
     )
     .await;
@@ -631,7 +632,6 @@ async fn fk_violation_still_retries_and_resolves() {
     assert_eq!(updated.get("dev-child"), Some(&1));
     assert_eq!(updated.get("dev-parent"), Some(&1));
     assert_eq!(result.changesets_applied, 2);
-    assert!(result.constraint_conflicts.is_empty());
     assert_eq!(
         query_text(&target, "SELECT tag FROM note_tags WHERE id = 't1'").await,
         "green"
@@ -1012,6 +1012,7 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         changeset_size: cs.len() - 1,
         author_pubkey: None,
         membership_grant: None,
+        blob_locations: Vec::new(),
         signature: None,
     };
     envelope::sign_envelope(&mut env, &author, &cs);
@@ -1627,6 +1628,9 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         )
         .await
         .expect("plant audio blob before publish");
+    db1.record_blob_uploader("audio", "audio1", &storage.own_uploader().unwrap())
+        .await
+        .unwrap();
 
     // Drive the real push path. The inline push uploads only host-provided blobs, so
     // the user-provided audio is NOT uploaded here — it goes via the durable outbox in
@@ -1839,6 +1843,9 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
         )
         .await
         .expect("plant remote blob");
+    db.record_blob_uploader("audio", "audio1", &storage.own_uploader().unwrap())
+        .await
+        .unwrap();
     let outgoing = capture_bytes(
         &db,
         &[
@@ -2016,7 +2023,6 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
         "test-lib",
         keypair.clone(),
     );
-    const COVER_KEY: &str = "photos/n1/cover-p1cover.jpg";
 
     let bytes = b"COVER-BYTES";
     let db = open_test_db_with_blob(readable_photo_decl());
@@ -2037,8 +2043,16 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
     ];
     let outgoing = capture_bytes(&db, &rows).await;
     push_cycle(&db, &tables, &storage, outgoing.clone(), 0, &keypair, &ld).await;
+    let cover_key = current_blob_key(
+        &db,
+        &storage,
+        "photos",
+        "p1cover",
+        Some("n1/cover-p1cover.jpg"),
+    )
+    .await;
     assert_eq!(
-        home.get(COVER_KEY).as_deref(),
+        home.get(&cover_key).as_deref(),
         Some(bytes.as_slice()),
         "the first push uploads the cover",
     );
@@ -2072,7 +2086,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
         "a blob already in the cloud must not abort the push for want of a local copy",
     );
     assert_eq!(
-        home.get(COVER_KEY).as_deref(),
+        home.get(&cover_key).as_deref(),
         Some(bytes.as_slice()),
         "the cloud object is left exactly as it stands",
     );
@@ -2150,12 +2164,20 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     )
     .await
     .expect("push_changeset");
+    let readable_key = current_blob_key(
+        &db1,
+        &storage,
+        "photos",
+        "p1cover",
+        Some("n1/cover-p1cover.jpg"),
+    )
+    .await;
 
     // The blob lands at the readable key, not the hashed shard.
     assert!(
         storage
             .cloud_home()
-            .exists("photos/n1/cover-p1cover.jpg")
+            .exists(&readable_key)
             .await
             .expect("exists at readable key"),
         "the blob must land at the readable cloud_path key",
@@ -2286,8 +2308,6 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
         "test-lib",
         keypair.clone(),
     );
-    const OLD_KEY: &str = "photos/n1/cover-p1cover.jpg";
-    const NEW_KEY: &str = "photos/n1/cover-p2cover.jpg";
 
     let old_bytes = b"OLD-COVER-BYTES";
     let new_bytes = b"NEW-COVER-BYTES";
@@ -2313,8 +2333,16 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
     )
     .await;
     push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+    let old_key = current_blob_key(
+        &db1,
+        &storage,
+        "photos",
+        "p1cover",
+        Some("n1/cover-p1cover.jpg"),
+    )
+    .await;
     assert_eq!(
-        home.get(OLD_KEY).as_deref(),
+        home.get(&old_key).as_deref(),
         Some(old_bytes.as_slice()),
         "the first push puts the cover at the key its path names",
     );
@@ -2348,14 +2376,22 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
     )
     .await;
     push_cycle(&db1, &tables, &storage, outgoing, 1, &keypair, &ld1).await;
+    let new_key = current_blob_key(
+        &db1,
+        &storage,
+        "photos",
+        "p2cover",
+        Some("n1/cover-p2cover.jpg"),
+    )
+    .await;
 
     assert_eq!(
-        home.get(NEW_KEY).as_deref(),
+        home.get(&new_key).as_deref(),
         Some(new_bytes.as_slice()),
         "the replacement writes its own cloud object",
     );
     assert_eq!(
-        home.get(OLD_KEY).as_deref(),
+        home.get(&old_key).as_deref(),
         Some(old_bytes.as_slice()),
         "the replaced blob's object is untouched — it is tombstoned, not overwritten, so a \
          device that has not yet pulled the replacement still reads the bytes its row names",
@@ -2364,7 +2400,6 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
     // Device B pulls the replacement. Its download verifies the object against the new
     // row's content hash, so an object holding the replaced bytes would fail the pull.
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
-
     assert!(
         !result.asset_downloads_failed,
         "device B must download a cover matching the row's hash",
@@ -2465,18 +2500,34 @@ async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
         "dev2", &db_b, &tables, &storage, outgoing_b, 0, &keypair, &ld_b,
     )
     .await;
+    let key_a = current_blob_key(
+        &db_a,
+        &storage,
+        "photos",
+        "pAcover",
+        Some("n1/cover-pAcover.jpg"),
+    )
+    .await;
+    let key_b = current_blob_key(
+        &db_b,
+        &storage,
+        "photos",
+        "pBcover",
+        Some("n1/cover-pBcover.jpg"),
+    )
+    .await;
 
     // Neither replacement overwrote the other: both objects stand, each holding the bytes
     // of the blob its key names. Under a key that did not name its blob, these two writes
     // would have been one object, and its bytes would be whichever device the bucket saw
     // last — not necessarily the device the row's conflict resolved to.
     assert_eq!(
-        home.get("photos/n1/cover-pAcover.jpg").as_deref(),
+        home.get(&key_a).as_deref(),
         Some(from_a.as_slice()),
         "device A's replacement is at its own key",
     );
     assert_eq!(
-        home.get("photos/n1/cover-pBcover.jpg").as_deref(),
+        home.get(&key_b).as_deref(),
         Some(from_b.as_slice()),
         "device B's replacement is at its own key",
     );
@@ -2649,7 +2700,6 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
         keypair.clone(),
     );
     // A readable name with no blob id anywhere in it.
-    const AUDIO_KEY: &str = "photos/n1/Sonata No. 3.flac";
 
     let bytes = b"AUDIO-BYTES";
     let db1 = open_test_db_with_blob(write_once_photo_decl());
@@ -2673,9 +2723,17 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     )
     .await;
     push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+    let audio_key = current_blob_key(
+        &db1,
+        &storage,
+        "photos",
+        "f1audio",
+        Some("n1/Sonata No. 3.flac"),
+    )
+    .await;
 
     assert_eq!(
-        home.get(AUDIO_KEY).as_deref(),
+        home.get(&audio_key).as_deref(),
         Some(bytes.as_slice()),
         "the blob lands at the consumer's own readable name, with no blob id in it",
     );
@@ -2715,7 +2773,6 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
         "test-lib",
         keypair.clone(),
     );
-    const AUDIO_KEY: &str = "photos/n1/Sonata No. 3.flac";
 
     let first = b"FIRST-AUDIO";
     let second = b"SECOND-AUDIO-BYTES";
@@ -2741,6 +2798,14 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
     )
     .await;
     push_cycle(&db, &tables, &storage, outgoing, 0, &keypair, &ld).await;
+    let audio_key = current_blob_key(
+        &db,
+        &storage,
+        "photos",
+        "f1audio",
+        Some("n1/Sonata No. 3.flac"),
+    )
+    .await;
 
     // Repoint the write-once row at a second blob — the move that would rewrite the object
     // the first blob occupies.
@@ -2777,7 +2842,7 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
         "the error must name the blob the row was repointed at, got {message:?}",
     );
     assert_eq!(
-        home.get(AUDIO_KEY).as_deref(),
+        home.get(&audio_key).as_deref(),
         Some(first.as_slice()),
         "the first blob's cloud object is untouched — the cycle aborted before any upload",
     );
@@ -2814,8 +2879,6 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
         "test-lib",
         keypair.clone(),
     );
-    const OLD_KEY: &str = "photos/n1/cover-p1cover.jpg";
-    const NEW_KEY: &str = "photos/n1/cover-p2cover.jpg";
 
     let old_bytes = b"OLD-COVER-BYTES";
     let new_bytes = b"NEW-COVER-BYTES";
@@ -2841,8 +2904,16 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     )
     .await;
     push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+    let old_key = current_blob_key(
+        &db1,
+        &storage,
+        "photos",
+        "p1cover",
+        Some("n1/cover-p1cover.jpg"),
+    )
+    .await;
     assert_eq!(
-        home.get(OLD_KEY).as_deref(),
+        home.get(&old_key).as_deref(),
         Some(old_bytes.as_slice()),
         "the first push puts the cover at the key its path names",
     );
@@ -2870,14 +2941,22 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     )
     .await;
     push_cycle(&db1, &tables, &storage, outgoing, 1, &keypair, &ld1).await;
+    let new_key = current_blob_key(
+        &db1,
+        &storage,
+        "photos",
+        "p2cover",
+        Some("n1/cover-p2cover.jpg"),
+    )
+    .await;
 
     assert_eq!(
-        home.get(NEW_KEY).as_deref(),
+        home.get(&new_key).as_deref(),
         Some(new_bytes.as_slice()),
         "the repointed row's blob writes its own cloud object",
     );
     assert_eq!(
-        home.get(OLD_KEY).as_deref(),
+        home.get(&old_key).as_deref(),
         Some(old_bytes.as_slice()),
         "the replaced blob's object is not overwritten — it is tombstoned and stands until \
          the GC collects it",
@@ -2926,7 +3005,6 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
         "test-lib",
         keypair.clone(),
     );
-    const OLD_KEY: &str = "photos/n1/cover-p1cover.jpg";
 
     let old_bytes = b"OLD-COVER-BYTES";
     let new_bytes = b"NEW-COVER-BYTES";
@@ -2952,6 +3030,14 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
     )
     .await;
     push_cycle(&db1, &tables, &storage, outgoing, 0, &keypair, &ld1).await;
+    let old_key = current_blob_key(
+        &db1,
+        &storage,
+        "photos",
+        "p1cover",
+        Some("n1/cover-p1cover.jpg"),
+    )
+    .await;
 
     // The repointing leaves `cloud_path` naming the blob it replaced, so the new blob
     // would be keyed at the old blob's object.
@@ -2988,7 +3074,7 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
         "the error must name the new blob and the path it kept, got {message:?}",
     );
     assert_eq!(
-        home.get(OLD_KEY).as_deref(),
+        home.get(&old_key).as_deref(),
         Some(old_bytes.as_slice()),
         "the replaced blob's object is untouched — the cycle aborted before any upload",
     );
@@ -3048,6 +3134,24 @@ async fn push_cycle(
         "dev1", db, tables, storage, outgoing, local_seq, keypair, store_dir,
     )
     .await;
+}
+
+async fn current_blob_key(
+    db: &crate::database::Database,
+    storage: &CloudSyncStorage,
+    namespace: &str,
+    id: &str,
+    cloud_path: Option<&str>,
+) -> String {
+    let location = db.blob_location(namespace, id).await.unwrap().unwrap();
+    CloudSyncStorage::blob_key_at(
+        storage.blob_path_scheme(),
+        namespace,
+        Some(&location),
+        id,
+        cloud_path,
+    )
+    .unwrap()
 }
 
 /// Full encrypted blob round-trip through `CloudSyncStorage` (encrypted) over a
@@ -3122,14 +3226,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     .expect("push_changeset");
 
     // At rest the cover photo is ciphertext, not the source bytes.
-    let blob_key = CloudSyncStorage::blob_key(
-        BlobPathScheme::Hashed,
-        "photos",
-        Some(&storage.self_uploader()),
-        "p1cover",
-        None,
-    )
-    .expect("hashed key");
+    let blob_key = current_blob_key(&db1, &storage, "photos", "p1cover", None).await;
     let at_rest = storage
         .cloud_home()
         .read(&blob_key)

@@ -596,10 +596,8 @@ impl CloudHome for S3CloudHome {
             {
                 // Delete is idempotent: AWS S3 returns 204 for an already-absent key,
                 // but GCS's S3 XML API returns 404 `NoSuchKey`. A missing object is not
-                // a failure — `cancel_tombstone` deletes the tombstone after every
-                // upload and relies on the no-tombstone case being a no-op — so swallow
-                // not-found (the shared rule both S3 backends apply) and surface only
-                // real errors.
+                // a failure, so swallow not-found (the shared rule both S3 backends
+                // apply) and surface only real errors.
                 if !is_not_found_code(e.code()) {
                     return Err(CloudHomeError::Transport(format!("delete {key}: {e}")));
                 }

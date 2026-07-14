@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
-use crate::local_blob::{PlatformLocalBlobBackend, PlatformPlaintextReader, TEMP_BLOB_PREFIX};
+use crate::local_blob::{
+    CommitNoReplaceError, PlatformLocalBlobBackend, PlatformPlaintextReader, TEMP_BLOB_PREFIX,
+};
 
 pub(crate) static TEST_LOCAL_BLOB_BACKEND: TestLocalBlobBackend = TestLocalBlobBackend;
 
@@ -162,6 +164,28 @@ impl PlatformLocalBlobBackend for TestLocalBlobBackend {
                 path.display()
             )
         })
+    }
+
+    async fn commit_temp_no_replace(
+        &self,
+        temp: &Path,
+        destination: &Path,
+    ) -> Result<(), CommitNoReplaceError> {
+        match tokio::fs::hard_link(temp, destination).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(CommitNoReplaceError::DestinationExists(
+                    destination.to_path_buf(),
+                ));
+            }
+            Err(error) => return Err(CommitNoReplaceError::Other(error.to_string())),
+        }
+        self.sync_parent_dir(destination)
+            .await
+            .map_err(CommitNoReplaceError::DestinationCreated)?;
+        tokio::fs::remove_file(temp)
+            .await
+            .map_err(|error| CommitNoReplaceError::DestinationCreated(error.to_string()))
     }
 
     async fn exists(&self, path: &Path) -> Result<bool, String> {

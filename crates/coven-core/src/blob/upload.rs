@@ -476,32 +476,6 @@ async fn upload_entry(
         obs.on_blob_uploaded(file_id).await;
     }
 
-    // A successful write wins over any pending deletion: remove the tombstone a prior
-    // cycle (possibly another device) wrote for this key, so the GC won't reclaim the
-    // blob we just re-uploaded — the round-trip re-make_remote case (a prior
-    // make_local tombstoned this key). The enqueue layer already drops a same-device
-    // pending delete row; this covers a tombstone already committed to the cloud. On
-    // an inline-cancel failure a durable `cancel` row is enqueued (before the outbox
-    // row is removed below), so the tombstone-cancel drain retries until the tombstone
-    // is gone. If even that enqueue fails, leave the outbox row so next cycle's
-    // idempotent re-upload retries — never remove the row and strand the tombstone.
-    let suffix = cipher.snapshot().suffix();
-    if let Err(e) = crate::blob::delete::cancel_tombstone_or_enqueue(
-        db,
-        cloud_home,
-        suffix,
-        &entry.cloud_key,
-        now_rfc,
-    )
-    .await
-    {
-        warn!(
-            "recording a durable tombstone cancel for {} failed ({e}); leaving the upload queued for retry",
-            entry.cloud_key
-        );
-        return EntryOutcome::Uploaded { made_remote: false };
-    }
-
     // The post-upload commit: mint the gate-flip stamp off coven's HLC (the same
     // register the host stamps rows from, so the flip sorts causally and is captured
     // into this cycle's changeset), then in one DB call complete a make_remote
@@ -708,9 +682,7 @@ async fn commit_after_upload(
 
 /// The non-completing post-upload outcome: remove the upload's outbox row in its own
 /// transaction. The `Continued` branches — a plain upload with no gated root, and a
-/// non-final make_remote upload — share this single commit shape. The tombstone cancel
-/// is handled before this by [`crate::blob::delete::cancel_tombstone_or_enqueue`], so
-/// the cancel is durably queued before the upload row is removed.
+/// non-final make_remote upload — share this single commit shape.
 fn commit_finish(conn: &Connection, id: i64) -> Result<(), DbError> {
     let tx = conn.unchecked_transaction()?;
     finish_outbox_row(&tx, id)?;
@@ -719,8 +691,7 @@ fn commit_finish(conn: &Connection, id: i64) -> Result<(), DbError> {
 
 /// Remove a completed upload's outbox row. Shared with the make_remote completion
 /// commit ([`crate::blob::transition::commit_make_remote_flip`]), which removes the
-/// final upload's row inside the flip. The tombstone cancel is queued separately by
-/// [`crate::blob::delete::cancel_tombstone_or_enqueue`] before this runs.
+/// final upload's row inside the flip.
 pub(crate) fn finish_outbox_row(conn: &Connection, id: i64) -> Result<(), DbError> {
     conn.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
         .map_err(DbError::from)?;

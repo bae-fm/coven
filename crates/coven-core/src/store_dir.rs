@@ -272,11 +272,23 @@ impl StoreDir {
         let _ab = parts.next()?;
         let _cd = parts.next()?;
         let id = parts.next()?;
-        if parts.next().is_some() {
+        let suffix: Vec<_> = parts.collect();
+        if !suffix.is_empty()
+            && (suffix.len() != 2
+                || suffix[0] != "generations"
+                || suffix[1].is_empty()
+                || !suffix[1]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        {
             return None;
         }
         match Self::uploader_hashed_key(namespace, uploader, id) {
-            Ok(rebuilt) if rebuilt == cloud_key => {
+            Ok(rebuilt)
+                if rebuilt == cloud_key
+                    || (!suffix.is_empty()
+                        && format!("{rebuilt}/generations/{}", suffix[1]) == cloud_key) =>
+            {
                 Some((namespace.to_string(), uploader.to_string(), id.to_string()))
             }
             _ => None,
@@ -489,6 +501,25 @@ mod tests {
         assert_eq!(
             StoreDir::hashed_path("im/ages", "abcd"),
             Err(PathTokenError::Separator),
+        );
+    }
+
+    #[test]
+    fn uploader_hashed_parser_accepts_legacy_and_generated_keys() {
+        let legacy = StoreDir::uploader_hashed_key("photos", "aa11", "aabbccdd").unwrap();
+        let expected = Some((
+            "photos".to_string(),
+            "aa11".to_string(),
+            "aabbccdd".to_string(),
+        ));
+        assert_eq!(StoreDir::parse_uploader_hashed_key(&legacy), expected);
+        assert_eq!(
+            StoreDir::parse_uploader_hashed_key(&format!("{legacy}/generations/deadbeef")),
+            expected,
+        );
+        assert_eq!(
+            StoreDir::parse_uploader_hashed_key(&format!("{legacy}/generations/not-hex")),
+            None,
         );
     }
 

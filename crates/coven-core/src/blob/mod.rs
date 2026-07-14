@@ -105,7 +105,46 @@ pub mod local_files;
 pub mod transition;
 pub mod upload;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudBlobLocation {
+    pub uploader: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+}
+
+impl CloudBlobLocation {
+    pub fn legacy(uploader: impl Into<String>) -> Self {
+        Self {
+            uploader: uploader.into(),
+            generation: None,
+        }
+    }
+
+    pub fn generated(uploader: impl Into<String>, stamp: &str) -> Self {
+        Self {
+            uploader: uploader.into(),
+            generation: Some(hex::encode(stamp.as_bytes())),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        crate::store_dir::validate_path_token(&self.uploader).map_err(|error| error.to_string())?;
+        if let Some(generation) = &self.generation {
+            crate::store_dir::validate_path_token(generation).map_err(|error| error.to_string())?;
+            if generation.is_empty()
+                || !generation
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err("blob generation must be non-empty lowercase hexadecimal".to_string());
+            }
+        }
+        Ok(())
+    }
+}
 
 /// The content hash a blob-bearing row carries: the lowercase-hex SHA-256 of the
 /// blob's plaintext bytes, computed at import and stored in the row's blob columns
@@ -205,8 +244,8 @@ mod transition_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod local_files_tests;
 // The delete half's tests: tombstone signing, the drain that writes tombstones,
-// the graced GC that reclaims blobs, upload-cancels-delete at both layers, and the
-// shared `cloud_outbox` row shape. Driven against `InMemoryCloudHome` and
+// the graced GC that reclaims blobs, immutable-generation races, and the shared
+// `cloud_outbox` row shape. Driven against `InMemoryCloudHome` and
 // `MockSyncStorage`. See [`delete`].
 #[cfg(test)]
 mod delete_tests;

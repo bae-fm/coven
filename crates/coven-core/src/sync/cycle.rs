@@ -92,31 +92,25 @@ pub fn staging_path(store_dir: &StoreDir) -> PathBuf {
 const STAGED_PENDING_CHANGESET_ID_KEY: &str = "staged_pending_changeset_id";
 
 /// Clear the staged changeset after a successful push.
-pub async fn clear_staged_changeset(store_dir: &StoreDir) {
-    let _ = crate::local_blob::remove_file(&staging_path(store_dir)).await;
+pub async fn clear_staged_changeset(store_dir: &StoreDir) -> Result<(), String> {
+    match crate::local_blob::remove_file(&staging_path(store_dir)).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("staged changeset file was absent when clearing it".to_string()),
+        Err(error) => Err(format!("failed to remove staged changeset: {error}")),
+    }
 }
 
 /// Read a previously staged changeset (if any) for retry.
-pub async fn read_staged_changeset(store_dir: &StoreDir) -> Option<Vec<u8>> {
+pub async fn read_staged_changeset(store_dir: &StoreDir) -> Result<Option<Vec<u8>>, String> {
     let path = staging_path(store_dir);
     match crate::local_blob::exists(&path).await {
         Ok(true) => match crate::local_blob::read(&path).await {
-            Ok(data) if !data.is_empty() => Some(data),
-            Ok(_) => {
-                clear_staged_changeset(store_dir).await;
-                None
-            }
-            Err(e) => {
-                warn!("Failed to read staged changeset: {e}");
-                clear_staged_changeset(store_dir).await;
-                None
-            }
+            Ok(data) if !data.is_empty() => Ok(Some(data)),
+            Ok(_) => Err("staged changeset file is empty".to_string()),
+            Err(error) => Err(format!("failed to read staged changeset: {error}")),
         },
-        Ok(false) => None,
-        Err(e) => {
-            warn!("Failed to check staged changeset: {e}");
-            None
-        }
+        Ok(false) => Ok(None),
+        Err(error) => Err(format!("failed to check staged changeset: {error}")),
     }
 }
 
@@ -202,7 +196,7 @@ async fn commit_push_success(
     db.set_sync_state("staged_seq", "")
         .await
         .map_err(|e| format!("Failed to clear staged_seq after push: {e}"))?;
-    clear_staged_changeset(store_dir).await;
+    clear_staged_changeset(store_dir).await?;
     drain_published_blob_drop_intents(db, store_dir, seq).await?;
     Ok(())
 }
@@ -519,7 +513,7 @@ pub(crate) async fn run_single_sync_cycle(
     // upload drain, the host-provided make_remote completion, the inline
     // host-provided blob upload inside `service::sync`, the tombstone write
     // drain, both changeset-push paths, and the snapshot. Pull, local writes, and
-    // delete-only paths (tombstone GC and cancel-drain) are unaffected — the gate
+    // delete-only tombstone GC is unaffected — the gate
     // is on sealing for the cloud, not on using the store. An unadoptable
     // rotation — including one whose activation entry is not yet visible — is
     // marked pending by the refresh and pauses exactly this set; it never aborts
@@ -564,16 +558,6 @@ pub(crate) async fn run_single_sync_cycle(
     // orders causally and must not be confused with this display time.
     let sync_time = clock.now().to_rfc3339();
 
-    // The cloud handle + object-key suffix the inline host-provided upload path uses to
-    // cancel a pending tombstone after a (re-)upload — the same invariant the outbox
-    // drain holds. `None` on a cloud-less run, which has no tombstones to cancel.
-    let blob_object_suffix = cipher.snapshot().suffix();
-    let host_upload_cancel = cloud_home.map(|ch| super::service::HostUploadCloud {
-        cloud_home: ch,
-        suffix: blob_object_suffix,
-        now_rfc: &sync_time,
-    });
-
     // Drain the blob engine's upload queue. Blob-before-row ordering is enforced by
     // the gate column: a root being made Remote stays gated off until its last
     // user-provided blob lands, and coven flips it on inside the drain (the
@@ -606,18 +590,6 @@ pub(crate) async fn run_single_sync_cycle(
                 Err(e) => warn!("Blob upload drain error: {e}"),
             }
         }
-
-        // Retry any tombstone-cancel an upload's inline cancel could not complete.
-        // Runs right after the upload drain (and before the tombstone GC below), so
-        // a blob re-uploaded this cycle has its tombstone removed before the GC
-        // could reclaim it. A cancel that still fails stays queued for the next
-        // cycle, backed off like the delete drain — the live re-uploaded blob must
-        // never lose its tombstone-cancel.
-        match crate::blob::delete::drain_tombstone_cancels(db, ch, cipher, clock).await {
-            Ok(n) if n > 0 => info!(count = n, "Completed pending tombstone cancels"),
-            Err(e) => warn!("Tombstone cancel drain error: {e}"),
-            _ => {}
-        }
     }
 
     // Retry a staged changeset left behind by a failed push in an earlier cycle.
@@ -629,7 +601,7 @@ pub(crate) async fn run_single_sync_cycle(
                 seq,
                 "rotation pending; leaving the staged changeset queued until adoption"
             );
-        } else if let Some(staged_data) = read_staged_changeset(store_dir).await {
+        } else if let Some(staged_data) = read_staged_changeset(store_dir).await? {
             info!(seq, "Retrying staged changeset push");
 
             match push_changeset(storage, db, device_id, seq, staged_data, &sync_time).await {
@@ -647,23 +619,9 @@ pub(crate) async fn run_single_sync_cycle(
                 Err(e) => return Err(format!("Staged changeset push failed: {e}")),
             }
         } else {
-            // staged_seq set but the file is absent: the push never committed.
-            // The staging write is directory-durable (its parent is fsynced
-            // after the rename), so a committed stage always leaves a
-            // recoverable file — this branch cannot be reached by power loss
-            // dropping the rename's directory entry, only by a stage that never
-            // completed. The success path persists local_seq before clearing the
-            // file, so it can't produce this state either. The seq was never
-            // consumed on the remote — drop the marker, keep local_seq. Abnormal:
-            // the changeset those bytes held is gone, so surface it.
-            warn!(
-                seq,
-                "Stale staged_seq with no staged file; dropping the marker"
-            );
-            db.set_sync_state("staged_seq", "")
-                .await
-                .map_err(|e| format!("Failed to clear stale staged_seq: {e}"))?;
-            delete_sync_state(db, STAGED_PENDING_CHANGESET_ID_KEY).await?;
+            return Err(format!(
+                "staged_seq {seq} has no staged changeset payload; preserving sequence and pending journal"
+            ));
         }
     }
 
@@ -674,13 +632,7 @@ pub(crate) async fn run_single_sync_cycle(
             "rotation pending; leaving ready host-provided make_remote intents queued until adoption"
         );
     } else if super::service::complete_host_provided_make_remotes(
-        db,
-        tables,
-        storage,
-        &timestamp,
-        store_dir,
-        local_seq,
-        host_upload_cancel.as_ref(),
+        db, tables, storage, &timestamp, store_dir, local_seq,
     )
     .await
     .map_err(|e| format!("Host-provided make_remote completion failed: {e}"))?
@@ -711,7 +663,6 @@ pub(crate) async fn run_single_sync_cycle(
         store_dir,
         membership.chain.as_ref(),
         membership.pinned_owner.as_deref(),
-        host_upload_cancel.as_ref(),
         rotation_pending.is_some(),
     )
     .await
@@ -855,45 +806,28 @@ pub(crate) async fn run_single_sync_cycle(
                 _ => {}
             }
         }
-        // A still-pending tombstone-cancel means a blob was re-uploaded this
-        // cycle (or earlier) but its cancel couldn't reach the cloud, so the
-        // tombstone is still present though the blob is live. Reclaiming now would
-        // delete that re-upload, so skip the GC entirely while any cancel is
-        // pending — the next cycle retries the cancels (above) before reclaiming.
-        let cancels_pending = match db.get_pending_cloud_cancels().await {
-            Ok(cancels) => !cancels.is_empty(),
-            Err(e) => {
-                // Can't confirm the cancel queue is clear — don't risk reclaiming.
-                warn!("Tombstone GC skipped: failed to read pending cancels: {e}");
-                true
+        // Authorize every reclaim against the cycle's once-loaded chain, already
+        // anchored to the device's pinned owner (set on join/restore/found). A
+        // per-tombstone re-load would both repeat the cycle's listing and risk
+        // judging a different chain state; the load's own fail-closed anchor is
+        // what keeps deleting user blobs on an unverifiable owner impossible.
+        match crate::blob::delete::gc_tombstones(
+            db,
+            ch,
+            cipher,
+            store_id,
+            &hex::encode(user_keypair.public_key()),
+            membership.chain.as_ref(),
+            clock,
+            db.blob_tombstone_grace(),
+        )
+        .await
+        {
+            Ok(n) if n > 0 => {
+                info!(count = n, "Reclaimed blobs past the tombstone grace")
             }
-        };
-        if cancels_pending {
-            debug!("tombstone cancels still pending; skipping reclaim this cycle");
-        } else {
-            // Authorize every reclaim against the cycle's once-loaded chain, already
-            // anchored to the device's pinned owner (set on join/restore/found). A
-            // per-tombstone re-load would both repeat the cycle's listing and risk
-            // judging a different chain state; the load's own fail-closed anchor is
-            // what keeps deleting user blobs on an unverifiable owner impossible.
-            match crate::blob::delete::gc_tombstones(
-                db,
-                ch,
-                cipher,
-                store_id,
-                &hex::encode(user_keypair.public_key()),
-                membership.chain.as_ref(),
-                clock,
-                db.blob_tombstone_grace(),
-            )
-            .await
-            {
-                Ok(n) if n > 0 => {
-                    info!(count = n, "Reclaimed blobs past the tombstone grace")
-                }
-                Err(e) => warn!("Tombstone GC error: {e}"),
-                _ => {}
-            }
+            Err(e) => warn!("Tombstone GC error: {e}"),
+            _ => {}
         }
     }
 
@@ -977,7 +911,7 @@ pub(crate) async fn run_single_sync_cycle(
                     storage,
                     store_dir,
                     &cut.snapshot.host_blobs,
-                    host_upload_cancel.as_ref(),
+                    &timestamp,
                 )
                 .await
                 .map_err(|e| format!("Snapshot host-provided blob upload failed: {e}"))?;
@@ -1060,13 +994,14 @@ pub(crate) async fn run_single_sync_cycle(
         Some(&sync_time),
     );
 
+    let constraint_conflicts = sync_result.pull.constraint_conflicts.len() as u64;
     Ok(SyncCycleResult {
         changesets_applied: sync_result.pull.changesets_applied,
         skipped_schema: sync_result.pull.skipped_schema,
         rejected_unauthorized: sync_result.pull.rejected_unauthorized.len() as u64,
         invalid_signatures: sync_result.pull.invalid_signatures.len() as u64,
         held_changesets: sync_result.pull.held_changesets,
-        constraint_conflicts: sync_result.pull.constraint_conflicts.len() as u64,
+        constraint_conflicts,
         device_activity: core_status.other_devices,
         sync_time,
         asset_downloads_failed: sync_result.pull.asset_downloads_failed,

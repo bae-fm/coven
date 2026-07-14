@@ -1277,7 +1277,7 @@ pub async fn reconcile_snapshot_blobs(
             info!(total, "snapshot blob reconciliation cancelled");
             return Ok(SnapshotBlobReconcile::Cancelled);
         }
-        if !crate::sync::pull::download_blobs(db, vec![blob], storage, store_dir, None).await {
+        if !crate::sync::pull::download_blobs(db, vec![blob], storage, store_dir, &[], None).await {
             all_ok = false;
         }
     }
@@ -2115,12 +2115,15 @@ mod tests {
             )
             .await
             .expect("plant remote user-provided blob");
+        db.record_blob_uploader("audio", "audio1", &storage.own_uploader().unwrap())
+            .await
+            .unwrap();
         crate::sync::service::upload_snapshot_host_blobs(
             &db,
             &storage,
             &ld,
             &snapshot.host_blobs,
-            None,
+            "2024-01-01T00:00:00Z",
         )
         .await
         .expect("upload host-provided snapshot blobs");

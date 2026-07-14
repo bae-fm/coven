@@ -449,6 +449,7 @@ async fn apply_reporting(db: &crate::database::Database, bytes: &[u8]) -> bool {
     db.call(move |conn| {
         resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms)
             .map(|r| r.had_fk_violations)
+            .map_err(|error| crate::database::DbError(error.to_string()))
     })
     .await
     .expect("apply")

@@ -72,7 +72,8 @@ pub fn resolve_and_apply_changeset(
 /// Apply `bytes` to `conn`, resolving conflicts against a pre-built
 /// [`TableSchema`]: a column-level premerge of losing UPDATEs
 /// ([`premerge_losing_update_columns`]) followed by an apply whose conflict
-/// closure arbitrates every remaining row collision.
+/// closure arbitrates every remaining row collision. Non-FK constraint conflicts
+/// abort and roll back the whole transaction.
 ///
 /// The schema's per-table `_updated_at` column index map is derived once (from
 /// the live schema, so future migrations that add columns are safe) and reused
@@ -87,8 +88,8 @@ pub fn resolve_and_apply_changeset(
 /// wall-clock millis, read once by the caller and moved into the closure to bound
 /// a grossly-future incoming `_updated_at` (see [`arbitrate_row_conflict`]).
 /// `blob_uploads` records, atomically with the applied rows, which device uploaded
-/// each blob the changeset introduces (`(namespace, blob_id, uploader)`): the read
-/// dispatch later keys a blob under its uploader's cloud prefix. Writing it inside
+/// each blob the changeset references (`(namespace, blob_id, location)`): the read
+/// dispatch later keys a blob at that exact immutable object. Writing it inside
 /// this transaction is what keeps the index consistent with the rows that reference
 /// the blobs — a committed row always has its uploader recorded, never a later
 /// repair. Callers with no blobs to record (a test, a snapshot round-trip) pass an
@@ -98,7 +99,7 @@ pub fn resolve_and_apply_changeset_with_schema(
     bytes: &[u8],
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
-    blob_uploads: &[(String, String, String)],
+    blob_uploads: &[(String, String, crate::blob::CloudBlobLocation)],
 ) -> Result<ApplyResult, DbError> {
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
     let result = resolve_and_apply_changeset_with_schema_on(
@@ -125,10 +126,9 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on(
     bytes: &[u8],
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
-    blob_uploads: &[(String, String, String)],
+    blob_uploads: &[(String, String, crate::blob::CloudBlobLocation)],
 ) -> Result<ApplyResult, DbError> {
     validate_changeset_tables(bytes, &schema)?;
-
     let fk_flag = Arc::new(AtomicBool::new(false));
     let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
     let premerged_updates = premerge_losing_update_columns(conn, bytes, &schema, receiver_wall_ms)?;
@@ -189,10 +189,10 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on(
     if !had_fk_violations {
         // Record the uploader of each blob these rows introduce on the caller's
         // transaction, so a committed blob-bearing row always carries its
-        // uploader. The caller rolls these records back with the rows on any
+        // location. The caller rolls these records back with the rows on any
         // rejected apply; a deferred retry re-records the same fact idempotently.
-        for (namespace, blob_id, uploader) in blob_uploads {
-            crate::database::Database::record_blob_uploader_on(conn, namespace, blob_id, uploader)?;
+        for (namespace, blob_id, location) in blob_uploads {
+            crate::database::Database::record_blob_location_on(conn, namespace, blob_id, location)?;
         }
     }
 

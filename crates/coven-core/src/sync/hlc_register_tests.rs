@@ -45,6 +45,7 @@ fn store_signed_changeset(
         changeset_size: changeset_bytes.len(),
         author_pubkey: None,
         membership_grant: None,
+        blob_locations: Vec::new(),
         signature: None,
     };
     envelope::sign_envelope(&mut env, author, changeset_bytes);

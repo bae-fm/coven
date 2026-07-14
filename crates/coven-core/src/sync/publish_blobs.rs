@@ -90,8 +90,25 @@ pub(crate) async fn ensure_publishable_blobs(
             });
         }
 
+        let location = db
+            .blob_location(&blob.namespace, &blob.id)
+            .await
+            .map_err(|source| PublishBlobError::ExternalLookup {
+                namespace: blob.namespace.clone(),
+                id: blob.id.clone(),
+                source,
+            })?
+            .ok_or_else(|| PublishBlobError::MissingRemote {
+                namespace: blob.namespace.clone(),
+                id: blob.id.clone(),
+            })?;
         if !storage
-            .blob_exists(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
+            .blob_exists_at(
+                &blob.namespace,
+                &location,
+                &blob.id,
+                blob.cloud_path.as_deref(),
+            )
             .await
             .map_err(|source| PublishBlobError::RemoteCheck {
                 namespace: blob.namespace.clone(),

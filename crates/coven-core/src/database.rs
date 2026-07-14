@@ -1132,17 +1132,34 @@ impl Database {
     /// `None` if this device has never recorded one. The read dispatch consults it
     /// to key a blob under its uploader's prefix; a `None` is a missing dispatch
     /// key the read surfaces loud, never a cue to scan an untrusted listing.
+    #[cfg(test)]
     pub(crate) async fn blob_uploader(
         &self,
         namespace: &str,
         id: &str,
     ) -> Result<Option<String>, DbError> {
+        Ok(self
+            .blob_location(namespace, id)
+            .await?
+            .map(|location| location.uploader))
+    }
+
+    pub(crate) async fn blob_location(
+        &self,
+        namespace: &str,
+        id: &str,
+    ) -> Result<Option<crate::blob::CloudBlobLocation>, DbError> {
         let (namespace, id) = (namespace.to_string(), id.to_string());
         self.call(move |conn| {
             conn.query_row(
-                "SELECT uploader FROM blob_uploaders WHERE namespace = ?1 AND blob_id = ?2",
+                "SELECT uploader, generation FROM blob_uploaders WHERE namespace = ?1 AND blob_id = ?2",
                 (namespace, id),
-                |r| r.get::<_, String>(0),
+                |r| {
+                    Ok(crate::blob::CloudBlobLocation {
+                        uploader: r.get(0)?,
+                        generation: r.get(1)?,
+                    })
+                },
             )
             .optional()
             .map_err(DbError::from)
@@ -1156,16 +1173,32 @@ impl Database {
     /// same uploader (a changeset re-applied after an FK-deferred retry) is a
     /// no-op; a later, authoritative uploader (a re-upload by a different member)
     /// overwrites.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn record_blob_uploader_on(
         conn: &Connection,
         namespace: &str,
         id: &str,
         uploader: &str,
     ) -> Result<(), DbError> {
+        Self::record_blob_location_on(
+            conn,
+            namespace,
+            id,
+            &crate::blob::CloudBlobLocation::legacy(uploader),
+        )
+    }
+
+    pub(crate) fn record_blob_location_on(
+        conn: &Connection,
+        namespace: &str,
+        id: &str,
+        location: &crate::blob::CloudBlobLocation,
+    ) -> Result<(), DbError> {
+        location.validate().map_err(DbError)?;
         conn.execute(
-            "INSERT INTO blob_uploaders (namespace, blob_id, uploader) VALUES (?1, ?2, ?3) \
-             ON CONFLICT(namespace, blob_id) DO UPDATE SET uploader = excluded.uploader",
-            (namespace, id, uploader),
+            "INSERT INTO blob_uploaders (namespace, blob_id, uploader, generation) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(namespace, blob_id) DO UPDATE SET uploader = excluded.uploader, generation = excluded.generation",
+            rusqlite::params![namespace, id, location.uploader, location.generation],
         )
         .map(|_| ())
         .map_err(DbError::from)
@@ -1175,6 +1208,7 @@ impl Database {
     /// used by the inline host-provided upload, which records this device as the
     /// uploader for a blob it just sealed to the cloud. Recording an authoritative
     /// fact (who uploaded), not repairing wrong state.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn record_blob_uploader(
         &self,
         namespace: &str,
@@ -1185,6 +1219,30 @@ impl Database {
             (namespace.to_string(), id.to_string(), uploader.to_string());
         self.call(move |conn| Self::record_blob_uploader_on(conn, &namespace, &id, &uploader))
             .await
+    }
+
+    pub(crate) async fn record_blob_location(
+        &self,
+        namespace: &str,
+        id: &str,
+        location: &crate::blob::CloudBlobLocation,
+    ) -> Result<(), DbError> {
+        let (namespace, id, location) = (namespace.to_string(), id.to_string(), location.clone());
+        self.call(move |conn| Self::record_blob_location_on(conn, &namespace, &id, &location))
+            .await
+    }
+
+    pub(crate) fn clear_blob_location_on(
+        conn: &Connection,
+        namespace: &str,
+        id: &str,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "DELETE FROM blob_uploaders WHERE namespace = ?1 AND blob_id = ?2",
+            (namespace, id),
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
     }
 
     // ---- Bookkeeping: sync_cursors ----
@@ -1341,9 +1399,9 @@ impl Database {
     /// resolves it to a key at drain, long after the enqueue site is gone.
     /// At most one upload per `(operation, cloud_key)`; a re-enqueue for the same key
     /// overwrites the row's source path, scope, and pin choice with this call's values
-    /// (latest enqueue decides). Queuing an upload also cancels any pending delete of
-    /// the same key — latest intent wins, so a re-upload isn't tombstoned in the same
-    /// cycle.
+    /// (latest enqueue decides). Queuing an upload also removes a pending delete of
+    /// the same exact immutable key; this occurs only while revising one durable
+    /// operation, not when uploading a later generation.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn enqueue_upload(
         &self,
@@ -1388,11 +1446,8 @@ impl Database {
         retain_pinned: bool,
         created_at: &str,
     ) -> Result<(), DbError> {
-        // Latest intent wins: queuing an upload for a key cancels a pending delete
-        // of the same key, so a re-upload and a stale delete can't both be live in
-        // one cycle (which the upload-then-delete phase split would otherwise
-        // resolve by deleting the freshly re-uploaded blob). Runs on the caller's
-        // connection so a transactional import stays atomic with this cancel.
+        // One exact immutable key cannot be both pending upload and pending delete.
+        // Runs on the caller's connection so the revision is atomic.
         conn.execute(
             "DELETE FROM cloud_outbox WHERE operation = 'delete' AND cloud_key = ?1",
             [cloud_key],
@@ -1431,8 +1486,8 @@ impl Database {
     /// Enqueue a blob delete. The next sync cycle's drain turns it into a signed
     /// cloud tombstone, and a later GC reclaims the blob once the convergence grace
     /// has passed (see [`crate::blob::delete`]). Idempotent on `(operation,
-    /// cloud_key)`. Queuing a delete also cancels any pending upload of the same key
-    /// — latest intent wins.
+    /// cloud_key)`. Queuing a delete also removes any pending upload of that exact
+    /// immutable key.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn enqueue_delete(&self, cloud_key: &str, created_at: &str) -> Result<(), DbError> {
         let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
@@ -1451,15 +1506,10 @@ impl Database {
         cloud_key: &str,
         created_at: &str,
     ) -> Result<(), DbError> {
-        // Latest intent wins: queuing a delete cancels a pending upload of the same
-        // key (the mirror of `enqueue_upload_on`), so an enqueued-then-deleted blob
-        // isn't uploaded only to be tombstoned in the same cycle. It also drops a
-        // pending tombstone-cancel for the key: a fresh delete wants the blob
-        // tombstoned, so a leftover cancel (which would remove that tombstone) must
-        // not survive to undo it.
+        // One exact immutable key cannot be both pending upload and pending delete.
         conn.execute(
             "DELETE FROM cloud_outbox \
-             WHERE operation IN ('upload', 'cancel') AND cloud_key = ?1",
+             WHERE operation = 'upload' AND cloud_key = ?1",
             [cloud_key],
         )
         .map_err(DbError::from)?;
@@ -1473,25 +1523,6 @@ impl Database {
         .map_err(DbError::from)
     }
 
-    /// Enqueue a durable tombstone-cancel for `cloud_key`: the tombstone-cancel drain
-    /// ([`crate::blob::delete::drain_tombstone_cancels`]) retries removing the
-    /// tombstone until it is gone, so a re-uploaded blob is never reclaimed by a GC
-    /// that outraces an inline cancel. Backs a failed inline cancel on every upload
-    /// path. Idempotent on `(operation, cloud_key)`.
-    pub async fn enqueue_cancel(&self, cloud_key: &str, created_at: &str) -> Result<(), DbError> {
-        let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
-        self.call(move |conn| {
-            conn.execute(
-                "INSERT OR IGNORE INTO cloud_outbox (operation, cloud_key, scope, created_at) \
-                 VALUES ('cancel', ?1, NULL, ?2)",
-                (cloud_key, created_at),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
     /// Pending upload entries, oldest first. The host reads these to drive its
     /// own upload-status UI; coven's sync loop reads them to do the uploads.
     pub async fn get_pending_cloud_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {
@@ -1501,14 +1532,6 @@ impl Database {
     /// Pending delete entries, oldest first.
     pub async fn get_pending_cloud_deletes(&self) -> Result<Vec<OutboxEntry>, DbError> {
         self.pending_outbox("delete").await
-    }
-
-    /// Pending tombstone-cancel entries, oldest first. Each names a `cloud_key`
-    /// whose tombstone must be removed because the blob was re-uploaded; the
-    /// tombstone-cancel drain reads these and retries the removal until it lands
-    /// (see [`crate::blob::delete::drain_tombstone_cancels`]).
-    pub async fn get_pending_cloud_cancels(&self) -> Result<Vec<OutboxEntry>, DbError> {
-        self.pending_outbox("cancel").await
     }
 
     async fn pending_outbox(&self, op_str: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
@@ -1580,33 +1603,6 @@ impl Database {
         .await
     }
 
-    /// Record a failed delete/cancel attempt (bumps `attempt_count`, stores the
-    /// error and the time), scoped to `operation` so an id collision with the
-    /// other kind of row cannot mutate it. Shared by
-    /// [`record_cloud_delete_failure`](Self::record_cloud_delete_failure) and
-    /// [`record_cloud_cancel_failure`](Self::record_cloud_cancel_failure), which
-    /// differ only in which operation they're scoped to.
-    async fn record_cloud_outbox_failure(
-        &self,
-        id: i64,
-        operation: &'static str,
-        error: &str,
-        attempted_at: &str,
-    ) -> Result<(), DbError> {
-        let (error, attempted_at) = (error.to_string(), attempted_at.to_string());
-        self.call(move |conn| {
-            conn.execute(
-                "UPDATE cloud_outbox \
-                 SET attempt_count = attempt_count + 1, last_error = ?1, last_attempt_at = ?2 \
-                 WHERE id = ?3 AND operation = ?4",
-                (error, attempted_at, id, operation),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
     /// Record a failed delete/tombstone attempt (bumps `attempt_count`, stores the
     /// error and the time). Scoped to delete rows so an id collision with another
     /// operation cannot mutate the wrong kind of outbox entry.
@@ -1616,21 +1612,18 @@ impl Database {
         error: &str,
         attempted_at: &str,
     ) -> Result<(), DbError> {
-        self.record_cloud_outbox_failure(id, "delete", error, attempted_at)
-            .await
-    }
-
-    /// Record a failed tombstone-cancel retry (bumps `attempt_count`, stores the
-    /// error and the time). Scoped to cancel rows so an id collision with another
-    /// operation cannot mutate the wrong kind of outbox entry.
-    pub async fn record_cloud_cancel_failure(
-        &self,
-        id: i64,
-        error: &str,
-        attempted_at: &str,
-    ) -> Result<(), DbError> {
-        self.record_cloud_outbox_failure(id, "cancel", error, attempted_at)
-            .await
+        let (error, attempted_at) = (error.to_string(), attempted_at.to_string());
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE cloud_outbox \
+                 SET attempt_count = attempt_count + 1, last_error = ?1, last_attempt_at = ?2 \
+                 WHERE id = ?3 AND operation = 'delete'",
+                (error, attempted_at, id),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
     }
 
     // ---- Local blob refs (external user files) ----
@@ -1833,7 +1826,6 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
             }
         }
         "delete" => OutboxOperation::Delete,
-        "cancel" => OutboxOperation::Cancel,
         other => panic!("invalid cloud_outbox.operation: {other:?}"),
     };
     Ok(OutboxEntry {

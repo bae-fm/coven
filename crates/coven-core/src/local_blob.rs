@@ -22,6 +22,16 @@ pub fn is_temp_blob_path(path: &Path) -> bool {
 
 pub struct PlaintextReader(Box<dyn PlatformPlaintextReader>);
 
+#[derive(Debug, thiserror::Error)]
+pub enum CommitNoReplaceError {
+    #[error("destination already exists: {0}")]
+    DestinationExists(PathBuf),
+    #[error("destination was created but the commit did not finish: {0}")]
+    DestinationCreated(String),
+    #[error("{0}")]
+    Other(String),
+}
+
 impl PlaintextReader {
     pub async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
         self.0.next_chunk(max).await
@@ -48,6 +58,17 @@ pub trait PlatformLocalBlobBackend: crate::MaybeThreadSafe {
     async fn read(&self, path: &Path) -> Result<Vec<u8>, String>;
     async fn read_range(&self, path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, String>;
     async fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), String>;
+    async fn commit_temp_no_replace(
+        &self,
+        temp: &Path,
+        destination: &Path,
+    ) -> Result<(), CommitNoReplaceError> {
+        Err(CommitNoReplaceError::Other(format!(
+            "atomic no-replace commit is unavailable for {} -> {}",
+            temp.display(),
+            destination.display()
+        )))
+    }
     /// Like [`write_atomic`](Self::write_atomic), but the committed directory
     /// entry also survives power loss: after the atomic rename, the parent
     /// directory is fsynced so the entry that now names the new bytes is itself
@@ -111,6 +132,13 @@ pub async fn read_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, S
 
 pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     backend().write_atomic(path, bytes).await
+}
+
+pub async fn commit_temp_no_replace(
+    temp: &Path,
+    destination: &Path,
+) -> Result<(), CommitNoReplaceError> {
+    backend().commit_temp_no_replace(temp, destination).await
 }
 
 pub async fn write_atomic_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {

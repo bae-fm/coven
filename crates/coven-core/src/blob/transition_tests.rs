@@ -30,7 +30,7 @@ use crate::database::Database;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, PendingRotation};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
@@ -1145,6 +1145,29 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         "B's cover bytes match",
     );
 
+    let photo_key = CloudSyncStorage::blob_key_at(
+        BlobPathScheme::Plain,
+        "photos",
+        db_a.blob_location("photos", "photoaaa")
+            .await
+            .unwrap()
+            .as_ref(),
+        "photoaaa",
+        Some("cv/photoaaa.jpg"),
+    )
+    .unwrap();
+    let cover_key = CloudSyncStorage::blob_key_at(
+        BlobPathScheme::Plain,
+        "covers",
+        db_a.blob_location("covers", "coveraaa")
+            .await
+            .unwrap()
+            .as_ref(),
+        "coveraaa",
+        Some("cv/cover-coveraaa.jpg"),
+    )
+    .unwrap();
+
     // make_local: the photo back to its dest (external ref), the cover back to the
     // local store (no dest), both cloud copies tombstoned.
     let dest_path = tmp_a.path().join("dest/photoaaa.jpg");
@@ -1195,10 +1218,11 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     deletes.sort();
     assert_eq!(
         deletes,
-        vec![
-            "covers/cv/cover-coveraaa.jpg".to_string(),
-            "photos/cv/photoaaa.jpg".to_string(),
-        ],
+        {
+            let mut expected = vec![cover_key, photo_key];
+            expected.sort();
+            expected
+        },
         "both cloud copies are tombstoned in the make_local commit",
     );
     // The source the user provided is untouched: make_remote uploads a copy and
@@ -2005,6 +2029,17 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
         has_intent(&db, "notes", "n1").await,
         "the make_remote is still in flight"
     );
+    let uploaded_key = CloudSyncStorage::blob_key_at(
+        BlobPathScheme::Plain,
+        "photos",
+        db.blob_location("photos", "photoaaa")
+            .await
+            .unwrap()
+            .as_ref(),
+        "photoaaa",
+        Some("cv/photoaaa.jpg"),
+    )
+    .unwrap();
 
     // Cancel: the gate stays off, photoaaa (already uploaded) is tombstoned and its pinned
     // copy dropped, photobbb's pending upload is removed, the intent is cleared.
@@ -2027,7 +2062,7 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
     assert_eq!(pending_uploads(&db).await, 0, "no uploads remain");
     assert_eq!(
         pending_deletes(&db).await,
-        vec!["photos/cv/photoaaa.jpg".to_string()],
+        vec![uploaded_key],
         "the already-uploaded orphan is tombstoned",
     );
     assert!(
@@ -2197,6 +2232,138 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
             .is_ok(),
         "the cloud blob is untouched",
     );
+}
+
+#[tokio::test]
+async fn make_local_refuses_to_replace_an_existing_destination() {
+    let storage = MockSyncStorage::new();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, lib) = temp_store_dir();
+    let bytes = b"managed-bytes".to_vec();
+    let existing = b"unrelated-user-bytes".to_vec();
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
+
+    let dest_path = tmp.path().join("dest/photoaaa.jpg");
+    std::fs::create_dir_all(dest_path.parent().unwrap()).unwrap();
+    std::fs::write(&dest_path, &existing).unwrap();
+    let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
+    let (_cancel_tx, cancel) = watch::channel(false);
+
+    let err = make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        "notes",
+        "n1",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect_err("an existing destination is owned by the user");
+
+    assert!(err.to_string().contains("already exists"));
+    assert_eq!(std::fs::read(&dest_path).unwrap(), existing);
+    assert_eq!(shared_flag(&db, "n1").await, 1);
+    assert!(db.external_blob("photoaaa").await.unwrap().is_none());
+    assert!(pending_deletes(&db).await.is_empty());
+    assert!(storage
+        .get_blob(
+            "photos",
+            None,
+            "photoaaa",
+            BlobScope::Master,
+            Some("cv/photoaaa.jpg")
+        )
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn make_local_rolls_back_when_two_blobs_share_a_destination() {
+    let storage = MockSyncStorage::new();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, lib) = temp_store_dir();
+    let first = b"first-blob".to_vec();
+    let second = b"second-blob".to_vec();
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &first).await;
+    exec(
+        &db,
+        &format!(
+            "INSERT INTO note_photos (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('photobbb', 'n1', 'image', {}, '{}', '0000000001001-0000-A', '2026-01-01', 'cv/photobbb.jpg')",
+            second.len(),
+            crate::blob::content_hash(&second),
+        ),
+    )
+    .await;
+    storage
+        .put_blob(
+            "photos",
+            "photobbb",
+            BlobScope::Master,
+            Some("cv/photobbb.jpg"),
+            second,
+        )
+        .await
+        .unwrap();
+    db.record_blob_uploader("photos", "photobbb", &storage.own_uploader().unwrap())
+        .await
+        .unwrap();
+
+    let destination = tmp.path().join("dest/shared.jpg");
+    let dest: HashMap<String, PathBuf> = [
+        ("photoaaa".to_string(), destination.clone()),
+        ("photobbb".to_string(), destination.clone()),
+    ]
+    .into();
+    let (_cancel_tx, cancel) = watch::channel(false);
+    let error = make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        "notes",
+        "n1",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect_err("one destination cannot own two blobs");
+
+    assert!(matches!(
+        error,
+        crate::blob::transition::MakeLocalError::DestinationExists { .. }
+    ));
+    assert!(!destination.exists());
+    assert_eq!(shared_flag(&db, "n1").await, 1);
+    assert!(pending_deletes(&db).await.is_empty());
+    assert!(storage
+        .get_blob(
+            "photos",
+            None,
+            "photoaaa",
+            BlobScope::Master,
+            Some("cv/photoaaa.jpg")
+        )
+        .await
+        .is_ok());
+    assert!(storage
+        .get_blob(
+            "photos",
+            None,
+            "photobbb",
+            BlobScope::Master,
+            Some("cv/photobbb.jpg")
+        )
+        .await
+        .is_ok());
 }
 
 /// A non-UTF-8 destination path aborts make_local before the cloud delete: the path
@@ -2421,9 +2588,8 @@ async fn make_local_abort_then_retry_converges() {
 // Round trip
 // ===========================================================================
 
-/// make_remote → make_local → make_remote on one device. The second make_remote re-uploads
-/// to the same cloud key, whose drain cancels the make_local's tombstone, and flips the gate back
-/// on. The release ends Remote with the blob in the cloud and no external ref.
+/// make_remote → make_local → make_remote on one device. The second make_remote
+/// uploads a new immutable generation while the first generation remains condemned.
 #[tokio::test]
 async fn round_trip_make_remote_make_local_make_remote() {
     let storage = MockSyncStorage::new();
@@ -2457,6 +2623,19 @@ async fn round_trip_make_remote_make_local_make_remote() {
     .expect("make_remote 1");
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
     assert_eq!(shared_flag(&db, "n1").await, 1, "Remote after make_remote");
+    let first_location = db
+        .blob_location("photos", "photoaaa")
+        .await
+        .unwrap()
+        .unwrap();
+    let first_key = CloudSyncStorage::blob_key_at(
+        BlobPathScheme::Plain,
+        "photos",
+        Some(&first_location),
+        "photoaaa",
+        Some("cv/photoaaa.jpg"),
+    )
+    .unwrap();
 
     // Make it Local again.
     let dest_path = tmp.path().join("dest/photoaaa.jpg");
@@ -2481,14 +2660,14 @@ async fn round_trip_make_remote_make_local_make_remote() {
     assert_eq!(shared_flag(&db, "n1").await, 0, "Local after make_local");
     assert!(
         storage
-            .exists("blob_tombstones/photos/cv/photoaaa.jpg")
+            .exists(&format!("blob_tombstones/{first_key}"))
             .await
             .unwrap(),
         "the make_local tombstoned the cloud blob",
     );
 
-    // Second make_remote: the external file (now at dest) is re-uploaded, the drain cancels
-    // the tombstone, and the gate flips back on.
+    // Second make_remote: the external file is uploaded to a new generation and
+    // the gate flips back on without touching the old tombstone.
     make_remote(
         &db,
         BlobPathScheme::Plain,
@@ -2510,18 +2689,24 @@ async fn round_trip_make_remote_make_local_make_remote() {
         db.external_blob("photoaaa").await.unwrap().is_none(),
         "external ref cleared"
     );
+    let second_location = db
+        .blob_location("photos", "photoaaa")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first_location, second_location);
     assert!(
-        !storage
-            .exists("blob_tombstones/photos/cv/photoaaa.jpg")
+        storage
+            .exists(&format!("blob_tombstones/{first_key}"))
             .await
             .unwrap(),
-        "the re-upload cancelled the leftover tombstone",
+        "the old generation remains condemned",
     );
     assert!(
         storage
-            .get_blob(
+            .get_blob_at(
                 "photos",
-                None,
+                Some(&second_location),
                 "photoaaa",
                 BlobScope::Master,
                 Some("cv/photoaaa.jpg")
@@ -2529,193 +2714,5 @@ async fn round_trip_make_remote_make_local_make_remote() {
             .await
             .is_ok(),
         "the blob is back in the cloud",
-    );
-}
-
-/// Seed a host-provided-only release, make it Remote (the cover uploads inline and the
-/// gate flips), then make it Local (the cover returns to the local store and its cloud
-/// copy is tombstoned). Returns with the release gated off, the tombstone standing, and
-/// the cover in the local store — the state a re-share by a direct host gate flip must
-/// recover from without leaving the tombstone to reclaim the re-shared blob.
-async fn tombstoned_host_cover(
-    storage: &MockSyncStorage,
-    enc: &RwLock<CloudCipher>,
-    kp: &UserKeypair,
-    hlc: &Hlc,
-    db: &Database,
-    lib: &StoreDir,
-    cover: &[u8],
-) {
-    exec(
-        db,
-        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('n1', 'Release', NULL, 0, '0000000001000-0000-A', '2026-01-01')",
-    )
-    .await;
-    exec(
-        db,
-        &format!(
-            "INSERT INTO note_covers (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
-             VALUES ('coveraaa', 'n1', {}, '{}', '0000000001000-0000-A', '2026-01-01', 'cv/cover-coveraaa.jpg')",
-            cover.len(),
-            crate::blob::content_hash(cover),
-        ),
-    )
-    .await;
-    local_files::store(lib, "covers", "coveraaa", cover)
-        .await
-        .expect("store host-provided cover");
-
-    make_remote(
-        db,
-        BlobPathScheme::Plain,
-        SELF_UPLOADER,
-        hlc,
-        "notes",
-        "n1",
-        false,
-    )
-    .await
-    .expect("make_remote");
-    run_cycle(storage, "A", hlc, db, enc, kp, lib, None).await;
-    assert_eq!(shared_flag(db, "n1").await, 1, "Remote after make_remote");
-    assert!(
-        storage
-            .exists("covers/cv/cover-coveraaa.jpg")
-            .await
-            .unwrap(),
-        "the cover is uploaded to the cloud"
-    );
-
-    let dest: HashMap<String, PathBuf> = HashMap::new();
-    let (_cancel_tx, cancel) = watch::channel(false);
-    make_local(
-        db,
-        storage,
-        lib,
-        BlobPathScheme::Plain,
-        hlc,
-        None,
-        "notes",
-        "n1",
-        &dest,
-        &cancel,
-    )
-    .await
-    .expect("make_local");
-    run_cycle(storage, "A", hlc, db, enc, kp, lib, None).await;
-    assert_eq!(shared_flag(db, "n1").await, 0, "Local after make_local");
-    assert!(
-        storage
-            .exists("blob_tombstones/covers/cv/cover-coveraaa.jpg")
-            .await
-            .unwrap(),
-        "make_local tombstoned the cover"
-    );
-    assert!(
-        lib.local_blob_path("covers", "coveraaa").unwrap().exists(),
-        "the host-provided cover is back in the local store"
-    );
-}
-
-/// A host re-shares a tombstoned host-provided blob by flipping the gate column true
-/// directly (host-gated roots are host-writable). The cover is still in the cloud
-/// within its grace and still holds this blob's bytes, so the inline push skips the
-/// upload — and must still cancel the standing tombstone, or a GC past the grace
-/// reclaims the re-shared blob.
-#[tokio::test]
-async fn inline_reshare_cancels_the_tombstone_of_a_blob_it_skips_uploading() {
-    let storage = MockSyncStorage::new();
-    let enc = plaintext();
-    let kp = UserKeypair::generate();
-    let hlc = Hlc::new("A".to_string());
-    let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
-    let (_tmp, lib) = temp_store_dir();
-    let cover = b"HOST-COVER-RESHARED".to_vec();
-
-    tombstoned_host_cover(&storage, &enc, &kp, &hlc, &db, &lib, &cover).await;
-    assert!(
-        storage
-            .exists("covers/cv/cover-coveraaa.jpg")
-            .await
-            .unwrap(),
-        "the cover's cloud copy is still present within the grace, so the push skips it"
-    );
-
-    // The host flips the gate true directly — no make_remote intent, so the inline push
-    // (not the pre-capture completion) re-emits and re-uploads the cover.
-    exec(
-        &db,
-        "UPDATE notes SET shared = 1, _updated_at = '0000000002000-0000-A' WHERE id = 'n1'",
-    )
-    .await;
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
-
-    assert_eq!(shared_flag(&db, "n1").await, 1, "re-shared");
-    assert!(
-        !storage
-            .exists("blob_tombstones/covers/cv/cover-coveraaa.jpg")
-            .await
-            .unwrap(),
-        "the inline push cancelled the tombstone of the blob it skipped uploading"
-    );
-    assert!(
-        storage
-            .exists("covers/cv/cover-coveraaa.jpg")
-            .await
-            .unwrap(),
-        "the re-shared cover survives — no tombstone remains to reclaim it"
-    );
-}
-
-/// The same re-share when the cover's cloud copy is already gone (the host re-provided
-/// the local-store bytes) but the tombstone still stands. The inline push takes the
-/// fresh-upload arm, which must also cancel the tombstone.
-#[tokio::test]
-async fn inline_reshare_cancels_tombstone_on_the_fresh_upload_arm() {
-    let storage = MockSyncStorage::new();
-    let enc = plaintext();
-    let kp = UserKeypair::generate();
-    let hlc = Hlc::new("A".to_string());
-    let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
-    let (_tmp, lib) = temp_store_dir();
-    let cover = b"HOST-COVER-fresh-upload".to_vec();
-
-    tombstoned_host_cover(&storage, &enc, &kp, &hlc, &db, &lib, &cover).await;
-
-    // The cloud blob is gone while the tombstone still stands, so the inline push must
-    // re-upload from the local store rather than skip.
-    crate::storage::cloud::CloudHome::delete(&storage, "covers/cv/cover-coveraaa.jpg")
-        .await
-        .expect("remove the cloud blob object");
-    assert!(
-        !storage
-            .exists("covers/cv/cover-coveraaa.jpg")
-            .await
-            .unwrap(),
-        "the cover's cloud copy is absent (fresh-upload arm)"
-    );
-
-    exec(
-        &db,
-        "UPDATE notes SET shared = 1, _updated_at = '0000000002000-0000-A' WHERE id = 'n1'",
-    )
-    .await;
-    run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
-
-    assert_eq!(shared_flag(&db, "n1").await, 1, "re-shared");
-    assert!(
-        storage
-            .exists("covers/cv/cover-coveraaa.jpg")
-            .await
-            .unwrap(),
-        "the inline push re-uploaded the cover"
-    );
-    assert!(
-        !storage
-            .exists("blob_tombstones/covers/cv/cover-coveraaa.jpg")
-            .await
-            .unwrap(),
-        "the inline push cancelled the tombstone on the fresh-upload arm"
     );
 }

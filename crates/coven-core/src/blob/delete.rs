@@ -33,35 +33,14 @@
 //! before acting on it. A tombstone that fails either check is skipped, never
 //! acted on — the blob survives.
 //!
-//! ## Upload cancels the deletion
+//! ## Deletion names one immutable generation
 //!
-//! A blob re-uploaded after a deletion was queued must not be deleted. This is
-//! enforced at two layers: at enqueue ([`crate::database::Database::enqueue_upload`]
-//! drops any pending delete row for the same key, and vice versa — latest intent
-//! wins within a device), and after a successful (re-)upload
-//! ([`cancel_tombstone_or_enqueue`] removes any tombstone a *prior* cycle — possibly
-//! on another device — already wrote). Every upload path runs that cancel: the outbox
-//! drain ([`crate::blob::upload::drain_uploads`]) and the inline host-provided push
-//! (the changeset push, the make_remote host-blob completion, and the snapshot). A
-//! re-upload thus wins over a pending deletion by construction, on every path.
-//!
-//! The completion cancel must not be lost if it fails, or a surviving tombstone
-//! past its grace would delete the live re-uploaded blob. When the inline cancel
-//! fails, a durable `cancel` outbox row is queued and [`drain_tombstone_cancels`]
-//! retries it each cycle until the tombstone is gone, so the cancel survives cloud
-//! errors and restarts: once a blob is successfully (re-)uploaded to a key, the
-//! tombstone for that key is removed eventually, and this device's own GC never
-//! reclaims it (the sync cycle skips its GC while any cancel is pending).
-//!
-//! That skip is **device-local** — the pending-cancel queue lives in this device's
-//! database, and a *peer's* GC cannot see it. A blob re-uploaded to a key whose
-//! tombstone is already past its grace can therefore be reclaimed by a peer whose
-//! database has seen the deletion but not yet the re-share, before this device's
-//! cancel lands. The grace period bounds the race (a within-grace tombstone is
-//! never reclaimed), and the failure is loud, never silent: the re-uploader's push
-//! refuses to publish a row whose blob is missing remotely and retries every
-//! cycle. Hosts that write new content at new (content-addressed or versioned)
-//! blob keys never re-enter a tombstoned key and avoid the race entirely.
+//! Every new upload occupies a generated key that is never reused. A tombstone
+//! therefore condemns one immutable object generation, and a later upload of the
+//! same logical blob uses a different key. GC can race that upload without being
+//! able to delete it. Pending upload/delete rows for the exact same key still
+//! replace one another within one device, which only affects retries of the same
+//! durable operation.
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -418,10 +397,7 @@ pub async fn drain_tombstones(
 }
 
 /// Await an operation-scoped outbox failure-recording call and warn if the
-/// recording itself fails. `record` is `record_cloud_delete_failure` or
-/// `record_cloud_cancel_failure` — each scoped to its own operation, so an id
-/// collision with the other kind can't mutate the wrong kind of row; `kind`
-/// names which for the warning.
+/// recording itself fails.
 async fn record_outbox_failure(
     record: impl std::future::Future<Output = Result<(), crate::database::DbError>>,
     kind: &str,
@@ -443,22 +419,6 @@ async fn record_delete_failure(
     record_outbox_failure(
         db.record_cloud_delete_failure(entry_id, error, attempted_at),
         "delete",
-        cloud_key,
-        entry_id,
-    )
-    .await;
-}
-
-async fn record_cancel_failure(
-    db: &Database,
-    entry_id: i64,
-    cloud_key: &str,
-    error: &str,
-    attempted_at: &str,
-) {
-    record_outbox_failure(
-        db.record_cloud_cancel_failure(entry_id, error, attempted_at),
-        "cancel",
         cloud_key,
         entry_id,
     )
@@ -506,17 +466,14 @@ enum RowReference {
 ///    a live row still references the blob and resolves as remote, cancel the
 ///    tombstone (a re-reference outlived the deletion); if that row's locality can't
 ///    be resolved, skip and surface it. Otherwise re-check the tombstone still
-///    exists (it may have been canceled by a concurrent re-upload), confirm the blob
+///    exists (it may have been canceled because a live row re-referenced it), confirm the blob
 ///    is actually present (a tombstone whose blob is already gone is a leftover from
 ///    a pass that deleted the blob but failed to delete the tombstone — clean it up
 ///    without counting a reclaim), then delete the blob and the tombstone object.
 ///
-/// The blob delete is a plain, unconditional delete on every provider. A blob
-/// re-uploaded to a key whose tombstone's grace already expired can therefore be
-/// erased by a concurrent GC pass between the re-check and the delete; that loss
-/// surfaces as a loud read error on the next read, never silent corruption, and a
-/// host avoids it by writing new content at new (content-addressed or versioned)
-/// blob keys rather than re-uploading at a deleted key.
+/// The blob delete is a plain, unconditional delete on every provider. Its key
+/// names one immutable generation, so a concurrent later upload cannot occupy the
+/// object GC is deleting.
 ///
 /// Authorization judges against `membership_chain`, the cycle's once-loaded chain
 /// already anchored to the owner pinned on join/restore/found — not
@@ -736,15 +693,13 @@ pub async fn gc_tombstones(
             }
         }
 
-        // Re-check the tombstone still exists before reclaiming. A re-upload's
-        // cancel (inline or its durable retry) deletes the tombstone once the blob
-        // is (re-)written, so a tombstone still present here means no re-upload has
-        // completed; a tombstone now gone means one has, and the deletion is no
-        // longer current — skip.
+        // Re-check the tombstone still exists before reclaiming. Generated blob
+        // locations are immutable: a later upload of the same blob id uses another
+        // key, so this tombstone can target only the generation it names.
         match cloud_home.exists(&key).await {
             Ok(true) => {}
             Ok(false) => {
-                debug!("tombstone {key} canceled before reclaim (re-upload won); skipping");
+                debug!("tombstone {key} was removed before reclaim; skipping");
                 continue;
             }
             Err(e) => {
@@ -769,11 +724,8 @@ pub async fn gc_tombstones(
             }
         };
         if blob_present {
-            // Plain, unconditional delete on every provider. A re-upload that lands
-            // at this key between the tombstone re-check above and this delete is
-            // erased here; that loss surfaces as a loud read error on the next read
-            // (never silent corruption), and a host avoids it by writing new content
-            // at new blob keys rather than re-uploading at a deleted key.
+            // The key names one immutable upload generation, so this delete cannot
+            // target a later upload of the same blob id.
             if let Err(e) = cloud_home.delete(&tombstone.cloud_key).await {
                 warn!(
                     "Failed to delete blob {} past the grace: {e}",
@@ -802,124 +754,4 @@ pub async fn gc_tombstones(
     }
 
     Ok(deleted)
-}
-
-/// Cancel any tombstone for `cloud_key`: delete the tombstone object so a GC pass
-/// won't reclaim the blob. Called from the upload drain after a blob is
-/// successfully (re-)written, so a re-upload from any device cancels a deletion a
-/// prior cycle already wrote — a re-upload wins over a pending deletion by
-/// construction. The upload drain backs a failed inline call with a durable
-/// `cancel` row that [`drain_tombstone_cancels`] retries, so the cancel is not
-/// lost on a transient cloud error.
-///
-/// `suffix` is the cipher's object-key suffix (so the tombstone key matches what
-/// [`drain_tombstones`] wrote). Deleting an absent tombstone is a no-op, so the
-/// common case (no pending deletion) costs one idempotent delete and nothing else.
-pub async fn cancel_tombstone(
-    cloud_home: &dyn CloudHome,
-    suffix: &str,
-    cloud_key: &str,
-) -> Result<(), String> {
-    let key = tombstone_key(cloud_key, suffix);
-    cloud_home
-        .delete(&key)
-        .await
-        .map_err(|e| format!("failed to cancel tombstone for {cloud_key}: {e}"))
-}
-
-/// Cancel any tombstone for `cloud_key` after a successful (re-)upload, so a later GC
-/// can't reclaim the live blob — a re-upload wins over a pending deletion. Attempt the
-/// inline [`cancel_tombstone`]; on failure, enqueue a durable `cancel` outbox row so
-/// [`drain_tombstone_cancels`] retries the removal until it lands. Every upload path
-/// calls this — the outbox drain and the inline host-provided push — so the invariant
-/// holds uniformly rather than only on the drain.
-///
-/// The durable row is enqueued in its own commit before the caller records the upload
-/// as done (removes its outbox row, or publishes the changeset the inline push
-/// uploaded for), so a crash after this never leaves the tombstone standing with no
-/// retry queued.
-pub(crate) async fn cancel_tombstone_or_enqueue(
-    db: &Database,
-    cloud_home: &dyn CloudHome,
-    suffix: &str,
-    cloud_key: &str,
-    now_rfc: &str,
-) -> Result<(), crate::database::DbError> {
-    if let Err(e) = cancel_tombstone(cloud_home, suffix, cloud_key).await {
-        warn!("tombstone cancel for {cloud_key} failed ({e}); queuing a durable cancel for retry");
-        db.enqueue_cancel(cloud_key, now_rfc).await?;
-    }
-    Ok(())
-}
-
-/// Drain the queued tombstone-cancels: for each, remove the tombstone object for
-/// its `cloud_key`, then remove the outbox row. A cancel row is queued by the
-/// upload drain only when its inline [`cancel_tombstone`] failed, so this is the
-/// retry that makes the cancel durable: once a blob is successfully (re-)uploaded
-/// to a key, the tombstone for that key is removed eventually, across cancel
-/// failures and restarts, so a later GC never reclaims the live re-uploaded blob.
-///
-/// A failed cancel leaves the row queued (it is removed only after the tombstone
-/// delete succeeds) and records `attempt_count`/`last_attempt_at`/`last_error` on
-/// the row, exactly like [`drain_tombstones`]'s failure accounting, with the same
-/// per-row [`crate::blob::upload::backoff_window`] before the next retry — so a
-/// persistently-failing cancel neither retries every cycle nor sits invisible in
-/// the outbox row. The delete is a no-op if the tombstone is already gone, so a
-/// cancel that races the inline one — or a peer's GC that already reclaimed and
-/// removed it — still completes cleanly. Returns the number of cancels completed
-/// this pass.
-pub async fn drain_tombstone_cancels(
-    db: &Database,
-    cloud_home: &dyn CloudHome,
-    cipher: &dyn CloudCipherAccess,
-    clock: &dyn crate::clock::Clock,
-) -> Result<usize, String> {
-    let cancels = db
-        .get_pending_cloud_cancels()
-        .await
-        .map_err(|e| format!("Failed to get pending tombstone cancels: {e}"))?;
-
-    let now = clock.now();
-    let now_rfc = now.to_rfc3339();
-    let suffix = cipher.snapshot().suffix();
-    let mut count = 0;
-    for entry in cancels {
-        // Per-row backoff, exactly like the delete drain: skip an entry still
-        // inside its retry window so a persistently-failing cancel isn't
-        // re-attempted every cycle.
-        if let Some(last) = entry.last_attempt_at.as_deref() {
-            match chrono::DateTime::parse_from_rfc3339(last) {
-                Ok(last_dt) => {
-                    let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
-                    if elapsed < crate::blob::upload::backoff_window(entry.attempt_count) {
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    // Don't strand a cancel on a corrupt timestamp; log and retry.
-                    warn!(
-                        "Cancel outbox entry {} has unparseable last_attempt_at {last:?}: {e}; retrying",
-                        entry.id
-                    );
-                }
-            }
-        }
-
-        if let Err(e) = cancel_tombstone(cloud_home, suffix, &entry.cloud_key).await {
-            // Leave the row queued; the cancel must outlive a transient cloud
-            // error so the tombstone is removed before the grace passes. Record
-            // the attempt so the row backs off instead of retrying every cycle.
-            warn!("Tombstone cancel retry failed for {}: {e}", entry.cloud_key);
-            record_cancel_failure(db, entry.id, &entry.cloud_key, &e, &now_rfc).await;
-            continue;
-        }
-        if let Err(e) = db.remove_cloud_outbox_entry(entry.id).await {
-            // The tombstone is gone; a lingering cancel row just re-deletes an
-            // already-absent tombstone next cycle (a no-op), so this is harmless.
-            warn!("Failed to remove cancel outbox entry {}: {e}", entry.id);
-        }
-        count += 1;
-    }
-
-    Ok(count)
 }

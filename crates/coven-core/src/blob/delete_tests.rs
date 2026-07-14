@@ -1,6 +1,6 @@
 //! Tests for the blob-delete half: signed tombstones, the graced GC that performs
-//! the actual deletion, upload-cancels-delete at both layers, the durable
-//! tombstone-cancel retry, and the shared `cloud_outbox` row shape.
+//! the actual deletion, immutable-generation races, and the shared
+//! `cloud_outbox` row shape.
 //!
 //! The grace and forgery behaviors are the load-bearing ones — this code deletes
 //! user data and trusts a signature, so a stale or forged tombstone is real data
@@ -12,8 +12,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use crate::blob::delete::{
-    drain_tombstone_cancels, drain_tombstones, gc_tombstones, BlobTombstoneJson,
-    BLOB_TOMBSTONE_GRACE,
+    drain_tombstones, gc_tombstones, BlobTombstoneJson, BLOB_TOMBSTONE_GRACE,
 };
 use crate::blob::{BlobScope, CacheFill, Provenance};
 use crate::clock::FixedClock;
@@ -169,41 +168,6 @@ async fn get_delete(db: &Database, id: i64) -> Option<(i64, Option<String>, Opti
     .expect("query delete outbox entry")
 }
 
-/// Insert a fully-specified `cloud_outbox` cancel row directly, so a backoff test
-/// can seed a stalled retry state without draining a real upload through to a
-/// failed inline cancel first.
-async fn insert_cancel(db: &Database, id: i64, cloud_key: &str, attempt_count: i64) {
-    let cloud_key = cloud_key.to_string();
-    db.call(move |conn| {
-        conn.execute(
-            "INSERT INTO cloud_outbox (id, operation, cloud_key, created_at, attempt_count) \
-             VALUES (?1, 'cancel', ?2, '2024-01-01T00:00:00Z', ?3)",
-            rusqlite::params![id, cloud_key, attempt_count],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("insert cancel row");
-}
-
-/// Read back `(attempt_count, last_error, last_attempt_at)` for a cancel entry, or
-/// `None` if it was removed.
-async fn get_cancel(db: &Database, id: i64) -> Option<(i64, Option<String>, Option<String>)> {
-    db.call(move |conn| {
-        conn.query_row(
-            "SELECT attempt_count, last_error, last_attempt_at FROM cloud_outbox \
-             WHERE id = ?1 AND operation = 'cancel'",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("query cancel outbox entry")
-}
-
 /// A plaintext cipher (tests don't encrypt) behind the lock the drain/GC take.
 fn plaintext_cipher() -> RwLock<CloudCipher> {
     RwLock::new(CloudCipher::Plaintext)
@@ -256,21 +220,19 @@ async fn plant_tombstone(cloud: &dyn CloudHome, tombstone: &BlobTombstoneJson) {
         .expect("plant");
 }
 
-/// A `CloudHome` that delegates to an inner `MockSyncStorage`, but the first time
-/// the GC re-checks the named tombstone key with `exists`, it simulates a
-/// concurrent `cancel_tombstone` landing in the TOCTOU window: it deletes the
-/// tombstone from the inner store and reports `false`. This drives the GC's
-/// re-check-before-delete deterministically — the blob must then be left alone,
-/// because the deletion was canceled mid-pass by a re-upload.
-struct CancelTombstoneOnExists<'a> {
+/// A `CloudHome` that pauses GC at its final tombstone-existence check and writes
+/// the same logical blob into a new immutable generation before allowing GC to
+/// continue deleting the old generation.
+struct UploadNewGenerationOnTombstoneExists<'a> {
     inner: &'a MockSyncStorage,
     tombstone_key: String,
+    new_generation_key: String,
     fired: AtomicBool,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl CloudHome for CancelTombstoneOnExists<'_> {
+impl CloudHome for UploadNewGenerationOnTombstoneExists<'_> {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         self.inner.put_object(key, data).await
     }
@@ -304,12 +266,16 @@ impl CloudHome for CancelTombstoneOnExists<'_> {
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        // The GC's pre-delete re-check: on the first hit for the tombstone key,
-        // cancel it (delete the object) and report it gone, as a racing re-upload
-        // would. Any later/other check delegates normally.
         if key == self.tombstone_key && !self.fired.swap(true, Ordering::SeqCst) {
-            self.inner.delete(key).await?;
-            return Ok(false);
+            self.inner
+                .write(
+                    &self.new_generation_key,
+                    crate::storage::cloud::BlobBody::from_bytes(
+                        b"new generation contents".to_vec(),
+                    ),
+                    &no_progress(),
+                )
+                .await?;
         }
         self.inner.exists(key).await
     }
@@ -1392,23 +1358,21 @@ fn past_grace_instant(deleted_at: &str) -> String {
     (at(deleted_at) + BLOB_TOMBSTONE_GRACE + chrono::Duration::minutes(1)).to_rfc3339()
 }
 
-/// A tombstone canceled (by a concurrent re-upload's `cancel_tombstone`) *between*
-/// the GC verifying/aging it and deleting the blob must NOT take the blob: the
-/// re-uploaded blob is live data. The GC re-checks the tombstone still exists right
-/// before the delete and skips when it's gone.
+/// GC may validate an old-generation tombstone, then race a new upload of the same
+/// logical blob. The old tombstone names only the old immutable key, so resuming GC
+/// deletes that generation and cannot touch the new one.
 #[tokio::test]
-async fn tombstone_canceled_mid_gc_leaves_the_reuploaded_blob() {
+async fn gc_of_an_old_generation_cannot_delete_a_concurrent_new_generation() {
     let (storage, founder, member) = storage_with_chain().await;
     let owner = pubkey_hex(&founder);
     let cipher = plaintext_cipher();
 
-    // A blob (here standing in for the re-uploaded one) and an authorized, past-grace
-    // tombstone for it. Authorization passes, so the GC reaches the pre-delete
-    // re-check — which is where the simulated cancel lands.
+    let old_generation = format!("photos/{GC_TEST_UPLOADER}/aa/bb/aabbccdd/generations/aaa1");
+    let new_generation = format!("photos/{GC_TEST_UPLOADER}/aa/bb/aabbccdd/generations/aaa2");
     storage
         .write(
-            "blob-key",
-            crate::storage::cloud::BlobBody::from_bytes(b"fresh re-uploaded contents".to_vec()),
+            &old_generation,
+            crate::storage::cloud::BlobBody::from_bytes(b"old generation contents".to_vec()),
             &no_progress(),
         )
         .await
@@ -1416,16 +1380,16 @@ async fn tombstone_canceled_mid_gc_leaves_the_reuploaded_blob() {
     let deleted_at = "2024-06-01T00:00:00+00:00";
     let tombstone = BlobTombstoneJson::signed(
         "test-lib",
-        "blob-key".to_string(),
+        old_generation.clone(),
         deleted_at.to_string(),
         &member,
     );
     plant_tombstone(&storage, &tombstone).await;
 
-    // The cloud_home cancels the tombstone exactly in the GC's re-check window.
-    let racing_home = CancelTombstoneOnExists {
+    let racing_home = UploadNewGenerationOnTombstoneExists {
         inner: &storage,
-        tombstone_key: "blob_tombstones/blob-key".to_string(),
+        tombstone_key: format!("blob_tombstones/{old_generation}"),
+        new_generation_key: new_generation.clone(),
         fired: AtomicBool::new(false),
     };
 
@@ -1440,10 +1404,15 @@ async fn tombstone_canceled_mid_gc_leaves_the_reuploaded_blob() {
     )
     .await
     .expect("gc");
-    assert_eq!(n, 0, "a tombstone canceled mid-GC reclaims nothing");
+    assert_eq!(n, 1, "GC reclaims the condemned old generation");
     assert!(
-        storage.read("blob-key").await.is_ok(),
-        "the re-uploaded blob survives a tombstone canceled in the TOCTOU window",
+        storage.read(&old_generation).await.is_err(),
+        "the old generation is deleted",
+    );
+    assert_eq!(
+        storage.read(&new_generation).await.unwrap(),
+        b"new generation contents",
+        "the concurrent new generation survives",
     );
 }
 
@@ -1916,94 +1885,6 @@ async fn enqueue_upload_and_delete_cancel_each_other_for_a_key() {
     );
 }
 
-/// Prior-cycle-tombstone layer: a tombstone written in an earlier cycle (possibly
-/// on another device) is cancelled when the blob is re-uploaded, so a later GC
-/// won't reclaim the re-uploaded blob. Drives the real upload drain
-/// ([`crate::blob::upload::drain_uploads`]) so it exercises the wiring, not just
-/// `cancel_tombstone` in isolation: the drain writes the blob, then cancels the
-/// tombstone.
-#[tokio::test]
-async fn reupload_through_the_drain_cancels_a_prior_cycle_tombstone() {
-    use crate::blob::upload::drain_uploads;
-
-    let (storage, founder, member) = storage_with_chain().await;
-    let cipher = plaintext_cipher();
-    let owner = pubkey_hex(&founder);
-    let tmp = tempfile::tempdir().unwrap();
-
-    // A prior cycle tombstoned the blob.
-    let deleted_at = "2024-06-01T00:00:00+00:00";
-    let tombstone = BlobTombstoneJson::signed(
-        "test-lib",
-        "blob-key".to_string(),
-        deleted_at.to_string(),
-        &member,
-    );
-    plant_tombstone(&storage, &tombstone).await;
-
-    // Now the host re-stages the blob and queues an upload for the same key; the
-    // drain writes it to the cloud and cancels the prior tombstone.
-    let src = tmp.path().join("blob.bin");
-    std::fs::write(&src, b"fresh contents").unwrap();
-    let db = open_outbox_db();
-    db.enqueue_upload(
-        "blob-file",
-        "blob-key",
-        Some(&src.to_string_lossy()),
-        BlobScope::Master,
-        false,
-        T0,
-    )
-    .await
-    .expect("enqueue upload");
-
-    let clock = FixedClock(at("2024-06-01T01:00:00Z"));
-    let n = drain_uploads(
-        &db,
-        &storage,
-        &cipher,
-        &PendingRotation::none(),
-        "test-lib",
-        &StoreDir::new(tmp.path()),
-        &clock,
-        &crate::sync::hlc::Hlc::new("test-device".to_string()),
-        None,
-    )
-    .await
-    .expect("drain")
-    .uploaded;
-    assert_eq!(n, 1, "the blob is re-uploaded");
-    assert!(
-        storage.read("blob-key").await.is_ok(),
-        "the re-uploaded blob is in the cloud",
-    );
-    assert!(
-        storage.read("blob_tombstones/blob-key").await.is_err(),
-        "the upload drain cancelled the prior-cycle tombstone",
-    );
-
-    // A GC long past the grace now finds no tombstone and leaves the live blob.
-    let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let gc = gc_tombstones_without_live_refs(
-        &storage,
-        &storage,
-        &cipher,
-        "test-lib",
-        Some(&owner),
-        &past,
-    )
-    .await
-    .expect("gc");
-    assert_eq!(
-        gc, 0,
-        "no tombstone remains to reclaim the re-uploaded blob"
-    );
-    assert!(
-        storage.read("blob-key").await.is_ok(),
-        "the re-uploaded blob survives — its deletion was cancelled",
-    );
-}
-
 // ----- the tombstone write is idempotent: a re-drain holds the grace deadline -----
 
 /// A Delete row drained when a tombstone already exists for its key does not
@@ -2089,197 +1970,12 @@ async fn re_draining_a_delete_keeps_the_original_deleted_at() {
 
 // ----- the completion cancel is durable: it survives a failure and a retry -----
 
-/// A re-upload whose inline tombstone cancel fails does not leave the tombstone to
-/// doom the blob: a durable `cancel` row is queued (atomically with removing the
-/// upload row), and the tombstone-cancel drain retries it until the tombstone is
-/// gone. After the retry a GC past the grace keeps the live re-uploaded blob.
-#[tokio::test]
-async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
-    use crate::blob::upload::drain_uploads;
-
-    let (storage, founder, member) = storage_with_chain().await;
-    let owner = pubkey_hex(&founder);
-    let cipher = plaintext_cipher();
-    let tmp = tempfile::tempdir().unwrap();
-
-    // A prior cycle tombstoned the blob.
-    let deleted_at = "2024-06-01T00:00:00+00:00";
-    let tombstone = BlobTombstoneJson::signed(
-        "test-lib",
-        "blob-key".to_string(),
-        deleted_at.to_string(),
-        &member,
-    );
-    plant_tombstone(&storage, &tombstone).await;
-
-    // The host re-stages the blob and queues the re-upload.
-    let src = tmp.path().join("blob.bin");
-    std::fs::write(&src, b"fresh contents").unwrap();
-    let db = open_outbox_db();
-    db.enqueue_upload(
-        "blob-file",
-        "blob-key",
-        Some(&src.to_string_lossy()),
-        BlobScope::Master,
-        false,
-        T0,
-    )
-    .await
-    .expect("enqueue upload");
-
-    // The cloud fails the cancel (a `delete` of the tombstone key) the first time.
-    // The drain writes the blob, the inline cancel fails, and a durable cancel row
-    // is queued in its place.
-    let failing = FailCloudOpOnKey::new(
-        &storage,
-        FailingCloudOp::Delete,
-        "blob_tombstones/blob-key",
-        1,
-    );
-    let clock = FixedClock(at("2024-06-01T01:00:00Z"));
-    let n = drain_uploads(
-        &db,
-        &failing,
-        &cipher,
-        &PendingRotation::none(),
-        "test-lib",
-        &StoreDir::new(tmp.path()),
-        &clock,
-        &crate::sync::hlc::Hlc::new("test-device".to_string()),
-        None,
-    )
-    .await
-    .expect("drain")
-    .uploaded;
-    assert_eq!(n, 1, "the blob is re-uploaded despite the cancel failing");
-    assert!(
-        storage.read("blob-key").await.is_ok(),
-        "the re-uploaded blob is in the cloud",
-    );
-    assert!(
-        storage.read("blob_tombstones/blob-key").await.is_ok(),
-        "the tombstone still exists — the inline cancel failed",
-    );
-    assert!(
-        db.get_pending_cloud_uploads().await.unwrap().is_empty(),
-        "the upload row is removed once the blob is written",
-    );
-    let cancels = db.get_pending_cloud_cancels().await.unwrap();
-    assert_eq!(cancels.len(), 1, "a durable cancel row is queued for retry");
-    assert_eq!(cancels[0].cloud_key, "blob-key");
-
-    // The tombstone-cancel drain retries (the injected failure is spent), removing
-    // the tombstone and clearing the cancel row.
-    let done = drain_tombstone_cancels(&db, &failing, &cipher, &clock)
-        .await
-        .expect("cancel drain");
-    assert_eq!(done, 1, "the retried cancel completes");
-    assert!(
-        storage.read("blob_tombstones/blob-key").await.is_err(),
-        "the retry removed the tombstone",
-    );
-    assert!(
-        db.get_pending_cloud_cancels().await.unwrap().is_empty(),
-        "the cancel row is cleared once the tombstone is gone",
-    );
-
-    // A GC long past the grace now finds no tombstone and keeps the live blob.
-    let past = FixedClock(at(&past_grace_instant(deleted_at)));
-    let gc = gc_tombstones_without_live_refs(
-        &storage,
-        &storage,
-        &cipher,
-        "test-lib",
-        Some(&owner),
-        &past,
-    )
-    .await
-    .expect("gc");
-    assert_eq!(
-        gc, 0,
-        "no tombstone remains to reclaim the re-uploaded blob"
-    );
-    assert!(
-        storage.read("blob-key").await.is_ok(),
-        "the re-uploaded blob survives across the cancel failure and its retry",
-    );
-}
-
-/// A failed tombstone-cancel retry records durable retry state (bumping
-/// `attempt_count`, `last_error`, `last_attempt_at`) exactly like the delete
-/// drain's failure accounting, and the cancel drain then skips the row while it
-/// is inside its backoff window instead of re-attempting it every cycle —
-/// mirroring `drain_tombstones`' shape so a persistently-failing cancel is
-/// neither retried every cycle nor invisible in the outbox row.
-#[tokio::test]
-async fn cancel_retry_failure_backs_off_then_retries() {
-    let db = open_outbox_db();
-    let inner = InMemoryCloudHome::new();
-    let cloud = FailCloudOpOnKey::new(
-        &inner,
-        FailingCloudOp::Delete,
-        "blob_tombstones/blob-key",
-        1,
-    );
-    let cipher = plaintext_cipher();
-
-    insert_cancel(&db, 1, "blob-key", 0).await;
-
-    let first = FixedClock(at("2024-06-01T00:00:00Z"));
-    let n = drain_tombstone_cancels(&db, &cloud, &cipher, &first)
-        .await
-        .expect("first cancel drain");
-    assert_eq!(n, 0, "the failed cancel completes nothing");
-    assert_eq!(cloud.matching_calls(), 1);
-
-    let first_row = get_cancel(&db, 1).await.expect("cancel row remains");
-    assert_eq!(first_row.0, 1, "the failed attempt is counted");
-    assert!(
-        first_row
-            .1
-            .as_deref()
-            .unwrap()
-            .contains("injected delete failure"),
-        "the failure reason is recorded",
-    );
-    let recorded = chrono::DateTime::parse_from_rfc3339(first_row.2.as_deref().unwrap()).unwrap();
-    assert_eq!(recorded.with_timezone(&chrono::Utc), first.0);
-
-    let inside = FixedClock(at("2024-06-01T00:00:10Z"));
-    let n = drain_tombstone_cancels(&db, &cloud, &cipher, &inside)
-        .await
-        .expect("inside backoff drain");
-    assert_eq!(n, 0, "inside the backoff window nothing is attempted");
-    assert_eq!(
-        cloud.matching_calls(),
-        1,
-        "inside the backoff window no cloud delete runs",
-    );
-    assert_eq!(
-        get_cancel(&db, 1).await.expect("cancel row remains"),
-        first_row,
-        "the skipped row is unchanged",
-    );
-
-    let after = FixedClock(at("2024-06-01T00:00:31Z"));
-    let n = drain_tombstone_cancels(&db, &cloud, &cipher, &after)
-        .await
-        .expect("after backoff drain");
-    assert_eq!(n, 1, "the elapsed backoff allows the retry");
-    assert_eq!(cloud.matching_calls(), 2);
-    assert!(
-        get_cancel(&db, 1).await.is_none(),
-        "the successful retry clears the cancel row",
-    );
-}
-
 // ----- the GC tolerates a tombstone left over by a failed tombstone delete -----
 
 /// When the GC reclaims a blob but the follow-up tombstone delete fails, the blob
 /// is gone and the tombstone is left for a retry. The leftover must be harmless: a
 /// later GC finds the blob already gone, cleans up the tombstone, and reports no
-/// reclaim — it does not re-count the already-gone blob, and (paired with the
-/// durable cancel) a blob re-uploaded to the key is never deleted by the leftover.
+/// reclaim — it does not re-count the already-gone blob.
 #[tokio::test]
 async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     let (storage, founder, member) = storage_with_chain().await;
@@ -2351,59 +2047,5 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
     assert!(
         storage.read("blob_tombstones/blob-key").await.is_err(),
         "the leftover tombstone is cleaned up",
-    );
-
-    // The data-loss case the leftover could cause: a blob re-uploaded to the same
-    // key before the leftover is cleaned. The re-upload's durable cancel removes the
-    // tombstone, so a GC past the grace keeps the re-uploaded blob. Reconstruct the
-    // leftover (tombstone present, blob now re-uploaded) and drive a re-upload
-    // through the real drain.
-    let tmp = tempfile::tempdir().unwrap();
-    plant_tombstone(&storage, &tombstone).await; // the leftover, again
-    let src = tmp.path().join("blob.bin");
-    std::fs::write(&src, b"re-uploaded contents").unwrap();
-    let db = open_outbox_db();
-    db.enqueue_upload(
-        "blob-file",
-        "blob-key",
-        Some(&src.to_string_lossy()),
-        BlobScope::Master,
-        false,
-        T0,
-    )
-    .await
-    .expect("enqueue upload");
-    let clock = FixedClock(at("2024-06-01T01:00:00Z"));
-    crate::blob::upload::drain_uploads(
-        &db,
-        &storage,
-        &cipher,
-        &PendingRotation::none(),
-        "test-lib",
-        &StoreDir::new(tmp.path()),
-        &clock,
-        &crate::sync::hlc::Hlc::new("test-device".to_string()),
-        None,
-    )
-    .await
-    .expect("re-upload drain");
-    assert!(
-        storage.read("blob_tombstones/blob-key").await.is_err(),
-        "the re-upload's cancel removed the leftover tombstone",
-    );
-    let n = gc_tombstones_without_live_refs(
-        &storage,
-        &storage,
-        &cipher,
-        "test-lib",
-        Some(&owner),
-        &past,
-    )
-    .await
-    .expect("gc after re-upload");
-    assert_eq!(n, 0, "no tombstone remains to delete the re-uploaded blob");
-    assert!(
-        storage.read("blob-key").await.is_ok(),
-        "the re-uploaded blob survives the leftover-tombstone window",
     );
 }

@@ -215,6 +215,19 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         data: Vec<u8>,
     ) -> Result<(), StorageError>;
 
+    async fn put_blob_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        let _ = location;
+        self.put_blob(namespace, id, scope, cloud_path, data).await
+    }
+
     /// Upload a blob from a local plaintext file without reading the whole file
     /// into memory. Same keying, scope, and at-rest protection as [`Self::put_blob`].
     async fn put_blob_from_file(
@@ -225,6 +238,20 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         cloud_path: Option<&str>,
         source_path: &Path,
     ) -> Result<(), StorageError>;
+
+    async fn put_blob_from_file_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        source_path: &Path,
+    ) -> Result<(), StorageError> {
+        let _ = location;
+        self.put_blob_from_file(namespace, id, scope, cloud_path, source_path)
+            .await
+    }
 
     /// Download and open a blob, keyed
     /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}` under the hashed scheme
@@ -244,6 +271,24 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         cloud_path: Option<&str>,
     ) -> Result<Vec<u8>, StorageError>;
 
+    async fn get_blob_at(
+        &self,
+        namespace: &str,
+        location: Option<&crate::blob::CloudBlobLocation>,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.get_blob(
+            namespace,
+            location.map(|value| value.uploader.as_str()),
+            id,
+            scope,
+            cloud_path,
+        )
+        .await
+    }
+
     /// Check whether a blob object exists at the same key [`Self::put_blob`] and
     /// [`Self::get_blob`] use. This does not read or open the blob; publish
     /// preflights use it to prove a row about to be published will not point at a
@@ -254,6 +299,17 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         id: &str,
         cloud_path: Option<&str>,
     ) -> Result<bool, StorageError>;
+
+    async fn blob_exists_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let _ = location;
+        self.blob_exists(namespace, id, cloud_path).await
+    }
 
     /// Serve `len` plaintext bytes of a blob starting at `offset`, without
     /// downloading the whole object — the ranged sibling of [`Self::get_blob`].
@@ -282,6 +338,30 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         len: u64,
     ) -> Result<Vec<u8>, StorageError>;
 
+    async fn read_blob_range_at(
+        &self,
+        namespace: &str,
+        location: Option<&crate::blob::CloudBlobLocation>,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.read_blob_range(
+            namespace,
+            location.map(|value| value.uploader.as_str()),
+            id,
+            scope,
+            cloud_path,
+            source_size,
+            offset,
+            len,
+        )
+        .await
+    }
+
     /// Download and open a blob into `dest` without holding the whole plaintext in
     /// memory. Same keying, scope, and validation as [`Self::read_blob_range`],
     /// writing exactly `source_size` bytes or failing.
@@ -304,6 +384,31 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         dest: &Path,
     ) -> Result<(), StorageError>;
 
+    #[allow(clippy::too_many_arguments)]
+    async fn read_blob_to_file_at(
+        &self,
+        namespace: &str,
+        location: Option<&crate::blob::CloudBlobLocation>,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        expected_hash: &str,
+        dest: &Path,
+    ) -> Result<(), StorageError> {
+        self.read_blob_to_file(
+            namespace,
+            location.map(|value| value.uploader.as_str()),
+            id,
+            scope,
+            cloud_path,
+            source_size,
+            expected_hash,
+            dest,
+        )
+        .await
+    }
+
     /// The blob-path scheme this home uses. The read dispatch consults it to decide
     /// whether a blob key needs an uploader segment (hashed) or not (plain).
     fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme;
@@ -320,12 +425,20 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         cloud_path: Option<&str>,
     ) -> Result<String, StorageError>;
 
-    /// This device's own `{uploader}` segment — the hex public key its blob uploads
-    /// key under on a hashed home, or `None` on a browsable home (which carries no
-    /// uploader segment). The upload path records it in the local uploader index as
-    /// this device's own authoritative uploader for the blobs it introduces, so a
-    /// later self-read (after a cache eviction) resolves the blob straight from that
-    /// index.
+    fn blob_cloud_key_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<String, StorageError> {
+        let _ = location;
+        self.blob_cloud_key(namespace, id, cloud_path)
+    }
+
+    /// This device's upload identity. Hashed homes use it as the `{uploader}` key
+    /// segment; plain generated keys retain it as authenticated provenance even
+    /// though legacy plain keys had no uploader segment.
     fn own_uploader(&self) -> Option<String>;
 
     /// Upload one snapshot generation's DB image under its publishing device.

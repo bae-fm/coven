@@ -28,21 +28,21 @@ macro_rules! coven_tables {
             cloud_outbox,
             "
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    operation TEXT NOT NULL CHECK (operation IN ('upload', 'delete', 'cancel')),
+    operation TEXT NOT NULL CHECK (operation IN ('upload', 'delete')),
     -- The blob's file id, which an upload reports progress under. NULL for a
-    -- delete or cancel entry, which carry no file id.
+    -- delete entry, which carries no file id.
     file_id TEXT,
     cloud_key TEXT NOT NULL,
     source_path TEXT,
     -- The blob's encryption scope (master / derived / item), serialized so the
     -- async drain resolves it to a key long after the enqueue site is gone.
-    -- NULL for a delete or cancel entry, which touch no key. Local bookkeeping;
+    -- NULL for a delete entry, which touches no encryption key. Local bookkeeping;
     -- this table does not sync.
     scope TEXT,
     -- Whether a successful upload should also populate coven's protected cache
     -- folder (storage/pinned/<id>) from the plaintext, so the blob is kept local
     -- and budget-exempt with no later cloud round-trip. Upload-only and honestly
-    -- 0 for a delete or cancel (they retain nothing), so unlike scope/source_path
+    -- 0 for a delete (it retains nothing), so unlike scope/source_path
     -- it has a meaningful default rather than NULL.
     retain_pinned INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -111,6 +111,7 @@ macro_rules! coven_tables {
     -- fact the same for every device, so a snapshot-bootstrapped device inherits
     -- authoritative uploaders from the Owner-signed snapshot rather than scanning.
     uploader  TEXT NOT NULL,
+    generation TEXT,
     PRIMARY KEY (namespace, blob_id)
 "
         );
@@ -135,6 +136,15 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
     }
 
     coven_tables!(apply_table);
+    let has_generation = conn
+        .prepare("PRAGMA table_info(blob_uploaders)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|column| column == "generation");
+    if !has_generation {
+        conn.execute("ALTER TABLE blob_uploaders ADD COLUMN generation TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -193,6 +203,57 @@ mod tests {
             assert_eq!(strict, 1, "{name} must be STRICT");
         }
     }
+
+    fn blob_uploader_columns(conn: &rusqlite::Connection) -> Vec<String> {
+        conn.prepare("PRAGMA table_info(blob_uploaders)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn fresh_blob_location_schema_includes_nullable_generation() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        apply_coven_schema(&conn).unwrap();
+        assert!(blob_uploader_columns(&conn)
+            .iter()
+            .any(|name| name == "generation"));
+        conn.execute(
+            "INSERT INTO blob_uploaders (namespace, blob_id, uploader, generation) \
+             VALUES ('photos', 'p1', 'aa11', NULL)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn opening_legacy_blob_uploader_schema_adds_generation_without_losing_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE blob_uploaders (\
+                 namespace TEXT NOT NULL, blob_id TEXT NOT NULL, uploader TEXT NOT NULL, \
+                 PRIMARY KEY (namespace, blob_id)\
+             ) STRICT;\
+             INSERT INTO blob_uploaders VALUES ('photos', 'p1', 'aa11');",
+        )
+        .unwrap();
+
+        apply_coven_schema(&conn).unwrap();
+
+        assert!(blob_uploader_columns(&conn)
+            .iter()
+            .any(|name| name == "generation"));
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT uploader, generation FROM blob_uploaders WHERE namespace = 'photos' AND blob_id = 'p1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("aa11".to_string(), None));
+    }
 }
 
 /// An external user-owned file a blob id resolves to, read back from a
@@ -215,7 +276,7 @@ pub struct ExternalBlob {
 /// [`OutboxOperation`]. The `cloud_outbox` table is flat (the operation-specific
 /// `scope`/`source_path` columns are nullable), but a row reads back as exactly one
 /// variant, so a drain matches on `operation` and never sees a column that doesn't
-/// belong to it (no upload-only `scope` on a delete or cancel).
+/// belong to it (no upload-only `scope` on a delete).
 #[derive(Debug, Clone)]
 pub struct OutboxEntry {
     pub id: i64,
@@ -257,11 +318,4 @@ pub enum OutboxOperation {
     /// grace has passed, so a peer that still references it isn't stranded. See
     /// [`crate::blob::delete`]. Carries no extra fields.
     Delete,
-    /// Cancel the tombstone for `cloud_key`: remove the `blob_tombstones/{key}`
-    /// object so a GC pass won't reclaim a blob that has just been (re-)uploaded
-    /// to that key. Queued by the upload drain only when its inline cancel of the
-    /// tombstone fails, so the cancel survives that failure and a restart and is
-    /// retried each cycle until the tombstone is gone (see
-    /// [`crate::blob::delete::drain_tombstone_cancels`]). Carries no extra fields.
-    Cancel,
 }

@@ -69,7 +69,6 @@ pub async fn complete_host_provided_make_remotes(
     timestamp: &str,
     store_dir: &StoreDir,
     local_seq: u64,
-    cancel: Option<&HostUploadCloud<'_>>,
 ) -> Result<bool, SyncCycleError> {
     let roots = ready_host_provided_make_remotes(db, tables).await?;
     let mut completed = false;
@@ -90,7 +89,8 @@ pub async fn complete_host_provided_make_remotes(
         // copy. A copy already in the cache (crash-recovery fallback) needs neither.
         let mut drops = Vec::new();
         for blob in &root.host_blobs {
-            let uploaded = upload_host_provided_blob(db, storage, store_dir, blob, cancel).await?;
+            let uploaded =
+                upload_host_provided_blob(db, storage, store_dir, blob, timestamp).await?;
             if let Some(drop) = uploaded
                 .deferred_local_blob_drop(local_blob_disposition(blob, root.intent.retain_pinned))
             {
@@ -110,10 +110,10 @@ pub(super) async fn upload_snapshot_host_blobs(
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
     blobs: &[BlobRef],
-    cancel: Option<&HostUploadCloud<'_>>,
+    timestamp: &str,
 ) -> Result<(), SyncCycleError> {
     for blob in blobs {
-        let uploaded = upload_host_provided_blob(db, storage, store_dir, blob, cancel).await?;
+        let uploaded = upload_host_provided_blob(db, storage, store_dir, blob, timestamp).await?;
         uploaded
             .apply_local_store_disposition(db, store_dir, local_blob_disposition(blob, false))
             .await?;
@@ -141,7 +141,6 @@ pub async fn sync(
     store_dir: &StoreDir,
     membership_chain: Option<&MembershipChain>,
     owner_pubkey: Option<&str>,
-    cancel: Option<&HostUploadCloud<'_>>,
     seal_paused: bool,
 ) -> Result<SyncResult, SyncCycleError> {
     // Step 2: apply row-level sync gating. Cut gated-false rows (and their
@@ -188,6 +187,7 @@ pub async fn sync(
     // local-store cleanup that runs only after the changeset is published.
     let mut deferred_local_blob_drops = Vec::new();
     let mut consumed_intents: HashSet<(String, String)> = HashSet::new();
+    let mut outgoing_blob_locations = Vec::new();
     // A committed store-key rotation this device has not adopted pauses sealing:
     // skip the inline host-provided blob uploads (and the publishability check) so
     // nothing is sealed under a superseded generation. The changeset built below
@@ -204,7 +204,8 @@ pub async fn sync(
         for blob in host_blobs {
             let intent = make_remote_intents.get(&(blob.namespace.clone(), blob.id.clone()));
             let retain_pinned = intent.is_some_and(|intent| intent.retain_pinned);
-            let uploaded = upload_host_provided_blob(db, storage, store_dir, &blob, cancel).await?;
+            let uploaded =
+                upload_host_provided_blob(db, storage, store_dir, &blob, timestamp).await?;
             if let Some(intent) = intent {
                 consumed_intents.insert((intent.root_table.clone(), intent.root_id.clone()));
             }
@@ -227,6 +228,37 @@ pub async fn sync(
         ensure_publishable_blobs(db, storage, &publish_blobs)
             .await
             .map_err(SyncCycleError::from)?;
+        let mut seen = HashSet::new();
+        for blob in publish_blobs {
+            if !seen.insert((blob.namespace.clone(), blob.id.clone())) {
+                continue;
+            }
+            let location = db
+                .blob_location(&blob.namespace, &blob.id)
+                .await
+                .map_err(|error| SyncCycleError::AssetUpload(error.0))?
+                .ok_or_else(|| {
+                    SyncCycleError::BlobMissing(format!(
+                        "blob {}/{} has no cloud location",
+                        blob.namespace, blob.id
+                    ))
+                })?;
+            let plaintext_size = crate::blob::cache::expected_blob_size(db, &blob)
+                .await
+                .map_err(|error| SyncCycleError::AssetScan(error.to_string()))?;
+            let content_hash = match crate::blob::cache::expected_blob_hash(db, &blob).await {
+                Ok(hash) => Some(hash),
+                Err(crate::blob::cache::BlobCacheError::MissingContentHash { .. }) => None,
+                Err(error) => return Err(SyncCycleError::AssetScan(error.to_string())),
+            };
+            outgoing_blob_locations.push(envelope::BlobLocationRecord {
+                namespace: blob.namespace,
+                blob_id: blob.id,
+                location,
+                plaintext_size: Some(plaintext_size),
+                content_hash,
+            });
+        }
     }
 
     // Bind the outgoing changeset to the membership entry that authorizes us
@@ -241,7 +273,7 @@ pub async fn sync(
 
     let outgoing = outgoing_cs.map(|cs| {
         let next_seq = local_seq + 1;
-        let packed = envelope::pack_signed(
+        let packed = envelope::pack_signed_with_blob_locations(
             device_id,
             next_seq,
             db.schema_version(),
@@ -249,6 +281,7 @@ pub async fn sync(
             timestamp,
             keypair,
             membership_grant,
+            outgoing_blob_locations,
             &cs,
         );
         OutgoingChangeset {
@@ -363,47 +396,6 @@ impl UploadedHostBlob {
     }
 }
 
-/// The cloud handle, object-key suffix, and timestamp the inline host-provided upload
-/// path needs to cancel a pending tombstone after a successful (re-)upload. Built once
-/// per cycle when a cloud home is present; `None` on a cloud-less run, which has no
-/// tombstones to cancel.
-pub struct HostUploadCloud<'a> {
-    pub cloud_home: &'a dyn crate::storage::cloud::CloudHome,
-    pub suffix: &'a str,
-    pub now_rfc: &'a str,
-}
-
-/// Cancel any tombstone standing for `blob`'s cloud key after this path re-uploaded
-/// (or found already-present) the blob, mirroring what the outbox drain does on every
-/// upload — so a re-shared host blob a prior make_local tombstoned is not reclaimed by
-/// a GC that outraces the re-upload. [`upload_host_provided_blob`] calls this however it
-/// left the blob's cloud object: the skip is the live case when the blob is still within
-/// its deletion grace. The cloud key comes from the home itself ([`SyncStorage::blob_cloud_key`]),
-/// so it names exactly where the (re-)upload wrote the blob and where any tombstone for
-/// it sits — not a re-derivation that could disagree with the home's own keying.
-async fn cancel_host_blob_tombstone(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    blob: &BlobRef,
-    cancel: Option<&HostUploadCloud<'_>>,
-) -> Result<(), SyncCycleError> {
-    let Some(cancel) = cancel else {
-        return Ok(());
-    };
-    let cloud_key = storage
-        .blob_cloud_key(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
-        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
-    crate::blob::delete::cancel_tombstone_or_enqueue(
-        db,
-        cancel.cloud_home,
-        cancel.suffix,
-        &cloud_key,
-        cancel.now_rfc,
-    )
-    .await
-    .map_err(|e| SyncCycleError::AssetUpload(e.0))
-}
-
 /// Where this device holds a host-provided blob's plaintext, if it holds it at all.
 enum LocalHostBlob {
     /// coven's local store — the blob's Local home, where the host put it. Once the
@@ -460,7 +452,7 @@ async fn upload_host_provided_blob(
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
     blob: &BlobRef,
-    cancel: Option<&HostUploadCloud<'_>>,
+    timestamp: &str,
 ) -> Result<UploadedHostBlob, SyncCycleError> {
     let blob = &with_row_cloud_path(db, blob).await?;
     let expected_size = expected_blob_size(db, blob).await?;
@@ -473,8 +465,32 @@ async fn upload_host_provided_blob(
     // THIS blob's key holds THIS blob's bytes: presence is proof of content, and there is
     // nothing to upload. A repointed row whose cloud path did not move fails to key at
     // all, so it never reaches this skip.
+    let location = match db
+        .blob_location(&blob.namespace, &blob.id)
+        .await
+        .map_err(|e| SyncCycleError::AssetUpload(e.0))?
+    {
+        Some(location) => location,
+        None => crate::blob::CloudBlobLocation::generated(
+            storage.own_uploader().ok_or_else(|| {
+                SyncCycleError::AssetUpload("storage has no uploader identity".to_string())
+            })?,
+            timestamp,
+        ),
+    };
+    // Persist the generated location before the cloud write. A failed or interrupted
+    // upload therefore retries the same immutable key instead of minting another
+    // generation and losing the durable identity of the operation.
+    db.record_blob_location(&blob.namespace, &blob.id, &location)
+        .await
+        .map_err(|error| SyncCycleError::AssetUpload(error.0))?;
     let uploaded = storage
-        .blob_exists(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
+        .blob_exists_at(
+            &blob.namespace,
+            &location,
+            &blob.id,
+            blob.cloud_path.as_deref(),
+        )
         .await
         .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
 
@@ -490,8 +506,9 @@ async fn upload_host_provided_blob(
         (_, true) => {}
         (Some(local), false) => {
             storage
-                .put_blob_from_file(
+                .put_blob_from_file_at(
                     &blob.namespace,
+                    &location,
                     &blob.id,
                     blob.scope.clone(),
                     blob.cloud_path.as_deref(),
@@ -514,35 +531,11 @@ async fn upload_host_provided_blob(
         }
     }
 
-    // A (re-)upload — and a blob already in the cloud — wins over any pending deletion
-    // of this key: cancel a tombstone a prior make_local left, so a GC past the grace
-    // won't reclaim what stands there now.
-    cancel_host_blob_tombstone(db, storage, blob, cancel).await?;
-    record_self_upload(db, storage, blob).await?;
-
     Ok(UploadedHostBlob {
         blob: blob.clone(),
         expected_size,
         cleanup_local_store_after_publish: local.is_some_and(|local| local.in_local_store()),
     })
-}
-
-/// Record in the local uploader index that this device uploaded `blob`, so a later
-/// self-read after a cache eviction keys it under us without a listing scan. A
-/// no-op on a browsable home (no uploader segment). The upload has already
-/// succeeded when this runs, so a failure fails the push loudly and the whole
-/// (idempotent) upload retries — the record then lands on the retry.
-async fn record_self_upload(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    blob: &BlobRef,
-) -> Result<(), SyncCycleError> {
-    if let Some(uploader) = storage.own_uploader() {
-        db.record_blob_uploader(&blob.namespace, &blob.id, &uploader)
-            .await
-            .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
-    }
-    Ok(())
 }
 
 async fn expected_blob_size(db: &Database, blob: &BlobRef) -> Result<u64, SyncCycleError> {

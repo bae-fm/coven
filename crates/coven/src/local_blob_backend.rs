@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use coven_core::local_blob::{PlatformLocalBlobBackend, PlatformPlaintextReader, TEMP_BLOB_PREFIX};
+use coven_core::local_blob::{
+    CommitNoReplaceError, PlatformLocalBlobBackend, PlatformPlaintextReader, TEMP_BLOB_PREFIX,
+};
 use tokio::io::AsyncReadExt;
 
 static NATIVE_LOCAL_BLOB_BACKEND: NativeLocalBlobBackend = NativeLocalBlobBackend;
@@ -284,6 +286,38 @@ impl PlatformLocalBlobBackend for NativeLocalBlobBackend {
         Ok(())
     }
 
+    async fn commit_temp_no_replace(
+        &self,
+        temp: &Path,
+        destination: &Path,
+    ) -> Result<(), CommitNoReplaceError> {
+        match tokio::fs::hard_link(temp, destination).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(CommitNoReplaceError::DestinationExists(
+                    destination.to_path_buf(),
+                ));
+            }
+            Err(error) => {
+                return Err(CommitNoReplaceError::Other(format!(
+                    "link temp {} to {}: {error}",
+                    temp.display(),
+                    destination.display()
+                )));
+            }
+        }
+        if let Err(error) = self.sync_parent_dir(destination).await {
+            return Err(CommitNoReplaceError::DestinationCreated(error));
+        }
+        if let Err(error) = tokio::fs::remove_file(temp).await {
+            return Err(CommitNoReplaceError::DestinationCreated(format!(
+                "remove committed temp {}: {error}",
+                temp.display()
+            )));
+        }
+        Ok(())
+    }
+
     async fn exists(&self, path: &Path) -> Result<bool, String> {
         tokio::fs::try_exists(path)
             .await
@@ -403,5 +437,27 @@ mod tests {
 
         let read_back = NativeLocalBlobBackend.read(&path).await.expect("read back");
         assert_eq!(read_back, bytes);
+    }
+
+    #[tokio::test]
+    async fn no_replace_commit_preserves_a_destination_created_before_commit() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let operation_temp = tmp.path().join("operation.tmp");
+        let destination = tmp.path().join("destination.bin");
+        tokio::fs::write(&operation_temp, b"materialized")
+            .await
+            .unwrap();
+        tokio::fs::write(&destination, b"winner").await.unwrap();
+
+        let error = NativeLocalBlobBackend
+            .commit_temp_no_replace(&operation_temp, &destination)
+            .await
+            .expect_err("the destination creator wins");
+        assert!(matches!(error, CommitNoReplaceError::DestinationExists(_)));
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"winner");
+        assert_eq!(
+            tokio::fs::read(&operation_temp).await.unwrap(),
+            b"materialized"
+        );
     }
 }

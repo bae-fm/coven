@@ -15,7 +15,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::blob::{BlobScope, CacheFill, Provenance};
 use crate::clock::SystemClock;
-use crate::database::Database;
+use crate::database::{Database, PendingChangesetBatch};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
@@ -1644,6 +1644,9 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
         )
         .await
         .expect("plant remote blob");
+    db.record_blob_uploader("photos", "remoteonly", &storage.own_uploader().unwrap())
+        .await
+        .unwrap();
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -1840,7 +1843,7 @@ async fn staged_retry_writes_rfc3339_head_timestamp() {
     storage.fail_next_changeset_puts(1);
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        cycle::read_staged_changeset(&ld).await.is_some(),
+        cycle::read_staged_changeset(&ld).await.unwrap().is_some(),
         "the changeset stages after the push write fails",
     );
 
@@ -1851,6 +1854,81 @@ async fn staged_retry_writes_rfc3339_head_timestamp() {
         "the staged retry publishes the changeset",
     );
     assert_own_head_timestamps_are_rfc3339(&storage, "M");
+}
+
+#[tokio::test]
+async fn missing_committed_stage_holds_sequence_and_pending_journal() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (_tmp, ld) = temp_store_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [24u8; 32],
+    )));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'First', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    storage.fail_next_changeset_puts(1);
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+
+    let staged = cycle::read_staged_changeset(&ld)
+        .await
+        .expect("read staged changeset")
+        .expect("staged changeset exists");
+    storage
+        .put_changeset("M", 1, staged.clone())
+        .await
+        .expect("simulate committed cloud changeset");
+    storage
+        .put_head("M", 1, T0)
+        .await
+        .expect("simulate committed cloud head");
+    crate::local_blob::remove_file(&cycle::staging_path(&ld))
+        .await
+        .expect("remove stage");
+
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n2', 'Later', NULL, 1, '0000000002000-0000-M', '2026-01-01')",
+    )
+    .await;
+    let retry = run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &PendingRotation::none(),
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(
+        retry.is_err(),
+        "a missing staged payload must stop the cycle"
+    );
+    assert_eq!(
+        db.get_sync_state("staged_seq").await.unwrap().as_deref(),
+        Some("1")
+    );
+    assert_eq!(db.get_sync_state("local_seq").await.unwrap(), None);
+    assert!(matches!(
+        db.pending_changeset_batch().await.unwrap(),
+        PendingChangesetBatch::Pending { .. }
+    ));
+    assert_eq!(storage.get_changeset("M", 1).await.unwrap(), staged);
 }
 
 #[tokio::test]
@@ -1877,6 +1955,9 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
         )
         .await
         .expect("plant remote user-provided blob");
+    db.record_blob_uploader("audio", "audio1", &storage.own_uploader().unwrap())
+        .await
+        .unwrap();
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -1893,7 +1974,7 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
     storage.fail_next_changeset_puts(1);
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        cycle::read_staged_changeset(&ld).await.is_some(),
+        cycle::read_staged_changeset(&ld).await.unwrap().is_some(),
         "the packed changeset remains staged after the publish write fails"
     );
     assert!(

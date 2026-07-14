@@ -800,11 +800,11 @@ pub(crate) async fn materialize_remote_blob_to_file(
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     validate_blob_ref(blob)?;
     let expected_hash = expected_blob_hash(db, blob).await?;
-    let uploader = resolve_blob_uploader(db, storage, blob).await?;
+    let location = resolve_blob_location(db, storage, blob).await?;
     storage
-        .read_blob_to_file(
+        .read_blob_to_file_at(
             &blob.namespace,
-            uploader.as_deref(),
+            location.as_ref(),
             &blob.id,
             blob.scope.clone(),
             blob.cloud_path.as_deref(),
@@ -1284,11 +1284,11 @@ pub(crate) async fn fetch_from_cloud(
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
     validate_blob_ref(blob)?;
-    let uploader = resolve_blob_uploader(db, storage, blob).await?;
+    let location = resolve_blob_location(db, storage, blob).await?;
     storage
-        .get_blob(
+        .get_blob_at(
             &blob.namespace,
-            uploader.as_deref(),
+            location.as_ref(),
             &blob.id,
             blob.scope.clone(),
             blob.cloud_path.as_deref(),
@@ -1304,29 +1304,29 @@ pub(crate) async fn fetch_from_cloud(
 /// uploader is authoritative state tied to the blob's row, never blind-searched:
 /// a miss is a missing dispatch key surfaced loud, not a cue to scan an untrusted
 /// listing (which a member could seed with a same-size decoy under its own prefix).
-/// `None` means a browsable/plain home, whose keys carry no uploader segment.
-pub(crate) async fn resolve_blob_uploader(
+/// `None` means a legacy browsable/plain object whose key predates locations.
+pub(crate) async fn resolve_blob_location(
     db: &Database,
     storage: &dyn SyncStorage,
     blob: &BlobRef,
-) -> Result<Option<String>, BlobCacheError> {
+) -> Result<Option<crate::blob::CloudBlobLocation>, BlobCacheError> {
+    if let Some(location) = db
+        .blob_location(&blob.namespace, &blob.id)
+        .await
+        .map_err(|e| BlobCacheError::Io(e.0))?
+    {
+        return Ok(Some(location));
+    }
     if !matches!(
         storage.blob_path_scheme(),
         crate::sync::cloud_storage::BlobPathScheme::Hashed
     ) {
         return Ok(None);
     }
-    match db
-        .blob_uploader(&blob.namespace, &blob.id)
-        .await
-        .map_err(|e| BlobCacheError::Io(e.0))?
-    {
-        Some(uploader) => Ok(Some(uploader)),
-        None => Err(BlobCacheError::UploaderUnresolved {
-            namespace: blob.namespace.clone(),
-            id: blob.id.clone(),
-        }),
-    }
+    Err(BlobCacheError::UploaderUnresolved {
+        namespace: blob.namespace.clone(),
+        id: blob.id.clone(),
+    })
 }
 
 /// Resolve a blob's scope to its encryption key and download + decrypt a plaintext
@@ -1349,11 +1349,11 @@ async fn fetch_range_from_cloud(
     len: u64,
 ) -> Result<Vec<u8>, BlobCacheError> {
     validate_blob_ref(blob)?;
-    let uploader = resolve_blob_uploader(db, storage, blob).await?;
+    let location = resolve_blob_location(db, storage, blob).await?;
     storage
-        .read_blob_range(
+        .read_blob_range_at(
             &blob.namespace,
-            uploader.as_deref(),
+            location.as_ref(),
             &blob.id,
             blob.scope.clone(),
             blob.cloud_path.as_deref(),

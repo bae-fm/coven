@@ -697,16 +697,34 @@ impl CloudSyncStorage {
         id: &str,
         cloud_path: Option<&str>,
     ) -> Result<String, StorageError> {
+        let location = uploader.map(crate::blob::CloudBlobLocation::legacy);
+        Self::blob_key_at(scheme, namespace, location.as_ref(), id, cloud_path)
+    }
+
+    pub fn blob_key_at(
+        scheme: BlobPathScheme,
+        namespace: &str,
+        location: Option<&crate::blob::CloudBlobLocation>,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<String, StorageError> {
         match scheme {
             BlobPathScheme::Hashed => {
-                let uploader = uploader.ok_or_else(|| {
+                let location = location.ok_or_else(|| {
                     StorageError::Parse(format!(
                         "an opaque-home blob requires an uploader for {namespace}/{id}"
                     ))
                 })?;
-                Ok(crate::store_dir::StoreDir::uploader_hashed_key(
-                    namespace, uploader, id,
-                )?)
+                location.validate().map_err(StorageError::Parse)?;
+                let legacy = crate::store_dir::StoreDir::uploader_hashed_key(
+                    namespace,
+                    &location.uploader,
+                    id,
+                )?;
+                Ok(match &location.generation {
+                    Some(generation) => format!("{legacy}/generations/{generation}"),
+                    None => legacy,
+                })
             }
             BlobPathScheme::Plain => {
                 let path = cloud_path.ok_or_else(|| {
@@ -716,7 +734,18 @@ impl CloudSyncStorage {
                 })?;
                 crate::store_dir::validate_path_token(namespace)?;
                 crate::store_dir::validate_cloud_path(path)?;
-                Ok(format!("{namespace}/{path}"))
+                let legacy = format!("{namespace}/{path}");
+                match location.and_then(|location| location.generation.as_deref()) {
+                    Some(generation) => {
+                        let location = location.expect("generation came from a location");
+                        location.validate().map_err(StorageError::Parse)?;
+                        Ok(format!(
+                            "{namespace}/.coven-generations/{}/{generation}/{path}",
+                            location.uploader
+                        ))
+                    }
+                    None => Ok(legacy),
+                }
             }
         }
     }
@@ -1228,6 +1257,19 @@ impl SyncStorage for CloudSyncStorage {
         self.write_blob_sealed(&key, scope, data).await
     }
 
+    async fn put_blob_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        let key = Self::blob_key_at(self.blob_paths, namespace, Some(location), id, cloud_path)?;
+        self.write_blob_sealed(&key, scope, data).await
+    }
+
     async fn put_blob_from_file(
         &self,
         namespace: &str,
@@ -1238,6 +1280,27 @@ impl SyncStorage for CloudSyncStorage {
     ) -> Result<(), StorageError> {
         let uploader = self.self_uploader();
         let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
+        let cipher = self.cipher_for_seal()?;
+        let body = cipher
+            .open_body(scope, source_path, &self.aad_context(&key))
+            .await
+            .map_err(StorageError::Storage)?;
+        self.home
+            .write(&key, body, &crate::storage::cloud::no_progress())
+            .await?;
+        Ok(())
+    }
+
+    async fn put_blob_from_file_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        source_path: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        let key = Self::blob_key_at(self.blob_paths, namespace, Some(location), id, cloud_path)?;
         let cipher = self.cipher_for_seal()?;
         let body = cipher
             .open_body(scope, source_path, &self.aad_context(&key))
@@ -1262,6 +1325,19 @@ impl SyncStorage for CloudSyncStorage {
             .await
     }
 
+    async fn get_blob_at(
+        &self,
+        namespace: &str,
+        location: Option<&crate::blob::CloudBlobLocation>,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+    ) -> Result<Vec<u8>, StorageError> {
+        let key = Self::blob_key_at(self.blob_paths, namespace, location, id, cloud_path)?;
+        self.read_blob_sealed(&key, scope, &format!("blob {namespace}/{id}"))
+            .await
+    }
+
     async fn blob_exists(
         &self,
         namespace: &str,
@@ -1275,6 +1351,17 @@ impl SyncStorage for CloudSyncStorage {
         // and the object standing at one is that blob's bytes. Presence IS content.
         let uploader = self.self_uploader();
         let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
+        self.home.exists(&key).await.map_err(StorageError::from)
+    }
+
+    async fn blob_exists_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let key = Self::blob_key_at(self.blob_paths, namespace, Some(location), id, cloud_path)?;
         self.home.exists(&key).await.map_err(StorageError::from)
     }
 
@@ -1306,6 +1393,32 @@ impl SyncStorage for CloudSyncStorage {
             aad_context,
         );
         reader.read(offset, len).await
+    }
+
+    async fn read_blob_range_at(
+        &self,
+        namespace: &str,
+        location: Option<&crate::blob::CloudBlobLocation>,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        let key = Self::blob_key_at(self.blob_paths, namespace, location, id, cloud_path)?;
+        let cipher = self.cipher().clone();
+        let aad_context = self.aad_context(&key);
+        BlobRangeReader::new(
+            self.home.clone(),
+            &cipher,
+            scope,
+            key,
+            source_size,
+            aad_context,
+        )
+        .read(offset, len)
+        .await
     }
 
     async fn read_blob_to_file(
@@ -1353,6 +1466,46 @@ impl SyncStorage for CloudSyncStorage {
         Ok(())
     }
 
+    async fn read_blob_to_file_at(
+        &self,
+        namespace: &str,
+        location: Option<&crate::blob::CloudBlobLocation>,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        expected_hash: &str,
+        dest: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        let key = Self::blob_key_at(self.blob_paths, namespace, location, id, cloud_path)?;
+        let cipher = self.cipher().clone();
+        let reader = BlobRangeReader::new(
+            self.home.clone(),
+            &cipher,
+            scope,
+            key.clone(),
+            source_size,
+            self.aad_context(&key),
+        );
+        let mut source = HashVerifyingPlaintextReader {
+            reader,
+            offset: 0,
+            remaining: source_size,
+            hasher: crate::blob::ContentHasher::new(),
+            expected_hash: expected_hash.to_string(),
+            key,
+        };
+        let written = crate::local_blob::write_stream_atomic(dest, &mut source)
+            .await
+            .map_err(StorageError::Storage)?;
+        if written != source_size {
+            return Err(StorageError::Storage(format!(
+                "downloaded blob {namespace}/{id} wrote {written} bytes, expected {source_size}"
+            )));
+        }
+        Ok(())
+    }
+
     fn blob_path_scheme(&self) -> BlobPathScheme {
         self.blob_paths
     }
@@ -1372,11 +1525,18 @@ impl SyncStorage for CloudSyncStorage {
         )
     }
 
+    fn blob_cloud_key_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<String, StorageError> {
+        Self::blob_key_at(self.blob_paths, namespace, Some(location), id, cloud_path)
+    }
+
     fn own_uploader(&self) -> Option<String> {
-        match self.blob_paths {
-            BlobPathScheme::Hashed => Some(self.self_uploader()),
-            BlobPathScheme::Plain => None,
-        }
+        Some(self.self_uploader())
     }
 
     async fn put_snapshot(
@@ -2585,6 +2745,59 @@ mod tests {
             .await
             .expect("get_blob plain");
         assert_eq!(got, bytes);
+    }
+
+    #[test]
+    fn generated_blob_keys_extend_legacy_layouts_without_changing_legacy_keys() {
+        let legacy = crate::blob::CloudBlobLocation::legacy("aa11");
+        let generated = crate::blob::CloudBlobLocation {
+            uploader: "aa11".to_string(),
+            generation: Some("deadbeef".to_string()),
+        };
+        assert_eq!(
+            CloudSyncStorage::blob_key_at(
+                BlobPathScheme::Hashed,
+                "photos",
+                Some(&legacy),
+                "aabbccdd",
+                None,
+            )
+            .unwrap(),
+            "photos/aa11/aa/bb/aabbccdd",
+        );
+        assert_eq!(
+            CloudSyncStorage::blob_key_at(
+                BlobPathScheme::Hashed,
+                "photos",
+                Some(&generated),
+                "aabbccdd",
+                None,
+            )
+            .unwrap(),
+            "photos/aa11/aa/bb/aabbccdd/generations/deadbeef",
+        );
+        assert_eq!(
+            CloudSyncStorage::blob_key_at(
+                BlobPathScheme::Plain,
+                "photos",
+                Some(&legacy),
+                "aabbccdd",
+                Some("Artist/cover.jpg"),
+            )
+            .unwrap(),
+            "photos/Artist/cover.jpg",
+        );
+        assert_eq!(
+            CloudSyncStorage::blob_key_at(
+                BlobPathScheme::Plain,
+                "photos",
+                Some(&generated),
+                "aabbccdd",
+                Some("Artist/cover.jpg"),
+            )
+            .unwrap(),
+            "photos/.coven-generations/aa11/deadbeef/Artist/cover.jpg",
+        );
     }
 
     /// A plain-scheme home with no `cloud_path` is a surfaced error, never a
