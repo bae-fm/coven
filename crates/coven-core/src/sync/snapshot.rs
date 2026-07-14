@@ -144,7 +144,7 @@ pub struct BootstrapResult {
     store_id: String,
     target_path: PathBuf,
     db_hash: String,
-    genesis_hash: super::store_commit::ObjectHash,
+    store_root_hash: super::store_commit::ObjectHash,
     snapshot_hash: super::store_commit::ObjectHash,
     coverage: BTreeMap<String, super::store_commit::CommitPosition>,
 }
@@ -161,8 +161,8 @@ mod bootstrap_capability_tests {
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::store_commit::{CommitPosition, ObjectHash};
     use crate::sync::test_helpers::{
-        open_test_db, publish_test_founder_membership, publish_test_store_genesis, test_migrations,
-        test_synced_tables,
+        open_test_db, publish_test_founder_membership, publish_test_store_protocol_root,
+        test_migrations, test_synced_tables,
     };
 
     const STORE_ID: &str = "bootstrap-capability-store";
@@ -171,7 +171,7 @@ mod bootstrap_capability_tests {
         _temp: tempfile::TempDir,
         storage: CloudSyncStorage,
         owner: UserKeypair,
-        genesis_hash: ObjectHash,
+        store_root_hash: ObjectHash,
         membership_floor: Vec<crate::sync::membership::MembershipCoord>,
         coverage: BTreeMap<String, CommitPosition>,
     }
@@ -191,8 +191,8 @@ mod bootstrap_capability_tests {
             "bootstrap-capability",
         )));
         let source = open_test_db();
-        let genesis_hash =
-            publish_test_store_genesis(&source, &storage, STORE_ID, "source", &owner).await;
+        let store_root_hash =
+            publish_test_store_protocol_root(&source, &storage, STORE_ID, "source", &owner).await;
         let membership = publish_test_founder_membership(&storage, STORE_ID, &owner).await;
         let snapshot_dir = temp.path().to_path_buf();
         let tables = source.synced_tables().to_vec();
@@ -212,7 +212,7 @@ mod bootstrap_capability_tests {
         )]);
         super::super::store_snapshot::push_store_snapshot(
             &storage,
-            genesis_hash,
+            store_root_hash,
             CreatedSnapshot {
                 db_image: image,
                 host_blobs: Vec::new(),
@@ -231,7 +231,7 @@ mod bootstrap_capability_tests {
             _temp: temp,
             storage,
             owner,
-            genesis_hash,
+            store_root_hash,
             membership_floor: membership.author_heads(),
             coverage,
         }
@@ -241,7 +241,7 @@ mod bootstrap_capability_tests {
         bootstrap_from_snapshot(
             &fixture.storage,
             STORE_ID,
-            fixture.genesis_hash,
+            fixture.store_root_hash,
             &crate::keys::public_key_hex(&fixture.owner),
             &fixture.membership_floor,
             1,
@@ -307,7 +307,7 @@ mod bootstrap_capability_tests {
     }
 
     #[tokio::test]
-    async fn consuming_capability_installs_exact_genesis_snapshot_and_coverage() {
+    async fn consuming_capability_installs_exact_store_protocol_root_snapshot_and_coverage() {
         let fixture = published_snapshot().await;
         let target = fixture._temp.path().join("installed.db");
         let result = capability(&fixture, &target).await;
@@ -316,10 +316,10 @@ mod bootstrap_capability_tests {
             .expect("consume verified snapshot capability");
 
         assert_eq!(
-            db.get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+            db.get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
                 .await
-                .expect("read installed genesis"),
-            Some(fixture.genesis_hash.to_string())
+                .expect("read installed Store protocol root"),
+            Some(fixture.store_root_hash.to_string())
         );
         assert_eq!(
             db.snapshot_coverage_frontier()
@@ -341,7 +341,7 @@ impl BootstrapResult {
     }
 
     /// Consume the verified bootstrap authority by opening its bound database
-    /// file and atomically installing its genesis and exact signed coverage.
+    /// file and atomically installing its Store protocol root and exact signed coverage.
     #[allow(clippy::too_many_arguments)]
     pub async fn open_database(
         self,
@@ -381,7 +381,7 @@ impl BootstrapResult {
                 migrations,
             )
             .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
-            db.install_bootstrap_state(&self.coverage, self.snapshot_hash, self.genesis_hash)
+            db.install_bootstrap_state(&self.coverage, self.snapshot_hash, self.store_root_hash)
                 .await
                 .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
             Ok(db)
@@ -623,7 +623,7 @@ pub fn should_create_snapshot(
 
 /// Bootstrap a new device from an immutable Store snapshot.
 ///
-/// The reader verifies the expected genesis, loads the owner-anchored membership
+/// The reader verifies the expected Store protocol root, loads the owner-anchored membership
 /// chain, and considers only snapshot metadata signed by a current owner. It
 /// selects a maximal signed coverage vector deterministically, refuses a schema
 /// newer than this binary, loads the exact content-addressed image, and writes it
@@ -631,23 +631,23 @@ pub fn should_create_snapshot(
 /// granting authority to install coverage.
 ///
 /// The returned [`BootstrapResult`] binds the verified image, store, destination,
-/// genesis, snapshot hash, and coverage. Consuming it rechecks the image and
+/// Store protocol root, snapshot hash, and coverage. Consuming it rechecks the image and
 /// installs all bootstrap state in one database transaction.
 pub async fn bootstrap_from_snapshot(
     storage: &dyn SyncStorage,
     store_id: &str,
-    expected_genesis_hash: super::store_commit::ObjectHash,
+    expected_store_root_hash: super::store_commit::ObjectHash,
     owner_pubkey: &str,
     membership_floor: &[super::membership::MembershipCoord],
     binary_schema_version: u32,
     target_path: &Path,
 ) -> Result<BootstrapResult, SnapshotError> {
-    // Authenticate genesis, membership, snapshot metadata, and the exact image
+    // Authenticate Store protocol root, membership, snapshot metadata, and the exact image
     // before returning installation authority.
-    let (genesis_hash, meta, plaintext) = super::store_snapshot::select_store_snapshot(
+    let (store_root_hash, meta, plaintext) = super::store_snapshot::select_store_snapshot(
         storage,
         store_id,
-        expected_genesis_hash,
+        expected_store_root_hash,
         owner_pubkey,
         membership_floor,
         binary_schema_version,
@@ -668,7 +668,7 @@ pub async fn bootstrap_from_snapshot(
         store_id: store_id.to_string(),
         target_path,
         db_hash: snapshot_db_hash(&plaintext),
-        genesis_hash,
+        store_root_hash,
         snapshot_hash,
         coverage,
     })

@@ -26,8 +26,8 @@ use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::store_commit::{
-    CommitPosition, ProtocolGenesis, SnapshotMeta, StoreAck, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationState,
+    CommitPosition, SnapshotMeta, StoreAck, StoreDeviceHead, StoreDeviceRegistration,
+    StoreDeviceRegistrationState, StoreProtocolRoot,
 };
 use crate::sync::test_helpers::*;
 
@@ -93,7 +93,7 @@ async fn run_cycle_m_result(
 async fn store_package_exists(storage: &MockSyncStorage, device_id: &str, seq: u64) -> bool {
     let Some(commit) = crate::sync::store_objects::load_commit_slot(
         storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         device_id,
         seq,
     )
@@ -108,7 +108,7 @@ async fn store_package_exists(storage: &MockSyncStorage, device_id: &str, seq: u
 }
 
 async fn store_snapshot_metas(storage: &MockSyncStorage) -> Vec<SnapshotMeta> {
-    crate::sync::store_objects::list_snapshot_metas(storage, storage.protocol_genesis_hash())
+    crate::sync::store_objects::list_snapshot_metas(storage, storage.store_root_hash())
         .await
         .expect("list Store snapshots")
         .metas
@@ -118,7 +118,7 @@ async fn store_snapshot_metas(storage: &MockSyncStorage) -> Vec<SnapshotMeta> {
 }
 
 async fn store_heads(storage: &MockSyncStorage) -> Vec<StoreDeviceHead> {
-    crate::sync::store_objects::list_visible_heads(storage, storage.protocol_genesis_hash())
+    crate::sync::store_objects::list_visible_heads(storage, storage.store_root_hash())
         .await
         .expect("list Store heads")
         .heads
@@ -130,7 +130,7 @@ async fn store_heads(storage: &MockSyncStorage) -> Vec<StoreDeviceHead> {
 async fn publish_mock_founder_membership(
     storage: &MockSyncStorage,
 ) -> crate::sync::membership::MembershipChain {
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let founder_coord = founder.coord();
     let mut chain = crate::sync::membership::MembershipChain::new();
     chain
@@ -155,7 +155,7 @@ async fn append_active_store_device(
     signer: &UserKeypair,
 ) {
     let registration = StoreDeviceRegistration::signed(
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         device_id.to_string(),
         1,
         None,
@@ -184,7 +184,7 @@ async fn append_store_ack(
     signer: &UserKeypair,
 ) {
     let ack = StoreAck::signed(
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         device_id.to_string(),
         1,
         None,
@@ -523,8 +523,8 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
 
     // First connect: empty storage, no pinned owner → found + pin.
     let storage = MockSyncStorage::with_keypair(owner.clone());
-    let genesis = storage.protocol_genesis();
-    ensure_owner_anchored_chain(&storage, &db, &genesis, &owner)
+    let store_protocol_root = storage.store_protocol_root();
+    ensure_owner_anchored_chain(&storage, &db, &store_protocol_root, &owner)
         .await
         .expect("first connect founds the store");
     assert_eq!(
@@ -543,7 +543,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     );
 
     // Second connect on the same storage + db: anchors fine (founder == owner).
-    ensure_owner_anchored_chain(&storage, &db, &genesis, &owner)
+    ensure_owner_anchored_chain(&storage, &db, &store_protocol_root, &owner)
         .await
         .expect("re-connect anchors to the pinned owner");
     let entries = storage.discover_membership_entries().await;
@@ -560,9 +560,9 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
 
     // Wiped membership/* with the owner still pinned → refuse (do not re-found).
     let wiped = MockSyncStorage::with_keypair(owner.clone());
-    let wiped_genesis = wiped.protocol_genesis();
+    let wiped_store_protocol_root = wiped.store_protocol_root();
     assert!(
-        ensure_owner_anchored_chain(&wiped, &db, &wiped_genesis, &owner)
+        ensure_owner_anchored_chain(&wiped, &db, &wiped_store_protocol_root, &owner)
             .await
             .is_err(),
         "an empty chain with a pinned owner is tampering, not a fresh store",
@@ -579,7 +579,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     // Refounded under an attacker's key with the owner pinned → refuse.
     let attacker = UserKeypair::generate();
     let forged = MockSyncStorage::with_keypair(attacker.clone());
-    let forged_genesis = forged.protocol_genesis();
+    let forged_store_protocol_root = forged.store_protocol_root();
     let forged_founder = founder_entry("test-store", &attacker, "2026-03-01T00:00:00Z");
     forged
         .append_membership_entry_bytes(
@@ -590,7 +590,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         .await
         .unwrap();
     assert!(
-        ensure_owner_anchored_chain(&forged, &db, &forged_genesis, &owner)
+        ensure_owner_anchored_chain(&forged, &db, &forged_store_protocol_root, &owner)
             .await
             .is_err(),
         "a chain refounded under a different key is a takeover attempt",
@@ -605,7 +605,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     );
 
     let committed_foreign = MockSyncStorage::with_keypair(attacker.clone());
-    let committed_foreign_genesis = committed_foreign.protocol_genesis();
+    let committed_foreign_store_protocol_root = committed_foreign.store_protocol_root();
     write_founder_entry(
         &committed_foreign,
         "test-store",
@@ -615,9 +615,14 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     .await
     .unwrap();
     assert!(
-        ensure_owner_anchored_chain(&committed_foreign, &db, &committed_foreign_genesis, &owner,)
-            .await
-            .is_err(),
+        ensure_owner_anchored_chain(
+            &committed_foreign,
+            &db,
+            &committed_foreign_store_protocol_root,
+            &owner,
+        )
+        .await
+        .is_err(),
         "a committed foreign founder must not replace the pinned owner",
     );
     assert_eq!(
@@ -648,11 +653,16 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
     // next connect completes it (founder == our key) and anchors.
     let db = open_test_db();
     let storage = MockSyncStorage::with_keypair(owner.clone());
-    let genesis = storage.protocol_genesis();
-    write_founder_entry(&storage, "test-store", &owner, &genesis.founder.created_at)
-        .await
-        .unwrap();
-    ensure_owner_anchored_chain(&storage, &db, &genesis, &owner)
+    let store_protocol_root = storage.store_protocol_root();
+    write_founder_entry(
+        &storage,
+        "test-store",
+        &owner,
+        &store_protocol_root.founder.created_at,
+    )
+    .await
+    .unwrap();
+    ensure_owner_anchored_chain(&storage, &db, &store_protocol_root, &owner)
         .await
         .expect("completes our own half-done founding");
     assert_eq!(
@@ -674,7 +684,7 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
     let attacker = UserKeypair::generate();
     let fresh_db = open_test_db();
     let seeded = MockSyncStorage::with_keypair(attacker.clone());
-    let seeded_genesis = seeded.protocol_genesis();
+    let seeded_store_protocol_root = seeded.store_protocol_root();
     write_founder_entry(
         &seeded,
         "test-store",
@@ -684,7 +694,7 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
     .await
     .unwrap();
     assert!(
-        ensure_owner_anchored_chain(&seeded, &fresh_db, &seeded_genesis, &owner)
+        ensure_owner_anchored_chain(&seeded, &fresh_db, &seeded_store_protocol_root, &owner)
             .await
             .is_err(),
         "a foreign chain with no pinned owner must be refused, not adopted on trust",
@@ -779,7 +789,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
 }
 
 #[tokio::test]
-async fn initialization_refuses_a_founder_entry_without_its_genesis() {
+async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root() {
     use crate::sync::membership::founder_entry;
     use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
@@ -795,16 +805,16 @@ async fn initialization_refuses_a_founder_entry_without_its_genesis() {
     );
     let db = open_test_db();
     let founder = founder_entry("test-lib", &owner, "0000000001000-0000-interrupted-founder");
-    let genesis = ProtocolGenesis::signed(
+    let store_protocol_root = StoreProtocolRoot::signed(
         "test-lib".to_string(),
         founder.clone(),
         db.schema_version(),
         &owner,
     )
-    .expect("sign interrupted protocol genesis");
-    db.stage_protocol_genesis(genesis)
+    .expect("sign interrupted store protocol root");
+    db.stage_store_protocol_root(store_protocol_root)
         .await
-        .expect("stage interrupted protocol genesis");
+        .expect("stage interrupted store protocol root");
     let founder_bytes = serde_json::to_vec(&founder).expect("serialize founder");
     crate::sync::test_helpers::append_membership_entry_bytes(
         &storage,
@@ -820,10 +830,10 @@ async fn initialization_refuses_a_founder_entry_without_its_genesis() {
             .await
         {
             Err(error) => error,
-            Ok(_) => panic!("a nonempty Store layout without genesis must fail loud"),
+            Ok(_) => panic!("a nonempty Store layout without a Store protocol root must fail loud"),
         };
     assert!(
-        matches!(error, cycle::InitSyncError::ProtocolGenesis(ref message) if message.contains("nonempty but has no supported genesis")),
+        matches!(error, cycle::InitSyncError::StoreProtocolRoot(ref message) if message.contains("nonempty but has no supported Store protocol root")),
         "{error}"
     );
 
@@ -846,7 +856,7 @@ async fn initialization_refuses_a_founder_entry_without_its_genesis() {
 }
 
 #[tokio::test]
-async fn initialization_refuses_a_foreign_founder_without_genesis() {
+async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() {
     use crate::sync::membership::founder_entry;
     use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
 
@@ -889,10 +899,10 @@ async fn initialization_refuses_a_foreign_founder_without_genesis() {
             .await
         {
             Err(error) => error,
-            Ok(_) => panic!("a nonempty Store layout without genesis must fail loud"),
+            Ok(_) => panic!("a nonempty Store layout without a Store protocol root must fail loud"),
         };
     assert!(
-        matches!(error, cycle::InitSyncError::ProtocolGenesis(ref message) if message.contains("nonempty but has no supported genesis")),
+        matches!(error, cycle::InitSyncError::StoreProtocolRoot(ref message) if message.contains("nonempty but has no supported Store protocol root")),
         "{error}"
     );
 
@@ -927,28 +937,28 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
     );
     let db = open_test_db();
     let founder = founder_entry("test-lib", &owner, "0000000001000-0000-founder");
-    let genesis = ProtocolGenesis::signed(
+    let store_protocol_root = StoreProtocolRoot::signed(
         "test-lib".to_string(),
         founder.clone(),
         db.schema_version(),
         &owner,
     )
-    .expect("sign protocol genesis");
-    let genesis_hash = genesis.object_hash();
-    db.stage_protocol_genesis(genesis.clone())
+    .expect("sign store protocol root");
+    let store_root_hash = store_protocol_root.object_hash();
+    db.stage_store_protocol_root(store_protocol_root.clone())
         .await
-        .expect("stage protocol genesis");
+        .expect("stage store protocol root");
     crate::sync::store_objects::append_and_verify(
         &storage,
-        &crate::sync::store_commit::genesis_semantic_prefix(genesis_hash),
+        &crate::sync::store_commit::store_protocol_root_semantic_prefix(store_root_hash),
         ".json",
-        &genesis.to_bytes(),
+        &store_protocol_root.to_bytes(),
     )
     .await
-    .expect("publish protocol genesis");
-    db.complete_protocol_genesis(genesis_hash)
+    .expect("publish store protocol root");
+    db.complete_store_protocol_root(store_root_hash)
         .await
-        .expect("complete protocol genesis");
+        .expect("complete store protocol root");
 
     let coord = founder.coord();
     let mut chain = MembershipChain::new();
@@ -1424,15 +1434,10 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     // commit because apply bypasses the pending journal.
     run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        crate::sync::store_objects::load_commit_slot(
-            &storage,
-            storage.protocol_genesis_hash(),
-            "M",
-            1,
-        )
-        .await
-        .expect("load M Store commit slot")
-        .is_none(),
+        crate::sync::store_objects::load_commit_slot(&storage, storage.store_root_hash(), "M", 1,)
+            .await
+            .expect("load M Store commit slot")
+            .is_none(),
         "the row M applied from A must not create an outgoing M commit",
     );
 }
@@ -2389,7 +2394,7 @@ async fn member_device_does_not_create_a_snapshot() {
     // The owner founds the chain and adds this device as a write-capable Member.
     let owner_pk = pubkey_hex(&owner);
     let mut chain = MembershipChain::new();
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     let add = chain
         .signed_set_member(
@@ -2451,7 +2456,7 @@ async fn owner_device_creates_a_snapshot() {
 
     let owner_pk = pubkey_hex(&owner);
     let mut chain = MembershipChain::new();
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
     db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))

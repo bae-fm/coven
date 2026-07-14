@@ -25,12 +25,12 @@ use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::session::SyncedTable;
 use crate::sync::store_commit::{
-    CommitPosition, ObjectHash, ProtocolGenesis, SnapshotMeta, StoreAck, StoreBatchCommit,
-    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationState,
+    CommitPosition, ObjectHash, SnapshotMeta, StoreAck, StoreBatchCommit, StoreDeviceHead,
+    StoreDeviceRegistration, StoreDeviceRegistrationState, StoreProtocolRoot,
 };
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
-pub const PROTOCOL_GENESIS_HASH_STATE_KEY: &str = "protocol_genesis_hash";
+pub const STORE_ROOT_HASH_STATE_KEY: &str = "store_root_hash";
 pub const LAST_SNAPSHOT_HASH_STATE_KEY: &str = "last_snapshot_hash";
 pub const LAST_SNAPSHOT_FRONTIER_STATE_KEY: &str = "last_snapshot_frontier";
 
@@ -1275,18 +1275,18 @@ impl Database {
                     stage.commit.device_id, stage.head.device_id, local_device_id
                 )));
             }
-            let genesis_hash: ObjectHash = tx
+            let store_root_hash: ObjectHash = tx
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
-                    [PROTOCOL_GENESIS_HASH_STATE_KEY],
+                    [STORE_ROOT_HASH_STATE_KEY],
                     |row| row.get::<_, String>(0),
                 )
                 .map_err(DbError::from)?
                 .parse()
-                .map_err(|error| DbError(format!("protocol genesis hash: {error}")))?;
+                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
             stage
                 .commit
-                .verify_at(genesis_hash, &local_device_id, stage.commit.seq)
+                .verify_at(store_root_hash, &local_device_id, stage.commit.seq)
                 .map_err(|error| DbError(format!("verify staged Store commit: {error}")))?;
             stage
                 .commit
@@ -1301,7 +1301,7 @@ impl Database {
             let head_bytes = stage.head.to_bytes();
             let parsed_head = StoreDeviceHead::parse_at(
                 &head_bytes,
-                genesis_hash,
+                store_root_hash,
                 &local_device_id,
                 stage.commit.seq,
             )
@@ -1550,17 +1550,18 @@ impl Database {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .map_err(DbError::from)?;
-            let genesis_hash: ObjectHash = tx
+            let store_root_hash: ObjectHash = tx
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
-                    [PROTOCOL_GENESIS_HASH_STATE_KEY],
+                    [STORE_ROOT_HASH_STATE_KEY],
                     |row| row.get::<_, String>(0),
                 )
                 .map_err(DbError::from)?
                 .parse()
-                .map_err(|error| DbError(format!("protocol genesis hash: {error}")))?;
-            let commit = StoreBatchCommit::parse_at(&stored, genesis_hash, &local_device_id, seq)
-                .map_err(|error| DbError(format!("outbound commit: {error}")))?;
+                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
+            let commit =
+                StoreBatchCommit::parse_at(&stored, store_root_hash, &local_device_id, seq)
+                    .map_err(|error| DbError(format!("outbound commit: {error}")))?;
             if commit.commit_hash() != commit_hash {
                 return Err(DbError("outbound commit hash changed".to_string()));
             }
@@ -1637,15 +1638,15 @@ impl Database {
     pub(crate) async fn stage_store_ack(&self, ack: StoreAck) -> Result<(), DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let genesis_hash: ObjectHash = tx
+            let store_root_hash: ObjectHash = tx
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
-                    [PROTOCOL_GENESIS_HASH_STATE_KEY],
+                    [STORE_ROOT_HASH_STATE_KEY],
                     |row| row.get::<_, String>(0),
                 )
                 .map_err(DbError::from)?
                 .parse()
-                .map_err(|error| DbError(format!("protocol genesis hash: {error}")))?;
+                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
             let device_id: String = tx
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
@@ -1653,7 +1654,7 @@ impl Database {
                     |row| row.get(0),
                 )
                 .map_err(DbError::from)?;
-            StoreAck::parse_at(&ack.to_bytes(), genesis_hash, &device_id, ack.revision)
+            StoreAck::parse_at(&ack.to_bytes(), store_root_hash, &device_id, ack.revision)
                 .map_err(|error| DbError(format!("verify staged Store acknowledgement: {error}")))?;
             let previous = tx
                 .query_row(
@@ -2022,7 +2023,7 @@ impl Database {
                 .map_err(|error| DbError(format!("outbound snapshot metadata: {error}")))?;
             let meta = SnapshotMeta::parse_at(
                 &meta_bytes,
-                unverified.genesis_hash,
+                unverified.store_root_hash,
                 &unverified.author_pubkey,
                 snapshot_hash,
             )
@@ -2090,13 +2091,13 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn local_protocol_genesis(
+    pub(crate) async fn local_store_protocol_root(
         &self,
     ) -> Result<Option<DurableProtocolObject>, DbError> {
         self.call(|conn| {
             conn.query_row(
-                "SELECT genesis_hash, genesis_bytes, published \
-                 FROM local_protocol_genesis WHERE singleton = 1",
+                "SELECT store_root_hash, store_protocol_root_bytes, published \
+                 FROM local_store_protocol_root WHERE singleton = 1",
                 [],
                 |row| {
                     Ok((
@@ -2111,7 +2112,7 @@ impl Database {
             .map(|(hash, bytes, published)| {
                 Ok(DurableProtocolObject {
                     semantic_hash: hash.parse().map_err(|error| {
-                        DbError(format!("local protocol genesis hash: {error}"))
+                        DbError(format!("local store protocol root hash: {error}"))
                     })?,
                     bytes,
                     published: match published {
@@ -2119,7 +2120,7 @@ impl Database {
                         1 => true,
                         value => {
                             return Err(DbError(format!(
-                                "local protocol genesis has invalid published value {value}"
+                                "local store protocol root has invalid published value {value}"
                             )))
                         }
                     },
@@ -2130,23 +2131,23 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn stage_protocol_genesis(
+    pub(crate) async fn stage_store_protocol_root(
         &self,
-        genesis: ProtocolGenesis,
+        store_protocol_root: StoreProtocolRoot,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
-            let bytes = genesis.to_bytes();
-            let parsed = ProtocolGenesis::parse(&bytes)
-                .map_err(|error| DbError(format!("verify staged protocol genesis: {error}")))?;
-            if parsed != genesis {
+            let bytes = store_protocol_root.to_bytes();
+            let parsed = StoreProtocolRoot::parse(&bytes)
+                .map_err(|error| DbError(format!("verify staged store protocol root: {error}")))?;
+            if parsed != store_protocol_root {
                 return Err(DbError(
-                    "staged protocol genesis changed during encoding".to_string(),
+                    "staged store protocol root changed during encoding".to_string(),
                 ));
             }
-            let hash = genesis.object_hash();
+            let hash = store_protocol_root.object_hash();
             let existing = conn
                 .query_row(
-                    "SELECT genesis_hash, genesis_bytes FROM local_protocol_genesis \
+                    "SELECT store_root_hash, store_protocol_root_bytes FROM local_store_protocol_root \
                      WHERE singleton = 1",
                     [],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
@@ -2158,12 +2159,12 @@ impl Database {
                     return Ok(());
                 }
                 return Err(DbError(
-                    "local protocol genesis already owns different bytes".to_string(),
+                    "local store protocol root already owns different bytes".to_string(),
                 ));
             }
             conn.execute(
-                "INSERT INTO local_protocol_genesis \
-                 (singleton, genesis_hash, genesis_bytes, published) VALUES (1, ?1, ?2, 0)",
+                "INSERT INTO local_store_protocol_root \
+                 (singleton, store_root_hash, store_protocol_root_bytes, published) VALUES (1, ?1, ?2, 0)",
                 (hash.to_string(), bytes),
             )
             .map(|_| ())
@@ -2172,28 +2173,28 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn complete_protocol_genesis(
+    pub(crate) async fn complete_store_protocol_root(
         &self,
-        genesis_hash: ObjectHash,
+        store_root_hash: ObjectHash,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let updated = tx
                 .execute(
-                    "UPDATE local_protocol_genesis SET published = 1 \
-                     WHERE singleton = 1 AND genesis_hash = ?1",
-                    [genesis_hash.to_string()],
+                    "UPDATE local_store_protocol_root SET published = 1 \
+                     WHERE singleton = 1 AND store_root_hash = ?1",
+                    [store_root_hash.to_string()],
                 )
                 .map_err(DbError::from)?;
             if updated != 1 {
                 return Err(DbError(
-                    "local protocol genesis ownership row is absent".to_string(),
+                    "local store protocol root ownership row is absent".to_string(),
                 ));
             }
             tx.execute(
                 "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (PROTOCOL_GENESIS_HASH_STATE_KEY, genesis_hash.to_string()),
+                (STORE_ROOT_HASH_STATE_KEY, store_root_hash.to_string()),
             )
             .map_err(DbError::from)?;
             tx.commit().map_err(DbError::from)
@@ -2297,15 +2298,15 @@ impl Database {
         registration: StoreDeviceRegistration,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
-            let genesis_hash: ObjectHash = conn
+            let store_root_hash: ObjectHash = conn
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
-                    [PROTOCOL_GENESIS_HASH_STATE_KEY],
+                    [STORE_ROOT_HASH_STATE_KEY],
                     |row| row.get::<_, String>(0),
                 )
                 .map_err(DbError::from)?
                 .parse()
-                .map_err(|error| DbError(format!("protocol genesis hash: {error}")))?;
+                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
             let device_id: String = conn
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
@@ -2316,7 +2317,7 @@ impl Database {
             let bytes = registration.to_bytes();
             let parsed = StoreDeviceRegistration::parse_at(
                 &bytes,
-                genesis_hash,
+                store_root_hash,
                 &device_id,
                 registration.revision,
             )
@@ -2358,7 +2359,7 @@ impl Database {
                 }
                 let previous = StoreDeviceRegistration::parse_at(
                     &existing_bytes,
-                    genesis_hash,
+                    store_root_hash,
                     &device_id,
                     revision,
                 )
@@ -2852,7 +2853,7 @@ impl Database {
         &self,
         coverage: &BTreeMap<String, CommitPosition>,
         snapshot_hash: ObjectHash,
-        genesis_hash: ObjectHash,
+        store_root_hash: ObjectHash,
     ) -> Result<(), DbError> {
         let coverage = coverage.clone();
         self.call(move |conn| {
@@ -2875,7 +2876,7 @@ impl Database {
             tx.execute(
                 "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (PROTOCOL_GENESIS_HASH_STATE_KEY, genesis_hash.to_string()),
+                (STORE_ROOT_HASH_STATE_KEY, store_root_hash.to_string()),
             )
             .map_err(DbError::from)?;
             tx.execute(

@@ -74,7 +74,9 @@ fn restore_code_with_sid(sid: &str) -> String {
         // before the key is touched, and a valid `sid` rebuilds this keypair and
         // proceeds to the cloud step (where the loopback endpoint fails it).
         sk: hex::encode(crate::keys::UserKeypair::generate().to_keypair_bytes()),
-        genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore test genesis"),
+        store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+            b"restore test store protocol root",
+        ),
         founder_pubkey: hex::encode([0xAB_u8; 32]),
         membership_floor: membership_floor(hex::encode([0xAB_u8; 32])),
     };
@@ -436,7 +438,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
 
     let tables = test_synced_tables();
     let db = open_test_db();
-    let genesis_hash = crate::sync::test_helpers::publish_test_store_genesis(
+    let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
         &db,
         &owner_storage,
         store_id,
@@ -461,7 +463,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         .expect("create owner snapshot");
     crate::sync::test_helpers::push_test_store_snapshot(
         &owner_storage,
-        genesis_hash,
+        store_root_hash,
         snapshot,
         BTreeMap::new(),
         db.schema_version(),
@@ -504,7 +506,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         &store_dir,
         store_id,
         "device-late",
-        genesis_hash,
+        store_root_hash,
         BootstrapContext::Restore {
             founder_pubkey: &pubkey_hex(&owner_keypair),
             keypair: &joiner_keypair,
@@ -632,7 +634,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
     // Owner: a store with one shared note, captured straight into the published
     // snapshot — the shape a device sees the first time it opens a shared store.
     let db_owner = open_test_db();
-    let genesis_hash = crate::sync::test_helpers::publish_test_store_genesis(
+    let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
         &db_owner,
         &owner_storage,
         store_id,
@@ -663,7 +665,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         .expect("owner snapshot");
     crate::sync::test_helpers::push_test_store_snapshot(
         &owner_storage,
-        genesis_hash,
+        store_root_hash,
         snapshot,
         BTreeMap::new(),
         db_owner.schema_version(),
@@ -674,7 +676,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
     .await;
 
     let snapshot_before: Vec<_> =
-        crate::sync::store_objects::list_snapshot_metas(&owner_storage, genesis_hash)
+        crate::sync::store_objects::list_snapshot_metas(&owner_storage, store_root_hash)
             .await
             .expect("list Store snapshots")
             .metas
@@ -709,7 +711,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         &lib_b,
         store_id,
         "device-b",
-        genesis_hash,
+        store_root_hash,
         BootstrapContext::Restore {
             founder_pubkey: &pubkey_hex(&owner_keypair),
             keypair: &joiner_keypair,
@@ -771,7 +773,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
     .expect("B sync cycle");
 
     let snapshot_after: Vec<_> =
-        crate::sync::store_objects::list_snapshot_metas(&joiner_storage, genesis_hash)
+        crate::sync::store_objects::list_snapshot_metas(&joiner_storage, store_root_hash)
             .await
             .expect("list Store snapshots")
             .metas
@@ -800,7 +802,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
     let owner_keypair = UserKeypair::generate();
     let storage = MockSyncStorage::with_store_and_keypair("test-lib", owner_keypair.clone());
     let owner_pk = pubkey_hex(&owner_keypair);
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let chain = MembershipChain::from_entries(vec![founder.clone()]).unwrap();
     crate::sync::store_objects::append_membership_entry_object(
         &storage,
@@ -825,7 +827,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         .expect("owner snapshot");
     crate::sync::test_helpers::push_test_store_snapshot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         snapshot,
         BTreeMap::new(),
         db_owner.schema_version(),
@@ -839,7 +841,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
     let boot = bootstrap_from_snapshot(
         &storage,
         "test-lib",
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         &owner_pk,
         &chain.author_heads(),
         1,
@@ -902,7 +904,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let owner_pk = pubkey_hex(&owner);
 
     // Build the chain: found, add a member, then remove them — head at seq 3.
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::from_entries(vec![founder.clone()]).unwrap();
     crate::sync::store_objects::append_membership_entry_object(
         &storage,
@@ -951,7 +953,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         .expect("owner snapshot");
     crate::sync::test_helpers::push_test_store_snapshot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         snapshot,
         BTreeMap::new(),
         db_owner.schema_version(),
@@ -980,7 +982,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let error = bootstrap_from_snapshot(
         &storage,
         "test-lib",
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         &owner_pk,
         &membership_floor,
         1,
@@ -1040,7 +1042,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         Provenance::HostProvided,
         CacheFill::CacheEager,
     ));
-    let genesis_hash = crate::sync::test_helpers::publish_test_store_genesis(
+    let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
         &db_owner,
         &owner_storage,
         store_id,
@@ -1092,7 +1094,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .expect("owner snapshot");
     crate::sync::test_helpers::push_test_store_snapshot(
         &owner_storage,
-        genesis_hash,
+        store_root_hash,
         snapshot,
         BTreeMap::new(),
         db_owner.schema_version(),
@@ -1144,7 +1146,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         &lib_b,
         store_id,
         "device-b",
-        genesis_hash,
+        store_root_hash,
         BootstrapContext::Restore {
             founder_pubkey: &pubkey_hex(&owner_keypair),
             keypair: &joiner_keypair,

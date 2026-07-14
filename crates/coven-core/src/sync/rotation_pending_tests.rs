@@ -34,7 +34,7 @@ use crate::sync::membership_ops::{
 };
 use crate::sync::test_helpers::{
     host_exec, open_test_db, pubkey_hex, publish_test_founder_membership,
-    publish_test_store_genesis, temp_store_dir, TestCustody,
+    publish_test_store_protocol_root, temp_store_dir, TestCustody,
 };
 
 const LIB_ID: &str = "rotation-pending-test";
@@ -153,7 +153,7 @@ async fn found_add_and_fail_to_adopt_a_removal(
     old_key: [u8; 32],
 ) -> (CloudSyncStorage, Hlc) {
     let storage = storage_for(home, old_key, owner);
-    publish_test_store_genesis(db, &storage, LIB_ID, DEVICE_ID, owner).await;
+    publish_test_store_protocol_root(db, &storage, LIB_ID, DEVICE_ID, owner).await;
     publish_test_founder_membership(&storage, LIB_ID, owner).await;
     db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(owner))
         .await

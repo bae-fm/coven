@@ -162,12 +162,12 @@ pub async fn pull_store_commits(
     db: &Database,
     tables: &[SyncedTable],
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     our_device_id: &str,
     store_dir: &StoreDir,
     membership: Option<&MembershipChain>,
 ) -> Result<StorePullResult, StorePullError> {
-    let head_listing = list_visible_heads(storage, genesis_hash).await?;
+    let head_listing = list_visible_heads(storage, store_root_hash).await?;
     let mut first_failed_head_by_device = BTreeMap::new();
     for failure in head_listing.failures {
         let replace = first_failed_head_by_device
@@ -231,7 +231,7 @@ pub async fn pull_store_commits(
             match position_is_materialized(
                 db,
                 storage,
-                genesis_hash,
+                store_root_hash,
                 &coverage,
                 &head.device_id,
                 &expected_position,
@@ -247,7 +247,7 @@ pub async fn pull_store_commits(
             }
             let verified_commit = match load_commit_slot(
                 storage,
-                genesis_hash,
+                store_root_hash,
                 &head.device_id,
                 expected_position.seq,
             )
@@ -392,7 +392,7 @@ pub async fn pull_store_commits(
             match readiness(
                 db,
                 storage,
-                genesis_hash,
+                store_root_hash,
                 &coverage,
                 &frontier,
                 &candidate.commit,
@@ -547,7 +547,7 @@ fn held_object_error(error: StoreObjectError) -> HeldStorePositionReason {
             StoreProtocolError::InvalidSignature => HeldStorePositionReason::InvalidSignature,
             StoreProtocolError::RelocatedSlot { .. }
             | StoreProtocolError::RelocatedPackage { .. }
-            | StoreProtocolError::GenesisMismatch { .. }
+            | StoreProtocolError::StoreRootMismatch { .. }
             | StoreProtocolError::StoreMismatch { .. }
             | StoreProtocolError::FounderMismatch { .. } => {
                 HeldStorePositionReason::WrongSlot(source.to_string())
@@ -568,7 +568,7 @@ fn held_object_error(error: StoreObjectError) -> HeldStorePositionReason {
 async fn readiness(
     db: &Database,
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     coverage: &BTreeMap<String, CommitPosition>,
     frontier: &BTreeMap<String, CommitPosition>,
     commit: &StoreBatchCommit,
@@ -578,7 +578,7 @@ async fn readiness(
             match position_is_materialized(
                 db,
                 storage,
-                genesis_hash,
+                store_root_hash,
                 coverage,
                 &commit.device_id,
                 &commit.position(),
@@ -632,7 +632,7 @@ async fn readiness(
     }
 
     for (device_id, position) in &commit.dependencies {
-        match position_is_materialized(db, storage, genesis_hash, coverage, device_id, position)
+        match position_is_materialized(db, storage, store_root_hash, coverage, device_id, position)
             .await?
         {
             MaterializedCheck::Yes => {}
@@ -660,7 +660,7 @@ async fn readiness(
 async fn position_is_materialized(
     db: &Database,
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     coverage: &BTreeMap<String, CommitPosition>,
     device_id: &str,
     position: &CommitPosition,
@@ -686,7 +686,7 @@ async fn position_is_materialized(
     let mut seq = covered.seq;
     let mut expected = covered.commit_hash;
     while seq > position.seq {
-        let commit = match load_commit_slot(storage, genesis_hash, device_id, seq).await {
+        let commit = match load_commit_slot(storage, store_root_hash, device_id, seq).await {
             Ok(Some(commit)) => commit,
             Ok(None) => return Ok(MaterializedCheck::Missing),
             Err(error) => return Ok(MaterializedCheck::Held(held_object_error(error))),
@@ -920,7 +920,7 @@ mod tests {
     use crate::storage::cloud::{CloudHome, SequentialCopyIdGenerator};
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::membership::founder_entry;
-    use crate::sync::store_commit::{genesis_semantic_prefix, ProtocolGenesis};
+    use crate::sync::store_commit::{store_protocol_root_semantic_prefix, StoreProtocolRoot};
     use crate::sync::store_objects::append_and_verify;
     use crate::sync::store_outbound::{drain_outbound_store_batches, stage_pending_store_batch};
     use crate::sync::test_helpers::{
@@ -943,16 +943,16 @@ mod tests {
         .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(copy_source)))
     }
 
-    async fn bind_database(db: &Database, device_id: &str, genesis_hash: ObjectHash) {
+    async fn bind_database(db: &Database, device_id: &str, store_root_hash: ObjectHash) {
         db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
             .await
             .expect("bind local device id");
         db.set_protocol_state(
-            crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY,
-            &genesis_hash.to_string(),
+            crate::database::STORE_ROOT_HASH_STATE_KEY,
+            &store_root_hash.to_string(),
         )
         .await
-        .expect("bind protocol genesis");
+        .expect("bind store protocol root");
     }
 
     async fn publish_pending(
@@ -988,13 +988,13 @@ mod tests {
 
     async fn publish_package(
         storage: &CloudSyncStorage,
-        genesis_hash: ObjectHash,
+        store_root_hash: ObjectHash,
         device_id: &str,
         package: &[u8],
         keypair: &UserKeypair,
     ) -> CommitPosition {
         let commit = StoreBatchCommit::signed(
-            genesis_hash,
+            store_root_hash,
             device_id.to_string(),
             1,
             None,
@@ -1006,7 +1006,7 @@ mod tests {
         )
         .expect("sign Store commit");
         let head = StoreDeviceHead::signed(
-            genesis_hash,
+            store_root_hash,
             device_id.to_string(),
             Some(commit.position()),
             "2026-01-01T00:00:00Z".to_string(),
@@ -1059,24 +1059,24 @@ mod tests {
             &identity,
             "0000000000001-0000-founder",
         );
-        let genesis =
-            ProtocolGenesis::signed("causal-ordering-test".to_string(), founder, 1, &identity)
-                .expect("sign protocol genesis");
-        let genesis_hash = genesis.object_hash();
+        let store_protocol_root =
+            StoreProtocolRoot::signed("causal-ordering-test".to_string(), founder, 1, &identity)
+                .expect("sign store protocol root");
+        let store_root_hash = store_protocol_root.object_hash();
         append_and_verify(
-            &storage(&home, &identity, "genesis"),
-            &genesis_semantic_prefix(genesis_hash),
+            &storage(&home, &identity, "store-protocol-root"),
+            &store_protocol_root_semantic_prefix(store_root_hash),
             ".json",
-            &genesis.to_bytes(),
+            &store_protocol_root.to_bytes(),
         )
         .await
-        .expect("publish protocol genesis");
-        (home, identity, genesis_hash)
+        .expect("publish store protocol root");
+        (home, identity, store_root_hash)
     }
 
     #[tokio::test]
     async fn invalid_remote_uuid_holds_exact_commit_while_another_device_applies() {
-        let (home, identity, genesis_hash) = setup_store().await;
+        let (home, identity, store_root_hash) = setup_store().await;
         let source = open_test_db();
         let invalid_package = crate::sync::test_helpers::capture_bytes(
             &source,
@@ -1098,7 +1098,7 @@ mod tests {
         let shared_storage = storage(&home, &identity, "identity-receipt");
         let invalid_position = publish_package(
             &shared_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-a-invalid",
             &invalid_package,
             &identity,
@@ -1106,7 +1106,7 @@ mod tests {
         .await;
         let valid_position = publish_package(
             &shared_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-z-valid",
             &valid_package,
             &identity,
@@ -1117,13 +1117,13 @@ mod tests {
             independent_test_tables(),
             crate::sync::test_helpers::test_migrations(),
         );
-        bind_database(&receiver, "dev-receiver", genesis_hash).await;
+        bind_database(&receiver, "dev-receiver", store_root_hash).await;
         let (_receiver_tmp, receiver_dir) = temp_store_dir();
         let pulled = pull_store_commits(
             &receiver,
             &independent_test_tables(),
             &shared_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1232,22 +1232,22 @@ mod tests {
             &identity,
             "0000000000001-0000-founder",
         );
-        let genesis =
-            ProtocolGenesis::signed("causal-ordering-test".to_string(), founder, 1, &identity)
-                .expect("sign protocol genesis");
-        let genesis_hash = genesis.object_hash();
+        let store_protocol_root =
+            StoreProtocolRoot::signed("causal-ordering-test".to_string(), founder, 1, &identity)
+                .expect("sign store protocol root");
+        let store_root_hash = store_protocol_root.object_hash();
         let setup_storage = storage(&home, &identity, "setup");
         append_and_verify(
             &setup_storage,
-            &genesis_semantic_prefix(genesis_hash),
+            &store_protocol_root_semantic_prefix(store_root_hash),
             ".json",
-            &genesis.to_bytes(),
+            &store_protocol_root.to_bytes(),
         )
         .await
-        .expect("publish protocol genesis");
+        .expect("publish store protocol root");
 
         let insert_db = open_test_db();
-        bind_database(&insert_db, inserter, genesis_hash).await;
+        bind_database(&insert_db, inserter, store_root_hash).await;
         host_exec(
             &insert_db,
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -1266,14 +1266,14 @@ mod tests {
         .await;
 
         let update_db = open_test_db();
-        bind_database(&update_db, updater, genesis_hash).await;
+        bind_database(&update_db, updater, store_root_hash).await;
         let (_update_tmp, update_dir) = temp_store_dir();
         let update_storage = storage(&home, &identity, "update");
         let first_pull = pull_store_commits(
             &update_db,
             &test_synced_tables(),
             &update_storage,
-            genesis_hash,
+            store_root_hash,
             updater,
             &update_dir,
             None,
@@ -1290,14 +1290,14 @@ mod tests {
         publish_pending(&update_db, &update_storage, updater, &identity, &update_dir).await;
 
         let receiver = open_test_db();
-        bind_database(&receiver, "dev-receiver", genesis_hash).await;
+        bind_database(&receiver, "dev-receiver", store_root_hash).await;
         let (_receiver_tmp, receiver_dir) = temp_store_dir();
         let receiver_storage = storage(&home, &identity, "receiver");
         let pull = pull_store_commits(
             &receiver,
             &test_synced_tables(),
             &receiver_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1326,9 +1326,9 @@ mod tests {
 
     #[tokio::test]
     async fn latest_head_walks_and_applies_every_unseen_predecessor() {
-        let (home, identity, genesis_hash) = setup_store().await;
+        let (home, identity, store_root_hash) = setup_store().await;
         let publisher = open_test_db();
-        bind_database(&publisher, "dev-publisher", genesis_hash).await;
+        bind_database(&publisher, "dev-publisher", store_root_hash).await;
         let (_publisher_tmp, publisher_dir) = temp_store_dir();
         let publisher_storage = storage(&home, &identity, "publisher");
 
@@ -1363,13 +1363,13 @@ mod tests {
         assert_eq!(second.seq, 2);
 
         let receiver = open_test_db();
-        bind_database(&receiver, "dev-receiver", genesis_hash).await;
+        bind_database(&receiver, "dev-receiver", store_root_hash).await;
         let (_receiver_tmp, receiver_dir) = temp_store_dir();
         let result = pull_store_commits(
             &receiver,
             &test_synced_tables(),
             &storage(&home, &identity, "receiver"),
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1387,9 +1387,9 @@ mod tests {
 
     #[tokio::test]
     async fn row_and_materialized_position_roll_back_together_on_frontier_failure() {
-        let (home, identity, genesis_hash) = setup_store().await;
+        let (home, identity, store_root_hash) = setup_store().await;
         let publisher = open_test_db();
-        bind_database(&publisher, "dev-publisher", genesis_hash).await;
+        bind_database(&publisher, "dev-publisher", store_root_hash).await;
         let (_publisher_tmp, publisher_dir) = temp_store_dir();
         host_exec(
             &publisher,
@@ -1407,7 +1407,7 @@ mod tests {
         .await;
 
         let receiver = open_test_db();
-        bind_database(&receiver, "dev-receiver", genesis_hash).await;
+        bind_database(&receiver, "dev-receiver", store_root_hash).await;
         receiver
             .call(|conn| {
                 conn.execute_batch(
@@ -1424,7 +1424,7 @@ mod tests {
             &receiver,
             &test_synced_tables(),
             &storage(&home, &identity, "receiver-first"),
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1463,7 +1463,7 @@ mod tests {
             &receiver,
             &test_synced_tables(),
             &storage(&home, &identity, "receiver-retry"),
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1482,9 +1482,9 @@ mod tests {
 
     #[tokio::test]
     async fn host_write_captures_the_exact_materialized_dependency_frontier() {
-        let (home, identity, genesis_hash) = setup_store().await;
+        let (home, identity, store_root_hash) = setup_store().await;
         let source = open_test_db();
-        bind_database(&source, "dev-source", genesis_hash).await;
+        bind_database(&source, "dev-source", store_root_hash).await;
         let (_source_tmp, source_dir) = temp_store_dir();
         host_exec(
             &source,
@@ -1502,14 +1502,14 @@ mod tests {
         .await;
 
         let writer = open_test_db();
-        bind_database(&writer, "dev-writer", genesis_hash).await;
+        bind_database(&writer, "dev-writer", store_root_hash).await;
         let (_writer_tmp, writer_dir) = temp_store_dir();
         let writer_storage = storage(&home, &identity, "writer");
         pull_store_commits(
             &writer,
             &test_synced_tables(),
             &writer_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-writer",
             &writer_dir,
             None,
@@ -1546,7 +1546,7 @@ mod tests {
         .await;
         let commit = load_commit_slot(
             &writer_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-writer",
             writer_position.seq,
         )
@@ -1558,9 +1558,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_dependency_is_held_across_restart_then_applied_when_visible() {
-        let (home, identity, genesis_hash) = setup_store().await;
+        let (home, identity, store_root_hash) = setup_store().await;
         let source = open_test_db();
-        bind_database(&source, "dev-source", genesis_hash).await;
+        bind_database(&source, "dev-source", store_root_hash).await;
         let (_source_tmp, source_dir) = temp_store_dir();
         host_exec(
             &source,
@@ -1578,14 +1578,14 @@ mod tests {
         .await;
 
         let dependent = open_test_db();
-        bind_database(&dependent, "dev-dependent", genesis_hash).await;
+        bind_database(&dependent, "dev-dependent", store_root_hash).await;
         let (_dependent_tmp, dependent_dir) = temp_store_dir();
         let dependent_storage = storage(&home, &identity, "dependent");
         pull_store_commits(
             &dependent,
             &test_synced_tables(),
             &dependent_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-dependent",
             &dependent_dir,
             None,
@@ -1611,13 +1611,13 @@ mod tests {
         assert!(!removed_heads.is_empty());
         for attempt in ["receiver-before-restart", "receiver-after-restart"] {
             let receiver = open_test_db();
-            bind_database(&receiver, attempt, genesis_hash).await;
+            bind_database(&receiver, attempt, store_root_hash).await;
             let (_receiver_tmp, receiver_dir) = temp_store_dir();
             let held = pull_store_commits(
                 &receiver,
                 &test_synced_tables(),
                 &storage(&home, &identity, attempt),
-                genesis_hash,
+                store_root_hash,
                 attempt,
                 &receiver_dir,
                 None,
@@ -1638,13 +1638,13 @@ mod tests {
 
         restore_appended(&home, removed_heads);
         let receiver = open_test_db();
-        bind_database(&receiver, "dev-final", genesis_hash).await;
+        bind_database(&receiver, "dev-final", store_root_hash).await;
         let (_receiver_tmp, receiver_dir) = temp_store_dir();
         let applied = pull_store_commits(
             &receiver,
             &test_synced_tables(),
             &storage(&home, &identity, "receiver-final"),
-            genesis_hash,
+            store_root_hash,
             "dev-final",
             &receiver_dir,
             None,
@@ -1657,9 +1657,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_predecessor_is_held_until_the_exact_commit_reappears() {
-        let (home, identity, genesis_hash) = setup_store().await;
+        let (home, identity, store_root_hash) = setup_store().await;
         let publisher = open_test_db();
-        bind_database(&publisher, "dev-publisher", genesis_hash).await;
+        bind_database(&publisher, "dev-publisher", store_root_hash).await;
         let (_publisher_tmp, publisher_dir) = temp_store_dir();
         let publisher_storage = storage(&home, &identity, "publisher");
         host_exec(
@@ -1694,13 +1694,13 @@ mod tests {
         assert!(!removed.is_empty());
 
         let receiver = open_test_db();
-        bind_database(&receiver, "dev-receiver", genesis_hash).await;
+        bind_database(&receiver, "dev-receiver", store_root_hash).await;
         let (_receiver_tmp, receiver_dir) = temp_store_dir();
         let held = pull_store_commits(
             &receiver,
             &test_synced_tables(),
             &storage(&home, &identity, "receiver"),
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1718,7 +1718,7 @@ mod tests {
             &receiver,
             &test_synced_tables(),
             &storage(&home, &identity, "receiver-retry"),
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1731,9 +1731,9 @@ mod tests {
 
     #[tokio::test]
     async fn dependency_hash_mismatch_fails_against_the_durable_exact_position() {
-        let (home, identity, genesis_hash) = setup_store().await;
+        let (home, identity, store_root_hash) = setup_store().await;
         let source = open_test_db();
-        bind_database(&source, "dev-source", genesis_hash).await;
+        bind_database(&source, "dev-source", store_root_hash).await;
         let (_source_tmp, source_dir) = temp_store_dir();
         host_exec(
             &source,
@@ -1751,14 +1751,14 @@ mod tests {
         .await;
 
         let receiver = open_test_db();
-        bind_database(&receiver, "dev-receiver", genesis_hash).await;
+        bind_database(&receiver, "dev-receiver", store_root_hash).await;
         let (_receiver_tmp, receiver_dir) = temp_store_dir();
         let receiver_storage = storage(&home, &identity, "receiver");
         pull_store_commits(
             &receiver,
             &test_synced_tables(),
             &receiver_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1782,7 +1782,7 @@ mod tests {
         let mut dependencies = BTreeMap::new();
         dependencies.insert("dev-source".to_string(), fake_dependency.clone());
         let commit = StoreBatchCommit::signed(
-            genesis_hash,
+            store_root_hash,
             "dev-dependent".to_string(),
             1,
             None,
@@ -1794,7 +1794,7 @@ mod tests {
         )
         .expect("sign mismatched dependency commit");
         let head = StoreDeviceHead::signed(
-            genesis_hash,
+            store_root_hash,
             "dev-dependent".to_string(),
             Some(commit.position()),
             "2026-01-01T00:00:00Z".to_string(),
@@ -1834,7 +1834,7 @@ mod tests {
             &receiver,
             &test_synced_tables(),
             &receiver_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1865,9 +1865,9 @@ mod tests {
 
     #[tokio::test]
     async fn non_fk_constraint_rolls_back_rows_and_exact_position_then_retries() {
-        let (home, identity, genesis_hash) = setup_store().await;
+        let (home, identity, store_root_hash) = setup_store().await;
         let publisher = unique_note_db();
-        bind_database(&publisher, "dev-publisher", genesis_hash).await;
+        bind_database(&publisher, "dev-publisher", store_root_hash).await;
         let (_publisher_tmp, publisher_dir) = temp_store_dir();
         host_exec(
             &publisher,
@@ -1887,7 +1887,7 @@ mod tests {
         .await;
 
         let receiver = unique_note_db();
-        bind_database(&receiver, "dev-receiver", genesis_hash).await;
+        bind_database(&receiver, "dev-receiver", store_root_hash).await;
         host_exec(
             &receiver,
             "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
@@ -1903,7 +1903,7 @@ mod tests {
                 crate::sync::session::RowIdentity::SharedKey,
             )],
             &receiver_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1934,7 +1934,7 @@ mod tests {
                 crate::sync::session::RowIdentity::SharedKey,
             )],
             &receiver_storage,
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,
@@ -1954,9 +1954,9 @@ mod tests {
     }
 
     async fn assert_concurrent_delete_update_converges(deleter: &str, updater: &str) {
-        let (home, identity, genesis_hash) = setup_store().await;
+        let (home, identity, store_root_hash) = setup_store().await;
         let base = open_test_db();
-        bind_database(&base, "dev-base", genesis_hash).await;
+        bind_database(&base, "dev-base", store_root_hash).await;
         let (_base_tmp, base_dir) = temp_store_dir();
         host_exec(
             &base,
@@ -1974,14 +1974,14 @@ mod tests {
         .await;
 
         let delete_db = open_test_db();
-        bind_database(&delete_db, deleter, genesis_hash).await;
+        bind_database(&delete_db, deleter, store_root_hash).await;
         let (_delete_tmp, delete_dir) = temp_store_dir();
         let delete_storage = storage(&home, &identity, "delete");
         pull_store_commits(
             &delete_db,
             &test_synced_tables(),
             &delete_storage,
-            genesis_hash,
+            store_root_hash,
             deleter,
             &delete_dir,
             None,
@@ -1990,14 +1990,14 @@ mod tests {
         .unwrap();
 
         let update_db = open_test_db();
-        bind_database(&update_db, updater, genesis_hash).await;
+        bind_database(&update_db, updater, store_root_hash).await;
         let (_update_tmp, update_dir) = temp_store_dir();
         let update_storage = storage(&home, &identity, "update");
         pull_store_commits(
             &update_db,
             &test_synced_tables(),
             &update_storage,
-            genesis_hash,
+            store_root_hash,
             updater,
             &update_dir,
             None,
@@ -2016,13 +2016,13 @@ mod tests {
         publish_pending(&update_db, &update_storage, updater, &identity, &update_dir).await;
 
         let receiver = open_test_db();
-        bind_database(&receiver, "dev-receiver", genesis_hash).await;
+        bind_database(&receiver, "dev-receiver", store_root_hash).await;
         let (_receiver_tmp, receiver_dir) = temp_store_dir();
         let result = pull_store_commits(
             &receiver,
             &test_synced_tables(),
             &storage(&home, &identity, "receiver-delete-update"),
-            genesis_hash,
+            store_root_hash,
             "dev-receiver",
             &receiver_dir,
             None,

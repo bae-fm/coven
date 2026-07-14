@@ -2166,8 +2166,8 @@ mod tests {
         )
         .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("append-copy")));
         let semantic = format!(
-            "store-v1/genesis/{}",
-            crate::sync::store_commit::ObjectHash::digest(b"genesis")
+            "store-v1/store-protocol-root/{}",
+            crate::sync::store_commit::ObjectHash::digest(b"store protocol root")
         );
         let first = storage
             .append_protocol_object(&semantic, ".json", b"same signed bytes".to_vec())

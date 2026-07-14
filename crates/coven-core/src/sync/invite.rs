@@ -2145,7 +2145,7 @@ mod tests {
         let encryption_key: [u8; 32] = [42u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         // Owner invites the new member.
         create_invitation(
@@ -2278,7 +2278,7 @@ mod tests {
 
         let cloud = RecordingCloudHome::new();
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
         create_invitation(
             &storage,
             &cloud,
@@ -2311,7 +2311,7 @@ mod tests {
 
         let cloud = RecordingCloudHome::new();
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
         create_invitation(
             &storage,
             &cloud,
@@ -2341,7 +2341,7 @@ mod tests {
         let invitee = gen_keypair();
         let invitee_pubkey = pubkey_hex(&invitee);
         let storage = MockSyncStorage::with_store_and_keypair(LIB_ID, owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
         let cloud = RecordingCloudHome::new();
         let directory = tempfile::tempdir().expect("membership outbox temp directory");
         let path = directory.path().join("store.sqlite3");
@@ -2429,7 +2429,7 @@ mod tests {
         let member = gen_keypair();
         let member_pubkey = pubkey_hex(&member);
         let storage = MockSyncStorage::with_store_and_keypair(LIB_ID, owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
         let cloud = RecordingCloudHome::new();
         let current = EncryptionService::from_key([93; 32]);
         create_invitation_with_encryption(
@@ -2611,7 +2611,7 @@ mod tests {
         let encryption_key: [u8; 32] = [7u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         create_invitation(
             &storage,
@@ -2638,7 +2638,7 @@ mod tests {
     async fn create_invitation_invalid_pubkey_hex() {
         let owner = gen_keypair();
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
         let encryption_key: [u8; 32] = [0u8; 32];
 
         let result = create_invitation(
@@ -2662,7 +2662,7 @@ mod tests {
     async fn create_invitation_off_curve_pubkey_errors() {
         let owner = gen_keypair();
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
         let encryption_key: [u8; 32] = [0u8; 32];
         let off_curve_pubkey = "0200000000000000000000000000000000000000000000000000000000000000";
 
@@ -2691,7 +2691,7 @@ mod tests {
         let encryption_key: [u8; 32] = [0u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         // Add member first.
         create_invitation(
@@ -2734,7 +2734,7 @@ mod tests {
         let encryption_key: [u8; 32] = [1u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         create_invitation(
             &storage,
@@ -2774,7 +2774,7 @@ mod tests {
         let old_key: [u8; 32] = [42u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         // Owner invites the member.
         create_invitation(
@@ -2872,7 +2872,7 @@ mod tests {
         let attempt1_key: [u8; 32] = [31u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
         invite_member_for_test(
             &storage,
             &mut chain,
@@ -3051,7 +3051,7 @@ mod tests {
         let old_key: [u8; 32] = [10u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         // Invite two members.
         create_invitation(
@@ -3141,7 +3141,7 @@ mod tests {
         let new_key: [u8; 32] = [15u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
         invite_member_for_test(
             &storage,
             &mut chain,
@@ -3735,7 +3735,7 @@ mod tests {
         let old_key: [u8; 32] = [11u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -3808,7 +3808,7 @@ mod tests {
         let off_curve_pubkey = "0200000000000000000000000000000000000000000000000000000000000000";
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -3883,7 +3883,7 @@ mod tests {
         let old_key: [u8; 32] = [12u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -3981,7 +3981,7 @@ mod tests {
         let old_key: [u8; 32] = [13u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -4055,7 +4055,7 @@ mod tests {
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         create_invitation(
             &storage,
@@ -4120,7 +4120,7 @@ mod tests {
         let remaining_pubkey = pubkey_hex(&remaining);
         let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         create_invitation(
             &storage,
@@ -4227,7 +4227,7 @@ mod tests {
         let remaining_pubkey = pubkey_hex(&remaining);
         let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         for (member, timestamp) in [
             (&revokee, "0000000002000-0000-owner"),
@@ -4332,7 +4332,7 @@ mod tests {
         let outsider = gen_keypair();
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         let result = revoke_member(
             &storage,
@@ -4355,7 +4355,7 @@ mod tests {
         let member = gen_keypair();
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         // Add a regular member.
         create_invitation(
@@ -4396,7 +4396,7 @@ mod tests {
         let member2 = gen_keypair();
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         // Add two members.
         create_invitation(
@@ -4753,7 +4753,7 @@ mod tests {
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -4824,7 +4824,7 @@ mod tests {
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         assert!(
             storage
@@ -4887,7 +4887,7 @@ mod tests {
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -4958,7 +4958,7 @@ mod tests {
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         // Seed a stray slot for a non-member (anomalous leftover state).
         storage
@@ -5024,7 +5024,7 @@ mod tests {
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
         let cloud = RecordingCloudHome::new();
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         invite_member_for_test(
             &storage,
@@ -5088,7 +5088,7 @@ mod tests {
         let new_key: [u8; 32] = [39u8; 32];
 
         let storage = MockSyncStorage::with_keypair(owner.clone());
-        let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+        let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
 
         invite_member_for_test(
             &storage,

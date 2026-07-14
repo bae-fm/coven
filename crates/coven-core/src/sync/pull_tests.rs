@@ -64,12 +64,12 @@ impl TestStoreStorage for CloudSyncStorage {
         keypair: &UserKeypair,
     ) -> Result<(), String> {
         if db
-            .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+            .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
             .await
             .map_err(|error| error.to_string())?
             .is_none()
         {
-            let genesis = crate::sync::store_genesis::create_store(
+            let store_protocol_root = crate::sync::store_protocol_root::create_store(
                 db,
                 self,
                 self.store_id(),
@@ -78,7 +78,13 @@ impl TestStoreStorage for CloudSyncStorage {
             )
             .await
             .map_err(|error| error.to_string())?;
-            crate::sync::cycle::ensure_owner_anchored_chain(self, db, &genesis, keypair).await?;
+            crate::sync::cycle::ensure_owner_anchored_chain(
+                self,
+                db,
+                &store_protocol_root,
+                keypair,
+            )
+            .await?;
         }
         db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
             .await
@@ -517,7 +523,7 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
         .install_bootstrap_state(
             &overflow,
             crate::sync::store_commit::ObjectHash::digest(b"snapshot"),
-            crate::sync::store_commit::ObjectHash::digest(b"genesis"),
+            crate::sync::store_commit::ObjectHash::digest(b"store protocol root"),
         )
         .await
         .is_err());
@@ -626,7 +632,7 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
     let commit = crate::sync::store_objects::load_commit_slot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "dev1",
         1,
     )
@@ -893,7 +899,7 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
     storage.store_changeset_signed_as("dev1", 1, &cs, SCHEMA_VERSION + 1, None, &forger, &forger);
     let commit = crate::sync::store_objects::load_commit_slot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "dev1",
         1,
     )
@@ -1065,7 +1071,7 @@ async fn push_stamps_the_dbs_schema_version() {
     let position = result.expect("an outgoing Store commit");
     let commit = crate::sync::store_objects::load_commit_slot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "dev1",
         position.seq,
     )
@@ -1207,7 +1213,7 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     storage.store_changeset_signed_as("dev1", 1, &cs, SCHEMA_VERSION, None, &author, &author);
     let commit = crate::sync::store_objects::load_commit_slot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "dev1",
         1,
     )
@@ -1266,15 +1272,11 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
     )
     .await;
     storage.store_changeset_signed_as("dev", 1, &cs, SCHEMA_VERSION, None, &victim, &victim);
-    let commit = crate::sync::store_objects::load_commit_slot(
-        &storage,
-        storage.protocol_genesis_hash(),
-        "dev",
-        1,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let commit =
+        crate::sync::store_objects::load_commit_slot(&storage, storage.store_root_hash(), "dev", 1)
+            .await
+            .unwrap()
+            .unwrap();
     remove_protocol_prefix(&storage, "store-v1/heads/dev/").await;
     let relocated_position = crate::sync::store_commit::CommitPosition {
         seq: 2,
@@ -1287,7 +1289,7 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
         .await
         .unwrap();
     let relocated_head = StoreDeviceHead::signed(
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "dev".to_string(),
         Some(relocated_position.clone()),
         "2026-03-01T00:05:00Z".to_string(),
@@ -1340,7 +1342,7 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
     storage.store_changeset_signed_as("devVictim", 1, &cs, SCHEMA_VERSION, None, &victim, &victim);
     let commit = crate::sync::store_objects::load_commit_slot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "devVictim",
         1,
     )
@@ -1361,7 +1363,7 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
         .await
         .unwrap();
     let relocated_head = StoreDeviceHead::signed(
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "devAttacker".to_string(),
         Some(commit.value.position()),
         "2026-03-01T00:01:00Z".to_string(),
@@ -1559,7 +1561,7 @@ async fn repaired_store_slot_resumes_the_held_device() {
 
     let bad_commit = crate::sync::store_objects::load_commit_slot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "dev1",
         1,
     )
@@ -1963,7 +1965,7 @@ async fn user_provided_blob_with_external_ref_aborts_before_changeset_publish() 
         "the error must name the local user-provided blob: {err}",
     );
     assert!(
-        crate::sync::store_objects::list_visible_heads(&storage, storage.protocol_genesis_hash(),)
+        crate::sync::store_objects::list_visible_heads(&storage, storage.store_root_hash(),)
             .await
             .expect("list Store heads")
             .heads
@@ -2019,7 +2021,7 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         "the error must name the absent remote blob: {err}",
     );
     assert!(
-        crate::sync::store_objects::list_visible_heads(&storage, storage.protocol_genesis_hash(),)
+        crate::sync::store_objects::list_visible_heads(&storage, storage.store_root_hash(),)
             .await
             .expect("list Store heads")
             .heads
@@ -2082,7 +2084,7 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
     );
 
     assert_eq!(
-        crate::sync::store_objects::list_visible_heads(&storage, storage.protocol_genesis_hash())
+        crate::sync::store_objects::list_visible_heads(&storage, storage.store_root_hash())
             .await
             .expect("list Store heads")
             .heads[0]
@@ -2138,7 +2140,7 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
     assert!(result.is_some(), "the delete publishes a Store commit");
 
     assert_eq!(
-        crate::sync::store_objects::list_visible_heads(&storage, storage.protocol_genesis_hash())
+        crate::sync::store_objects::list_visible_heads(&storage, storage.store_root_hash())
             .await
             .expect("list Store heads")
             .heads[0]
@@ -3938,7 +3940,7 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
     let storage = MockSyncStorage::with_keypair(founder.clone());
     let founder_pk = hex::encode(founder.public_key());
 
-    let entry = storage.protocol_genesis().founder;
+    let entry = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &founder_pk, 1, entry).await;
     publish_membership_chain_head(&storage, &chain, &founder).await;
@@ -3961,7 +3963,7 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
     );
     let commit = crate::sync::store_objects::load_commit_slot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "dev1",
         1,
     )
@@ -4074,7 +4076,7 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
     }
 
     let mut chain = MembershipChain::new();
-    let founder_entry = storage.protocol_genesis().founder;
+    let founder_entry = storage.store_protocol_root().founder;
     append_membership_entry(&storage, &mut chain, &founder_pubkey, 1, founder_entry).await;
     let add_owner = chain
         .signed_set_member(
@@ -4196,7 +4198,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         .unwrap();
 
     let mut chain = MembershipChain::new();
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     append_membership_entry(&storage, &mut chain, &owner_pubkey, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
     let cycle_membership = crate::sync::pull::load_cycle_membership(&storage, &target)
@@ -4242,7 +4244,7 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         &target,
         target.synced_tables(),
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "dev2",
         &store_dir,
         cycle_membership.chain.as_ref(),
@@ -4322,7 +4324,7 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
     // and passes the head-authorization check.
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4368,7 +4370,7 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
     let owner_pk = hex::encode(owner.public_key());
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4415,7 +4417,7 @@ async fn pull_rejects_a_changeset_whose_signer_differs_from_the_device_head() {
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     let add_member = chain
@@ -4488,7 +4490,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // Founder at (owner, 1); the owner adds the member as a Member at (owner, 2).
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     let add_member = chain
@@ -4558,7 +4560,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     // pull reaches the changeset-level judgment.
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4619,7 +4621,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     let owner_pk = hex::encode(owner.public_key());
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4647,7 +4649,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     );
     let commit = crate::sync::store_objects::load_commit_slot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         "dev1",
         1,
     )
@@ -4703,7 +4705,7 @@ async fn pull_skips_a_removed_members_changeset() {
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     let add_member = chain
@@ -4777,7 +4779,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     let add_member = chain
@@ -4855,7 +4857,7 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     // The owner publishes a head covering only the founder entry (seq 1) before
     // adding the member, so the Add at seq 2 is uploaded but no head certifies it
     // yet — genuinely uncommitted, not just list-lagging.
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4914,7 +4916,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
     let relocated_author = hex::encode(UserKeypair::generate().public_key());
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -4994,7 +4996,7 @@ async fn pull_holds_the_position_when_the_mid_cycle_membership_list_fails() {
     // The owner publishes a head covering only the founder entry (seq 1) before
     // adding the member, so the Add at seq 2 is uploaded but no head certifies it
     // yet — genuinely uncommitted, not just list-lagging.
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -5066,7 +5068,7 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     let add_member = chain
@@ -5168,7 +5170,7 @@ async fn pull_rejects_a_stream_authored_by_a_non_member() {
     let outsider = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
     let owner_pk = hex::encode(owner.public_key());
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
@@ -5210,7 +5212,7 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
     // owner-signed — a current member.
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;

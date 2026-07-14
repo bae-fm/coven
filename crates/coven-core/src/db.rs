@@ -164,11 +164,11 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
-            local_protocol_genesis,
+            local_store_protocol_root,
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    genesis_hash TEXT NOT NULL CHECK (length(genesis_hash) = 64),
-    genesis_bytes BLOB NOT NULL,
+    store_root_hash TEXT NOT NULL CHECK (length(store_root_hash) = 64),
+    store_protocol_root_bytes BLOB NOT NULL,
     published INTEGER NOT NULL CHECK (published IN (0, 1))
 "
         );

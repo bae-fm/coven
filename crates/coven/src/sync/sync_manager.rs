@@ -345,25 +345,25 @@ impl SyncManager {
     ) -> Result<crate::sync::cycle::StoreInitialization, SyncError> {
         let Some(raw_hash) = self
             .db
-            .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+            .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
             .await?
         else {
             return Ok(crate::sync::cycle::StoreInitialization::CreateStore);
         };
-        let expected_genesis_hash = raw_hash
+        let expected_store_root_hash = raw_hash
             .parse()
-            .map_err(|error| SyncError::Protocol(format!("protocol genesis hash: {error}")))?;
+            .map_err(|error| SyncError::Protocol(format!("store protocol root hash: {error}")))?;
         let expected_founder = self
             .db
             .get_protocol_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
             .await?
             .ok_or_else(|| {
                 SyncError::Protocol(
-                    "protocol genesis is pinned but its founder is absent".to_string(),
+                    "store protocol root is pinned but its founder is absent".to_string(),
                 )
             })?;
         Ok(crate::sync::cycle::StoreInitialization::OpenStore {
-            expected_genesis_hash,
+            expected_store_root_hash,
             expected_founder,
         })
     }
@@ -653,13 +653,13 @@ impl SyncManager {
         let founder_pubkey = pinned_owner.clone().ok_or({
             SyncError::Membership(crate::sync::membership_ops::MembershipOpsError::NoFounderChain)
         })?;
-        let genesis_hash = self
+        let store_root_hash = self
             .db
-            .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+            .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
             .await?
-            .ok_or_else(|| SyncError::Protocol("protocol genesis hash is absent".to_string()))?
+            .ok_or_else(|| SyncError::Protocol("store protocol root hash is absent".to_string()))?
             .parse()
-            .map_err(|error| SyncError::Protocol(format!("protocol genesis hash: {error}")))?;
+            .map_err(|error| SyncError::Protocol(format!("store protocol root hash: {error}")))?;
         let membership_floor = crate::sync::membership_ops::current_membership_floor(
             storage,
             pinned_owner.as_deref(),
@@ -673,7 +673,7 @@ impl SyncManager {
             &self.key_service,
             self.custody.as_ref(),
             self.identity_custody.as_ref(),
-            genesis_hash,
+            store_root_hash,
             founder_pubkey,
             membership_floor,
         )
@@ -1132,7 +1132,7 @@ mod tests {
             .await
             .expect_err("foreign founder must prevent sync startup");
         assert!(
-            matches!(error, SyncError::Init(InitSyncError::ProtocolGenesis(_))),
+            matches!(error, SyncError::Init(InitSyncError::StoreProtocolRoot(_))),
             "unexpected startup error: {error:?}",
         );
         assert!(manager.sync_loop_handle().is_none());

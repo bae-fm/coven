@@ -1211,7 +1211,7 @@ mod tests {
         );
         assert!(crate::sync::store_objects::load_commit_slot(
             &storage,
-            storage.protocol_genesis_hash(),
+            storage.store_root_hash(),
             "device-test",
             1,
         )
@@ -1223,7 +1223,7 @@ mod tests {
         assert!(
             crate::sync::store_objects::load_commit_slot(
                 &storage,
-                storage.protocol_genesis_hash(),
+                storage.store_root_hash(),
                 "device-test",
                 1,
             )

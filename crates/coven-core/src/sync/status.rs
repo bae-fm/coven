@@ -75,7 +75,7 @@ mod tests {
 
     fn head(device_id: &str, seq: u64, published_at: &str) -> StoreDeviceHead {
         StoreDeviceHead::signed(
-            ObjectHash::digest(b"status-genesis"),
+            ObjectHash::digest(b"status-store-protocol-root"),
             device_id.to_string(),
             Some(CommitPosition {
                 seq,

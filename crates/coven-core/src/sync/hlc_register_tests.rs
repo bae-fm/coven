@@ -301,7 +301,7 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
 
     let owner_pk = pubkey_hex(&owner);
     let mut chain = MembershipChain::new();
-    let founder = storage.protocol_genesis().founder.clone();
+    let founder = storage.store_protocol_root().founder.clone();
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     let add_member = chain
         .signed_set_member(

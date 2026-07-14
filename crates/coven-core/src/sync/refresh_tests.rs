@@ -114,7 +114,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // Chain: owner founds, adds B and the victim as members.
-    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
             .signed_set_member(
@@ -277,7 +277,7 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
     // The cloud is the owner's, so a changeset it serves is authored by a member
     // the pull will authorize against the chain.
     let storage = MockSyncStorage::with_keypair(owner.clone());
-    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
             .signed_set_member(
@@ -403,7 +403,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     let old_key: [u8; 32] = [12u8; 32];
 
     let storage = MockSyncStorage::with_keypair(owner.clone());
-    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
             .signed_set_member(
@@ -517,7 +517,7 @@ async fn same_generation_wrapped_key_is_not_adopted() {
     let replacement_key: [u8; 32] = [14u8; 32];
 
     let storage = MockSyncStorage::with_keypair(owner.clone());
-    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
             .signed_set_member(
@@ -590,7 +590,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let old_key: [u8; 32] = [15u8; 32];
 
     let storage = MockSyncStorage::with_keypair(founder.clone());
-    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
             .signed_set_member(
@@ -677,7 +677,7 @@ async fn removed_owner_key_is_not_adopted() {
     let removed_owner_key: [u8; 32] = [17u8; 32];
 
     let storage = MockSyncStorage::with_keypair(founder.clone());
-    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
             .signed_set_member(
@@ -786,7 +786,7 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // Chain: owner founds + adds B.
-    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
             .signed_set_member(
@@ -868,7 +868,7 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // A real owner-anchored chain exists, but listing it is made to fail this cycle.
-    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
             .signed_set_member(
@@ -938,7 +938,7 @@ async fn one_cycle_lists_membership_once() {
     let storage = MockSyncStorage::with_keypair(owner.clone());
 
     // Chain: owner founds and adds B as a Member.
-    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
             .signed_set_member(
@@ -1019,7 +1019,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     let storage = MockSyncStorage::with_store_and_keypair(LIB_ID, owner.clone());
 
     // Chain: owner founds and adds the member.
-    let mut chain = bootstrap_chain(storage.protocol_genesis().founder.clone());
+    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
             .signed_set_member(

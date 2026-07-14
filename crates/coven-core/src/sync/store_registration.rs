@@ -110,7 +110,7 @@ pub async fn drain_registration_outbox(
     db: &Database,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreRegistrationError> {
-    let genesis_hash = protocol_hash(db).await?;
+    let store_root_hash = protocol_hash(db).await?;
     let device_id = protocol_value(db, crate::database::LOCAL_DEVICE_ID_STATE_KEY).await?;
     let mut published = 0_u64;
     while let Some(outbound) = db
@@ -120,7 +120,7 @@ pub async fn drain_registration_outbox(
     {
         let registration = StoreDeviceRegistration::parse_at(
             &outbound.registration_bytes,
-            genesis_hash,
+            store_root_hash,
             &device_id,
             outbound.revision,
         )
@@ -155,10 +155,12 @@ pub async fn drain_registration_outbox(
 }
 
 async fn protocol_hash(db: &Database) -> Result<ObjectHash, StoreRegistrationError> {
-    protocol_value(db, crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+    protocol_value(db, crate::database::STORE_ROOT_HASH_STATE_KEY)
         .await?
         .parse()
-        .map_err(|error| StoreRegistrationError::Invalid(format!("protocol genesis hash: {error}")))
+        .map_err(|error| {
+            StoreRegistrationError::Invalid(format!("store protocol root hash: {error}"))
+        })
 }
 
 async fn protocol_value(
@@ -187,7 +189,7 @@ mod tests {
     use crate::sync::store_objects::{
         append_and_verify, list_latest_registration_chains, StoreObjectError,
     };
-    use crate::sync::test_helpers::{open_test_db, publish_test_store_genesis};
+    use crate::sync::test_helpers::{open_test_db, publish_test_store_protocol_root};
 
     async fn initialized(
         source: &str,
@@ -209,7 +211,7 @@ mod tests {
         )
         .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(source)));
         let db = open_test_db();
-        let genesis_hash = publish_test_store_genesis(
+        let store_root_hash = publish_test_store_protocol_root(
             &db,
             &storage,
             "registration-store-test",
@@ -217,18 +219,18 @@ mod tests {
             &signer,
         )
         .await;
-        (home, storage, db, signer, genesis_hash)
+        (home, storage, db, signer, store_root_hash)
     }
 
     #[tokio::test]
     async fn active_registration_and_retired_successor_form_one_verified_chain() {
-        let (_home, storage, db, signer, genesis_hash) = initialized("active-retired").await;
+        let (_home, storage, db, signer, store_root_hash) = initialized("active-retired").await;
         ensure_active_registration(&db, &storage, &signer)
             .await
             .unwrap();
         assert!(retire_registration(&db, &storage, &signer).await.unwrap());
 
-        let chains = list_latest_registration_chains(&storage, genesis_hash)
+        let chains = list_latest_registration_chains(&storage, store_root_hash)
             .await
             .unwrap();
         let latest = &chains.latest_by_device["dev-reader"].value;
@@ -239,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_active_append_retries_the_owned_exact_bytes() {
-        let (home, storage, db, signer, genesis_hash) = initialized("active-retry").await;
+        let (home, storage, db, signer, store_root_hash) = initialized("active-retry").await;
         home.fail_append_before_call(1);
         assert!(ensure_active_registration(&db, &storage, &signer)
             .await
@@ -255,7 +257,7 @@ mod tests {
         ensure_active_registration(&db, &storage, &signer)
             .await
             .unwrap();
-        let chains = list_latest_registration_chains(&storage, genesis_hash)
+        let chains = list_latest_registration_chains(&storage, store_root_hash)
             .await
             .unwrap();
         assert_eq!(
@@ -266,11 +268,11 @@ mod tests {
 
     #[tokio::test]
     async fn registration_slot_fork_is_rejected() {
-        let (_home, storage, _db, signer, genesis_hash) = initialized("registration-fork").await;
+        let (_home, storage, _db, signer, store_root_hash) = initialized("registration-fork").await;
         let outsider = UserKeypair::generate();
         for author in [&signer, &outsider] {
             let registration = StoreDeviceRegistration::signed(
-                genesis_hash,
+                store_root_hash,
                 "dev-reader".to_string(),
                 1,
                 None,
@@ -288,7 +290,7 @@ mod tests {
             .unwrap();
         }
         assert!(matches!(
-            list_latest_registration_chains(&storage, genesis_hash).await,
+            list_latest_registration_chains(&storage, store_root_hash).await,
             Err(StoreObjectError::SemanticFork { slot, .. })
                 if slot == "store-v1/devices/dev-reader/1"
         ));
@@ -296,9 +298,9 @@ mod tests {
 
     #[tokio::test]
     async fn registration_chain_missing_predecessor_is_rejected() {
-        let (_home, storage, _db, signer, genesis_hash) = initialized("registration-gap").await;
+        let (_home, storage, _db, signer, store_root_hash) = initialized("registration-gap").await;
         let registration = StoreDeviceRegistration::signed(
-            genesis_hash,
+            store_root_hash,
             "dev-reader".to_string(),
             2,
             Some(ObjectHash::digest(b"missing registration")),
@@ -315,7 +317,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            list_latest_registration_chains(&storage, genesis_hash).await,
+            list_latest_registration_chains(&storage, store_root_hash).await,
             Err(StoreObjectError::MissingRegistrationRevision { device_id, revision })
                 if device_id == "dev-reader" && revision == 1
         ));

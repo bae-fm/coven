@@ -10,11 +10,12 @@ use super::membership::{
 use super::storage::{ProtocolObjectLocator, StorageError, SyncStorage};
 use super::store_commit::{
     ack_slot_prefix, commit_slot_prefix, head_slot_prefix, package_semantic_prefix,
-    parse_ack_copy_key, parse_commit_copy_key, parse_genesis_copy_key, parse_head_copy_key,
+    parse_ack_copy_key, parse_commit_copy_key, parse_head_copy_key,
     parse_membership_entry_copy_key, parse_membership_head_copy_key, parse_package_copy_key,
-    parse_registration_copy_key, parse_snapshot_meta_copy_key, registration_slot_prefix,
-    snapshot_image_semantic_prefix, ProtocolGenesis, SnapshotMeta, StoreAck, StoreBatchCommit,
-    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationState,
+    parse_registration_copy_key, parse_snapshot_meta_copy_key, parse_store_protocol_root_copy_key,
+    registration_slot_prefix, snapshot_image_semantic_prefix, SnapshotMeta, StoreAck,
+    StoreBatchCommit, StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationState,
+    StoreProtocolRoot,
 };
 use super::store_commit::{ObjectHash, StoreProtocolError};
 
@@ -174,40 +175,43 @@ pub async fn append_and_verify(
     Ok(object)
 }
 
-pub async fn load_expected_genesis(
+pub async fn load_expected_store_protocol_root(
     storage: &dyn SyncStorage,
     expected_hash: ObjectHash,
     expected_store_id: &str,
     expected_founder: &str,
-) -> Result<Option<VerifiedCopies<ProtocolGenesis>>, StoreObjectError> {
-    let semantic_prefix = super::store_commit::genesis_semantic_prefix(expected_hash);
+) -> Result<Option<VerifiedCopies<StoreProtocolRoot>>, StoreObjectError> {
+    let semantic_prefix = super::store_commit::store_protocol_root_semantic_prefix(expected_hash);
     load_semantic_copies(storage, &semantic_prefix, ".json", expected_hash, |bytes| {
-        ProtocolGenesis::parse_expected(bytes, expected_hash, expected_store_id, expected_founder)
+        StoreProtocolRoot::parse_expected(bytes, expected_hash, expected_store_id, expected_founder)
     })
     .await
 }
 
-pub async fn discover_genesis(
+pub async fn discover_store_protocol_root(
     storage: &dyn SyncStorage,
     expected_store_id: &str,
     expected_founder: Option<&str>,
-) -> Result<VerifiedCopies<ProtocolGenesis>, StoreObjectError> {
-    let listing = storage.list_protocol_objects("store-v1/genesis/").await?;
+) -> Result<VerifiedCopies<StoreProtocolRoot>, StoreObjectError> {
+    let listing = storage
+        .list_protocol_objects("store-v1/store-protocol-root/")
+        .await?;
     let mut groups: BTreeMap<ObjectHash, Vec<ProtocolObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
-        let (hash, _) = parse_genesis_copy_key(object.logical_key()).map_err(|error| {
-            StoreObjectError::Collision {
-                semantic_prefix: "store-v1/genesis".to_string(),
-                key: object.logical_key().to_string(),
-                reason: error.to_string(),
-            }
-        })?;
+        let (hash, _) =
+            parse_store_protocol_root_copy_key(object.logical_key()).map_err(|error| {
+                StoreObjectError::Collision {
+                    semantic_prefix: "store-v1/store-protocol-root".to_string(),
+                    key: object.logical_key().to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
         groups.entry(hash).or_default().push(object);
     }
     let mut valid = Vec::new();
     for (hash, objects) in groups {
-        let semantic_prefix = super::store_commit::genesis_semantic_prefix(hash);
-        if let Some(genesis) = load_semantic_candidates(
+        let semantic_prefix = super::store_commit::store_protocol_root_semantic_prefix(hash);
+        if let Some(store_protocol_root) = load_semantic_candidates(
             storage,
             &semantic_prefix,
             ".json",
@@ -215,50 +219,53 @@ pub async fn discover_genesis(
             objects,
             listing.coverage,
             |bytes| {
-                let genesis = ProtocolGenesis::parse(bytes)?;
-                if genesis.object_hash() != hash {
+                let store_protocol_root = StoreProtocolRoot::parse(bytes)?;
+                if store_protocol_root.object_hash() != hash {
                     return Err(StoreProtocolError::ObjectHashMismatch {
                         expected: hash,
-                        actual: genesis.object_hash(),
+                        actual: store_protocol_root.object_hash(),
                     });
                 }
-                if genesis.store_id != expected_store_id {
+                if store_protocol_root.store_id != expected_store_id {
                     return Err(StoreProtocolError::StoreMismatch {
                         expected: expected_store_id.to_string(),
-                        actual: genesis.store_id,
+                        actual: store_protocol_root.store_id,
                     });
                 }
                 if let Some(founder) = expected_founder {
-                    if genesis.author_pubkey != founder {
+                    if store_protocol_root.author_pubkey != founder {
                         return Err(StoreProtocolError::FounderMismatch {
                             expected: founder.to_string(),
-                            actual: genesis.author_pubkey,
+                            actual: store_protocol_root.author_pubkey,
                         });
                     }
                 }
-                Ok(genesis)
+                Ok(store_protocol_root)
             },
         )
         .await?
         {
-            valid.push(genesis);
+            valid.push(store_protocol_root);
         }
     }
     match valid.len() {
-        1 => Ok(valid.pop().expect("one genesis exists")),
+        1 => Ok(valid.pop().expect("one Store protocol root exists")),
         0 => Err(StoreObjectError::Storage(StorageError::NotFound(
-            "store-v1/genesis".to_string(),
+            "store-v1/store-protocol-root".to_string(),
         ))),
         _ => Err(StoreObjectError::SemanticFork {
-            slot: "store-v1/genesis".to_string(),
-            hashes: valid.iter().map(|genesis| genesis.semantic_hash).collect(),
+            slot: "store-v1/store-protocol-root".to_string(),
+            hashes: valid
+                .iter()
+                .map(|store_protocol_root| store_protocol_root.semantic_hash)
+                .collect(),
         }),
     }
 }
 
 pub async fn load_commit_slot(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     device_id: &str,
     seq: u64,
 ) -> Result<Option<VerifiedCopies<StoreBatchCommit>>, StoreObjectError> {
@@ -269,7 +276,7 @@ pub async fn load_commit_slot(
         ".json",
         |key| Ok(parse_commit_copy_key(key)?.semantic_hash),
         |semantic_hash, bytes| {
-            let commit = StoreBatchCommit::parse_at(bytes, genesis_hash, device_id, seq)?;
+            let commit = StoreBatchCommit::parse_at(bytes, store_root_hash, device_id, seq)?;
             if commit.commit_hash() != semantic_hash {
                 return Err(StoreProtocolError::ObjectHashMismatch {
                     expected: semantic_hash,
@@ -284,7 +291,7 @@ pub async fn load_commit_slot(
 
 pub async fn load_head_slot(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     device_id: &str,
     seq: u64,
 ) -> Result<Option<VerifiedCopies<StoreDeviceHead>>, StoreObjectError> {
@@ -295,7 +302,7 @@ pub async fn load_head_slot(
         ".json",
         |key| Ok(parse_head_copy_key(key)?.semantic_hash),
         |semantic_hash, bytes| {
-            let head = StoreDeviceHead::parse_at(bytes, genesis_hash, device_id, seq)?;
+            let head = StoreDeviceHead::parse_at(bytes, store_root_hash, device_id, seq)?;
             if head.head_hash() != semantic_hash {
                 return Err(StoreProtocolError::ObjectHashMismatch {
                     expected: semantic_hash,
@@ -310,7 +317,7 @@ pub async fn load_head_slot(
 
 pub async fn load_ack_slot(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     device_id: &str,
     revision: u64,
 ) -> Result<Option<VerifiedCopies<StoreAck>>, StoreObjectError> {
@@ -321,7 +328,7 @@ pub async fn load_ack_slot(
         ".json",
         |key| Ok(parse_ack_copy_key(key)?.semantic_hash),
         |semantic_hash, bytes| {
-            let ack = StoreAck::parse_at(bytes, genesis_hash, device_id, revision)?;
+            let ack = StoreAck::parse_at(bytes, store_root_hash, device_id, revision)?;
             if ack.ack_hash() != semantic_hash {
                 return Err(StoreProtocolError::ObjectHashMismatch {
                     expected: semantic_hash,
@@ -681,7 +688,7 @@ pub async fn list_membership_head_objects(
 
 pub async fn list_snapshot_metas(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
 ) -> Result<VerifiedSnapshotListing, StoreObjectError> {
     let listing = storage.list_protocol_objects("store-v1/snapshots/").await?;
     let mut groups: BTreeMap<(String, ObjectHash), Vec<ProtocolObjectLocator>> = BTreeMap::new();
@@ -708,7 +715,7 @@ pub async fn list_snapshot_metas(
             snapshot_hash,
             objects,
             listing.coverage,
-            |bytes| SnapshotMeta::parse_at(bytes, genesis_hash, &author, snapshot_hash),
+            |bytes| SnapshotMeta::parse_at(bytes, store_root_hash, &author, snapshot_hash),
         )
         .await?;
         if let Some(loaded) = loaded {
@@ -741,7 +748,7 @@ pub async fn load_snapshot_image(
 
 pub async fn list_visible_heads(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
 ) -> Result<VerifiedHeadListing, StoreObjectError> {
     let listing = storage.list_protocol_objects("store-v1/heads/").await?;
     let mut slots: BTreeMap<(String, u64), Vec<ProtocolObjectLocator>> = BTreeMap::new();
@@ -780,7 +787,7 @@ pub async fn list_visible_heads(
             listing.coverage,
             |key| Ok(parse_head_copy_key(key)?.semantic_hash),
             |semantic_hash, bytes| {
-                let head = StoreDeviceHead::parse_at(bytes, genesis_hash, &device_id, seq)?;
+                let head = StoreDeviceHead::parse_at(bytes, store_root_hash, &device_id, seq)?;
                 if head.head_hash() != semantic_hash {
                     return Err(StoreProtocolError::ObjectHashMismatch {
                         expected: semantic_hash,
@@ -811,7 +818,7 @@ pub async fn list_visible_heads(
 
 pub async fn list_latest_ack_chains(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
 ) -> Result<VerifiedAckChains, StoreObjectError> {
     let listing = storage.list_protocol_objects("store-v1/acks/").await?;
     let mut slots: BTreeMap<(String, u64), Vec<ProtocolObjectLocator>> = BTreeMap::new();
@@ -839,7 +846,7 @@ pub async fn list_latest_ack_chains(
             listing.coverage,
             |key| Ok(parse_ack_copy_key(key)?.semantic_hash),
             |semantic_hash, bytes| {
-                let ack = StoreAck::parse_at(bytes, genesis_hash, &device_id, revision)?;
+                let ack = StoreAck::parse_at(bytes, store_root_hash, &device_id, revision)?;
                 if ack.ack_hash() != semantic_hash {
                     return Err(StoreProtocolError::ObjectHashMismatch {
                         expected: semantic_hash,
@@ -894,7 +901,7 @@ pub async fn list_latest_ack_chains(
 
 pub async fn list_latest_registration_chains(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
 ) -> Result<VerifiedRegistrationChains, StoreObjectError> {
     let listing = storage.list_protocol_objects("store-v1/devices/").await?;
     let mut slots: BTreeMap<(String, u64), Vec<ProtocolObjectLocator>> = BTreeMap::new();
@@ -923,8 +930,12 @@ pub async fn list_latest_registration_chains(
             listing.coverage,
             |key| Ok(parse_registration_copy_key(key)?.semantic_hash),
             |semantic_hash, bytes| {
-                let registration =
-                    StoreDeviceRegistration::parse_at(bytes, genesis_hash, &device_id, revision)?;
+                let registration = StoreDeviceRegistration::parse_at(
+                    bytes,
+                    store_root_hash,
+                    &device_id,
+                    revision,
+                )?;
                 if registration.registration_hash() != semantic_hash {
                     return Err(StoreProtocolError::ObjectHashMismatch {
                         expected: semantic_hash,
@@ -1012,7 +1023,7 @@ pub async fn list_latest_registration_chains(
 
 pub async fn list_store_packages(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
 ) -> Result<VerifiedPackageListing, StoreObjectError> {
     let listing = storage.list_protocol_objects("store-v1/packages/").await?;
     let mut groups: BTreeMap<(String, u64, ObjectHash), Vec<ProtocolObjectLocator>> =
@@ -1032,7 +1043,7 @@ pub async fn list_store_packages(
     }
     let mut packages = Vec::with_capacity(groups.len());
     for ((device_id, seq, package_hash), objects) in groups {
-        let commit = load_commit_slot(storage, genesis_hash, &device_id, seq)
+        let commit = load_commit_slot(storage, store_root_hash, &device_id, seq)
             .await?
             .ok_or_else(|| {
                 StoreObjectError::Storage(StorageError::NotFound(commit_slot_prefix(
@@ -1317,7 +1328,7 @@ mod tests {
         let storage = storage(&home);
         let bytes = b"semantic bytes";
         let hash = ObjectHash::digest(bytes);
-        let prefix = format!("store-v1/genesis/{hash}");
+        let prefix = format!("store-v1/store-protocol-root/{hash}");
         append_and_verify(&storage, &prefix, ".json", bytes)
             .await
             .unwrap();
@@ -1341,7 +1352,7 @@ mod tests {
         let storage = storage(&home);
         let bytes = b"semantic bytes";
         let hash = ObjectHash::digest(bytes);
-        let prefix = format!("store-v1/genesis/{hash}");
+        let prefix = format!("store-v1/store-protocol-root/{hash}");
         append_and_verify(&storage, &prefix, ".json", bytes)
             .await
             .unwrap();

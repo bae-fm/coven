@@ -16,7 +16,7 @@ use crate::storage::cloud::CopyId;
 
 pub const STORE_PROTOCOL_VERSION: u32 = 1;
 
-const GENESIS_DOMAIN: &[u8] = b"coven.protocol-genesis.v1\0";
+const STORE_PROTOCOL_ROOT_DOMAIN: &[u8] = b"coven.store-protocol-root.v1\0";
 const COMMIT_DOMAIN: &[u8] = b"coven.store-batch-commit.v1\0";
 const HEAD_DOMAIN: &[u8] = b"coven.store-device-head.v1\0";
 const REGISTRATION_DOMAIN: &[u8] = b"coven.store-device-registration.v1\0";
@@ -108,7 +108,7 @@ pub struct StorePackageRef {
 #[serde(deny_unknown_fields)]
 pub struct StoreBatchCommit {
     pub version: u32,
-    pub genesis_hash: ObjectHash,
+    pub store_root_hash: ObjectHash,
     pub device_id: String,
     pub author_pubkey: String,
     pub seq: u64,
@@ -122,7 +122,7 @@ pub struct StoreBatchCommit {
 #[derive(Serialize)]
 struct CommitSignedFields<'a> {
     version: u32,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     device_id: &'a str,
     author_pubkey: &'a str,
     seq: u64,
@@ -135,7 +135,7 @@ struct CommitSignedFields<'a> {
 impl StoreBatchCommit {
     #[allow(clippy::too_many_arguments)]
     pub fn signed(
-        genesis_hash: ObjectHash,
+        store_root_hash: ObjectHash,
         device_id: String,
         seq: u64,
         previous_commit_hash: Option<ObjectHash>,
@@ -174,7 +174,7 @@ impl StoreBatchCommit {
         };
         let mut commit = Self {
             version: STORE_PROTOCOL_VERSION,
-            genesis_hash,
+            store_root_hash,
             device_id,
             author_pubkey,
             seq,
@@ -192,7 +192,7 @@ impl StoreBatchCommit {
     pub fn canonical_signed_bytes(&self) -> Vec<u8> {
         let fields = CommitSignedFields {
             version: self.version,
-            genesis_hash: self.genesis_hash,
+            store_root_hash: self.store_root_hash,
             device_id: &self.device_id,
             author_pubkey: &self.author_pubkey,
             seq: self.seq,
@@ -221,27 +221,27 @@ impl StoreBatchCommit {
 
     pub fn parse_at(
         bytes: &[u8],
-        expected_genesis: ObjectHash,
+        expected_store_root_hash: ObjectHash,
         expected_device: &str,
         expected_seq: u64,
     ) -> Result<Self, StoreProtocolError> {
         let commit: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-        commit.verify_at(expected_genesis, expected_device, expected_seq)?;
+        commit.verify_at(expected_store_root_hash, expected_device, expected_seq)?;
         Ok(commit)
     }
 
     pub fn verify_at(
         &self,
-        expected_genesis: ObjectHash,
+        expected_store_root_hash: ObjectHash,
         expected_device: &str,
         expected_seq: u64,
     ) -> Result<(), StoreProtocolError> {
         require_version(self.version)?;
-        if self.genesis_hash != expected_genesis {
-            return Err(StoreProtocolError::GenesisMismatch {
-                expected: expected_genesis,
-                actual: self.genesis_hash,
+        if self.store_root_hash != expected_store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: expected_store_root_hash,
+                actual: self.store_root_hash,
             });
         }
         if self.device_id != expected_device || self.seq != expected_seq {
@@ -311,7 +311,7 @@ impl StoreBatchCommit {
 #[serde(deny_unknown_fields)]
 pub struct StoreDeviceHead {
     pub version: u32,
-    pub genesis_hash: ObjectHash,
+    pub store_root_hash: ObjectHash,
     pub device_id: String,
     pub author_pubkey: String,
     pub position: Option<CommitPosition>,
@@ -322,7 +322,7 @@ pub struct StoreDeviceHead {
 #[derive(Serialize)]
 struct HeadSignedFields<'a> {
     version: u32,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     device_id: &'a str,
     author_pubkey: &'a str,
     position: Option<&'a CommitPosition>,
@@ -331,7 +331,7 @@ struct HeadSignedFields<'a> {
 
 impl StoreDeviceHead {
     pub fn signed(
-        genesis_hash: ObjectHash,
+        store_root_hash: ObjectHash,
         device_id: String,
         position: Option<CommitPosition>,
         published_at: String,
@@ -341,7 +341,7 @@ impl StoreDeviceHead {
         let author_pubkey = keys::public_key_hex(signer);
         let mut head = Self {
             version: STORE_PROTOCOL_VERSION,
-            genesis_hash,
+            store_root_hash,
             device_id,
             author_pubkey,
             position,
@@ -358,7 +358,7 @@ impl StoreDeviceHead {
             HEAD_DOMAIN,
             &HeadSignedFields {
                 version: self.version,
-                genesis_hash: self.genesis_hash,
+                store_root_hash: self.store_root_hash,
                 device_id: &self.device_id,
                 author_pubkey: &self.author_pubkey,
                 position: self.position.as_ref(),
@@ -381,17 +381,17 @@ impl StoreDeviceHead {
 
     pub fn parse_at(
         bytes: &[u8],
-        expected_genesis: ObjectHash,
+        expected_store_root_hash: ObjectHash,
         expected_device: &str,
         expected_seq: u64,
     ) -> Result<Self, StoreProtocolError> {
         let head: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
         require_version(head.version)?;
-        if head.genesis_hash != expected_genesis {
-            return Err(StoreProtocolError::GenesisMismatch {
-                expected: expected_genesis,
-                actual: head.genesis_hash,
+        if head.store_root_hash != expected_store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: expected_store_root_hash,
+                actual: head.store_root_hash,
             });
         }
         if head.device_id != expected_device || head.slot_sequence() != expected_seq {
@@ -429,7 +429,7 @@ pub enum StoreDeviceRegistrationState {
 #[serde(deny_unknown_fields)]
 pub struct StoreDeviceRegistration {
     pub version: u32,
-    pub genesis_hash: ObjectHash,
+    pub store_root_hash: ObjectHash,
     pub device_id: String,
     pub author_pubkey: String,
     pub revision: u64,
@@ -441,7 +441,7 @@ pub struct StoreDeviceRegistration {
 #[derive(Serialize)]
 struct RegistrationSignedFields<'a> {
     version: u32,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     device_id: &'a str,
     author_pubkey: &'a str,
     revision: u64,
@@ -451,7 +451,7 @@ struct RegistrationSignedFields<'a> {
 
 impl StoreDeviceRegistration {
     pub fn signed(
-        genesis_hash: ObjectHash,
+        store_root_hash: ObjectHash,
         device_id: String,
         revision: u64,
         previous_registration_hash: Option<ObjectHash>,
@@ -463,7 +463,7 @@ impl StoreDeviceRegistration {
         let author_pubkey = keys::public_key_hex(signer);
         let mut registration = Self {
             version: STORE_PROTOCOL_VERSION,
-            genesis_hash,
+            store_root_hash,
             device_id,
             author_pubkey,
             revision,
@@ -481,7 +481,7 @@ impl StoreDeviceRegistration {
             REGISTRATION_DOMAIN,
             &RegistrationSignedFields {
                 version: self.version,
-                genesis_hash: self.genesis_hash,
+                store_root_hash: self.store_root_hash,
                 device_id: &self.device_id,
                 author_pubkey: &self.author_pubkey,
                 revision: self.revision,
@@ -501,17 +501,17 @@ impl StoreDeviceRegistration {
 
     pub fn parse_at(
         bytes: &[u8],
-        expected_genesis: ObjectHash,
+        expected_store_root_hash: ObjectHash,
         expected_device: &str,
         expected_revision: u64,
     ) -> Result<Self, StoreProtocolError> {
         let registration: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
         require_version(registration.version)?;
-        if registration.genesis_hash != expected_genesis {
-            return Err(StoreProtocolError::GenesisMismatch {
-                expected: expected_genesis,
-                actual: registration.genesis_hash,
+        if registration.store_root_hash != expected_store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: expected_store_root_hash,
+                actual: registration.store_root_hash,
             });
         }
         if registration.device_id != expected_device || registration.revision != expected_revision {
@@ -540,7 +540,7 @@ impl StoreDeviceRegistration {
 #[serde(deny_unknown_fields)]
 pub struct StoreAck {
     pub version: u32,
-    pub genesis_hash: ObjectHash,
+    pub store_root_hash: ObjectHash,
     pub device_id: String,
     pub author_pubkey: String,
     pub revision: u64,
@@ -553,7 +553,7 @@ pub struct StoreAck {
 #[derive(Serialize)]
 struct AckSignedFields<'a> {
     version: u32,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     device_id: &'a str,
     author_pubkey: &'a str,
     revision: u64,
@@ -564,7 +564,7 @@ struct AckSignedFields<'a> {
 
 impl StoreAck {
     pub fn signed(
-        genesis_hash: ObjectHash,
+        store_root_hash: ObjectHash,
         device_id: String,
         revision: u64,
         previous_ack_hash: Option<ObjectHash>,
@@ -578,7 +578,7 @@ impl StoreAck {
         let author_pubkey = keys::public_key_hex(signer);
         let mut ack = Self {
             version: STORE_PROTOCOL_VERSION,
-            genesis_hash,
+            store_root_hash,
             device_id,
             author_pubkey,
             revision,
@@ -597,7 +597,7 @@ impl StoreAck {
             ACK_DOMAIN,
             &AckSignedFields {
                 version: self.version,
-                genesis_hash: self.genesis_hash,
+                store_root_hash: self.store_root_hash,
                 device_id: &self.device_id,
                 author_pubkey: &self.author_pubkey,
                 revision: self.revision,
@@ -618,17 +618,17 @@ impl StoreAck {
 
     pub fn parse_at(
         bytes: &[u8],
-        expected_genesis: ObjectHash,
+        expected_store_root_hash: ObjectHash,
         expected_device: &str,
         expected_revision: u64,
     ) -> Result<Self, StoreProtocolError> {
         let ack: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
         require_version(ack.version)?;
-        if ack.genesis_hash != expected_genesis {
-            return Err(StoreProtocolError::GenesisMismatch {
-                expected: expected_genesis,
-                actual: ack.genesis_hash,
+        if ack.store_root_hash != expected_store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: expected_store_root_hash,
+                actual: ack.store_root_hash,
             });
         }
         if ack.device_id != expected_device || ack.revision != expected_revision {
@@ -655,7 +655,7 @@ impl StoreAck {
 #[serde(deny_unknown_fields)]
 pub struct SnapshotMeta {
     pub version: u32,
-    pub genesis_hash: ObjectHash,
+    pub store_root_hash: ObjectHash,
     pub author_pubkey: String,
     pub image_hash: ObjectHash,
     pub coverage: BTreeMap<String, CommitPosition>,
@@ -667,7 +667,7 @@ pub struct SnapshotMeta {
 #[derive(Serialize)]
 struct SnapshotSignedFields<'a> {
     version: u32,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     author_pubkey: &'a str,
     image_hash: ObjectHash,
     coverage: &'a BTreeMap<String, CommitPosition>,
@@ -677,7 +677,7 @@ struct SnapshotSignedFields<'a> {
 
 impl SnapshotMeta {
     pub fn signed(
-        genesis_hash: ObjectHash,
+        store_root_hash: ObjectHash,
         image_hash: ObjectHash,
         coverage: BTreeMap<String, CommitPosition>,
         schema_version: u32,
@@ -688,7 +688,7 @@ impl SnapshotMeta {
         let author_pubkey = keys::public_key_hex(signer);
         let mut meta = Self {
             version: STORE_PROTOCOL_VERSION,
-            genesis_hash,
+            store_root_hash,
             author_pubkey,
             image_hash,
             coverage,
@@ -706,7 +706,7 @@ impl SnapshotMeta {
             SNAPSHOT_DOMAIN,
             &SnapshotSignedFields {
                 version: self.version,
-                genesis_hash: self.genesis_hash,
+                store_root_hash: self.store_root_hash,
                 author_pubkey: &self.author_pubkey,
                 image_hash: self.image_hash,
                 coverage: &self.coverage,
@@ -726,17 +726,17 @@ impl SnapshotMeta {
 
     pub fn parse_at(
         bytes: &[u8],
-        expected_genesis: ObjectHash,
+        expected_store_root_hash: ObjectHash,
         expected_author: &str,
         expected_hash: ObjectHash,
     ) -> Result<Self, StoreProtocolError> {
         let meta: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
         require_version(meta.version)?;
-        if meta.genesis_hash != expected_genesis {
-            return Err(StoreProtocolError::GenesisMismatch {
-                expected: expected_genesis,
-                actual: meta.genesis_hash,
+        if meta.store_root_hash != expected_store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: expected_store_root_hash,
+                actual: meta.store_root_hash,
             });
         }
         if meta.author_pubkey != expected_author {
@@ -767,7 +767,7 @@ impl SnapshotMeta {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProtocolGenesis {
+pub struct StoreProtocolRoot {
     pub version: u32,
     pub store_id: String,
     pub founder: MembershipEntry,
@@ -777,7 +777,7 @@ pub struct ProtocolGenesis {
 }
 
 #[derive(Serialize)]
-struct GenesisSignedFields<'a> {
+struct StoreProtocolRootSignedFields<'a> {
     version: u32,
     store_id: &'a str,
     founder: &'a MembershipEntry,
@@ -785,7 +785,7 @@ struct GenesisSignedFields<'a> {
     author_pubkey: &'a str,
 }
 
-impl ProtocolGenesis {
+impl StoreProtocolRoot {
     pub fn signed(
         store_id: String,
         founder: MembershipEntry,
@@ -793,7 +793,7 @@ impl ProtocolGenesis {
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         let author_pubkey = keys::public_key_hex(signer);
-        let mut genesis = Self {
+        let mut store_protocol_root = Self {
             version: STORE_PROTOCOL_VERSION,
             store_id,
             founder,
@@ -801,16 +801,16 @@ impl ProtocolGenesis {
             author_pubkey,
             signature: String::new(),
         };
-        genesis.validate_founder()?;
-        let (_, signature) = keys::sign_hex(signer, &genesis.canonical_signed_bytes());
-        genesis.signature = signature;
-        Ok(genesis)
+        store_protocol_root.validate_founder()?;
+        let (_, signature) = keys::sign_hex(signer, &store_protocol_root.canonical_signed_bytes());
+        store_protocol_root.signature = signature;
+        Ok(store_protocol_root)
     }
 
     fn canonical_signed_bytes(&self) -> Vec<u8> {
         domain_json(
-            GENESIS_DOMAIN,
-            &GenesisSignedFields {
+            STORE_PROTOCOL_ROOT_DOMAIN,
+            &StoreProtocolRootSignedFields {
                 version: self.version,
                 store_id: &self.store_id,
                 founder: &self.founder,
@@ -821,7 +821,7 @@ impl ProtocolGenesis {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("ProtocolGenesis serialization cannot fail")
+        serde_json::to_vec(self).expect("StoreProtocolRoot serialization cannot fail")
     }
 
     pub fn object_hash(&self) -> ObjectHash {
@@ -829,18 +829,18 @@ impl ProtocolGenesis {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, StoreProtocolError> {
-        let genesis: Self = serde_json::from_slice(bytes)
+        let store_protocol_root: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-        require_version(genesis.version)?;
-        genesis.validate_founder()?;
+        require_version(store_protocol_root.version)?;
+        store_protocol_root.validate_founder()?;
         if !keys::verify_signature_hex(
-            &genesis.author_pubkey,
-            &genesis.signature,
-            &genesis.canonical_signed_bytes(),
+            &store_protocol_root.author_pubkey,
+            &store_protocol_root.signature,
+            &store_protocol_root.canonical_signed_bytes(),
         ) {
             return Err(StoreProtocolError::InvalidSignature);
         }
-        Ok(genesis)
+        Ok(store_protocol_root)
     }
 
     pub fn parse_expected(
@@ -849,27 +849,27 @@ impl ProtocolGenesis {
         expected_store_id: &str,
         expected_founder: &str,
     ) -> Result<Self, StoreProtocolError> {
-        let genesis = Self::parse(bytes)?;
-        let actual_hash = genesis.object_hash();
+        let store_protocol_root = Self::parse(bytes)?;
+        let actual_hash = store_protocol_root.object_hash();
         if actual_hash != expected_hash {
-            return Err(StoreProtocolError::GenesisMismatch {
+            return Err(StoreProtocolError::StoreRootMismatch {
                 expected: expected_hash,
                 actual: actual_hash,
             });
         }
-        if genesis.store_id != expected_store_id {
+        if store_protocol_root.store_id != expected_store_id {
             return Err(StoreProtocolError::StoreMismatch {
                 expected: expected_store_id.to_string(),
-                actual: genesis.store_id,
+                actual: store_protocol_root.store_id,
             });
         }
-        if genesis.author_pubkey != expected_founder {
+        if store_protocol_root.author_pubkey != expected_founder {
             return Err(StoreProtocolError::FounderMismatch {
                 expected: expected_founder.to_string(),
-                actual: genesis.author_pubkey,
+                actual: store_protocol_root.author_pubkey,
             });
         }
-        Ok(genesis)
+        Ok(store_protocol_root)
     }
 
     fn validate_founder(&self) -> Result<(), StoreProtocolError> {
@@ -912,8 +912,8 @@ pub enum StoreProtocolError {
     RelocatedSlot { expected: String, actual: String },
     #[error("Store package names key {actual:?}, expected {expected:?}")]
     RelocatedPackage { expected: String, actual: String },
-    #[error("Store protocol genesis hash is {actual}, expected {expected}")]
-    GenesisMismatch {
+    #[error("Store protocol root hash is {actual}, expected {expected}")]
+    StoreRootMismatch {
         expected: ObjectHash,
         actual: ObjectHash,
     },
@@ -921,9 +921,9 @@ pub enum StoreProtocolError {
     StoreMismatch { expected: String, actual: String },
     #[error("founder is {actual:?}, expected {expected:?}")]
     FounderMismatch { expected: String, actual: String },
-    #[error("protocol genesis has an invalid founder membership entry")]
+    #[error("store protocol root has an invalid founder membership entry")]
     InvalidFounder,
-    #[error("protocol genesis store id is empty")]
+    #[error("store protocol root store id is empty")]
     EmptyStoreId,
     #[error("Store commit sequence must start at 1, got {0}")]
     InvalidSequence(u64),
@@ -1001,11 +1001,13 @@ pub struct SnapshotCopySlot {
     pub copy_id: CopyId,
 }
 
-pub fn parse_genesis_copy_key(path: &str) -> Result<(ObjectHash, CopyId), StoreProtocolError> {
+pub fn parse_store_protocol_root_copy_key(
+    path: &str,
+) -> Result<(ObjectHash, CopyId), StoreProtocolError> {
     let segments: Vec<&str> = path.split('/').collect();
     if segments.len() != 5
         || segments[0] != "store-v1"
-        || segments[1] != "genesis"
+        || segments[1] != "store-protocol-root"
         || segments[3] != "copies"
     {
         return Err(StoreProtocolError::MalformedPath(path.to_string()));
@@ -1160,14 +1162,14 @@ pub fn protocol_prefix() -> &'static str {
     "store-v1/"
 }
 
-pub fn genesis_semantic_prefix(genesis_hash: ObjectHash) -> String {
-    format!("store-v1/genesis/{genesis_hash}")
+pub fn store_protocol_root_semantic_prefix(store_root_hash: ObjectHash) -> String {
+    format!("store-v1/store-protocol-root/{store_root_hash}")
 }
 
-pub fn genesis_copy_key(genesis_hash: ObjectHash, copy_id: CopyId) -> String {
+pub fn store_protocol_root_copy_key(store_root_hash: ObjectHash, copy_id: CopyId) -> String {
     format!(
         "{}/copies/{copy_id}.json",
-        genesis_semantic_prefix(genesis_hash)
+        store_protocol_root_semantic_prefix(store_root_hash)
     )
 }
 
@@ -1398,14 +1400,15 @@ mod tests {
     use super::*;
     use crate::sync::membership::founder_entry;
 
-    fn fixture() -> (UserKeypair, ProtocolGenesis, StoreBatchCommit, Vec<u8>) {
+    fn fixture() -> (UserKeypair, StoreProtocolRoot, StoreBatchCommit, Vec<u8>) {
         let signer = UserKeypair::generate();
         let founder = founder_entry("store-a", &signer, "0000000001000-0000-device-a");
-        let genesis = ProtocolGenesis::signed("store-a".to_string(), founder, 3, &signer)
-            .expect("sign genesis");
+        let store_protocol_root =
+            StoreProtocolRoot::signed("store-a".to_string(), founder, 3, &signer)
+                .expect("sign Store protocol root");
         let package = b"package".to_vec();
         let commit = StoreBatchCommit::signed(
-            genesis.object_hash(),
+            store_protocol_root.object_hash(),
             "device-a".to_string(),
             1,
             None,
@@ -1418,16 +1421,16 @@ mod tests {
             )]),
             Some(MembershipCoord {
                 author_pubkey: keys::public_key_hex(&signer),
-                author_owner_grant: genesis.founder.author_owner_grant.clone(),
+                author_owner_grant: store_protocol_root.founder.author_owner_grant.clone(),
                 seq: 1,
-                entry_hash: crate::sync::membership::entry_hash(&genesis.founder),
+                entry_hash: crate::sync::membership::entry_hash(&store_protocol_root.founder),
             }),
             3,
             &package,
             &signer,
         )
         .expect("sign commit");
-        (signer, genesis, commit, package)
+        (signer, store_protocol_root, commit, package)
     }
 
     #[test]
@@ -1447,10 +1450,11 @@ mod tests {
 
     #[test]
     fn canonical_commit_round_trip_and_literal_bytes() {
-        let (_, genesis, commit, package) = fixture();
+        let (_, store_protocol_root, commit, package) = fixture();
         let bytes = commit.to_bytes();
-        let parsed = StoreBatchCommit::parse_at(&bytes, genesis.object_hash(), "device-a", 1)
-            .expect("parse commit");
+        let parsed =
+            StoreBatchCommit::parse_at(&bytes, store_protocol_root.object_hash(), "device-a", 1)
+                .expect("parse commit");
         parsed.verify_package(&package).expect("verify package");
         assert_eq!(parsed, commit);
         assert!(commit.canonical_signed_bytes().starts_with(COMMIT_DOMAIN));
@@ -1458,23 +1462,23 @@ mod tests {
 
     #[test]
     fn commit_rejects_dependency_package_predecessor_and_slot_tamper() {
-        let (_, genesis, commit, package) = fixture();
+        let (_, store_protocol_root, commit, package) = fixture();
         let mut tampered = commit.clone();
         tampered.dependencies.get_mut("device-b").unwrap().seq += 1;
         assert!(matches!(
-            tampered.verify_at(genesis.object_hash(), "device-a", 1),
+            tampered.verify_at(store_protocol_root.object_hash(), "device-a", 1),
             Err(StoreProtocolError::InvalidSignature)
         ));
 
         let mut tampered = commit.clone();
         tampered.package.content_hash = ObjectHash::digest(b"different");
         assert!(matches!(
-            tampered.verify_at(genesis.object_hash(), "device-a", 1),
+            tampered.verify_at(store_protocol_root.object_hash(), "device-a", 1),
             Err(StoreProtocolError::RelocatedPackage { .. })
         ));
 
         assert!(matches!(
-            commit.verify_at(genesis.object_hash(), "device-a", 2),
+            commit.verify_at(store_protocol_root.object_hash(), "device-a", 2),
             Err(StoreProtocolError::RelocatedSlot { .. })
         ));
         assert!(matches!(
@@ -1487,12 +1491,12 @@ mod tests {
 
     #[test]
     fn unknown_fields_and_versions_are_rejected() {
-        let (_, genesis, commit, _) = fixture();
+        let (_, store_protocol_root, commit, _) = fixture();
         let mut value = serde_json::to_value(&commit).unwrap();
         value["unknown"] = serde_json::json!(true);
         assert!(StoreBatchCommit::parse_at(
             &serde_json::to_vec(&value).unwrap(),
-            genesis.object_hash(),
+            store_protocol_root.object_hash(),
             "device-a",
             1,
         )
@@ -1503,7 +1507,7 @@ mod tests {
         assert!(matches!(
             StoreBatchCommit::parse_at(
                 &serde_json::to_vec(&value).unwrap(),
-                genesis.object_hash(),
+                store_protocol_root.object_hash(),
                 "device-a",
                 1,
             ),
@@ -1512,16 +1516,16 @@ mod tests {
     }
 
     #[test]
-    fn genesis_embeds_and_authenticates_the_founder_entry() {
-        let (_, genesis, _, _) = fixture();
-        let bytes = genesis.to_bytes();
-        let parsed = ProtocolGenesis::parse_expected(
+    fn store_protocol_root_embeds_and_authenticates_the_founder_entry() {
+        let (_, store_protocol_root, _, _) = fixture();
+        let bytes = store_protocol_root.to_bytes();
+        let parsed = StoreProtocolRoot::parse_expected(
             &bytes,
-            genesis.object_hash(),
+            store_protocol_root.object_hash(),
             "store-a",
-            &genesis.author_pubkey,
+            &store_protocol_root.author_pubkey,
         )
-        .expect("parse exact genesis");
-        assert_eq!(parsed, genesis);
+        .expect("parse exact Store protocol root");
+        assert_eq!(parsed, store_protocol_root);
     }
 }

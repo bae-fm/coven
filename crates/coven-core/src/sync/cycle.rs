@@ -505,13 +505,13 @@ pub(crate) async fn run_single_sync_cycle(
         resume_drain_promptly = true;
     }
 
-    let genesis_hash = db
-        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+    let store_root_hash = db
+        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
         .await
-        .map_err(|error| format!("read protocol genesis hash: {error}"))?
-        .ok_or_else(|| "protocol genesis hash is absent".to_string())?
+        .map_err(|error| format!("read store protocol root hash: {error}"))?
+        .ok_or_else(|| "store protocol root hash is absent".to_string())?
         .parse()
-        .map_err(|error| format!("protocol genesis hash is invalid: {error}"))?;
+        .map_err(|error| format!("store protocol root hash is invalid: {error}"))?;
     if rotation_pending.is_none() {
         super::store_registration::ensure_active_registration(db, storage, user_keypair)
             .await
@@ -521,7 +521,7 @@ pub(crate) async fn run_single_sync_cycle(
         db,
         tables,
         storage,
-        genesis_hash,
+        store_root_hash,
         device_id,
         store_dir,
         membership.chain.as_ref(),
@@ -740,7 +740,7 @@ pub(crate) async fn run_single_sync_cycle(
 
                 let meta = super::store_snapshot::push_store_snapshot(
                     storage,
-                    genesis_hash,
+                    store_root_hash,
                     cut.snapshot,
                     cut.coverage,
                     db.schema_version(),
@@ -774,7 +774,7 @@ pub(crate) async fn run_single_sync_cycle(
         if let Some(chain) = membership.chain.as_ref() {
             match super::store_reclaim::reclaim_store_packages(
                 storage,
-                genesis_hash,
+                store_root_hash,
                 chain,
                 membership.listing_proof,
             )
@@ -1003,8 +1003,8 @@ pub enum InitSyncError {
     NoSyncedTables,
     #[error("cloud cipher and blob path scheme describe different storage modes")]
     IncoherentStorageRepresentation,
-    #[error("Store protocol genesis failed: {0}")]
-    ProtocolGenesis(String),
+    #[error("Store protocol root failed: {0}")]
+    StoreProtocolRoot(String),
     #[error("membership chain bootstrap/anchor failed: {0}")]
     MembershipAnchor(String),
     #[error("restoring the persisted pending rotation failed: {0}")]
@@ -1017,7 +1017,7 @@ pub enum InitSyncError {
 pub enum StoreInitialization {
     CreateStore,
     OpenStore {
-        expected_genesis_hash: super::store_commit::ObjectHash,
+        expected_store_root_hash: super::store_commit::ObjectHash,
         expected_founder: String,
     },
 }
@@ -1048,9 +1048,9 @@ pub async fn init_sync_over_storage(
     let hlc = db.hlc();
     let user_keypair = storage.user_keypair().clone();
     let store_id = storage.store_id().to_string();
-    let genesis = match initialization {
+    let store_protocol_root = match initialization {
         StoreInitialization::CreateStore => {
-            super::store_genesis::create_store(
+            super::store_protocol_root::create_store(
                 db,
                 &storage,
                 &store_id,
@@ -1060,21 +1060,21 @@ pub async fn init_sync_over_storage(
             .await
         }
         StoreInitialization::OpenStore {
-            expected_genesis_hash,
+            expected_store_root_hash,
             expected_founder,
         } => {
-            super::store_genesis::open_store(
+            super::store_protocol_root::open_store(
                 db,
                 &storage,
-                expected_genesis_hash,
+                expected_store_root_hash,
                 &store_id,
                 &expected_founder,
             )
             .await
         }
     }
-    .map_err(|error| InitSyncError::ProtocolGenesis(error.to_string()))?;
-    ensure_owner_anchored_chain(&storage, db, &genesis, &user_keypair)
+    .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
+    ensure_owner_anchored_chain(&storage, db, &store_protocol_root, &user_keypair)
         .await
         .map_err(InitSyncError::MembershipAnchor)?;
 
@@ -1118,7 +1118,7 @@ pub async fn init_sync_over_storage(
 pub async fn ensure_owner_anchored_chain(
     storage: &dyn SyncStorage,
     db: &Database,
-    genesis: &super::store_commit::ProtocolGenesis,
+    store_protocol_root: &super::store_commit::StoreProtocolRoot,
     owner_keypair: &UserKeypair,
 ) -> Result<(), String> {
     use super::membership_ops::OWNER_PUBKEY_STATE_KEY;
@@ -1133,22 +1133,22 @@ pub async fn ensure_owner_anchored_chain(
         .map_err(|e| format!("list membership entries: {e}"))?;
     if pinned
         .as_deref()
-        .is_some_and(|owner| owner != genesis.author_pubkey)
+        .is_some_and(|owner| owner != store_protocol_root.author_pubkey)
     {
         return Err(format!(
-            "pinned owner {:?} does not match protocol genesis founder {:?}",
+            "pinned owner {:?} does not match store protocol root founder {:?}",
             pinned.as_deref(),
-            genesis.author_pubkey
+            store_protocol_root.author_pubkey
         ));
     }
-    let expected_owner = &genesis.author_pubkey;
+    let expected_owner = &store_protocol_root.author_pubkey;
     let loaded =
         super::membership_ops::load_and_persist_owner_anchor(storage, &entries, expected_owner, db)
             .await
             .map_err(|error| error.to_string())?;
     if let Some(chain) = loaded {
-        if chain.entries().first() != Some(&genesis.founder) {
-            return Err("membership founder does not match protocol genesis".to_string());
+        if chain.entries().first() != Some(&store_protocol_root.founder) {
+            return Err("membership founder does not match store protocol root".to_string());
         }
         return Ok(());
     }
@@ -1159,14 +1159,14 @@ pub async fn ensure_owner_anchored_chain(
         ));
     }
 
-    if our_pk != genesis.author_pubkey {
+    if our_pk != store_protocol_root.author_pubkey {
         return Err(format!(
             "membership root is absent and local identity {our_pk} cannot republish founder {}",
-            genesis.author_pubkey
+            store_protocol_root.author_pubkey
         ));
     }
 
-    publish_or_complete_founder(storage, &genesis.founder, owner_keypair).await?;
+    publish_or_complete_founder(storage, &store_protocol_root.founder, owner_keypair).await?;
     let committed_entries = super::membership_ops::list_membership_entries(storage)
         .await
         .map_err(|e| format!("list membership entries after founder publish: {e}"))?;
@@ -1182,14 +1182,14 @@ pub async fn ensure_owner_anchored_chain(
 
 async fn publish_or_complete_founder(
     storage: &dyn SyncStorage,
-    genesis_founder: &super::membership::MembershipEntry,
+    store_protocol_root_founder: &super::membership::MembershipEntry,
     owner_keypair: &UserKeypair,
 ) -> Result<(), String> {
     use super::membership::MembershipChain;
     use super::store_objects::{append_membership_entry_object, load_membership_entry_slot};
 
     let owner_pubkey = hex::encode(owner_keypair.public_key());
-    let founder_coord = genesis_founder.coord();
+    let founder_coord = store_protocol_root_founder.coord();
     match load_membership_entry_slot(storage, &owner_pubkey, &founder_coord.author_owner_grant, 1)
         .await
     {
@@ -1206,8 +1206,10 @@ async fn publish_or_complete_founder(
                     "interrupted founder entry is not this storage identity's founder".to_string(),
                 );
             }
-            if chain.entries().first() != Some(genesis_founder) {
-                return Err("interrupted founder entry does not match protocol genesis".to_string());
+            if chain.entries().first() != Some(store_protocol_root_founder) {
+                return Err(
+                    "interrupted founder entry does not match store protocol root".to_string(),
+                );
             }
             append_membership_entry_object(storage, &coord, &entry)
                 .await
@@ -1219,16 +1221,18 @@ async fn publish_or_complete_founder(
         }
         Ok(None) => {
             let coord = founder_coord;
-            append_membership_entry_object(storage, &coord, genesis_founder)
+            append_membership_entry_object(storage, &coord, store_protocol_root_founder)
                 .await
-                .map_err(|error| format!("publish protocol genesis founder entry: {error}"))?;
-            let chain =
-                MembershipChain::from_entries_with_coords(vec![(coord, genesis_founder.clone())])
-                    .map_err(|error| format!("protocol genesis founder is invalid: {error}"))?;
+                .map_err(|error| format!("publish store protocol root founder entry: {error}"))?;
+            let chain = MembershipChain::from_entries_with_coords(vec![(
+                coord,
+                store_protocol_root_founder.clone(),
+            )])
+            .map_err(|error| format!("store protocol root founder is invalid: {error}"))?;
             super::membership_ops::publish_membership_head(storage, &chain, owner_keypair)
                 .await
                 .map(|_| ())
-                .map_err(|error| format!("publish protocol genesis founder head: {error}"))
+                .map_err(|error| format!("publish store protocol root founder head: {error}"))
         }
         Err(error) => Err(format!("read interrupted founder entry: {error}")),
     }

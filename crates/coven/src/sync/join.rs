@@ -626,7 +626,7 @@ pub(crate) async fn join_store(
             &store_dir,
             &code.store_id,
             &device_id,
-            code.genesis_hash,
+            code.store_root_hash,
             BootstrapContext::Join {
                 owner_pubkey: &code.owner_pubkey,
                 keypair: &user_keypair,
@@ -682,7 +682,7 @@ pub(crate) async fn bootstrap_and_save_store(
     store_dir: &StoreDir,
     store_id: &str,
     device_id: &str,
-    genesis_hash: crate::sync::store_commit::ObjectHash,
+    store_root_hash: crate::sync::store_commit::ObjectHash,
     context: BootstrapContext<'_>,
     membership_floor: &[MembershipCoord],
     synced_tables: &[SyncedTable],
@@ -712,7 +712,7 @@ pub(crate) async fn bootstrap_and_save_store(
     let bootstrap_result = bootstrap_from_snapshot(
         bucket_dyn,
         store_id,
-        genesis_hash,
+        store_root_hash,
         owner_pubkey,
         membership_floor,
         binary_schema_version,
@@ -937,18 +937,18 @@ pub(crate) async fn open_db_and_pull(
         }
         crate::sync::store_registration::ensure_active_registration(&db, storage, signer).await?;
     }
-    let genesis_hash = db
-        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+    let store_root_hash = db
+        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
         .await
         .map_err(|error| BootstrapError::Database(error.to_string()))?
-        .ok_or_else(|| BootstrapError::Database("protocol genesis hash is absent".to_string()))?
+        .ok_or_else(|| BootstrapError::Database("store protocol root hash is absent".to_string()))?
         .parse()
-        .map_err(|error| BootstrapError::Database(format!("protocol genesis hash: {error}")))?;
+        .map_err(|error| BootstrapError::Database(format!("store protocol root hash: {error}")))?;
     let pull_result = crate::sync::store_pull::pull_store_commits(
         &db,
         db.synced_tables(),
         storage,
-        genesis_hash,
+        store_root_hash,
         device_id,
         store_dir,
         membership.chain.as_ref(),

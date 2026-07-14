@@ -70,13 +70,13 @@ pub async fn stage_pending_store_batch(
     )
     .await
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let genesis_hash = protocol_genesis_hash(db).await?;
+    let store_root_hash = store_root_hash(db).await?;
     let previous = db.latest_local_store_position().await?;
     let seq = previous
         .as_ref()
         .map_or(1, |position| position.seq.saturating_add(1));
     let commit = StoreBatchCommit::signed(
-        genesis_hash,
+        store_root_hash,
         device_id.to_string(),
         seq,
         previous.map(|position| position.commit_hash),
@@ -88,7 +88,7 @@ pub async fn stage_pending_store_batch(
     )
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let head = StoreDeviceHead::signed(
-        genesis_hash,
+        store_root_hash,
         device_id.to_string(),
         Some(commit.position()),
         timestamp.to_string(),
@@ -115,7 +115,7 @@ pub async fn drain_outbound_store_batches(
     db: &Database,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreOutboundError> {
-    let genesis_hash = protocol_genesis_hash(db).await?;
+    let store_root_hash = store_root_hash(db).await?;
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await?
@@ -125,7 +125,7 @@ pub async fn drain_outbound_store_batches(
     let mut published = 0_u64;
     while let Some(batch) = db.oldest_outbound_store_batch().await? {
         validate_manifest(db, storage, &batch.blob_manifest).await?;
-        let (commit, head) = validate_outbound(&batch, genesis_hash, &device_id)?;
+        let (commit, head) = validate_outbound(&batch, store_root_hash, &device_id)?;
         append_and_verify(
             storage,
             &commit.package.object_key,
@@ -159,11 +159,11 @@ pub async fn drain_outbound_store_batches(
 
 fn validate_outbound(
     batch: &OutboundStoreBatch,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     device_id: &str,
 ) -> Result<(StoreBatchCommit, StoreDeviceHead), StoreOutboundError> {
     let commit =
-        StoreBatchCommit::parse_at(&batch.commit_bytes, genesis_hash, device_id, batch.seq)
+        StoreBatchCommit::parse_at(&batch.commit_bytes, store_root_hash, device_id, batch.seq)
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     if commit.commit_hash() != batch.commit_hash
         || commit.previous_commit_hash != batch.previous_commit_hash
@@ -177,7 +177,7 @@ fn validate_outbound(
     commit
         .verify_package(&batch.package_bytes)
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let head = StoreDeviceHead::parse_at(&batch.head_bytes, genesis_hash, device_id, batch.seq)
+    let head = StoreDeviceHead::parse_at(&batch.head_bytes, store_root_hash, device_id, batch.seq)
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     if head.head_hash() != batch.head_hash || head.position.as_ref() != Some(&commit.position()) {
         return Err(StoreOutboundError::InvalidOutbound(
@@ -251,16 +251,16 @@ async fn validate_manifest(
     Ok(())
 }
 
-async fn protocol_genesis_hash(db: &Database) -> Result<ObjectHash, StoreOutboundError> {
+async fn store_root_hash(db: &Database) -> Result<ObjectHash, StoreOutboundError> {
     let raw = db
-        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
         .await?
         .ok_or(StoreOutboundError::MissingState {
-            key: crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY,
+            key: crate::database::STORE_ROOT_HASH_STATE_KEY,
         })?;
     raw.parse::<ObjectHash>()
         .map_err(|error| StoreOutboundError::InvalidState {
-            key: crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY,
+            key: crate::database::STORE_ROOT_HASH_STATE_KEY,
             reason: error.to_string(),
         })
 }
@@ -274,7 +274,7 @@ mod tests {
     use crate::storage::cloud::SequentialCopyIdGenerator;
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::test_helpers::{
-        host_exec, open_test_db, publish_test_store_genesis, temp_store_dir,
+        host_exec, open_test_db, publish_test_store_protocol_root, temp_store_dir,
     };
 
     struct StagedBatch {
@@ -296,8 +296,14 @@ mod tests {
         )
         .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(copy_source)));
         let db = open_test_db();
-        publish_test_store_genesis(&db, &storage, "outbound-crash-test", "dev-writer", &keypair)
-            .await;
+        publish_test_store_protocol_root(
+            &db,
+            &storage,
+            "outbound-crash-test",
+            "dev-writer",
+            &keypair,
+        )
+        .await;
         host_exec(
             &db,
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -451,7 +457,7 @@ mod tests {
         );
         let loaded = super::super::store_objects::load_commit_slot(
             &staged.storage,
-            protocol_genesis_hash(&staged.db).await.unwrap(),
+            store_root_hash(&staged.db).await.unwrap(),
             "dev-writer",
             1,
         )

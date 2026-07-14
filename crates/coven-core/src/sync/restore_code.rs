@@ -51,7 +51,7 @@ pub struct RestoreCode {
     pub provider: CloudHomeJoinInfo,
     /// Ed25519 signing key, hex-encoded, 64 bytes. Required.
     pub sk: String,
-    pub genesis_hash: super::store_commit::ObjectHash,
+    pub store_root_hash: super::store_commit::ObjectHash,
     pub founder_pubkey: String,
     /// Every author's membership-head coordinate at mint time
     /// ([`MembershipChain::author_heads`](crate::sync::membership::MembershipChain::author_heads)),
@@ -74,7 +74,7 @@ impl std::fmt::Debug for RestoreCode {
             .field("name", &self.name)
             .field("provider", &self.provider)
             .field("sk", &"<redacted>")
-            .field("genesis_hash", &self.genesis_hash)
+            .field("store_root_hash", &self.store_root_hash)
             .field("founder_pubkey", &self.founder_pubkey)
             .field("membership_floor", &self.membership_floor)
             .finish()
@@ -268,7 +268,9 @@ mod tests {
                 secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
             },
             sk: test_sk(),
-            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"restore protocol root",
+            ),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         }
@@ -316,7 +318,9 @@ mod tests {
             name: "CloudKit Store".to_string(),
             provider: CloudHomeJoinInfo::CloudKit,
             sk: test_sk(),
-            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"restore protocol root",
+            ),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -337,7 +341,9 @@ mod tests {
                 folder_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs".to_string(),
             },
             sk: test_sk(),
-            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"restore protocol root",
+            ),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -361,7 +367,9 @@ mod tests {
                 folder_path: "/Apps/your-app/My Store".to_string(),
             },
             sk: test_sk(),
-            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"restore protocol root",
+            ),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -386,7 +394,9 @@ mod tests {
                 folder_id: "folder-id-456".to_string(),
             },
             sk: test_sk(),
-            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"restore protocol root",
+            ),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -418,7 +428,9 @@ mod tests {
                 zone_name: "zone".to_string(),
             },
             sk: test_sk(),
-            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"restore protocol root",
+            ),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -507,7 +519,9 @@ mod tests {
                 secret_key: "sk-cred".to_string(),
             },
             sk: test_sk(),
-            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"restore protocol root",
+            ),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -537,7 +551,9 @@ mod tests {
                 secret_key: "sk-cred".to_string(),
             },
             sk: test_sk(),
-            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"restore genesis"),
+            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"restore protocol root",
+            ),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };

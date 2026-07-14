@@ -278,8 +278,9 @@ pub async fn invite_member(
     // heads are the floor the joiner seeds its watermark from, so a provider
     // can never roll the joiner back to a state before this invite.
     let membership_floor = chain.author_heads();
-    let genesis =
-        super::store_objects::discover_genesis(storage, store_id, Some(&owner_pubkey)).await?;
+    let store_protocol_root =
+        super::store_objects::discover_store_protocol_root(storage, store_id, Some(&owner_pubkey))
+            .await?;
 
     // Build the invite code
     Ok(crate::join_code::InviteCode {
@@ -288,7 +289,7 @@ pub async fn invite_member(
         store_name: store_name.to_string(),
         join_info,
         owner_pubkey,
-        genesis_hash: genesis.semantic_hash,
+        store_root_hash: store_protocol_root.semantic_hash,
         membership_floor,
     })
 }
@@ -955,16 +956,17 @@ async fn validate_anchored_chain(
     let store_id = chain.store_id().ok_or_else(|| {
         AnchoredChainError::LoadFailed("membership chain has no store id".to_string())
     })?;
-    let genesis = super::store_objects::discover_genesis(storage, store_id, owner_pubkey)
-        .await
-        .map_err(map_membership_object_error)?;
+    let store_protocol_root =
+        super::store_objects::discover_store_protocol_root(storage, store_id, owner_pubkey)
+            .await
+            .map_err(map_membership_object_error)?;
     let founder_coord = chain.founder_coord().ok_or_else(|| {
         AnchoredChainError::LoadFailed("membership chain has no founder root".to_string())
     })?;
-    if genesis.value.founder.coord() != *founder_coord {
+    if store_protocol_root.value.founder.coord() != *founder_coord {
         return Err(AnchoredChainError::LoadFailed(format!(
-            "membership founder root {founder_coord:?} differs from genesis root {:?}",
-            genesis.value.founder.coord()
+            "membership founder {founder_coord:?} differs from Store protocol root founder {:?}",
+            store_protocol_root.value.founder.coord()
         )));
     }
 
@@ -1297,7 +1299,7 @@ mod tests {
         let removed_member_pubkey = pubkey_hex(&member);
         let mut chain = MembershipChain::new();
 
-        let founder_entry = storage.protocol_genesis().founder.clone();
+        let founder_entry = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &founder_pubkey, 1, founder_entry).await;
         let add_owner = chain
             .signed_set_member(
@@ -1470,7 +1472,7 @@ mod tests {
         let db = open_test_db();
         let mut chain = MembershipChain::new();
 
-        let first = storage.protocol_genesis().founder.clone();
+        let first = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &founder_pubkey, 1, first).await;
         let add_member = chain
             .signed_set_member(
@@ -1805,7 +1807,7 @@ mod tests {
         // Chain: founder, then the founder adds `second_owner` as an Owner.
         let storage = MockSyncStorage::with_store_and_keypair("lib-1", founder.clone());
         let mut chain = MembershipChain::new();
-        let founder_entry = storage.protocol_genesis().founder.clone();
+        let founder_entry = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &founder_pk, 1, founder_entry).await;
         let add_owner = chain
             .signed_set_member(
@@ -1912,7 +1914,7 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let invitee_pk = pubkey_hex(&invitee);
         let mut chain = MembershipChain::new();
-        let founder = storage.protocol_genesis().founder.clone();
+        let founder = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
         publish_membership_head(&storage, &chain, &owner)
             .await
@@ -1979,7 +1981,7 @@ mod tests {
         let member_pk = pubkey_hex(&member);
         let mut chain = MembershipChain::new();
 
-        let founder = storage.protocol_genesis().founder.clone();
+        let founder = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
         let add_member = chain
             .signed_set_member(
@@ -2038,7 +2040,7 @@ mod tests {
         let member_pk = pubkey_hex(&member);
         let mut chain = MembershipChain::new();
 
-        let founder = storage.protocol_genesis().founder.clone();
+        let founder = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
         let add_member = chain
             .signed_set_member(
@@ -2085,7 +2087,7 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let mut chain = MembershipChain::new();
 
-        let founder = storage.protocol_genesis().founder.clone();
+        let founder = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
         let add_a = chain
             .signed_set_member(
@@ -2130,7 +2132,7 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let mut chain = MembershipChain::new();
 
-        let founder = storage.protocol_genesis().founder.clone();
+        let founder = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
         let add_member = chain
             .signed_set_member(
@@ -2161,7 +2163,7 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let mut chain = MembershipChain::new();
 
-        let founder = storage.protocol_genesis().founder.clone();
+        let founder = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
         let visible = storage.discover_membership_entries().await;
 
@@ -2180,7 +2182,7 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
         let mut chain = MembershipChain::new();
 
-        let founder = storage.protocol_genesis().founder.clone();
+        let founder = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
         let add_member = chain
             .signed_set_member(
@@ -2231,7 +2233,7 @@ mod tests {
 
         // Founder's prefix: found, promote second_owner to Owner, add member.
         let mut chain = MembershipChain::new();
-        let f = storage.protocol_genesis().founder.clone();
+        let f = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &founder_pk, 1, f).await;
         let add_owner = chain
             .signed_set_member(
@@ -2488,7 +2490,7 @@ mod tests {
         let owner_pk = pubkey_hex(&owner);
 
         let mut chain = MembershipChain::new();
-        let f = storage.protocol_genesis().founder.clone();
+        let f = storage.store_protocol_root().founder.clone();
         append_membership_entry(&storage, &mut chain, &owner_pk, 1, f).await;
         let add = chain
             .signed_set_member(

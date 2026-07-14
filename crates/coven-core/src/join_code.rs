@@ -25,7 +25,7 @@ pub struct InviteCode {
     pub store_name: String,
     pub join_info: CloudHomeJoinInfo,
     pub owner_pubkey: String,
-    pub genesis_hash: crate::sync::store_commit::ObjectHash,
+    pub store_root_hash: crate::sync::store_commit::ObjectHash,
     /// Every author's membership-head coordinate at mint time
     /// ([`MembershipChain::author_heads`](crate::sync::membership::MembershipChain::author_heads)),
     /// non-empty in codes minted from an initialized store.
@@ -110,7 +110,7 @@ pub struct InviteCodeInfo {
     pub store_id: String,
     pub store_name: String,
     pub owner_pubkey: String,
-    pub genesis_hash: crate::sync::store_commit::ObjectHash,
+    pub store_root_hash: crate::sync::store_commit::ObjectHash,
     pub cloud_provider: crate::config::CloudProvider,
     /// Whether the joining device must run an OAuth flow before joining, so the
     /// host fetches the token first — mirrors `RestoreCodeInfo::needs_oauth`.
@@ -125,7 +125,7 @@ pub fn decode_invite_code_info(code: &str) -> Result<InviteCodeInfo, JoinCodeErr
         store_id: invite.store_id,
         store_name: invite.store_name,
         owner_pubkey: invite.owner_pubkey,
-        genesis_hash: invite.genesis_hash,
+        store_root_hash: invite.store_root_hash,
         needs_oauth: cloud_provider.needs_oauth(),
         cloud_provider,
     })
@@ -210,7 +210,9 @@ mod tests {
                 key_prefix: None,
             },
             owner_pubkey: test_owner_pubkey(),
-            genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"invite genesis"),
+            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"invite store protocol root",
+            ),
             membership_floor: test_membership_floor(),
         }
     }

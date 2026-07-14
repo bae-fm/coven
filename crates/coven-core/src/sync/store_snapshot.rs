@@ -11,13 +11,15 @@ use super::store_commit::{
     SnapshotMeta,
 };
 use super::store_objects::append_and_verify;
-use super::store_objects::{list_snapshot_metas, load_expected_genesis, load_snapshot_image};
+use super::store_objects::{
+    list_snapshot_metas, load_expected_store_protocol_root, load_snapshot_image,
+};
 use crate::keys::UserKeypair;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn push_store_snapshot(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     snapshot: CreatedSnapshot,
     coverage: BTreeMap<String, CommitPosition>,
     schema_version: u32,
@@ -45,7 +47,7 @@ pub(crate) async fn push_store_snapshot(
     }
     let image_hash = ObjectHash::digest(&snapshot.db_image);
     let meta = SnapshotMeta::signed(
-        genesis_hash,
+        store_root_hash,
         image_hash,
         coverage,
         schema_version,
@@ -98,7 +100,7 @@ async fn publish_durable_snapshot(
         .map_err(|error| SnapshotError::PublicationState(format!("snapshot metadata: {error}")))?;
     let meta = SnapshotMeta::parse_at(
         &pending.meta_bytes,
-        unverified.genesis_hash,
+        unverified.store_root_hash,
         &unverified.author_pubkey,
         pending.snapshot_hash,
     )
@@ -141,31 +143,36 @@ async fn publish_durable_snapshot(
 pub async fn select_store_snapshot(
     storage: &dyn SyncStorage,
     store_id: &str,
-    expected_genesis_hash: ObjectHash,
+    expected_store_root_hash: ObjectHash,
     expected_founder: &str,
     membership_floor: &[super::membership::MembershipCoord],
     binary_schema_version: u32,
 ) -> Result<(ObjectHash, SnapshotMeta, Vec<u8>), SnapshotError> {
-    let genesis = load_expected_genesis(storage, expected_genesis_hash, store_id, expected_founder)
-        .await
-        .map_err(snapshot_object_error)?
-        .ok_or_else(|| {
-            SnapshotError::Bucket(super::storage::StorageError::NotFound(
-                super::store_commit::genesis_semantic_prefix(expected_genesis_hash),
-            ))
-        })?;
+    let store_protocol_root = load_expected_store_protocol_root(
+        storage,
+        expected_store_root_hash,
+        store_id,
+        expected_founder,
+    )
+    .await
+    .map_err(snapshot_object_error)?
+    .ok_or_else(|| {
+        SnapshotError::Bucket(super::storage::StorageError::NotFound(
+            super::store_commit::store_protocol_root_semantic_prefix(expected_store_root_hash),
+        ))
+    })?;
     let entries = super::membership_ops::list_membership_entries(storage)
         .await
         .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
     let membership = super::membership_ops::load_anchored_chain_at_floor(
         storage,
         &entries,
-        &genesis.value.author_pubkey,
+        &store_protocol_root.value.author_pubkey,
         membership_floor,
     )
     .await
     .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
-    let metas = list_snapshot_metas(storage, genesis.semantic_hash)
+    let metas = list_snapshot_metas(storage, store_protocol_root.semantic_hash)
         .await
         .map_err(snapshot_object_error)?;
     let mut authorized = Vec::new();
@@ -207,7 +214,7 @@ pub async fn select_store_snapshot(
                 snapshot_image_semantic_prefix(&chosen.author_pubkey, chosen.image_hash),
             ))
         })?;
-    Ok((genesis.semantic_hash, chosen, image.value))
+    Ok((store_protocol_root.semantic_hash, chosen, image.value))
 }
 
 pub(crate) fn coverage_dominates(
@@ -244,9 +251,11 @@ mod tests {
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::membership::founder_entry;
     use crate::sync::snapshot::CreatedSnapshot;
-    use crate::sync::store_commit::{genesis_semantic_prefix, ProtocolGenesis};
-    use crate::sync::store_objects::{append_and_verify, discover_genesis, StoreObjectError};
-    use crate::sync::test_helpers::{open_test_db, publish_test_store_genesis};
+    use crate::sync::store_commit::{store_protocol_root_semantic_prefix, StoreProtocolRoot};
+    use crate::sync::store_objects::{
+        append_and_verify, discover_store_protocol_root, StoreObjectError,
+    };
+    use crate::sync::test_helpers::{open_test_db, publish_test_store_protocol_root};
 
     fn storage(
         home: &InMemoryCloudHome,
@@ -277,9 +286,14 @@ mod tests {
         let owner = UserKeypair::generate();
         let storage = storage(&home, &owner, copy_source);
         let db = open_test_db();
-        let genesis_hash =
-            publish_test_store_genesis(&db, &storage, "snapshot-store-test", "dev-owner", &owner)
-                .await;
+        let store_root_hash = publish_test_store_protocol_root(
+            &db,
+            &storage,
+            "snapshot-store-test",
+            "dev-owner",
+            &owner,
+        )
+        .await;
         let membership = crate::sync::test_helpers::publish_test_founder_membership(
             &storage,
             "snapshot-store-test",
@@ -291,7 +305,7 @@ mod tests {
             owner,
             storage,
             db,
-            genesis_hash,
+            store_root_hash,
             membership.author_heads(),
         )
     }
@@ -312,11 +326,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn genesis_failures_leave_no_false_pin_and_ambiguous_append_coalesces_on_retry() {
+    async fn store_protocol_root_failures_leave_no_false_pin_and_ambiguous_append_coalesces_on_retry(
+    ) {
         let home = InMemoryCloudHome::new();
         let founder = UserKeypair::generate();
-        let storage = storage(&home, &founder, "genesis-crash");
-        let genesis = ProtocolGenesis::signed(
+        let storage = storage(&home, &founder, "store-protocol-root-crash");
+        let store_protocol_root = StoreProtocolRoot::signed(
             "snapshot-store-test".to_string(),
             founder_entry(
                 "snapshot-store-test",
@@ -327,19 +342,19 @@ mod tests {
             &founder,
         )
         .unwrap();
-        let hash = genesis.object_hash();
+        let hash = store_protocol_root.object_hash();
 
         home.fail_append_before_call(1);
         assert!(append_and_verify(
             &storage,
-            &genesis_semantic_prefix(hash),
+            &store_protocol_root_semantic_prefix(hash),
             ".json",
-            &genesis.to_bytes(),
+            &store_protocol_root.to_bytes(),
         )
         .await
         .is_err());
         assert!(matches!(
-            discover_genesis(&storage, "snapshot-store-test", None).await,
+            discover_store_protocol_root(&storage, "snapshot-store-test", None).await,
             Err(StoreObjectError::Storage(
                 super::super::storage::StorageError::NotFound(_)
             ))
@@ -348,50 +363,51 @@ mod tests {
         home.fail_append_after_call(1);
         assert!(append_and_verify(
             &storage,
-            &genesis_semantic_prefix(hash),
+            &store_protocol_root_semantic_prefix(hash),
             ".json",
-            &genesis.to_bytes(),
+            &store_protocol_root.to_bytes(),
         )
         .await
         .is_err());
-        let visible = discover_genesis(&storage, "snapshot-store-test", None)
+        let visible = discover_store_protocol_root(&storage, "snapshot-store-test", None)
             .await
-            .expect("ambiguous append left an exact valid genesis");
+            .expect("ambiguous append left an exact valid Store protocol root");
         assert_eq!(visible.semantic_hash, hash);
         assert_eq!(visible.copies.len(), 1);
 
         append_and_verify(
             &storage,
-            &genesis_semantic_prefix(hash),
+            &store_protocol_root_semantic_prefix(hash),
             ".json",
-            &genesis.to_bytes(),
+            &store_protocol_root.to_bytes(),
         )
         .await
-        .expect("retry genesis append");
-        let retried = discover_genesis(&storage, "snapshot-store-test", None)
+        .expect("retry Store protocol root append");
+        let retried = discover_store_protocol_root(&storage, "snapshot-store-test", None)
             .await
-            .expect("coalesce exact genesis retries");
+            .expect("coalesce exact Store protocol root retries");
         assert_eq!(retried.semantic_hash, hash);
         assert_eq!(retried.copies.len(), 2);
     }
 
     #[tokio::test]
-    async fn genesis_discovery_ignores_unrelated_objects_and_refuses_multiple_valid_roots() {
+    async fn store_protocol_root_discovery_ignores_unrelated_objects_and_refuses_multiple_valid_roots(
+    ) {
         let home = InMemoryCloudHome::new();
         home.put_object("unrelated/object.json", b"unrelated bytes".to_vec())
             .await
             .unwrap();
         let first = UserKeypair::generate();
-        let storage = storage(&home, &first, "genesis-fork");
+        let storage = storage(&home, &first, "store-protocol-root-fork");
         assert!(matches!(
-            discover_genesis(&storage, "snapshot-store-test", None).await,
+            discover_store_protocol_root(&storage, "snapshot-store-test", None).await,
             Err(StoreObjectError::Storage(
                 super::super::storage::StorageError::NotFound(_)
             ))
         ));
 
         for (index, signer) in [first, UserKeypair::generate()].into_iter().enumerate() {
-            let genesis = ProtocolGenesis::signed(
+            let store_protocol_root = StoreProtocolRoot::signed(
                 "snapshot-store-test".to_string(),
                 founder_entry(
                     "snapshot-store-test",
@@ -404,15 +420,15 @@ mod tests {
             .unwrap();
             append_and_verify(
                 &storage,
-                &genesis_semantic_prefix(genesis.object_hash()),
+                &store_protocol_root_semantic_prefix(store_protocol_root.object_hash()),
                 ".json",
-                &genesis.to_bytes(),
+                &store_protocol_root.to_bytes(),
             )
             .await
             .unwrap();
         }
         assert!(matches!(
-            discover_genesis(&storage, "snapshot-store-test", None).await,
+            discover_store_protocol_root(&storage, "snapshot-store-test", None).await,
             Err(StoreObjectError::SemanticFork { .. })
         ));
     }
@@ -420,12 +436,12 @@ mod tests {
     #[tokio::test]
     async fn snapshot_image_and_meta_failures_never_activate_an_incomplete_generation() {
         for failed_call in 1..=2 {
-            let (home, owner, storage, db, genesis_hash, floor) =
+            let (home, owner, storage, db, store_root_hash, floor) =
                 initialized_store(&format!("snapshot-before-{failed_call}")).await;
             home.fail_append_before_call(failed_call);
             let first = push_store_snapshot(
                 &storage,
-                genesis_hash,
+                store_root_hash,
                 snapshot(b"snapshot-image"),
                 BTreeMap::new(),
                 1,
@@ -444,7 +460,7 @@ mod tests {
 
             push_store_snapshot(
                 &storage,
-                genesis_hash,
+                store_root_hash,
                 snapshot(b"snapshot-image"),
                 BTreeMap::new(),
                 1,
@@ -458,7 +474,7 @@ mod tests {
             let (_, selected, image) = select_store_snapshot(
                 &storage,
                 "snapshot-store-test",
-                genesis_hash,
+                store_root_hash,
                 &crate::keys::public_key_hex(&owner),
                 &floor,
                 1,
@@ -472,12 +488,12 @@ mod tests {
 
     #[tokio::test]
     async fn ambiguous_meta_append_is_already_selectable_and_retry_coalesces() {
-        let (home, owner, storage, db, genesis_hash, floor) =
+        let (home, owner, storage, db, store_root_hash, floor) =
             initialized_store("snapshot-after").await;
         home.fail_append_after_call(2);
         assert!(push_store_snapshot(
             &storage,
-            genesis_hash,
+            store_root_hash,
             snapshot(b"ambiguous-snapshot"),
             BTreeMap::new(),
             1,
@@ -491,7 +507,7 @@ mod tests {
         let (_, selected, image) = select_store_snapshot(
             &storage,
             "snapshot-store-test",
-            genesis_hash,
+            store_root_hash,
             &crate::keys::public_key_hex(&owner),
             &floor,
             1,
@@ -502,7 +518,7 @@ mod tests {
 
         push_store_snapshot(
             &storage,
-            genesis_hash,
+            store_root_hash,
             snapshot(b"ambiguous-snapshot"),
             selected.coverage,
             1,
@@ -536,7 +552,7 @@ mod tests {
         let owner = UserKeypair::generate();
         let storage = storage(&home, &owner, "snapshot-restart");
         let db = open();
-        let genesis_hash = publish_test_store_genesis(
+        let store_root_hash = publish_test_store_protocol_root(
             &db,
             &storage,
             "snapshot-store-test",
@@ -554,7 +570,7 @@ mod tests {
         home.fail_append_after_call(1);
         let first = push_store_snapshot(
             &storage,
-            genesis_hash,
+            store_root_hash,
             snapshot(b"restart-exact-snapshot"),
             BTreeMap::new(),
             1,
@@ -598,11 +614,11 @@ mod tests {
 
     #[tokio::test]
     async fn winning_newer_schema_snapshot_fails_without_falling_back_or_opening_its_image() {
-        let (home, owner, storage, db, genesis_hash, floor) =
+        let (home, owner, storage, db, store_root_hash, floor) =
             initialized_store("snapshot-schema").await;
         push_store_snapshot(
             &storage,
-            genesis_hash,
+            store_root_hash,
             snapshot(b"older"),
             BTreeMap::new(),
             1,
@@ -623,7 +639,7 @@ mod tests {
         );
         let newer = push_store_snapshot(
             &storage,
-            genesis_hash,
+            store_root_hash,
             snapshot(b"newer"),
             coverage,
             2,
@@ -644,7 +660,7 @@ mod tests {
             select_store_snapshot(
                 &storage,
                 "snapshot-store-test",
-                genesis_hash,
+                store_root_hash,
                 &crate::keys::public_key_hex(&owner),
                 &floor,
                 1,

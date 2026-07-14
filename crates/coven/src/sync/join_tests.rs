@@ -74,7 +74,9 @@ fn invite_code_with_store_id(store_id: &str) -> InviteCode {
             key_prefix: None,
         },
         owner_pubkey: hex::encode([0xAB_u8; 32]),
-        genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"invite test genesis"),
+        store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+            b"invite test store protocol root",
+        ),
         membership_floor: membership_floor(hex::encode([0xAB_u8; 32])),
     }
 }
@@ -336,7 +338,9 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
             folder_path: "/Apps/coven/oauth-cleanup-test".to_string(),
         },
         owner_pubkey: hex::encode([0xAB_u8; 32]),
-        genesis_hash: crate::sync::store_commit::ObjectHash::digest(b"invite test genesis"),
+        store_root_hash: crate::sync::store_commit::ObjectHash::digest(
+            b"invite test store protocol root",
+        ),
         membership_floor: membership_floor(hex::encode([0xAB_u8; 32])),
     });
     let oauth_tokens = crate::oauth::OAuthTokens {
@@ -528,7 +532,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
     let founder = crate::sync::membership::founder_entry(
         store_id,
         &owner_keypair,
-        "0000000000001-0000-test-store-genesis",
+        "0000000000001-0000-test-store-protocol-root",
     );
     let mut chain = crate::sync::membership::MembershipChain::from_entries(vec![founder.clone()])
         .expect("valid founder entry");
@@ -546,7 +550,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
 
     let tables = test_synced_tables();
     let db = open_test_db();
-    let genesis_hash = crate::sync::test_helpers::publish_test_store_genesis(
+    let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
         &db,
         &owner_storage,
         store_id,
@@ -565,7 +569,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         .expect("create owner snapshot");
     crate::sync::test_helpers::push_test_store_snapshot(
         &owner_storage,
-        genesis_hash,
+        store_root_hash,
         snapshot,
         BTreeMap::new(),
         db.schema_version(),
@@ -623,7 +627,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         &store_dir,
         store_id,
         "device-b",
-        genesis_hash,
+        store_root_hash,
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &owner_pk,
             keypair: &joiner_identity,
@@ -740,7 +744,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     // The shared snapshot pointer before B joins. B must not republish (which
     // would flip the pointer to a new generation).
     let snapshot_before: Vec<_> =
-        crate::sync::store_objects::list_snapshot_metas(&storage, storage.protocol_genesis_hash())
+        crate::sync::store_objects::list_snapshot_metas(&storage, storage.store_root_hash())
             .await
             .expect("list Store snapshots")
             .metas
@@ -755,7 +759,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     let boot = bootstrap_from_snapshot(
         &storage,
         "test-lib",
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         &founder_pubkey,
         &[storage.protocol_founder_coord()],
         1,
@@ -821,7 +825,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     // untouched: the pointer still names the owner's generation, not a republished
     // one of B's own.
     let snapshot_after: Vec<_> =
-        crate::sync::store_objects::list_snapshot_metas(&storage, storage.protocol_genesis_hash())
+        crate::sync::store_objects::list_snapshot_metas(&storage, storage.store_root_hash())
             .await
             .expect("list Store snapshots")
             .metas
@@ -893,7 +897,7 @@ async fn bootstrap_installs_snapshot_coverage_before_ordinary_pull() {
     let boot = bootstrap_from_snapshot(
         &storage,
         "test-lib",
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         &founder_pubkey,
         &[storage.protocol_founder_coord()],
         1,
@@ -975,7 +979,7 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
     let owner_pk = pubkey_hex(&owner);
 
     // Build the chain: found, add a member, then remove them — head at seq 3.
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let mut chain = MembershipChain::from_entries(vec![founder.clone()]).unwrap();
     crate::sync::store_objects::append_membership_entry_object(
         &storage,
@@ -1057,7 +1061,7 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
         .expect("owner snapshot");
     crate::sync::test_helpers::push_test_store_snapshot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         snapshot,
         BTreeMap::new(),
         db_owner.schema_version(),
@@ -1087,7 +1091,7 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
     let result = bootstrap_from_snapshot(
         &storage,
         "test-lib",
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         &owner_pk,
         &invite.membership_floor,
         1,
@@ -1122,7 +1126,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
     let second_member = UserKeypair::generate();
     let owner_pk = pubkey_hex(&owner);
 
-    let founder = storage.protocol_genesis().founder;
+    let founder = storage.store_protocol_root().founder;
     let chain = MembershipChain::from_entries(vec![founder.clone()]).unwrap();
     crate::sync::store_objects::append_membership_entry_object(
         &storage,
@@ -1201,7 +1205,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
         .expect("owner snapshot");
     crate::sync::test_helpers::push_test_store_snapshot(
         &storage,
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         snapshot,
         BTreeMap::new(),
         db_owner.schema_version(),
@@ -1215,7 +1219,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
     let boot = bootstrap_from_snapshot(
         &storage,
         "test-lib",
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         &owner_pk,
         &invite.membership_floor,
         1,
@@ -1330,7 +1334,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     let boot = bootstrap_from_snapshot(
         &storage,
         "test-lib",
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         &founder_pubkey,
         &[storage.protocol_founder_coord()],
         1,
@@ -1432,7 +1436,7 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
     let boot = bootstrap_from_snapshot(
         &storage,
         "test-lib",
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         &founder_pubkey,
         &[storage.protocol_founder_coord()],
         1,
@@ -1536,7 +1540,7 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
     let boot = bootstrap_from_snapshot(
         &storage,
         "test-lib",
-        storage.protocol_genesis_hash(),
+        storage.store_root_hash(),
         &founder_pubkey,
         &[storage.protocol_founder_coord()],
         1,
@@ -1580,7 +1584,7 @@ struct JoinerFixture {
     joiner_storage: crate::sync::cloud_storage::CloudSyncStorage,
     cipher: CloudCipher,
     master_key: crate::encryption::MasterKeyring,
-    genesis_hash: crate::sync::store_commit::ObjectHash,
+    store_root_hash: crate::sync::store_commit::ObjectHash,
     owner_pk: String,
     joiner_identity: UserKeypair,
     author_heads: Vec<crate::sync::membership::MembershipCoord>,
@@ -1627,7 +1631,7 @@ async fn joiner_fixture() -> JoinerFixture {
     let founder = crate::sync::membership::founder_entry(
         &store_id,
         &owner_keypair,
-        "0000000000001-0000-test-store-genesis",
+        "0000000000001-0000-test-store-protocol-root",
     );
     let mut chain = crate::sync::membership::MembershipChain::from_entries(vec![founder.clone()])
         .expect("valid founder entry");
@@ -1669,7 +1673,7 @@ async fn joiner_fixture() -> JoinerFixture {
 
     let tables = test_synced_tables();
     let db = open_test_db();
-    let genesis_hash = crate::sync::test_helpers::publish_test_store_genesis(
+    let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
         &db,
         &owner_storage,
         &store_id,
@@ -1688,7 +1692,7 @@ async fn joiner_fixture() -> JoinerFixture {
         .expect("create owner snapshot");
     crate::sync::test_helpers::push_test_store_snapshot(
         &owner_storage,
-        genesis_hash,
+        store_root_hash,
         snapshot,
         BTreeMap::new(),
         db.schema_version(),
@@ -1716,7 +1720,7 @@ async fn joiner_fixture() -> JoinerFixture {
         joiner_storage,
         cipher,
         master_key,
-        genesis_hash,
+        store_root_hash,
         owner_pk,
         joiner_identity,
         author_heads: chain.author_heads(),
@@ -1746,7 +1750,7 @@ async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
         &f.store_dir,
         &f.store_id,
         "device-b",
-        f.genesis_hash,
+        f.store_root_hash,
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &f.owner_pk,
             keypair: &f.joiner_identity,
@@ -1794,7 +1798,7 @@ async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
 
     let registrations = crate::sync::store_objects::list_latest_registration_chains(
         &f.joiner_storage,
-        f.genesis_hash,
+        f.store_root_hash,
     )
     .await
     .expect("list Store device registrations");
@@ -1809,9 +1813,10 @@ async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
     );
     assert_eq!(registration.author_pubkey, pubkey_hex(&f.joiner_identity));
 
-    let heads = crate::sync::store_objects::list_visible_heads(&f.joiner_storage, f.genesis_hash)
-        .await
-        .expect("list Store commit heads");
+    let heads =
+        crate::sync::store_objects::list_visible_heads(&f.joiner_storage, f.store_root_hash)
+            .await
+            .expect("list Store commit heads");
     assert!(
         heads
             .heads
@@ -1821,7 +1826,7 @@ async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
     );
 
     let acks =
-        crate::sync::store_objects::list_latest_ack_chains(&f.joiner_storage, f.genesis_hash)
+        crate::sync::store_objects::list_latest_ack_chains(&f.joiner_storage, f.store_root_hash)
             .await
             .expect("list Store acknowledgements");
     let ack = &acks
@@ -1830,7 +1835,7 @@ async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
         .expect("the joiner published its acknowledgement")
         .value;
     assert_eq!(ack.device_id, "device-b");
-    assert_eq!(ack.genesis_hash, f.genesis_hash);
+    assert_eq!(ack.store_root_hash, f.store_root_hash);
 }
 
 /// A join's saved config — the completion marker — implies a resolvable signing
@@ -1853,7 +1858,7 @@ async fn bootstrap_establishes_the_joiners_identity_before_the_marker() {
         &f.store_dir,
         &f.store_id,
         "device-b",
-        f.genesis_hash,
+        f.store_root_hash,
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &f.owner_pk,
             keypair: &f.joiner_identity,
@@ -1924,7 +1929,7 @@ async fn bootstrap_failure_publishes_a_retired_registration_successor() {
         &f.store_dir,
         &f.store_id,
         "device-b",
-        f.genesis_hash,
+        f.store_root_hash,
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &f.owner_pk,
             keypair: &f.joiner_identity,
@@ -1949,7 +1954,7 @@ async fn bootstrap_failure_publishes_a_retired_registration_successor() {
 
     let registrations = crate::sync::store_objects::list_latest_registration_chains(
         &f.joiner_storage,
-        f.genesis_hash,
+        f.store_root_hash,
     )
     .await
     .expect("list Store device registrations");
@@ -2001,7 +2006,7 @@ async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
         &f.store_dir,
         &f.store_id,
         "device-b",
-        f.genesis_hash,
+        f.store_root_hash,
         crate::sync::join::BootstrapContext::Join {
             owner_pubkey: &f.owner_pk,
             keypair: &f.joiner_identity,
@@ -2066,7 +2071,7 @@ async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
 
     let registrations = crate::sync::store_objects::list_latest_registration_chains(
         &f.joiner_storage,
-        f.genesis_hash,
+        f.store_root_hash,
     )
     .await
     .expect("list registration chain after retry");

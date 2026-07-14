@@ -168,7 +168,7 @@ async fn build_cloud_home(
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_from_cloud(
     store_id: &str,
-    genesis_hash: crate::sync::store_commit::ObjectHash,
+    store_root_hash: crate::sync::store_commit::ObjectHash,
     founder_pubkey: &str,
     encryption_key_hex: Option<&str>,
     store_name: &str,
@@ -269,7 +269,7 @@ pub async fn restore_from_cloud(
             &store_dir,
             store_id,
             &device_id,
-            genesis_hash,
+            store_root_hash,
             crate::sync::join::BootstrapContext::Restore {
                 founder_pubkey,
                 keypair,
@@ -364,7 +364,7 @@ pub async fn restore_from_code(
     // custody. Nothing identity-related is left for this caller to do.
     restore_from_cloud(
         &parsed.sid,
-        parsed.genesis_hash,
+        parsed.store_root_hash,
         &parsed.founder_pubkey,
         parsed.ek.as_deref(),
         &parsed.name,

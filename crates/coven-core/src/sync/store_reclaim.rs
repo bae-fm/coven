@@ -73,7 +73,7 @@ pub enum StoreReclaimError {
 
 pub async fn reclaim_store_packages(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     membership: &MembershipChain,
     membership_proof: super::pull::MembershipListingProof,
 ) -> Result<StoreReclaimResult, StoreReclaimError> {
@@ -82,7 +82,7 @@ pub async fn reclaim_store_packages(
             listing: "membership",
         });
     }
-    let metas = list_snapshot_metas(storage, genesis_hash).await?;
+    let metas = list_snapshot_metas(storage, store_root_hash).await?;
     require_complete(metas.coverage, "snapshot metadata")?;
     if metas
         .metas
@@ -95,7 +95,7 @@ pub async fn reclaim_store_packages(
     }
     let snapshot = choose_snapshot(storage, membership, metas.metas).await?;
 
-    let registration_listing = list_latest_registration_chains(storage, genesis_hash).await?;
+    let registration_listing = list_latest_registration_chains(storage, store_root_hash).await?;
     require_complete(registration_listing.coverage, "device registration")?;
     if registration_listing
         .latest_by_device
@@ -106,11 +106,11 @@ pub async fn reclaim_store_packages(
             listing: "device registration proof",
         });
     }
-    let ack_chains = list_latest_ack_chains(storage, genesis_hash).await?;
+    let ack_chains = list_latest_ack_chains(storage, store_root_hash).await?;
     require_complete(ack_chains.coverage, "acknowledgement")?;
     require_registered_device_acks(
         storage,
-        genesis_hash,
+        store_root_hash,
         membership,
         &snapshot,
         &registration_listing.latest_by_device,
@@ -118,7 +118,7 @@ pub async fn reclaim_store_packages(
     )
     .await?;
 
-    let package_listing = list_store_packages(storage, genesis_hash).await?;
+    let package_listing = list_store_packages(storage, store_root_hash).await?;
     require_complete(package_listing.coverage, "package")?;
     if package_listing.packages.iter().any(|package| {
         package.package.coverage != ListingCoverage::CompleteAtScan
@@ -137,7 +137,7 @@ pub async fn reclaim_store_packages(
         };
         if !position_covers(
             storage,
-            genesis_hash,
+            store_root_hash,
             &package.device_id,
             snapshot_position,
             &package.commit_position,
@@ -211,7 +211,7 @@ async fn choose_snapshot(
 
 async fn require_registered_device_acks(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     membership: &MembershipChain,
     snapshot: &SnapshotMeta,
     registrations: &BTreeMap<
@@ -262,7 +262,7 @@ async fn require_registered_device_acks(
                 Some(ack_position) => {
                     position_covers(
                         storage,
-                        genesis_hash,
+                        store_root_hash,
                         device_id,
                         ack_position,
                         snapshot_position,
@@ -286,7 +286,7 @@ async fn require_registered_device_acks(
 
 async fn position_covers(
     storage: &dyn SyncStorage,
-    genesis_hash: ObjectHash,
+    store_root_hash: ObjectHash,
     device_id: &str,
     covering: &CommitPosition,
     covered: &CommitPosition,
@@ -297,7 +297,7 @@ async fn position_covers(
     let mut seq = covering.seq;
     let mut expected = covering.commit_hash;
     while seq > covered.seq {
-        let commit = load_commit_slot(storage, genesis_hash, device_id, seq)
+        let commit = load_commit_slot(storage, store_root_hash, device_id, seq)
             .await?
             .ok_or_else(|| StoreReclaimError::MissingAncestry {
                 device_id: device_id.to_string(),
@@ -340,7 +340,7 @@ mod tests {
     use crate::sync::store_objects::{append_and_verify, load_commit_slot, load_package};
     use crate::sync::store_outbound::{drain_outbound_store_batches, stage_pending_store_batch};
     use crate::sync::test_helpers::{
-        bootstrap_chain, host_exec, open_test_db, pubkey_hex, publish_test_store_genesis,
+        bootstrap_chain, host_exec, open_test_db, pubkey_hex, publish_test_store_protocol_root,
         temp_store_dir,
     };
 
@@ -350,7 +350,7 @@ mod tests {
         owner: UserKeypair,
         member: Option<UserKeypair>,
         chain: MembershipChain,
-        genesis_hash: ObjectHash,
+        store_root_hash: ObjectHash,
         coverage: BTreeMap<String, CommitPosition>,
     }
 
@@ -370,13 +370,18 @@ mod tests {
         let owner = UserKeypair::generate();
         let storage = storage(&home, &owner, "reclaim-owner");
         let db = open_test_db();
-        let genesis_hash =
-            publish_test_store_genesis(&db, &storage, "reclaim-store-test", "dev-owner", &owner)
-                .await;
+        let store_root_hash = publish_test_store_protocol_root(
+            &db,
+            &storage,
+            "reclaim-store-test",
+            "dev-owner",
+            &owner,
+        )
+        .await;
         let mut chain = bootstrap_chain(founder_entry(
             "reclaim-store-test",
             &owner,
-            "0000000000001-0000-test-store-genesis",
+            "0000000000001-0000-test-store-protocol-root",
         ));
         let member = with_member.then(UserKeypair::generate);
         if let Some(member) = &member {
@@ -417,7 +422,7 @@ mod tests {
         let coverage = db.materialized_frontier().await.unwrap();
         super::super::store_snapshot::push_store_snapshot(
             &storage,
-            genesis_hash,
+            store_root_hash,
             super::super::snapshot::CreatedSnapshot {
                 db_image: b"reclaim snapshot".to_vec(),
                 host_blobs: Vec::new(),
@@ -438,7 +443,7 @@ mod tests {
             owner,
             member,
             chain,
-            genesis_hash,
+            store_root_hash,
             coverage,
         };
         register_device(&setup, "dev-owner", &setup.owner).await;
@@ -451,7 +456,7 @@ mod tests {
         signer: &UserKeypair,
     ) -> StoreDeviceRegistration {
         let registration = StoreDeviceRegistration::signed(
-            setup.genesis_hash,
+            setup.store_root_hash,
             device_id.to_string(),
             1,
             None,
@@ -476,7 +481,7 @@ mod tests {
         signer: &UserKeypair,
     ) -> StoreDeviceRegistration {
         let active = StoreDeviceRegistration::signed(
-            setup.genesis_hash,
+            setup.store_root_hash,
             device_id.to_string(),
             1,
             None,
@@ -485,7 +490,7 @@ mod tests {
         )
         .unwrap();
         let retired = StoreDeviceRegistration::signed(
-            setup.genesis_hash,
+            setup.store_root_hash,
             device_id.to_string(),
             2,
             Some(active.registration_hash()),
@@ -514,7 +519,7 @@ mod tests {
         stamp: &str,
     ) -> StoreAck {
         let ack = StoreAck::signed(
-            setup.genesis_hash,
+            setup.store_root_hash,
             device_id.to_string(),
             revision,
             previous,
@@ -558,7 +563,7 @@ mod tests {
         )
         .await;
         assert!(matches!(
-            reclaim_store_packages(&setup.storage, setup.genesis_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
+            reclaim_store_packages(&setup.storage, setup.store_root_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
             Err(StoreReclaimError::MissingAcknowledgement { device_id, .. })
                 if device_id == "dev-owner-sibling"
         ));
@@ -576,7 +581,7 @@ mod tests {
         .await;
         let result = reclaim_store_packages(
             &setup.storage,
-            setup.genesis_hash,
+            setup.store_root_hash,
             &setup.chain,
             super::super::pull::MembershipListingProof::complete_for_test(),
         )
@@ -606,7 +611,7 @@ mod tests {
         .await;
         let member_pubkey = hex::encode(setup.member.as_ref().unwrap().public_key());
         assert!(matches!(
-            reclaim_store_packages(&setup.storage, setup.genesis_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
+            reclaim_store_packages(&setup.storage, setup.store_root_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
             Err(StoreReclaimError::MissingRegisteredDevice { member }) if member == member_pubkey
         ));
         assert_eq!(package_count(&setup), 1);
@@ -623,7 +628,7 @@ mod tests {
         assert_eq!(
             reclaim_store_packages(
                 &setup.storage,
-                setup.genesis_hash,
+                setup.store_root_hash,
                 &setup.chain,
                 super::super::pull::MembershipListingProof::complete_for_test()
             )
@@ -651,7 +656,7 @@ mod tests {
         assert!(matches!(
             reclaim_store_packages(
                 &setup.storage,
-                setup.genesis_hash,
+                setup.store_root_hash,
                 &setup.chain,
                 super::super::pull::MembershipListingProof::complete_for_test()
             )
@@ -675,7 +680,7 @@ mod tests {
         ] {
             let setup = setup(false).await;
             let result =
-                reclaim_store_packages(&setup.storage, setup.genesis_hash, &setup.chain, proof)
+                reclaim_store_packages(&setup.storage, setup.store_root_hash, &setup.chain, proof)
                     .await;
             assert!(matches!(
                 result,
@@ -693,7 +698,7 @@ mod tests {
         retire_device(&setup, "dev-owner", &setup.owner).await;
         let result = reclaim_store_packages(
             &setup.storage,
-            setup.genesis_hash,
+            setup.store_root_hash,
             &setup.chain,
             super::super::pull::MembershipListingProof::complete_for_test(),
         )
@@ -733,7 +738,7 @@ mod tests {
             assert!(matches!(
                 reclaim_store_packages(
                     &setup.storage,
-                    setup.genesis_hash,
+                    setup.store_root_hash,
                     &setup.chain,
                     super::super::pull::MembershipListingProof::complete_for_test()
                 )
@@ -795,7 +800,7 @@ mod tests {
             }
             assert!(reclaim_store_packages(
                 &setup.storage,
-                setup.genesis_hash,
+                setup.store_root_hash,
                 &setup.chain,
                 super::super::pull::MembershipListingProof::complete_for_test()
             )
@@ -821,7 +826,7 @@ mod tests {
         )
         .await;
         assert!(matches!(
-            reclaim_store_packages(&setup.storage, setup.genesis_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
+            reclaim_store_packages(&setup.storage, setup.store_root_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
             Err(StoreReclaimError::Object(StoreObjectError::SemanticFork { slot, .. }))
                 if slot == "store-v1/devices/dev-owner/1"
         ));
@@ -841,7 +846,7 @@ mod tests {
             "2026-01-01T00:00:00Z",
         )
         .await;
-        let commit = load_commit_slot(&setup.storage, setup.genesis_hash, "dev-owner", 1)
+        let commit = load_commit_slot(&setup.storage, setup.store_root_hash, "dev-owner", 1)
             .await
             .unwrap()
             .unwrap();
@@ -862,7 +867,7 @@ mod tests {
         assert!(matches!(
             reclaim_store_packages(
                 &setup.storage,
-                setup.genesis_hash,
+                setup.store_root_hash,
                 &setup.chain,
                 super::super::pull::MembershipListingProof::complete_for_test()
             )

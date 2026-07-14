@@ -221,7 +221,7 @@ async fn storage_with_chain() -> (MockSyncStorage, UserKeypair, UserKeypair) {
     // The founder entry and the member's Add are both authored by the founder, so
     // they live under `membership/{founder}/{seq}` where `list_membership_entries`
     // finds them.
-    let f_entry = storage.protocol_genesis().founder.clone();
+    let f_entry = storage.store_protocol_root().founder.clone();
     let founder_pk = pubkey_hex(&founder);
     let mut chain = MembershipChain::new();
     append_membership_entry(&storage, &mut chain, &founder_pk, 1, f_entry).await;

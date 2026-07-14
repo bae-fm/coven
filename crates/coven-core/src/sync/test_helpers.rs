@@ -483,7 +483,7 @@ pub fn pubkey_hex(kp: &UserKeypair) -> String {
     hex::encode(kp.public_key())
 }
 
-/// A membership chain rooted at the exact founder entry carried by Store genesis.
+/// A membership chain rooted at the exact founder entry carried by Store protocol root.
 pub fn bootstrap_chain(founder: MembershipEntry) -> MembershipChain {
     let mut chain = MembershipChain::new();
     chain.add_entry(founder).unwrap();
@@ -579,7 +579,7 @@ pub struct MockSyncStorage {
     protocol_objects: Mutex<Vec<(crate::storage::cloud::AppendedObject, Vec<u8>)>>,
     next_protocol_object: std::sync::atomic::AtomicU64,
     store_commits: Mutex<HashMap<(String, u64), crate::sync::store_commit::StoreBatchCommit>>,
-    genesis: crate::sync::store_commit::ProtocolGenesis,
+    store_protocol_root: crate::sync::store_commit::StoreProtocolRoot,
     /// One membership-head read to pause after snapshotting its bytes. The two
     /// notifications tell the test that the snapshot is held and release it.
     membership_head_read_pause: Mutex<Option<MembershipHeadReadPause>>,
@@ -674,28 +674,32 @@ impl MockSyncStorage {
             &keypair,
             "0000000000001-0000-test-founder",
         );
-        let genesis = crate::sync::store_commit::ProtocolGenesis::signed(
+        let store_protocol_root = crate::sync::store_commit::StoreProtocolRoot::signed(
             store_id.to_string(),
             founder,
             1,
             &keypair,
         )
-        .expect("create test protocol genesis");
-        let genesis_hash = genesis.object_hash();
+        .expect("create test store protocol root");
+        let store_root_hash = store_protocol_root.object_hash();
         let copy_id: crate::storage::cloud::CopyId = format!("{:064x}", 0_u64)
             .parse()
             .expect("canonical test copy id");
-        let genesis_key = crate::sync::store_commit::genesis_copy_key(genesis_hash, copy_id);
-        let genesis_object = crate::storage::cloud::AppendedObject::from_provider(
-            genesis_key,
+        let store_protocol_root_key =
+            crate::sync::store_commit::store_protocol_root_copy_key(store_root_hash, copy_id);
+        let store_protocol_root_object = crate::storage::cloud::AppendedObject::from_provider(
+            store_protocol_root_key,
             "mock-protocol-0".to_string(),
         );
         MockSyncStorage {
             objects: Mutex::new(HashMap::new()),
-            protocol_objects: Mutex::new(vec![(genesis_object, genesis.to_bytes())]),
+            protocol_objects: Mutex::new(vec![(
+                store_protocol_root_object,
+                store_protocol_root.to_bytes(),
+            )]),
             next_protocol_object: std::sync::atomic::AtomicU64::new(1),
             store_commits: Mutex::new(HashMap::new()),
-            genesis,
+            store_protocol_root,
             membership_head_read_pause: Mutex::new(None),
             keypair,
             fail_membership_list: std::sync::atomic::AtomicBool::new(false),
@@ -722,12 +726,12 @@ impl MockSyncStorage {
         }
     }
 
-    pub fn protocol_genesis_hash(&self) -> crate::sync::store_commit::ObjectHash {
-        self.genesis.object_hash()
+    pub fn store_root_hash(&self) -> crate::sync::store_commit::ObjectHash {
+        self.store_protocol_root.object_hash()
     }
 
-    pub fn protocol_genesis(&self) -> crate::sync::store_commit::ProtocolGenesis {
-        self.genesis.clone()
+    pub fn store_protocol_root(&self) -> crate::sync::store_commit::StoreProtocolRoot {
+        self.store_protocol_root.clone()
     }
 
     pub fn protocol_founder_pubkey(&self) -> String {
@@ -739,13 +743,13 @@ impl MockSyncStorage {
     }
 
     pub fn protocol_founder_coord(&self) -> crate::sync::membership::MembershipCoord {
-        self.genesis.founder.coord()
+        self.store_protocol_root.founder.coord()
     }
 
     pub async fn publish_protocol_founder_membership(
         &self,
     ) -> crate::sync::membership::MembershipChain {
-        let founder = self.genesis.founder.clone();
+        let founder = self.store_protocol_root.founder.clone();
         let coord = founder.coord();
         let chain = crate::sync::membership::MembershipChain::from_entries(vec![founder.clone()])
             .expect("validate mock protocol founder");
@@ -781,7 +785,7 @@ impl MockSyncStorage {
         let membership = self.publish_protocol_founder_membership().await;
         crate::sync::store_snapshot::push_store_snapshot(
             self,
-            self.protocol_genesis_hash(),
+            self.store_root_hash(),
             crate::sync::snapshot::CreatedSnapshot {
                 db_image,
                 host_blobs: Vec::new(),
@@ -1213,7 +1217,7 @@ impl MockSyncStorage {
             )
         };
         let commit = crate::sync::store_commit::StoreBatchCommit::signed(
-            self.protocol_genesis_hash(),
+            self.store_root_hash(),
             device_id.to_string(),
             seq,
             previous,
@@ -1225,7 +1229,7 @@ impl MockSyncStorage {
         )
         .expect("sign test Store commit");
         let head = crate::sync::store_commit::StoreDeviceHead::signed(
-            self.protocol_genesis_hash(),
+            self.store_root_hash(),
             device_id.to_string(),
             Some(commit.position()),
             "2026-02-10T00:00:00Z".to_string(),
@@ -1766,24 +1770,24 @@ impl CloudHome for MockSyncStorage {
     }
 }
 
-/// Bind a test database to the immutable Store genesis already carried by the
+/// Bind a test database to the immutable Store protocol root already carried by the
 /// mock and to the device that will publish from it.
 pub async fn bind_mock_store_protocol(db: &Database, storage: &MockSyncStorage, device_id: &str) {
     db.set_protocol_state(
-        crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY,
-        &storage.protocol_genesis_hash().to_string(),
+        crate::database::STORE_ROOT_HASH_STATE_KEY,
+        &storage.store_root_hash().to_string(),
     )
     .await
-    .expect("bind mock Store genesis");
+    .expect("bind mock Store protocol root");
     db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
         .await
         .expect("bind mock Store device");
 }
 
-/// Append a founder-signed Store genesis and pin its exact hash in a test
+/// Append a founder-signed Store protocol root and pin its exact hash in a test
 /// database. Real cloud-storage tests use this instead of inventing protocol
 /// state that has no corresponding immutable object.
-pub async fn publish_test_store_genesis(
+pub async fn publish_test_store_protocol_root(
     db: &Database,
     storage: &dyn SyncStorage,
     store_id: &str,
@@ -1793,63 +1797,63 @@ pub async fn publish_test_store_genesis(
     let founder_entry = crate::sync::membership::founder_entry(
         store_id,
         founder,
-        "0000000000001-0000-test-store-genesis",
+        "0000000000001-0000-test-store-protocol-root",
     );
-    let genesis = crate::sync::store_commit::ProtocolGenesis::signed(
+    let store_protocol_root = crate::sync::store_commit::StoreProtocolRoot::signed(
         store_id.to_string(),
         founder_entry,
         1,
         founder,
     )
-    .expect("sign test Store genesis");
-    let hash = genesis.object_hash();
+    .expect("sign test Store protocol root");
+    let hash = store_protocol_root.object_hash();
     crate::sync::store_objects::append_and_verify(
         storage,
-        &crate::sync::store_commit::genesis_semantic_prefix(hash),
+        &crate::sync::store_commit::store_protocol_root_semantic_prefix(hash),
         ".json",
-        &genesis.to_bytes(),
+        &store_protocol_root.to_bytes(),
     )
     .await
-    .expect("append test Store genesis");
+    .expect("append test Store protocol root");
     db.set_protocol_state(
-        crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY,
+        crate::database::STORE_ROOT_HASH_STATE_KEY,
         &hash.to_string(),
     )
     .await
-    .expect("pin test Store genesis");
+    .expect("pin test Store protocol root");
     db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
         .await
         .expect("bind test Store device");
     hash
 }
 
-/// Publish one Store genesis and its byte-identical membership founder root.
+/// Publish one Store protocol root and its byte-identical membership founder root.
 pub async fn publish_test_protocol_roots(
     storage: &dyn SyncStorage,
     store_id: &str,
     founder: &UserKeypair,
     created_at: &str,
 ) -> (
-    crate::sync::store_commit::ProtocolGenesis,
+    crate::sync::store_commit::StoreProtocolRoot,
     crate::sync::membership::MembershipChain,
 ) {
     let founder_entry = crate::sync::membership::founder_entry(store_id, founder, created_at);
-    let genesis = crate::sync::store_commit::ProtocolGenesis::signed(
+    let store_protocol_root = crate::sync::store_commit::StoreProtocolRoot::signed(
         store_id.to_string(),
         founder_entry.clone(),
         1,
         founder,
     )
-    .expect("sign test Store genesis");
-    let hash = genesis.object_hash();
+    .expect("sign test Store protocol root");
+    let hash = store_protocol_root.object_hash();
     crate::sync::store_objects::append_and_verify(
         storage,
-        &crate::sync::store_commit::genesis_semantic_prefix(hash),
+        &crate::sync::store_commit::store_protocol_root_semantic_prefix(hash),
         ".json",
-        &genesis.to_bytes(),
+        &store_protocol_root.to_bytes(),
     )
     .await
-    .expect("publish test Store genesis");
+    .expect("publish test Store protocol root");
     let coord = founder_entry.coord();
     let chain = crate::sync::membership::MembershipChain::from_entries(vec![founder_entry.clone()])
         .expect("validate test founder membership");
@@ -1859,7 +1863,7 @@ pub async fn publish_test_protocol_roots(
     crate::sync::membership_ops::publish_membership_head(storage, &chain, founder)
         .await
         .expect("publish test founder head");
-    (genesis, chain)
+    (store_protocol_root, chain)
 }
 
 pub async fn publish_test_founder_membership(
@@ -1867,15 +1871,15 @@ pub async fn publish_test_founder_membership(
     store_id: &str,
     founder: &UserKeypair,
 ) -> crate::sync::membership::MembershipChain {
-    let genesis = crate::sync::store_objects::discover_genesis(
+    let store_protocol_root = crate::sync::store_objects::discover_store_protocol_root(
         storage,
         store_id,
         Some(&crate::keys::public_key_hex(founder)),
     )
     .await
-    .expect("load test Store genesis")
+    .expect("load test Store protocol root")
     .value;
-    let entry = genesis.founder;
+    let entry = store_protocol_root.founder;
     let coord = entry.coord();
     let mut chain = crate::sync::membership::MembershipChain::new();
     chain
@@ -1893,7 +1897,7 @@ pub async fn publish_test_founder_membership(
 #[allow(clippy::too_many_arguments)]
 pub async fn push_test_store_snapshot(
     storage: &dyn SyncStorage,
-    genesis_hash: crate::sync::store_commit::ObjectHash,
+    store_root_hash: crate::sync::store_commit::ObjectHash,
     db_image: Vec<u8>,
     coverage: std::collections::BTreeMap<String, crate::sync::store_commit::CommitPosition>,
     schema_version: u32,
@@ -1903,7 +1907,7 @@ pub async fn push_test_store_snapshot(
 ) -> crate::sync::store_commit::SnapshotMeta {
     crate::sync::store_snapshot::push_store_snapshot(
         storage,
-        genesis_hash,
+        store_root_hash,
         crate::sync::snapshot::CreatedSnapshot {
             db_image,
             host_blobs: Vec::new(),
@@ -1951,7 +1955,7 @@ pub async fn pull_into_result(
     crate::sync::store_pull::StorePullError,
 > {
     bind_mock_store_protocol(db, storage, device_id).await;
-    let genesis_hash = storage.protocol_genesis_hash();
+    let store_root_hash = storage.store_root_hash();
     let membership = crate::sync::pull::load_cycle_membership(storage, db)
         .await
         .map_err(|error| crate::sync::store_pull::StorePullError::Membership(error.to_string()))?;
@@ -1959,7 +1963,7 @@ pub async fn pull_into_result(
         db,
         db.synced_tables(),
         storage,
-        genesis_hash,
+        store_root_hash,
         device_id,
         store_dir,
         membership.chain.as_ref(),
@@ -1983,17 +1987,17 @@ pub async fn pull_cloud_into(
     std::collections::BTreeMap<String, u64>,
     crate::sync::store_pull::StorePullResult,
 ) {
-    let genesis_hash = trusted_store_db
-        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+    let store_root_hash = trusted_store_db
+        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
         .await
-        .expect("read trusted Store genesis")
-        .expect("trusted database is bound to a Store genesis")
+        .expect("read trusted Store protocol root")
+        .expect("trusted database is bound to a Store protocol root")
         .parse()
-        .expect("trusted Store genesis hash");
-    crate::sync::store_genesis::open_store(
+        .expect("trusted Store protocol root hash");
+    crate::sync::store_protocol_root::open_store(
         db,
         storage,
-        genesis_hash,
+        store_root_hash,
         storage.store_id(),
         &crate::keys::public_key_hex(storage.user_keypair()),
     )
@@ -2009,7 +2013,7 @@ pub async fn pull_cloud_into(
         db,
         db.synced_tables(),
         storage,
-        genesis_hash,
+        store_root_hash,
         device_id,
         store_dir,
         membership.chain.as_ref(),

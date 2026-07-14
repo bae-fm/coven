@@ -39,7 +39,7 @@ pub async fn stage_store_ack(
             "a prior acknowledgement remains queued".to_string(),
         ));
     }
-    let genesis_hash = protocol_genesis_hash(db).await?;
+    let store_root_hash = store_root_hash(db).await?;
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await?
@@ -49,7 +49,7 @@ pub async fn stage_store_ack(
     let previous = db.latest_local_store_ack().await?;
     let revision = previous.as_ref().map_or(1, |(revision, _)| revision + 1);
     let ack = StoreAck::signed(
-        genesis_hash,
+        store_root_hash,
         device_id,
         revision,
         previous.map(|(_, hash)| hash),
@@ -66,7 +66,7 @@ pub async fn drain_outbound_store_acks(
     db: &Database,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreAckError> {
-    let genesis_hash = protocol_genesis_hash(db).await?;
+    let store_root_hash = store_root_hash(db).await?;
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await?
@@ -77,7 +77,7 @@ pub async fn drain_outbound_store_acks(
     while let Some(outbound) = db.oldest_outbound_store_ack().await? {
         let ack = StoreAck::parse_at(
             &outbound.ack_bytes,
-            genesis_hash,
+            store_root_hash,
             &device_id,
             outbound.revision,
         )
@@ -105,16 +105,16 @@ pub async fn drain_outbound_store_acks(
     Ok(published)
 }
 
-async fn protocol_genesis_hash(db: &Database) -> Result<ObjectHash, StoreAckError> {
+async fn store_root_hash(db: &Database) -> Result<ObjectHash, StoreAckError> {
     let raw = db
-        .get_protocol_state(crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY)
+        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
         .await?
         .ok_or(StoreAckError::MissingState(
-            crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY,
+            crate::database::STORE_ROOT_HASH_STATE_KEY,
         ))?;
     raw.parse::<ObjectHash>()
         .map_err(|error| StoreAckError::InvalidState {
-            key: crate::database::PROTOCOL_GENESIS_HASH_STATE_KEY,
+            key: crate::database::STORE_ROOT_HASH_STATE_KEY,
             reason: error.to_string(),
         })
 }
@@ -128,7 +128,7 @@ mod tests {
     use crate::storage::cloud::SequentialCopyIdGenerator;
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::store_objects::{list_latest_ack_chains, load_ack_slot};
-    use crate::sync::test_helpers::{open_test_db, publish_test_store_genesis};
+    use crate::sync::test_helpers::{open_test_db, publish_test_store_protocol_root};
 
     async fn initialized(
         copy_source: &str,
@@ -150,15 +150,20 @@ mod tests {
         )
         .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(copy_source)));
         let db = open_test_db();
-        let genesis_hash =
-            publish_test_store_genesis(&db, &storage, "ack-store-test", "dev-reader", &signer)
-                .await;
-        (home, storage, db, signer, genesis_hash)
+        let store_root_hash = publish_test_store_protocol_root(
+            &db,
+            &storage,
+            "ack-store-test",
+            "dev-reader",
+            &signer,
+        )
+        .await;
+        (home, storage, db, signer, store_root_hash)
     }
 
     #[tokio::test]
     async fn durable_ack_revisions_form_an_exact_append_only_chain() {
-        let (_home, storage, db, signer, genesis_hash) = initialized("ack-chain").await;
+        let (_home, storage, db, signer, store_root_hash) = initialized("ack-chain").await;
         let first = stage_store_ack(
             &db,
             BTreeMap::new(),
@@ -191,14 +196,14 @@ mod tests {
         assert_eq!(second.previous_ack_hash, Some(first.ack_hash()));
         assert_eq!(drain_outbound_store_acks(&db, &storage).await.unwrap(), 1);
 
-        let chains = list_latest_ack_chains(&storage, genesis_hash)
+        let chains = list_latest_ack_chains(&storage, store_root_hash)
             .await
             .expect("verify acknowledgement chains");
         let latest = &chains.latest_by_device["dev-reader"];
         assert_eq!(latest.value, second);
         assert_eq!(latest.value.frontier, frontier);
         assert_eq!(
-            load_ack_slot(&storage, genesis_hash, "dev-reader", 1)
+            load_ack_slot(&storage, store_root_hash, "dev-reader", 1)
                 .await
                 .unwrap()
                 .unwrap()
@@ -210,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn acknowledgement_append_failures_preserve_exact_outbox_for_retry() {
         for after_visibility in [false, true] {
-            let (home, storage, db, signer, genesis_hash) = initialized(if after_visibility {
+            let (home, storage, db, signer, store_root_hash) = initialized(if after_visibility {
                 "ack-after"
             } else {
                 "ack-before"
@@ -245,7 +250,7 @@ mod tests {
 
             assert_eq!(drain_outbound_store_acks(&db, &storage).await.unwrap(), 1);
             assert!(db.oldest_outbound_store_ack().await.unwrap().is_none());
-            let loaded = load_ack_slot(&storage, genesis_hash, "dev-reader", 1)
+            let loaded = load_ack_slot(&storage, store_root_hash, "dev-reader", 1)
                 .await
                 .unwrap()
                 .unwrap();
@@ -256,7 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn acknowledgement_local_completion_failure_retries_after_visible_copy() {
-        let (home, storage, db, signer, genesis_hash) = initialized("ack-completion").await;
+        let (home, storage, db, signer, store_root_hash) = initialized("ack-completion").await;
         let ack = stage_store_ack(
             &db,
             BTreeMap::new(),
@@ -280,7 +285,7 @@ mod tests {
             Err(StoreAckError::Database(_))
         ));
         assert_eq!(
-            load_ack_slot(&storage, genesis_hash, "dev-reader", 1)
+            load_ack_slot(&storage, store_root_hash, "dev-reader", 1)
                 .await
                 .unwrap()
                 .unwrap()

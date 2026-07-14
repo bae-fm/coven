@@ -261,7 +261,7 @@ pub fn generate_restore_code(
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
     identity_custody: &dyn DeviceIdentityCustody,
-    genesis_hash: crate::sync::store_commit::ObjectHash,
+    store_root_hash: crate::sync::store_commit::ObjectHash,
     founder_pubkey: String,
     membership_floor: Vec<crate::sync::membership::MembershipCoord>,
 ) -> Result<String, SetupError> {
@@ -386,7 +386,7 @@ pub fn generate_restore_code(
         name: config.store_name.clone(),
         provider,
         sk: hex::encode(keypair.to_keypair_bytes()),
-        genesis_hash,
+        store_root_hash,
         founder_pubkey,
         membership_floor,
     };
@@ -561,7 +561,7 @@ mod tests {
             &key_service,
             custody.as_ref(),
             identity_custody.as_ref(),
-            crate::sync::store_commit::ObjectHash::digest(b"restore test genesis"),
+            crate::sync::store_commit::ObjectHash::digest(b"restore test store protocol root"),
             hex::encode([7u8; 32]),
             membership_floor(hex::encode([7u8; 32])),
         )
@@ -593,7 +593,7 @@ mod tests {
             &key_service,
             custody.as_ref(),
             identity_custody.as_ref(),
-            crate::sync::store_commit::ObjectHash::digest(b"restore test genesis"),
+            crate::sync::store_commit::ObjectHash::digest(b"restore test store protocol root"),
             hex::encode([7u8; 32]),
             membership_floor(hex::encode([7u8; 32])),
         )

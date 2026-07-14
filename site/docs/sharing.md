@@ -6,10 +6,12 @@ Pull verifies both each changeset's own signature and the chain itself, so the
 cloud provider never has to be trusted with who is allowed to write.
 
 Every initialized store has this chain, including a store with one writer and a
-browsable cloud home. Creation publishes a self-signed Owner entry and its
-signed head, then pins that founder locally before a sync runtime can start.
-"Browsable" describes cloud visibility and readable blob paths; it does not
-disable membership authorization.
+browsable cloud home. Creation publishes a signed `StoreProtocolRoot` that binds
+the store id, founder membership entry, and schema version. Its
+`store_root_hash` is pinned locally and carried by every signed Store protocol
+object. Creation then publishes the founder's signed head before a sync runtime
+can start. "Browsable" describes cloud visibility and readable blob paths; it
+does not disable membership authorization.
 
 coven shares a store by **membership**: it grants the *whole store* to
 another *writer*, a peer with their own identity in the chain, by sealing the
@@ -305,8 +307,8 @@ Under it, coven:
    *before* writing anything,
 4. uploads the wrapped keyring, the entry, and the owner's updated head.
 
-The cloud connection details come back packed with the store id, name, and
-owner pubkey into an
+The cloud connection details come back packed with the store id, name, owner
+pubkey, and `store_root_hash` into an
 [`InviteCode`](rustdoc:struct:coven::join_code::InviteCode). The owner sends
 that back.
 
@@ -340,8 +342,8 @@ without anyone re-inviting them. Where an invite code adds a new identity to the
 chain, a restore code re-establishes an identity that is already in it.
 
 `handle.generate_restore_code()` encodes everything needed to reconnect into
-one `coven:`-prefixed base64url string: the store id, the store keyring,
-the Ed25519 signing key, the cloud provider, and that provider's connection
+one `coven:`-prefixed base64url string: the store id, `store_root_hash`, store
+keyring, Ed25519 signing key, cloud provider, and that provider's connection
 details. The
 [`RestoreCode`](rustdoc:struct:coven::sync::restore_code::RestoreCode) is plain
 JSON under that prefix.
