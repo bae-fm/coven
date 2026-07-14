@@ -324,7 +324,7 @@ async fn ordinary_pull_applies_the_change_immediately_after_its_durable_cursor()
 }
 
 #[tokio::test]
-async fn negative_durable_cursor_is_rejected_by_every_cursor_read_path() {
+async fn invalid_durable_cursor_values_are_rejected_at_the_database_boundary() {
     let target = open_test_db();
     exec(
         &target,
@@ -334,13 +334,16 @@ async fn negative_durable_cursor_is_rejected_by_every_cursor_read_path() {
 
     assert!(target.get_all_sync_cursors().await.is_err());
     assert!(target
-        .install_snapshot_cursors(&HashMap::from([("bad-device".to_string(), 1)]))
-        .await
-        .is_err());
-    assert!(target
         .advance_sync_cursor("bad-device", 0, 1)
         .await
         .is_err());
+    assert!(
+        crate::database::Database::validate_sync_cursors(&HashMap::from([(
+            "overflow-device".to_string(),
+            u64::MAX,
+        )]))
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -1084,10 +1087,11 @@ async fn a_changeset_replayed_at_another_seq_is_held_not_applied() {
     // The reader has already applied this device's stream through seq 8, so its
     // pull legitimately begins at the relocated object's slot, seq 9.
     let db2 = open_test_db();
-    let cursors = HashMap::from([("dev".to_string(), 8u64)]);
-    db2.install_snapshot_cursors(&cursors)
-        .await
-        .expect("install prior verified coverage");
+    exec(
+        &db2,
+        "INSERT INTO sync_cursors (device_id, last_seq) VALUES ('dev', 8)",
+    )
+    .await;
 
     let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
@@ -3461,8 +3465,12 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
 
     let (_tmp, store_dir) = temp_store_dir();
     store_local(&store_dir, "cleanup-race", b"old bytes").await;
-    let (reached_filesystem, resume_cleanup) =
-        crate::blob::local_cleanup::pause_before_filesystem("photos", "cleanup-race");
+    let (reached_filesystem, resume_cleanup) = target.arm_test_pause(
+        crate::database::DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
+            namespace: "photos".to_string(),
+            blob_id: "cleanup-race".to_string(),
+        },
+    );
     let pull_db = target.clone();
     let pull_storage = storage.clone();
     let pull_store_dir = store_dir.clone();
@@ -3532,6 +3540,127 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
             .unwrap()
             .exists(),
         "cleanup removes the unreferenced old bytes",
+    );
+}
+
+#[tokio::test]
+async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
+    use crate::database::DatabaseTestPoint;
+
+    let decl = BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy)
+        .with_id_column("blob_id");
+    let target = open_test_db_with_blob(decl);
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'Cleanup parent', NULL, \
+                 '0000000001000-0000-dev2', '2026-01-01');",
+    )
+    .await;
+    target
+        .call(|conn| {
+            conn.execute(
+                "INSERT INTO local_cleanup_intents (namespace, blob_id) \
+                 VALUES ('photos', 'shared-intent')",
+                [],
+            )
+            .map(|_| ())
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .unwrap();
+
+    let (_tmp, store_dir) = temp_store_dir();
+    store_local(&store_dir, "shared-intent", b"old bytes").await;
+    let mut points = target.observe_test_points();
+    let before_filesystem = DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
+        namespace: "photos".to_string(),
+        blob_id: "shared-intent".to_string(),
+    };
+    let (first_reached_filesystem, resume_first) = target.arm_test_pause(before_filesystem.clone());
+
+    let first_db = target.clone();
+    let first_store_dir = store_dir.clone();
+    let first = tokio::spawn(async move {
+        crate::blob::local_cleanup::drain(&first_db, &first_store_dir).await
+    });
+    first_reached_filesystem.notified().await;
+    assert_eq!(
+        points.recv().await,
+        Some(DatabaseTestPoint::LocalBlobCleanupRequested)
+    );
+    assert_eq!(
+        points.recv().await,
+        Some(DatabaseTestPoint::LocalBlobCleanupAcquired)
+    );
+    assert_eq!(points.recv().await, Some(before_filesystem));
+
+    let tables = target.synced_tables().to_vec();
+    let host_re_reference = target
+        .call(move |conn| {
+            crate::database::Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                tx.execute(
+                    "INSERT INTO note_photos \
+                     (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
+                     VALUES ('blocked-row', 'n1', 'cover', 9, NULL, 'shared-intent', \
+                             '0000000002000-0000-dev2', '2026-01-01')",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+            })
+        })
+        .await;
+    assert!(
+        host_re_reference.is_err(),
+        "the cleanup intent rejects a host row re-reference"
+    );
+
+    let second_db = target.clone();
+    let second_store_dir = store_dir.clone();
+    let second = tokio::spawn(async move {
+        crate::blob::local_cleanup::drain(&second_db, &second_store_dir).await
+    });
+    assert_eq!(
+        points.recv().await,
+        Some(DatabaseTestPoint::LocalBlobCleanupRequested)
+    );
+
+    resume_first.notify_one();
+    assert_eq!(
+        points.recv().await,
+        Some(DatabaseTestPoint::LocalBlobCleanupFinished),
+        "the first drain must finish before the second drain acquires cleanup ownership"
+    );
+    assert_eq!(
+        points.recv().await,
+        Some(DatabaseTestPoint::LocalBlobCleanupAcquired)
+    );
+    assert_eq!(
+        points.recv().await,
+        Some(DatabaseTestPoint::LocalBlobCleanupFinished)
+    );
+    assert!(!first.await.expect("first drain task").unwrap());
+    assert!(!second.await.expect("second drain task").unwrap());
+
+    exec(
+        &target,
+        "INSERT INTO note_photos \
+         (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
+         VALUES ('live-row', 'n1', 'cover', 9, NULL, 'shared-intent', \
+                 '0000000003000-0000-dev2', '2026-01-01')",
+    )
+    .await;
+    store_local(&store_dir, "shared-intent", b"recreated bytes").await;
+    assert!(!crate::blob::local_cleanup::drain(&target, &store_dir)
+        .await
+        .unwrap());
+    assert!(
+        store_dir
+            .local_blob_path("photos", "shared-intent")
+            .unwrap()
+            .exists(),
+        "a live blob recreated after cleanup is not owned by an old drain"
     );
 }
 

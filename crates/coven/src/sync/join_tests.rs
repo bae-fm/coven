@@ -722,6 +722,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         .await
         .expect("B bootstrap");
     open_db_and_pull(
+        "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
@@ -729,7 +730,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         None,
         &[],
         &storage,
-        &boot.cursors,
+        boot,
         &lib_b,
         &never_cancelled(),
     )
@@ -840,8 +841,8 @@ async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
     let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
         .await
         .expect("bootstrap B from A/1 snapshot");
-    assert_eq!(boot.cursors.get("A"), Some(&1));
     let applied = open_db_and_pull(
+        "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
@@ -849,7 +850,7 @@ async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
         None,
         &[],
         &storage,
-        &boot.cursors,
+        boot,
         &lib_b,
         &never_cancelled(),
     )
@@ -1002,6 +1003,7 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
         .await
         .expect("B bootstrap");
     let result = open_db_and_pull(
+        "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
@@ -1009,7 +1011,7 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
         Some(&owner_pk),
         &invite.membership_floor,
         &storage,
-        &boot.cursors,
+        boot,
         &lib_b,
         &never_cancelled(),
     )
@@ -1124,6 +1126,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
         .await
         .expect("B bootstrap");
     let result = open_db_and_pull(
+        "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
@@ -1131,7 +1134,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
         Some(&owner_pk),
         &invite.membership_floor,
         &storage,
-        &boot.cursors,
+        boot,
         &lib_b,
         &never_cancelled(),
     )
@@ -1242,6 +1245,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         .await
         .expect("B bootstrap");
     open_db_and_pull(
+        "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
@@ -1249,7 +1253,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         None,
         &[],
         &storage,
-        &boot.cursors,
+        boot,
         &lib_b,
         &never_cancelled(),
     )
@@ -1347,6 +1351,7 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
         .await
         .expect("B bootstrap");
     open_db_and_pull(
+        "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
@@ -1354,7 +1359,7 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
         None,
         &[],
         &storage,
-        &boot.cursors,
+        boot,
         &lib_b,
         &never_cancelled(),
     )
@@ -1454,6 +1459,7 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
         .await
         .expect("B bootstrap");
     let result = open_db_and_pull(
+        "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
@@ -1461,7 +1467,7 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
         None,
         &[],
         &storage,
-        &boot.cursors,
+        boot,
         &lib_b,
         &cancel,
     )

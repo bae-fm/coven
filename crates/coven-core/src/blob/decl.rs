@@ -406,30 +406,24 @@ impl BlobDecls {
             let id_ident = quote_ident(&blob.id_col_name);
             let namespace_literal: String =
                 conn.query_row("SELECT quote(?1)", [&blob.namespace], |row| row.get(0))?;
-            let insert_trigger = quote_ident(&format!("coven_cleanup_guard_insert_{table}"));
-            let update_trigger = quote_ident(&format!("coven_cleanup_guard_update_{table}"));
-            conn.execute_batch(&format!(
-                "CREATE TEMP TRIGGER {insert_trigger} \
-                 BEFORE INSERT ON main.{table_ident} \
-                 WHEN NEW.{id_ident} IS NOT NULL AND EXISTS (\
-                     SELECT 1 FROM local_cleanup_intents \
-                     WHERE namespace = {namespace_literal} \
-                       AND blob_id = NEW.{id_ident}\
-                 ) \
-                 BEGIN \
-                     SELECT RAISE(ABORT, 'blob local cleanup in progress'); \
-                 END; \
-                 CREATE TEMP TRIGGER {update_trigger} \
-                 BEFORE UPDATE OF {id_ident} ON main.{table_ident} \
-                 WHEN NEW.{id_ident} IS NOT NULL AND EXISTS (\
-                     SELECT 1 FROM local_cleanup_intents \
-                     WHERE namespace = {namespace_literal} \
-                       AND blob_id = NEW.{id_ident}\
-                 ) \
-                 BEGIN \
-                     SELECT RAISE(ABORT, 'blob local cleanup in progress'); \
-                 END;"
-            ))?;
+            for (trigger_kind, event_clause) in [
+                ("insert", "BEFORE INSERT".to_string()),
+                ("update", format!("BEFORE UPDATE OF {id_ident}")),
+            ] {
+                let trigger = quote_ident(&format!("coven_cleanup_guard_{trigger_kind}_{table}"));
+                conn.execute_batch(&format!(
+                    "CREATE TEMP TRIGGER {trigger} \
+                     {event_clause} ON main.{table_ident} \
+                     WHEN NEW.{id_ident} IS NOT NULL AND EXISTS (\
+                         SELECT 1 FROM local_cleanup_intents \
+                         WHERE namespace = {namespace_literal} \
+                           AND blob_id = NEW.{id_ident}\
+                     ) \
+                     BEGIN \
+                         SELECT RAISE(ABORT, 'blob local cleanup in progress'); \
+                     END;"
+                ))?;
+            }
         }
         Ok(())
     }

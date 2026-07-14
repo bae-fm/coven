@@ -196,34 +196,6 @@ struct CompletedChangeset<'a> {
     changes: &'a [RowChange],
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-struct RemoteCommitPause {
-    device_id: String,
-    seq: u64,
-    reached: Arc<tokio::sync::Notify>,
-    resume: Arc<tokio::sync::Notify>,
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-static REMOTE_COMMIT_PAUSE: std::sync::Mutex<Option<RemoteCommitPause>> =
-    std::sync::Mutex::new(None);
-
-#[cfg(any(test, feature = "test-utils"))]
-pub fn pause_pull_after_remote_commit(
-    device_id: &str,
-    seq: u64,
-) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-    let reached = Arc::new(tokio::sync::Notify::new());
-    let resume = Arc::new(tokio::sync::Notify::new());
-    *REMOTE_COMMIT_PAUSE.lock().unwrap() = Some(RemoteCommitPause {
-        device_id: device_id.to_string(),
-        seq,
-        reached: reached.clone(),
-        resume: resume.clone(),
-    });
-    (reached, resume)
-}
-
 enum RemoteApplyOutcome {
     Applied,
     DeferredForeignKey,
@@ -863,7 +835,11 @@ pub async fn pull_changes(
             };
 
             #[cfg(any(test, feature = "test-utils"))]
-            pause_pull_after_remote_commit_if_armed(&head.device_id, seq).await;
+            db.reach_test_point(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
+                device_id: head.device_id.clone(),
+                seq,
+            })
+            .await;
 
             match apply_outcome {
                 RemoteApplyOutcome::Applied => {}
@@ -941,7 +917,11 @@ pub async fn pull_changes(
             };
 
             #[cfg(any(test, feature = "test-utils"))]
-            pause_pull_after_remote_commit_if_armed(&d.device_id, d.seq).await;
+            db.reach_test_point(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
+                device_id: d.device_id.clone(),
+                seq: d.seq,
+            })
+            .await;
 
             match retry_outcome {
                 RemoteApplyOutcome::Applied => {}
@@ -978,25 +958,6 @@ pub async fn pull_changes(
     result.devices_pulled = applied_devices.len() as u64;
 
     Ok((updated_cursors, result))
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-async fn pause_pull_after_remote_commit_if_armed(device_id: &str, seq: u64) {
-    let pause = {
-        let mut armed = REMOTE_COMMIT_PAUSE.lock().unwrap();
-        if armed
-            .as_ref()
-            .is_some_and(|pause| pause.device_id == device_id && pause.seq == seq)
-        {
-            armed.take()
-        } else {
-            None
-        }
-    };
-    if let Some(pause) = pause {
-        pause.reached.notify_one();
-        pause.resume.notified().await;
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1815,6 +1776,8 @@ impl std::error::Error for PullError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::session::{BlobDecl, SyncedTable};
+    use crate::sync::test_helpers::{capture_bytes, exec, open_test_db_with_blob, temp_store_dir};
 
     #[test]
     fn cleanup_intent_derivation_rejects_mismatched_lengths() {
@@ -1837,5 +1800,138 @@ mod tests {
                 new_count: 0
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn cleanup_guard_rejects_remote_row_re_reference_without_advancing_cursor() {
+        let blob_decl = || {
+            BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy)
+                .with_id_column("blob_id")
+        };
+        let source = open_test_db_with_blob(blob_decl());
+        exec(
+            &source,
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'Parent', NULL, \
+                     '0000000001000-0000-dev1', '2026-01-01')",
+        )
+        .await;
+        let changeset = capture_bytes(
+            &source,
+            &["INSERT INTO note_photos \
+               (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
+               VALUES ('remote-row', 'n1', 'cover', 9, NULL, 'guarded-blob', \
+                       '0000000002000-0000-dev1', '2026-01-01')"],
+        )
+        .await;
+        let changes = crate::changeset::walk(&changeset).expect("walk remote changeset");
+
+        let target = open_test_db_with_blob(blob_decl());
+        exec(
+            &target,
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'Parent', NULL, \
+                     '0000000001000-0000-dev2', '2026-01-01')",
+        )
+        .await;
+        target
+            .call(|conn| {
+                conn.execute(
+                    "INSERT INTO local_cleanup_intents (namespace, blob_id) \
+                     VALUES ('photos', 'guarded-blob')",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+            })
+            .await
+            .unwrap();
+        let direct_write = target
+            .call(|conn| {
+                conn.execute(
+                    "INSERT INTO note_photos \
+                     (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
+                     VALUES ('direct-row', 'n1', 'cover', 9, NULL, 'guarded-blob', \
+                             '0000000002000-0000-dev2', '2026-01-01')",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+            })
+            .await;
+        assert!(
+            direct_write.is_err(),
+            "the TEMP guard rejects equivalent direct SQL on this connection"
+        );
+        let schema = {
+            let tables = target.synced_tables().to_vec();
+            Arc::new(
+                target
+                    .call(move |conn| {
+                        let names: Vec<&str> = tables.iter().map(SyncedTable::name).collect();
+                        TableSchema::from_db(conn, &names)
+                    })
+                    .await
+                    .unwrap(),
+            )
+        };
+
+        let rejected = commit_remote_changeset(
+            &target,
+            "dev1",
+            1,
+            &changeset,
+            &changes,
+            schema.clone(),
+            target.receive_wall_ms(),
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                rejected,
+                RemoteApplyOutcome::ConstraintConflict(ref tables)
+                    if tables == &["note_photos".to_string()]
+            ),
+            "the TEMP guard rejects the remote row as a constraint conflict"
+        );
+        assert!(!target
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM note_photos WHERE id = 'remote-row')",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(crate::database::DbError::from)
+            })
+            .await
+            .unwrap());
+        assert_eq!(
+            target.get_all_sync_cursors().await.unwrap().get("dev1"),
+            None
+        );
+
+        let (_tmp, store_dir) = temp_store_dir();
+        assert!(!local_cleanup::drain(&target, &store_dir).await.unwrap());
+        let applied = commit_remote_changeset(
+            &target,
+            "dev1",
+            1,
+            &changeset,
+            &changes,
+            schema,
+            target.receive_wall_ms(),
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(matches!(applied, RemoteApplyOutcome::Applied));
+        assert_eq!(
+            target.get_all_sync_cursors().await.unwrap().get("dev1"),
+            Some(&1)
+        );
     }
 }

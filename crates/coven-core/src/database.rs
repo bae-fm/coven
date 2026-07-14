@@ -71,6 +71,108 @@ struct DatabaseState {
     /// Serializes complete membership-chain loads that share this database, so a
     /// load cannot return an older chain after another load commits a newer floor.
     membership_load: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the full durable-intent to filesystem-deletion to intent-removal
+    /// operation across every clone of this database.
+    local_blob_cleanup: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(any(test, feature = "test-utils"))]
+    test_pause_points: Arc<TestPausePoints<DatabaseTestPoint>>,
+}
+
+/// Test-only checkpoints reached by database operations whose ordering matters.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DatabaseTestPoint {
+    LocalBlobCleanupRequested,
+    LocalBlobCleanupAcquired,
+    LocalBlobCleanupBeforeFilesystem { namespace: String, blob_id: String },
+    LocalBlobCleanupFinished,
+    PullAfterRemoteCommit { device_id: String, seq: u64 },
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+struct ArmedTestPause<K> {
+    point: K,
+    reached: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+struct TestPauseState<K> {
+    armed: Option<ArmedTestPause<K>>,
+    observers: Vec<tokio::sync::mpsc::UnboundedSender<K>>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+struct TestPausePoints<K> {
+    state: std::sync::Mutex<TestPauseState<K>>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<K> Default for TestPausePoints<K> {
+    fn default() -> Self {
+        Self {
+            state: std::sync::Mutex::new(TestPauseState {
+                armed: None,
+                observers: Vec::new(),
+            }),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<K: Clone + PartialEq> TestPausePoints<K> {
+    fn arm(&self, point: K) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let prior = self
+            .state
+            .lock()
+            .expect("database test pause mutex poisoned")
+            .armed
+            .replace(ArmedTestPause {
+                point,
+                reached: reached.clone(),
+                resume: resume.clone(),
+            });
+        assert!(prior.is_none(), "database test pause already armed");
+        (reached, resume)
+    }
+
+    fn observe(&self) -> tokio::sync::mpsc::UnboundedReceiver<K> {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.state
+            .lock()
+            .expect("database test pause mutex poisoned")
+            .observers
+            .push(sender);
+        receiver
+    }
+
+    async fn reach(&self, point: K) {
+        let pause = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("database test pause mutex poisoned");
+            state
+                .observers
+                .retain(|observer| observer.send(point.clone()).is_ok());
+            if state
+                .armed
+                .as_ref()
+                .is_some_and(|pause| pause.point == point)
+            {
+                state.armed.take()
+            } else {
+                None
+            }
+        };
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.resume.notified().await;
+        }
+    }
 }
 
 /// The owned SQLite connection and the sync bookkeeping resolved beside it at
@@ -235,6 +337,9 @@ impl DatabaseCore {
             blob_tombstone_grace: self.blob_tombstone_grace,
             transfer_limits: self.transfer_limits,
             membership_load: Arc::new(tokio::sync::Mutex::new(())),
+            local_blob_cleanup: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(any(test, feature = "test-utils"))]
+            test_pause_points: Arc::new(TestPausePoints::default()),
         }
     }
 
@@ -548,6 +653,30 @@ impl Database {
     /// and every clone that shares its state.
     pub(crate) async fn lock_membership_load(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.state.membership_load.clone().lock_owned().await
+    }
+
+    pub(crate) async fn lock_local_blob_cleanup(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.state.local_blob_cleanup.clone().lock_owned().await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn arm_test_pause(
+        &self,
+        point: DatabaseTestPoint,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.state.test_pause_points.arm(point)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn observe_test_points(&self) -> tokio::sync::mpsc::UnboundedReceiver<DatabaseTestPoint> {
+        self.state.test_pause_points.observe()
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn reach_test_point(&self, point: DatabaseTestPoint) {
+        self.state.test_pause_points.reach(point).await;
     }
 
     /// Open and own the connection at `path`.
@@ -1079,59 +1208,43 @@ impl Database {
         let mut out = HashMap::new();
         for row in rows {
             let (id, seq) = row.map_err(DbError::from)?;
-            let seq = u64::try_from(seq).map_err(|_| {
-                DbError(format!(
-                    "sync cursor {id:?} contains negative sequence {seq}"
-                ))
-            })?;
+            let seq = Self::cursor_from_sqlite(&id, seq)?;
             out.insert(id, seq);
         }
         Ok(out)
     }
 
-    /// Install the cursor vector carried by a verified snapshot before applying
-    /// anything above it. Existing coverage is never lowered by an older
-    /// snapshot position.
-    #[doc(hidden)]
-    pub async fn install_snapshot_cursors(
+    pub(crate) fn validate_sync_cursors(cursors: &HashMap<String, u64>) -> Result<(), DbError> {
+        for (device_id, seq) in cursors {
+            Self::cursor_to_sqlite(device_id, *seq)?;
+        }
+        Ok(())
+    }
+
+    /// Replace the complete cursor vector with the positions carried by one
+    /// verified snapshot capability. No caller outside snapshot bootstrap can
+    /// manufacture this installation path.
+    pub(crate) async fn replace_snapshot_cursors(
         &self,
         cursors: &HashMap<String, u64>,
     ) -> Result<(), DbError> {
-        if cursors.is_empty() {
-            return Ok(());
-        }
+        Self::validate_sync_cursors(cursors)?;
         let cursors = cursors.clone();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            tx.execute("DELETE FROM sync_cursors", [])
+                .map_err(DbError::from)?;
             for (device_id, seq) in cursors {
-                Self::install_snapshot_cursor_on(&tx, &device_id, seq)?;
+                let seq = Self::cursor_to_sqlite(&device_id, seq)?;
+                tx.execute(
+                    "INSERT INTO sync_cursors (device_id, last_seq) VALUES (?1, ?2)",
+                    (&device_id, seq),
+                )
+                .map_err(DbError::from)?;
             }
             tx.commit().map_err(DbError::from)
         })
         .await
-    }
-
-    /// Install one verified snapshot cursor on a connection or transaction the
-    /// caller already owns. Snapshot restoration may start from an empty
-    /// bookkeeping table; an existing newer position wins over an older snapshot.
-    pub(crate) fn install_snapshot_cursor_on(
-        conn: &Connection,
-        device_id: &str,
-        seq: u64,
-    ) -> Result<(), DbError> {
-        if Self::read_sync_cursor_on(conn, device_id)?.is_some_and(|stored| stored >= seq) {
-            return Ok(());
-        }
-        let seq = i64::try_from(seq)
-            .map_err(|_| DbError(format!("sync cursor {device_id:?} exceeds SQLite INTEGER")))?;
-        conn.execute(
-            "INSERT INTO sync_cursors (device_id, last_seq) VALUES (?1, ?2) \
-             ON CONFLICT(device_id) DO UPDATE SET last_seq = excluded.last_seq \
-             WHERE sync_cursors.last_seq < excluded.last_seq",
-            (device_id, seq),
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
     }
 
     /// Advance a cursor as its own atomic database operation. Pull paths that
@@ -1186,8 +1299,7 @@ impl Database {
             )));
         }
 
-        let next = i64::try_from(next)
-            .map_err(|_| DbError(format!("sync cursor {device_id:?} exceeds SQLite INTEGER")))?;
+        let next = Self::cursor_to_sqlite(device_id, next)?;
         conn.execute(
             "INSERT INTO sync_cursors (device_id, last_seq) VALUES (?1, ?2) \
              ON CONFLICT(device_id) DO UPDATE SET last_seq = excluded.last_seq",
@@ -1205,14 +1317,21 @@ impl Database {
         )
         .optional()
         .map_err(DbError::from)?
-        .map(|value| {
-            u64::try_from(value).map_err(|_| {
-                DbError(format!(
-                    "sync cursor {device_id:?} contains negative sequence {value}"
-                ))
-            })
-        })
+        .map(|value| Self::cursor_from_sqlite(device_id, value))
         .transpose()
+    }
+
+    fn cursor_from_sqlite(device_id: &str, value: i64) -> Result<u64, DbError> {
+        u64::try_from(value).map_err(|_| {
+            DbError(format!(
+                "sync cursor {device_id:?} contains negative sequence {value}"
+            ))
+        })
+    }
+
+    fn cursor_to_sqlite(device_id: &str, value: u64) -> Result<i64, DbError> {
+        i64::try_from(value)
+            .map_err(|_| DbError(format!("sync cursor {device_id:?} exceeds SQLite INTEGER")))
     }
 
     // ---- Cloud outbox ----

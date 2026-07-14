@@ -792,6 +792,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         .await
         .expect("B bootstrap");
     open_db_and_pull(
+        "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
@@ -799,7 +800,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         None,
         &chain.author_heads(),
         &storage,
-        &boot.cursors,
+        boot,
         &lib_b,
         &tokio::sync::watch::channel(false).1,
     )
@@ -919,6 +920,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         .await
         .expect("B bootstrap");
     let error = open_db_and_pull(
+        "test-lib",
         &lib_b.db_path(),
         &tables,
         &test_migrations(),
@@ -926,7 +928,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
         None,
         &membership_floor,
         &storage,
-        &boot.cursors,
+        boot,
         &lib_b,
         &tokio::sync::watch::channel(false).1,
     )

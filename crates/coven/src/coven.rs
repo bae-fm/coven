@@ -1968,8 +1968,12 @@ mod tests {
         let storage = Arc::new(MockSyncStorage::new());
         storage.store_changeset("dev-remote", 1, &remote_delete, 1);
 
-        let (commit_reached, resume_pull) =
-            crate::sync::pull::pause_pull_after_remote_commit("dev-remote", 1);
+        let (commit_reached, resume_pull) = handle.db().arm_test_pause(
+            coven_core::database::DatabaseTestPoint::PullAfterRemoteCommit {
+                device_id: "dev-remote".to_string(),
+                seq: 1,
+            },
+        );
         let pull_handle = handle.clone();
         let pull_storage = storage.clone();
         let pull = tokio::spawn(async move {

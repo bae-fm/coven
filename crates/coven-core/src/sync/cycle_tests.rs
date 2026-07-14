@@ -10,7 +10,7 @@
 //! withheld until its gate flips. The completion flip + its mid-batch publish
 //! (`resume_drain_promptly`) are covered in `blob::transition_tests`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use crate::blob::{BlobScope, CacheFill, Provenance};
@@ -2163,9 +2163,11 @@ async fn cycle_keeps_a_behind_peers_changeset() {
                  '0000000001000-0000-A', '2026-01-01')",
     )
     .await;
-    db_b.install_snapshot_cursors(&HashMap::from([("A".to_string(), 1)]))
-        .await
-        .expect("install B's verified snapshot coverage");
+    exec(
+        &db_b,
+        "INSERT INTO sync_cursors (device_id, last_seq) VALUES ('A', 1)",
+    )
+    .await;
     pull_into(&db_b, &storage, "B", &ld).await;
     assert!(
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'a2'").await,

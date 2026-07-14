@@ -1612,7 +1612,7 @@ mod tests {
                 [],
             )
             .map_err(DbError::from)?;
-            Database::install_snapshot_cursor_on(&tx, "dev1", 1)?;
+            Database::advance_sync_cursor_on(&tx, "dev1", 0, 1)?;
             tx.commit().map_err(DbError::from)
         })
         .await
@@ -1631,7 +1631,7 @@ mod tests {
                 [],
             )
             .map_err(DbError::from)?;
-            Database::install_snapshot_cursor_on(&tx, "dev1", 2)?;
+            Database::advance_sync_cursor_on(&tx, "dev1", 1, 2)?;
             tx.commit().map_err(DbError::from)
         })
         .await

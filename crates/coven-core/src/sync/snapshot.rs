@@ -33,7 +33,7 @@
 /// Snapshot creation policy: after every N changesets (default 100) or
 /// T hours (default 24) since the last snapshot.
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -52,6 +52,7 @@ use super::storage::{StorageError, SyncStorage};
 use crate::blob::{BlobRef, Provenance};
 use crate::database::Database;
 use crate::keys::UserKeypair;
+use crate::migration::Migration;
 
 /// Default: create a snapshot after this many changesets since the last one.
 const SNAPSHOT_CHANGESET_THRESHOLD: u64 = 100;
@@ -147,6 +148,20 @@ pub enum SnapshotError {
     /// key.
     #[error("snapshot publish-id state: {0}")]
     PublishId(String),
+    #[error("snapshot bootstrap belongs to store {bound:?}, not {requested:?}")]
+    BootstrapStoreMismatch { bound: String, requested: String },
+    #[error(
+        "snapshot bootstrap belongs to database path {bound}, not {requested}",
+        bound = .bound.display(),
+        requested = .requested.display()
+    )]
+    BootstrapDestinationMismatch { bound: PathBuf, requested: PathBuf },
+    #[error("snapshot bootstrap database changed after verification")]
+    BootstrapDatabaseChanged,
+    #[error("snapshot bootstrap database: {0}")]
+    BootstrapDatabase(String),
+    #[error("snapshot bootstrap cursors: {0}")]
+    BootstrapCursors(String),
 }
 
 /// `sync_state` key holding this device's snapshot publish-id counter: a
@@ -194,12 +209,86 @@ fn snapshot_db_hash(db_image: &[u8]) -> String {
     hex::encode(Sha256::digest(db_image))
 }
 
-/// Result of bootstrapping from a snapshot.
+/// Verified authority to open one downloaded snapshot as one store database and
+/// install exactly the signed cursor vector beside it. Its fields are private so
+/// callers cannot transplant coverage into an unrelated database.
 #[derive(Debug)]
 pub struct BootstrapResult {
-    /// Per-device cursors from the snapshot metadata.
-    /// The bootstrapping device should use these as initial sync_cursors.
-    pub cursors: HashMap<String, u64>,
+    store_id: String,
+    target_path: PathBuf,
+    db_hash: String,
+    cursors: HashMap<String, u64>,
+}
+
+impl BootstrapResult {
+    pub fn cursor_count(&self) -> usize {
+        self.cursors.len()
+    }
+
+    /// Publish the joining reader's acknowledgement from the same verified
+    /// cursor vector this capability will consume for database installation.
+    pub async fn publish_reader(
+        &self,
+        storage: &super::cloud_storage::CloudSyncStorage,
+        device_id: &str,
+        timestamp: &str,
+    ) -> Result<(), SnapshotError> {
+        if storage.store_id() != self.store_id {
+            return Err(SnapshotError::BootstrapStoreMismatch {
+                bound: self.store_id.clone(),
+                requested: storage.store_id().to_string(),
+            });
+        }
+        storage
+            .publish_bootstrap_reader(device_id, &self.cursors, timestamp)
+            .await
+            .map_err(SnapshotError::Bucket)
+    }
+
+    /// Consume the verified bootstrap authority by opening its bound database
+    /// file and replacing the local cursor table with the signed vector.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_database(
+        self,
+        store_id: &str,
+        target_path: &Path,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: crate::blob::TransferLimits,
+        device_id: String,
+        migrations: &[Migration],
+    ) -> Result<Database, SnapshotError> {
+        if store_id != self.store_id {
+            return Err(SnapshotError::BootstrapStoreMismatch {
+                bound: self.store_id,
+                requested: store_id.to_string(),
+            });
+        }
+        let requested = std::fs::canonicalize(target_path)?;
+        if requested != self.target_path {
+            return Err(SnapshotError::BootstrapDestinationMismatch {
+                bound: self.target_path,
+                requested,
+            });
+        }
+        let database_bytes = std::fs::read(&requested)?;
+        if snapshot_db_hash(&database_bytes) != self.db_hash {
+            return Err(SnapshotError::BootstrapDatabaseChanged);
+        }
+        let (db, _stamper) = Database::open(
+            &requested,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            device_id,
+            migrations,
+        )
+        .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
+        db.replace_snapshot_cursors(&self.cursors)
+            .await
+            .map_err(|error| SnapshotError::BootstrapCursors(error.to_string()))?;
+        Ok(db)
+    }
 }
 
 /// Create a snapshot of the database as bytes ready for storage.
@@ -1098,9 +1187,11 @@ pub async fn bootstrap_from_snapshot(
         return Err(SnapshotError::DbHashMismatch);
     }
 
-    write_snapshot_db(target_path, &plaintext)?;
-
     let cursors: HashMap<String, u64> = meta.cursors.into_iter().collect();
+    Database::validate_sync_cursors(&cursors)
+        .map_err(|error| SnapshotError::BootstrapCursors(error.to_string()))?;
+    write_snapshot_db(target_path, &plaintext)?;
+    let target_path = std::fs::canonicalize(target_path)?;
     info!(
         num_devices = cursors.len(),
         db_size = plaintext.len(),
@@ -1108,7 +1199,12 @@ pub async fn bootstrap_from_snapshot(
         "bootstrapped from snapshot"
     );
 
-    Ok(BootstrapResult { cursors })
+    Ok(BootstrapResult {
+        store_id: store_id.to_string(),
+        target_path,
+        db_hash: meta.db_hash,
+        cursors,
+    })
 }
 
 /// Download the blob files the DB at `db_path` references but whose local file is
@@ -1258,7 +1354,7 @@ mod tests {
     use crate::sync::apply::resolve_and_apply_changeset;
     use crate::sync::session::BlobDecl;
     use crate::sync::test_helpers::{
-        open_test_db_with_user_and_host_blobs, temp_store_dir,
+        open_test_db_with_user_and_host_blobs, temp_store_dir, test_migrations, test_synced_tables,
         test_synced_tables_with_user_and_host_blobs, MockSyncStorage,
     };
     use rusqlite::session::Session as RqSession;
@@ -2108,6 +2204,121 @@ mod tests {
         assert_eq!(
             query_text(&db2, "SELECT title FROM notes WHERE id = 'a1'"),
             "Artist One"
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_bootstrap_coverage_is_bound_and_replaces_the_exact_cursor_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("source.db");
+        let (source, _stamper) = Database::open(
+            &source_path,
+            test_synced_tables(),
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "source-device".to_string(),
+            &test_migrations(),
+        )
+        .expect("open source database");
+        source
+            .call(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO sync_cursors (device_id, last_seq) \
+                     VALUES ('covered', 9), ('extra', 3)",
+                )
+                .map_err(DbError::from)
+            })
+            .await
+            .unwrap();
+        let image_path = temp.path().join("snapshot-image.db");
+        let vacuum_path = image_path
+            .to_str()
+            .expect("snapshot image path is UTF-8")
+            .to_string();
+        source
+            .call(move |conn| {
+                conn.execute("VACUUM INTO ?1", [vacuum_path])
+                    .map(|_| ())
+                    .map_err(DbError::from)
+            })
+            .await
+            .expect("copy source database image");
+        let image = std::fs::read(&image_path).expect("read source database image");
+        let storage = MockSyncStorage::new();
+        publish_signed_generation(&storage, 1, [("covered", 1)], image, &test_keypair()).await;
+
+        let wrong_store_path = temp.path().join("wrong-store.db");
+        let wrong_store =
+            bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 1, &wrong_store_path)
+                .await
+                .unwrap();
+        let wrong_store_result = wrong_store
+            .open_database(
+                "another-store",
+                &wrong_store_path,
+                test_synced_tables(),
+                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                "reader".to_string(),
+                &test_migrations(),
+            )
+            .await;
+        let wrong_store_error = match wrong_store_result {
+            Err(error) => error,
+            Ok(_) => panic!("coverage crossed stores"),
+        };
+        assert!(matches!(
+            wrong_store_error,
+            SnapshotError::BootstrapStoreMismatch { .. }
+        ));
+
+        let bound_path = temp.path().join("bound.db");
+        let wrong_destination =
+            bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 1, &bound_path)
+                .await
+                .unwrap();
+        let other_path = temp.path().join("other.db");
+        std::fs::copy(&bound_path, &other_path).expect("copy identical database image");
+        let wrong_destination_result = wrong_destination
+            .open_database(
+                TEST_STORE_ID,
+                &other_path,
+                test_synced_tables(),
+                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                "reader".to_string(),
+                &test_migrations(),
+            )
+            .await;
+        let wrong_destination_error = match wrong_destination_result {
+            Err(error) => error,
+            Ok(_) => panic!("coverage crossed destination databases"),
+        };
+        assert!(matches!(
+            wrong_destination_error,
+            SnapshotError::BootstrapDestinationMismatch { .. }
+        ));
+
+        let exact_path = temp.path().join("exact.db");
+        let exact = bootstrap_from_snapshot(&storage, TEST_STORE_ID, None, 1, &exact_path)
+            .await
+            .unwrap();
+        let db = exact
+            .open_database(
+                TEST_STORE_ID,
+                &exact_path,
+                test_synced_tables(),
+                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                "reader".to_string(),
+                &test_migrations(),
+            )
+            .await
+            .expect("consume verified bootstrap");
+        assert_eq!(
+            db.get_all_sync_cursors().await.unwrap(),
+            HashMap::from([("covered".to_string(), 1)]),
+            "the verified vector replaces stale and extra cursors from the database image"
         );
     }
 

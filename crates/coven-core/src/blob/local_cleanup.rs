@@ -1,10 +1,7 @@
 //! Durable deletion of a blob's on-device copies after its last row reference.
 
-#[cfg(test)]
-use std::sync::Arc;
-
 use rusqlite::Connection;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::blob::decl::BlobDecls;
 use crate::database::{Database, DbError};
@@ -49,17 +46,33 @@ pub fn record_if_unreferenced_on(
     {
         return Ok(false);
     }
-    conn.execute(
-        "INSERT OR IGNORE INTO local_cleanup_intents (namespace, blob_id) VALUES (?1, ?2)",
-        (intent.namespace(), intent.blob_id()),
-    )
-    .map_err(DbError::from)?;
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO local_cleanup_intents (namespace, blob_id) VALUES (?1, ?2)",
+            (intent.namespace(), intent.blob_id()),
+        )
+        .map_err(DbError::from)?;
+    if inserted == 0 {
+        debug!(
+            namespace = %intent.namespace(),
+            blob_id = %intent.blob_id(),
+            "local blob cleanup intent already exists"
+        );
+    }
     Ok(true)
 }
 
 /// Drain every committed cleanup obligation. A filesystem failure leaves that
 /// intent durable and returns `true`; database failures are surfaced.
 pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    db.reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupRequested)
+        .await;
+    let _cleanup_guard = db.lock_local_blob_cleanup().await;
+    #[cfg(any(test, feature = "test-utils"))]
+    db.reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupAcquired)
+        .await;
+
     let intents = db
         .call(|conn| {
             let mut stmt = conn
@@ -82,8 +95,14 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
 
     let mut pending = false;
     for intent in intents {
-        #[cfg(test)]
-        pause_before_filesystem_if_armed(&intent).await;
+        #[cfg(any(test, feature = "test-utils"))]
+        db.reach_test_point(
+            crate::database::DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {
+                namespace: intent.namespace().to_string(),
+                blob_id: intent.blob_id().to_string(),
+            },
+        )
+        .await;
         if let Err(error) = crate::blob::cache::drop_all_local_copies(
             store_dir,
             intent.namespace(),
@@ -113,47 +132,8 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
         })
         .await?;
     }
+    #[cfg(any(test, feature = "test-utils"))]
+    db.reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupFinished)
+        .await;
     Ok(pending)
-}
-
-#[cfg(test)]
-struct LocalBlobCleanupPause {
-    intent: LocalBlobCleanupIntent,
-    reached_filesystem: Arc<tokio::sync::Notify>,
-    resume: Arc<tokio::sync::Notify>,
-}
-
-#[cfg(test)]
-static LOCAL_BLOB_CLEANUP_PAUSE: std::sync::Mutex<Option<LocalBlobCleanupPause>> =
-    std::sync::Mutex::new(None);
-
-#[cfg(test)]
-pub(crate) fn pause_before_filesystem(
-    namespace: &str,
-    blob_id: &str,
-) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-    let reached_filesystem = Arc::new(tokio::sync::Notify::new());
-    let resume = Arc::new(tokio::sync::Notify::new());
-    *LOCAL_BLOB_CLEANUP_PAUSE.lock().unwrap() = Some(LocalBlobCleanupPause {
-        intent: LocalBlobCleanupIntent::new(namespace, blob_id),
-        reached_filesystem: reached_filesystem.clone(),
-        resume: resume.clone(),
-    });
-    (reached_filesystem, resume)
-}
-
-#[cfg(test)]
-async fn pause_before_filesystem_if_armed(intent: &LocalBlobCleanupIntent) {
-    let pause = {
-        let mut armed = LOCAL_BLOB_CLEANUP_PAUSE.lock().unwrap();
-        if armed.as_ref().is_some_and(|pause| pause.intent == *intent) {
-            armed.take()
-        } else {
-            None
-        }
-    };
-    if let Some(pause) = pause {
-        pause.reached_filesystem.notify_one();
-        pause.resume.notified().await;
-    }
 }

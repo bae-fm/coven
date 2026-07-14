@@ -236,7 +236,10 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     let target = open_test_db_with_hlc(local_hlc, |_conn| Ok(()));
     let (_tmp, store_dir) = temp_store_dir();
     let (commit_reached, _resume_pull) =
-        crate::sync::pull::pause_pull_after_remote_commit("dev-a", 1);
+        target.arm_test_pause(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
+            device_id: "dev-a".to_string(),
+            seq: 1,
+        });
     let pull_db = target.clone();
     let pull_storage = storage.clone();
     let pull_store_dir = store_dir.clone();

@@ -2,7 +2,6 @@
 //!
 //! Shared across all platforms (macOS, iOS, CLI).
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -10,7 +9,6 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::config::{CloudProvider, Config, ConfigError, HomeStorage};
-use crate::database::Database;
 use crate::encryption::{EncryptionError, MasterKeyring};
 use crate::identity_custody::IdentityCustody;
 use crate::join_code::InviteCode;
@@ -25,7 +23,7 @@ use crate::sync::invite::{unwrap_store_keyring, InviteError};
 use crate::sync::membership::MembershipCoord;
 use crate::sync::pull::{pull_changes, PullError};
 use crate::sync::session::SyncedTable;
-use crate::sync::snapshot::{bootstrap_from_snapshot, SnapshotError};
+use crate::sync::snapshot::{bootstrap_from_snapshot, BootstrapResult, SnapshotError};
 use crate::sync::storage::SyncStorage;
 
 /// Why joining or restoring a store failed. Both are the same operation —
@@ -709,10 +707,8 @@ pub(crate) async fn bootstrap_and_save_store(
 
     info!(
         "Bootstrapped from snapshot ({} device cursors)",
-        bootstrap_result.cursors.len()
+        bootstrap_result.cursor_count()
     );
-
-    let cursors = bootstrap_result.cursors;
 
     // Everything from the reader publish through the config save is one unit: if
     // any step fails, delete the head/ack this bootstrap published so a
@@ -724,14 +720,15 @@ pub(crate) async fn bootstrap_and_save_store(
         // Publish this device's head (seq 0) and ack (seeded at the snapshot
         // cursors) so a peer's changeset reclamation sees this reader and pins
         // every floor at what it still needs to pull.
-        storage
-            .publish_bootstrap_reader(device_id, &cursors, &clock.now().to_rfc3339())
+        bootstrap_result
+            .publish_reader(storage, device_id, &clock.now().to_rfc3339())
             .await?;
 
         // Step 6: Pull changesets since the snapshot.
         error_if_cancelled(cancel)?;
         on_status("Applying recent changes...");
         let changesets_applied = open_db_and_pull(
+            store_id,
             &db_path,
             synced_tables,
             migrations,
@@ -739,7 +736,7 @@ pub(crate) async fn bootstrap_and_save_store(
             owner_pubkey,
             membership_floor,
             bucket_dyn,
-            &cursors,
+            bootstrap_result,
             store_dir,
             cancel,
         )
@@ -792,12 +789,13 @@ pub(crate) async fn bootstrap_and_save_store(
     }
 }
 
-/// Open a [`Database`] over the bootstrapped db file and pull changesets since
+/// Open a [`crate::database::Database`] over the bootstrapped db file and pull changesets since
 /// the snapshot. The snapshot already carries the full schema and the writer's
 /// `user_version`, so the migration ladder only carries the image forward when
 /// this binary is newer (a no-op when they match).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn open_db_and_pull(
+    store_id: &str,
     db_path: &Path,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
@@ -805,23 +803,23 @@ pub(crate) async fn open_db_and_pull(
     owner_pubkey: Option<&str>,
     membership_floor: &[MembershipCoord],
     storage: &dyn SyncStorage,
-    cursors: &HashMap<String, u64>,
+    bootstrap: BootstrapResult,
     store_dir: &StoreDir,
     cancel: &watch::Receiver<bool>,
 ) -> Result<u64, BootstrapError> {
-    let (db, _stamper) = Database::open(
-        db_path,
-        synced_tables.to_vec(),
-        // This bootstrap database only applies changesets during join; it never runs
-        // the tombstone GC, so the grace is immaterial and takes the default.
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        device_id.to_string(),
-        migrations,
-    )
-    .map_err(|e| {
-        BootstrapError::Database(format!("Failed to open database for changeset apply: {e}"))
-    })?;
+    let db = bootstrap
+        .open_database(
+            store_id,
+            db_path,
+            synced_tables.to_vec(),
+            // This bootstrap database only applies changesets during join; it never runs
+            // the tombstone GC, so the grace is immaterial and takes the default.
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            device_id.to_string(),
+            migrations,
+        )
+        .await?;
 
     // Seed this device's per-author membership-head watermark from the invite
     // or restore code's floor BEFORE the pull below loads and anchors the
@@ -887,11 +885,6 @@ pub(crate) async fn open_db_and_pull(
     let membership = crate::sync::pull::load_cycle_membership(storage, &db)
         .await
         .map_err(BootstrapError::Pull)?;
-    db.install_snapshot_cursors(cursors)
-        .await
-        .map_err(|error| {
-            BootstrapError::Database(format!("Failed to install snapshot cursors: {error}"))
-        })?;
     let (_, pull_result) = pull_changes(
         &db,
         db.synced_tables(),
