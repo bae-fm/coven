@@ -37,8 +37,8 @@
 /// at pull from the changeset author, and at the device's own upload), falling
 /// back for an unrecorded blob to a one-time listing scan that records what it
 /// finds. The browsable plain scheme keeps human-readable `{namespace}/{cloud_path}`
-/// keys with no uploader segment — a browsable home has no membership chain to key
-/// one from and no rotation to defend, so the per-member ACL does not apply there.
+/// keys with no uploader segment. It still has an owner-anchored membership chain;
+/// plain object naming does not use the per-member encrypted-home path layout.
 ///
 /// A snapshot is published as a generation under the publishing device's
 /// `{author}` (its hex public key): the `{author}/{publish_id}.db` and then the

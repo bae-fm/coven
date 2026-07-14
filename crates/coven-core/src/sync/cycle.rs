@@ -15,13 +15,15 @@ use tracing::{debug, info, warn};
 
 use crate::blob::BlobTransitionObserver;
 use crate::changeset::RowChange;
-use crate::config::Config;
 use crate::database::{Database, DbError, PendingChangesetBatch};
 use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
 
-use super::cloud_storage::{CloudCipher, CloudSyncStorage, PendingRotation, RotationPending};
+use super::cloud_storage::{
+    BlobPathScheme, CloudCipherAccess, CloudCipherState, CloudSyncStorage, PendingRotation,
+    RotationPending,
+};
 use super::hlc::Hlc;
 use super::publish_blobs::{ensure_publishable_changeset_blobs, PublishBlobError};
 use super::pull::HeldChangeset;
@@ -428,14 +430,14 @@ fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String
 /// device's own changes.
 /// Loads/persists all cycle state (local_seq, cursors, staging, snapshots) through
 /// `db`'s bookkeeping API rather than keeping mutable state across calls.
-pub async fn run_single_sync_cycle(
+pub(crate) async fn run_single_sync_cycle(
     storage: &dyn SyncStorage,
     store_id: &str,
     device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
     db: &Database,
-    cipher: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
     user_keypair: &UserKeypair,
     custody: Option<&dyn MasterKeyCustody>,
@@ -496,7 +498,7 @@ pub async fn run_single_sync_cycle(
     // rotation — including one whose activation entry is not yet visible — is
     // marked pending by the refresh and pauses exactly this set; it never aborts
     // the cycle.
-    let rotation_pending = pending_rotation.check(&cipher.read().unwrap()).err();
+    let rotation_pending = pending_rotation.check(&cipher.snapshot()).err();
     if let Some(pending) = &rotation_pending {
         warn!(
             committed_generation = pending.committed_generation,
@@ -539,7 +541,7 @@ pub async fn run_single_sync_cycle(
     // The cloud handle + object-key suffix the inline host-provided upload path uses to
     // cancel a pending tombstone after a (re-)upload — the same invariant the outbox
     // drain holds. `None` on a cloud-less run, which has no tombstones to cancel.
-    let blob_object_suffix = cipher.read().unwrap().suffix();
+    let blob_object_suffix = cipher.snapshot().suffix();
     let host_upload_cancel = cloud_home.map(|ch| super::service::HostUploadCloud {
         cloud_home: ch,
         suffix: blob_object_suffix,
@@ -918,11 +920,12 @@ pub async fn run_single_sync_cycle(
         false
     } else if snapshot_due {
         // Judge against the cycle's once-loaded chain, the same acceptance-side rule
-        // the readers apply: the author must be a current Owner, and an open/browsable
-        // store with no chain is accepted (it has no owner to gate against). The
-        // chain was already listed, anchored, and (for an owner-pinned store)
-        // fail-closed at the top of the cycle, so the only outcome here is
-        // authorized-or-not: an unauthorized result skips the snapshot.
+        // the readers apply: an initialized store requires a current Owner. A caller
+        // before initialization can have no chain and is accepted on its verified
+        // identity alone. The chain was already listed, anchored, and (for an
+        // owner-pinned store) fail-closed at the top of the cycle, so the only
+        // outcome here is authorized-or-not: an unauthorized result skips the
+        // snapshot.
         let our_pk = hex::encode(user_keypair.public_key());
         match super::membership_ops::authorize_loaded_membership_author(
             membership.chain.as_ref(),
@@ -1078,11 +1081,11 @@ pub async fn run_single_sync_cycle(
 /// set and keeps a dead store key after a rotation it did not perform,
 /// recovering only on restart.
 ///
-/// A plaintext (browsable) home has no membership chain and no wrapped store
-/// key — it is open by design — so the whole refresh is a no-op there, mirroring
-/// how `init_sync` skips the chain for a plaintext home.
+/// A plaintext (browsable) home still has the owner-anchored membership chain
+/// loaded for this cycle, but it has no wrapped store key to rotate. The key
+/// refresh is therefore a no-op there; membership authorization is not.
 ///
-/// Fail-closed: for an owner-pinned (opaque) store the cycle's shared membership
+/// Fail-closed: for an initialized store the cycle's shared membership
 /// load has already aborted the cycle if the chain can't be listed, is wiped, or
 /// won't anchor — so `membership.chain` is present whenever an owner is pinned.
 ///
@@ -1096,7 +1099,7 @@ pub async fn run_single_sync_cycle(
 #[allow(clippy::too_many_arguments)]
 async fn refresh_authorization_state(
     cloud_home: &dyn CloudHome,
-    cipher: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
     db: &Database,
     user_keypair: &UserKeypair,
@@ -1104,9 +1107,9 @@ async fn refresh_authorization_state(
     store_id: &str,
     membership: &super::pull::CycleMembership,
 ) -> Result<(), String> {
-    // A plaintext home is open by design — no chain and no store key to rotate.
-    // Nothing to refresh.
-    if cipher.read().unwrap().is_plaintext() {
+    // A plaintext home has no encrypted store key to rotate. Its membership
+    // chain remains load-bearing elsewhere in the cycle.
+    if cipher.snapshot().is_plaintext() {
         debug!("refresh: plaintext home, nothing to refresh");
         return Ok(());
     }
@@ -1164,10 +1167,10 @@ async fn refresh_authorization_state(
     //    If the decrypted keyring carries a strictly newer generation, swap the
     //    live cipher (and persist to the keyring) via `apply_key_rotation`, so
     //    this same cycle's push/pull/blob ops use it.
-    let live_keyring = match &*cipher.read().unwrap() {
-        CloudCipher::Encrypted(enc) => enc.clone(),
-        CloudCipher::Plaintext => {
-            return Err("refresh: encrypted store became plaintext during key refresh".to_string())
+    let live_keyring = match cipher.snapshot() {
+        super::cloud_storage::CloudCipher::Encrypted(encryption) => encryption,
+        super::cloud_storage::CloudCipher::Plaintext => {
+            return Err("refresh: plaintext home cannot enter encrypted key refresh".to_string())
         }
     };
     match super::invite::unwrap_store_keyring_for_owners_with_activation(
@@ -1271,20 +1274,18 @@ async fn refresh_authorization_state(
 pub enum InitSyncError {
     #[error("no synced tables configured; pass a non-empty synced-table set before sync starts")]
     NoSyncedTables,
+    #[error("cloud cipher and blob path scheme describe different storage modes")]
+    IncoherentStorageRepresentation,
     #[error("membership chain bootstrap/anchor failed: {0}")]
     MembershipAnchor(String),
     #[error("restoring the persisted pending rotation failed: {0}")]
     PendingRotationRestore(String),
 }
 
-/// Bootstrap sync over an already-built [`CloudSyncStorage`], returning the
-/// components the sync loop needs.
+/// Establish the storage representation and signed owner anchor over an
+/// already-built [`CloudSyncStorage`], returning the only runnable sync session.
 pub async fn init_sync_over_storage(
-    config: &Config,
     db: &Database,
-    cipher: &CloudCipher,
-    hlc: std::sync::Arc<Hlc>,
-    user_keypair: UserKeypair,
     storage: CloudSyncStorage,
 ) -> Result<SyncComponents, InitSyncError> {
     // Integration guard. The host declared its synced tables on the builder; an
@@ -1295,13 +1296,27 @@ pub async fn init_sync_over_storage(
         return Err(InitSyncError::NoSyncedTables);
     }
 
-    let cipher_lock = storage.shared_cipher();
+    let cipher = storage.cipher_state().clone();
+    let cipher_is_plaintext = cipher.is_plaintext();
+    let representation_is_coherent = matches!(
+        (cipher_is_plaintext, storage.blob_path_scheme()),
+        (true, BlobPathScheme::Plain) | (false, BlobPathScheme::Hashed)
+    );
+    if !representation_is_coherent {
+        return Err(InitSyncError::IncoherentStorageRepresentation);
+    }
+
+    let hlc = db.hlc();
+    let user_keypair = storage.user_keypair().clone();
+    ensure_owner_anchored_chain(&storage, db, &user_keypair, &hlc)
+        .await
+        .map_err(InitSyncError::MembershipAnchor)?;
 
     // Restore any durably-recorded pending rotation into this connection's marker
     // before the first cycle seals anything, so a restart that interrupted an
     // unadopted rotation resumes paused rather than sealing under the superseded
     // generation.
-    if !cipher.is_plaintext() {
+    if !cipher_is_plaintext {
         crate::sync::cloud_storage::restore_pending_rotation(
             db,
             &storage.shared_pending_rotation(),
@@ -1310,42 +1325,31 @@ pub async fn init_sync_over_storage(
         .map_err(|e| InitSyncError::PendingRotationRestore(e.to_string()))?;
     }
 
-    // Opaque (encrypted) home: every store has an owner-anchored membership
-    // chain from creation. Establish it on first connect, and on every connect
-    // verify the chain is still founded by the pinned owner — refusing a missing
-    // or refounded chain as a takeover attempt. A
-    // plaintext (browsable) home has no chain — open by design — so this is
-    // skipped there.
-    if !cipher.is_plaintext() {
-        if let Err(e) = ensure_owner_anchored_chain(&storage, db, &user_keypair, &hlc).await {
-            return Err(InitSyncError::MembershipAnchor(e));
-        }
-    }
-
-    info!("Sync initialized (device: {})", config.device_id);
+    let store_id = storage.store_id().to_string();
+    let device_id = hlc.device_id().to_string();
+    let pending_rotation = storage.shared_pending_rotation();
+    info!("Sync initialized (device: {device_id})");
 
     Ok(SyncComponents {
         storage: std::sync::Arc::new(storage),
+        db: db.clone(),
         hlc,
-        store_id: config.store_id.clone(),
-        device_id: config.device_id.clone(),
-        cipher: cipher_lock,
+        store_id,
+        device_id,
+        cipher,
+        pending_rotation,
         user_keypair,
     })
 }
 
-/// Establish or verify the owner-anchored membership chain for an opaque store.
+/// Establish or verify the owner-anchored membership chain for a store.
 /// Returns once the chain is established and verified, or an error to abort sync.
 ///
-/// Founding is two non-atomic writes — the founder entry to cloud storage and the
-/// owner pin to the local DB — so this completes a half-done founding (in either
-/// order) idempotently when the chain is founded by *our* key, and otherwise
-/// refuses. It never adopts a chain founded by a *different* key with no owner
-/// pinned: that is the first-connect takeover window. Every legitimate
-/// non-creator pins the owner before this runs — join from the invite's owner,
-/// restore from the chain founder — so an absent pin against a foreign founder is
-/// either an attacker who seeded the bucket or an unestablished store, both of
-/// which we refuse rather than trust.
+/// Cloud publication and the local trust transaction cannot be one transaction,
+/// so this completes an interrupted own founder publication idempotently. A
+/// founder entry without its signed head is uncommitted; a committed own founder
+/// is validated before the owner and complete head floor are recorded together.
+/// A committed chain founded by a different key is never adopted.
 pub async fn ensure_owner_anchored_chain(
     storage: &dyn SyncStorage,
     db: &Database,
@@ -1363,95 +1367,227 @@ pub async fn ensure_owner_anchored_chain(
         .list_membership_entries()
         .await
         .map_err(|e| format!("list membership entries: {e}"))?;
-
-    if entries.is_empty() {
-        match pinned.as_deref() {
-            // Created store, first connect: we are the owner. Found + pin.
-            None => found_and_pin(storage, db, owner_keypair, &our_pk, hlc).await,
-            // An owner is pinned but the chain is gone. Founding writes the entry
-            // before pinning, so a crash never leaves this state — it means an
-            // established chain was wiped. Re-founding would silently drop every
-            // member, so refuse and surface it.
-            Some(p) => Err(format!(
-                "membership chain is missing but owner {p} is pinned for this store \
-                 — refusing (wiped or tampered membership/*)"
-            )),
-        }
-    } else {
-        let chain = super::membership_ops::download_chain(storage, &entries).await?;
-        let founder = chain
-            .founder_pubkey()
-            .ok_or_else(|| "loaded membership chain has no founder".to_string())?
-            .to_string();
-        match pinned.as_deref() {
-            // Anchored: the founder is the pinned owner.
-            Some(p) if p == founder => Ok(()),
-            // Refounded under a different key — refuse.
-            Some(p) => Err(format!(
-                "membership chain founder {founder} does not match the pinned owner \
-                 {p} — refusing (owner-takeover attempt)"
-            )),
-            // No pin, but the chain is founded by our own key. Founding is two
-            // non-atomic writes — the cloud founder entry, then the local pin — and
-            // `found_and_pin` already fails loud (sync does not start) if either
-            // fails; this is that same founding operation's idempotent retry.
-            // Cross-store atomicity isn't available, so a
-            // crash after the founder write but before the pin lands here; the next
-            // connect completes the pin. Refusing instead would brick the store
-            // forever on a mid-founding crash. Safe: an attacker cannot forge a
-            // founder signed by our key.
-            None if founder == our_pk => {
-                db.set_sync_state(OWNER_PUBKEY_STATE_KEY, &our_pk)
-                    .await
-                    .map_err(|e| format!("pin owner: {e}"))?;
-                Ok(())
-            }
-            // No pin and the chain is founded by someone else: we neither founded
-            // this nor pinned an owner (join/restore pin before this runs), so this
-            // is an attacker-seeded or unestablished chain. Refuse rather than adopt
-            // a foreign founder on trust (closes the first-connect takeover window).
-            None => Err(format!(
-                "membership chain is founded by {founder}, not this device, and no \
-                 owner is pinned — refusing (unestablished or foreign chain)"
-            )),
-        }
+    let expected_owner = pinned.as_deref().unwrap_or(&our_pk);
+    let loaded =
+        super::membership_ops::load_and_persist_owner_anchor(storage, &entries, expected_owner, db)
+            .await
+            .map_err(|error| error.to_string())?;
+    if loaded.is_some() {
+        return Ok(());
     }
-}
+    if let Some(pinned) = pinned {
+        return Err(format!(
+            "membership chain has no committed heads but owner {pinned} is pinned \
+             — refusing (wiped or tampered membership/*)"
+        ));
+    }
 
-/// Write the founder entry to cloud storage and pin the owner in the local DB.
-/// Shared by the first-connect found and the crash-recovery completion so the
-/// two writes can't drift.
-async fn found_and_pin(
-    storage: &dyn SyncStorage,
-    db: &Database,
-    owner_keypair: &UserKeypair,
-    our_pk: &str,
-    hlc: &Hlc,
-) -> Result<(), String> {
-    use super::membership_ops::OWNER_PUBKEY_STATE_KEY;
-
-    let ts = hlc.now().to_string();
-    super::membership_ops::write_founder_entry(storage, owner_keypair, &ts).await?;
-    db.set_sync_state(OWNER_PUBKEY_STATE_KEY, our_pk)
+    publish_or_complete_founder(storage, owner_keypair, hlc).await?;
+    let committed_entries = storage
+        .list_membership_entries()
         .await
-        .map_err(|e| format!("pin owner: {e}"))?;
+        .map_err(|e| format!("list membership entries after founder publish: {e}"))?;
+    super::membership_ops::load_and_persist_owner_anchor(storage, &committed_entries, &our_pk, db)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            "founder publish produced no signed committed membership head".to_string()
+        })?;
     info!(owner = %our_pk, "Founded store: wrote owner-anchored founder entry");
     Ok(())
 }
 
+async fn publish_or_complete_founder(
+    storage: &dyn SyncStorage,
+    owner_keypair: &UserKeypair,
+    hlc: &Hlc,
+) -> Result<(), String> {
+    use super::membership::{MembershipChain, MembershipCoord};
+    use super::storage::StorageError;
+
+    let owner_pubkey = hex::encode(owner_keypair.public_key());
+    let coord = MembershipCoord {
+        author_pubkey: owner_pubkey.clone(),
+        seq: 1,
+    };
+    match storage.get_membership_entry(&owner_pubkey, 1).await {
+        Ok(bytes) => {
+            let entry = super::membership_ops::parse_membership_entry_at(&coord, &bytes)?;
+            let chain = MembershipChain::from_entries_with_coords(vec![(coord, entry)])
+                .map_err(|error| format!("invalid interrupted founder entry: {error}"))?;
+            if !chain.is_founded_by(&owner_pubkey) {
+                return Err(
+                    "interrupted founder entry is not this storage identity's founder".to_string(),
+                );
+            }
+            storage
+                .put_membership_entry(&owner_pubkey, 1, bytes)
+                .await
+                .map_err(|error| format!("re-publish interrupted founder entry: {error}"))?;
+            super::membership_ops::publish_membership_head(storage, &chain, owner_keypair)
+                .await
+                .map_err(|error| format!("publish interrupted founder head: {error}"))?;
+            Ok(())
+        }
+        Err(StorageError::NotFound(_)) => {
+            let timestamp = hlc.now().to_string();
+            super::membership_ops::write_founder_entry(storage, owner_keypair, &timestamp).await
+        }
+        Err(error) => Err(format!("read interrupted founder entry: {error}")),
+    }
+}
+
 /// Components needed to run sync cycles.
 ///
-/// The connection itself is the shared [`Database`]; the sync loop holds a clone
-/// of it, so these carry only the storage, register clock, device identity, the
-/// at-rest cipher, and keypair.
+/// Owns the exact database, storage, register clock, device identity, at-rest
+/// cipher, pending-rotation marker, and signing identity that initialization
+/// checked. Callers cannot replace any of them before running a cycle.
 pub struct SyncComponents {
-    pub storage: std::sync::Arc<CloudSyncStorage>,
-    pub hlc: std::sync::Arc<Hlc>,
+    storage: std::sync::Arc<CloudSyncStorage>,
+    db: Database,
+    hlc: std::sync::Arc<Hlc>,
     /// The store this sync loop is for. Binds the snapshot meta/pointer it
     /// publishes so a member of two stores can't replay one's catalog as the
     /// other's.
-    pub store_id: String,
-    pub device_id: String,
-    pub cipher: std::sync::Arc<std::sync::RwLock<CloudCipher>>,
-    pub user_keypair: UserKeypair,
+    store_id: String,
+    device_id: String,
+    cipher: std::sync::Arc<CloudCipherState>,
+    pending_rotation: std::sync::Arc<PendingRotation>,
+    user_keypair: UserKeypair,
+}
+
+impl SyncComponents {
+    pub fn storage(&self) -> &std::sync::Arc<CloudSyncStorage> {
+        &self.storage
+    }
+
+    pub fn hlc(&self) -> &std::sync::Arc<Hlc> {
+        &self.hlc
+    }
+
+    pub fn user_keypair(&self) -> &UserKeypair {
+        &self.user_keypair
+    }
+
+    pub fn blob_path_scheme(&self) -> BlobPathScheme {
+        self.storage.blob_path_scheme()
+    }
+
+    pub fn current_encryption(&self) -> Option<crate::encryption::EncryptionService> {
+        self.cipher.encryption()
+    }
+
+    pub fn self_uploader(&self) -> String {
+        self.storage.self_uploader()
+    }
+
+    pub async fn drain_uploads(
+        &self,
+        clock: &dyn crate::clock::Clock,
+        store_dir: &StoreDir,
+        observer: Option<&dyn BlobTransitionObserver>,
+    ) -> Result<crate::blob::upload::DrainOutcome, DbError> {
+        crate::blob::upload::drain_uploads(
+            &self.db,
+            self.storage.cloud_home(),
+            &self.cipher,
+            &self.pending_rotation,
+            &self.store_id,
+            store_dir,
+            clock,
+            &self.hlc,
+            observer,
+        )
+        .await
+    }
+
+    pub async fn invite_member(
+        &self,
+        public_key_hex: &str,
+        invitee_email: Option<&str>,
+        role: super::membership::MemberRole,
+        store_name: &str,
+    ) -> Result<crate::join_code::InviteCode, super::membership_ops::MembershipOpsError> {
+        let encryption = self
+            .current_encryption()
+            .ok_or(super::membership_ops::MembershipOpsError::NotEncryptedHome)?;
+        super::membership_ops::invite_member(
+            &*self.storage,
+            self.storage.cloud_home(),
+            &self.user_keypair,
+            &self.hlc,
+            public_key_hex,
+            invitee_email,
+            role,
+            &encryption,
+            &self.store_id,
+            store_name,
+        )
+        .await
+    }
+
+    pub async fn remove_member(
+        &self,
+        public_key_hex: &str,
+        custody: &dyn MasterKeyCustody,
+    ) -> Result<String, super::membership_ops::MembershipOpsError> {
+        let encryption = self
+            .current_encryption()
+            .ok_or(super::membership_ops::MembershipOpsError::NotEncryptedHome)?;
+        super::membership_ops::remove_member(
+            &*self.storage,
+            self.storage.cloud_home(),
+            &self.user_keypair,
+            &self.hlc,
+            public_key_hex,
+            &self.store_id,
+            &encryption,
+            custody,
+            &self.cipher,
+            &self.pending_rotation,
+        )
+        .await
+    }
+
+    pub async fn persist_pending_rotation(&self) -> Result<(), DbError> {
+        super::cloud_storage::persist_pending_rotation(&self.db, &self.pending_rotation).await
+    }
+
+    pub fn adopt_key_rotation(
+        &self,
+        encryption: crate::encryption::EncryptionService,
+        custody: &dyn MasterKeyCustody,
+    ) -> Result<String, crate::keys::KeyError> {
+        super::membership_ops::apply_key_rotation(
+            encryption,
+            custody,
+            &self.cipher,
+            &self.pending_rotation,
+        )
+    }
+
+    pub async fn run_cycle(
+        &self,
+        clock: &dyn crate::clock::Clock,
+        custody: Option<&dyn MasterKeyCustody>,
+        store_dir: &StoreDir,
+        observer: Option<&dyn BlobTransitionObserver>,
+    ) -> Result<SyncCycleResult, String> {
+        run_single_sync_cycle(
+            &*self.storage,
+            &self.store_id,
+            &self.device_id,
+            &self.hlc,
+            clock,
+            &self.db,
+            &self.cipher,
+            &self.pending_rotation,
+            &self.user_keypair,
+            custody,
+            store_dir,
+            Some(self.storage.cloud_home()),
+            observer,
+        )
+        .await
+    }
 }

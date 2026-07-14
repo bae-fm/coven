@@ -21,7 +21,6 @@ use crate::join_code::{encode, InviteCode, JoinCodeError};
 use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
-use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::join::{join_from_invite_code, open_db_and_pull, BootstrapError};
 use crate::sync::session::BlobDecl;
@@ -29,6 +28,7 @@ use crate::sync::snapshot::{
     bootstrap_from_snapshot, create_snapshot, push_snapshot, SnapshotBlobPreflight,
 };
 use crate::sync::storage::SyncStorage;
+use crate::sync::test_helpers::run_test_cycle;
 use crate::sync::test_helpers::*;
 
 /// The synthetic test db opens with a single migration, so its
@@ -755,7 +755,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     let enc_lock = RwLock::new(enc.clone());
     let keypair = UserKeypair::generate();
     let b_hlc = Hlc::new("B".to_string());
-    run_single_sync_cycle(
+    run_test_cycle(
         &storage,
         "test-lib",
         "B",

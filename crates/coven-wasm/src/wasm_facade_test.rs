@@ -20,13 +20,16 @@
 //! [`S3WasmCloudHome`]: crate::storage::cloud::s3_wasm::S3WasmCloudHome
 
 use gloo_timers::future::TimeoutFuture;
+use std::collections::BTreeMap;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
+use crate::config::HomeStorage;
+use crate::keys::UserKeypair;
 use crate::migration::Migration;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::CloudHome;
-use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
+use crate::sync::cloud_storage::CloudCipher;
 use crate::sync::hlc::Timestamp;
 use crate::sync::session::SyncedTable;
 use crate::sync::wasm_runtime::WasmSyncSchedule;
@@ -40,20 +43,22 @@ wasm_bindgen_test_configure!(run_in_dedicated_worker);
 /// distinct so the two devices get independent SQLite paths, which the browser
 /// VFS hashes into separate OPFS storage names; they converge only through the
 /// cloud.
-async fn open_store(store_id: &str, device_id: &str, cloud: &InMemoryCloudHome) -> CovenStore {
+async fn open_store(
+    store_id: &str,
+    device_id: &str,
+    cloud: &InMemoryCloudHome,
+    identity: &UserKeypair,
+) -> CovenStore {
     let home: Box<dyn CloudHome> = Box::new(cloud.clone());
     let lib = CovenStore::from_home(
         home,
         CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
+        HomeStorage::Browsable,
         store_id,
         device_id.to_string(),
         demo_migrations(),
         demo_synced_tables(),
-        // A fresh identity per device: `open` would load one shared identity from the
-        // origin keystore, but these two simulated devices must sign as distinct
-        // members to model two tabs/devices converging.
-        crate::keys::UserKeypair::generate(),
+        identity.clone(),
         // Short cadence so the test converges quickly: a 10 ms startup grace and a
         // 50 ms idle interval, versus the facade's 3 s / 30 s production timings.
         WasmSyncSchedule {
@@ -72,16 +77,17 @@ async fn assemble_store(
     store_id: &str,
     device_id: &str,
     cloud: &InMemoryCloudHome,
+    identity: &UserKeypair,
 ) -> Result<CovenStore, String> {
     CovenStore::from_home(
         Box::new(cloud.clone()),
         CloudCipher::Plaintext,
-        BlobPathScheme::Plain,
+        HomeStorage::Browsable,
         store_id,
         device_id.to_string(),
         demo_migrations(),
         demo_synced_tables(),
-        crate::keys::UserKeypair::generate(),
+        identity.clone(),
         WasmSyncSchedule {
             initial_delay_ms: 10,
             idle_interval_ms: 50,
@@ -107,6 +113,17 @@ const DEMO_NOTES_SQL: &str = "CREATE TABLE IF NOT EXISTS notes (
     _updated_at TEXT NOT NULL,
     created_at TEXT NOT NULL
 ) STRICT;";
+
+fn cloud_objects(cloud: &InMemoryCloudHome) -> BTreeMap<String, Vec<u8>> {
+    cloud
+        .keys()
+        .into_iter()
+        .map(|key| {
+            let bytes = cloud.get(&key).expect("listed cloud object");
+            (key, bytes)
+        })
+        .collect()
+}
 
 fn to_js_value(value: serde_json::Value) -> JsValue {
     serde::Serialize::serialize(&value, &serde_wasm_bindgen::Serializer::json_compatible())
@@ -206,9 +223,10 @@ async fn two_stores_converge_a_note_through_the_facade() {
     // hashed into an OPFS storage name).
     let run = uuid::Uuid::new_v4().simple().to_string();
     let cloud = InMemoryCloudHome::new();
+    let identity = UserKeypair::generate();
 
-    let lib_a = open_store(&format!("tab-a-{run}"), "device-a", &cloud).await;
-    let lib_b = open_store(&format!("tab-b-{run}"), "device-b", &cloud).await;
+    let lib_a = open_store(&format!("tab-a-{run}"), "device-a", &cloud, &identity).await;
+    let lib_b = open_store(&format!("tab-b-{run}"), "device-b", &cloud, &identity).await;
 
     // Tab A writes a note through `sql`. The synced `notes` row carries the
     // `_updated_at` register the contract requires (here a literal HLC-shaped stamp
@@ -270,17 +288,84 @@ async fn two_stores_converge_a_note_through_the_facade() {
 }
 
 #[wasm_bindgen_test]
+async fn assembly_commits_the_founder_before_returning() {
+    console_error_panic_hook::set_once();
+
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let cloud = InMemoryCloudHome::new();
+    let identity = UserKeypair::generate();
+    let identity_pk = hex::encode(identity.public_key());
+
+    let _lib = assemble_store(
+        &format!("founder-before-return-{run}"),
+        "device-a",
+        &cloud,
+        &identity,
+    )
+    .await
+    .expect("assemble store");
+
+    assert!(
+        cloud.get(&format!("membership/{identity_pk}/1")).is_some(),
+        "the founder entry exists before assembly returns",
+    );
+    assert!(
+        cloud
+            .get(&format!("membership/{identity_pk}/head"))
+            .is_some(),
+        "the signed founder head exists before assembly returns",
+    );
+}
+
+#[wasm_bindgen_test]
+async fn foreign_identity_is_rejected_before_cloud_or_local_trust_changes() {
+    console_error_panic_hook::set_once();
+
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let cloud = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let attacker = UserKeypair::generate();
+    let _owner_store = assemble_store(&format!("owner-{run}"), "owner-device", &cloud, &owner)
+        .await
+        .expect("found the shared cloud under its owner identity");
+    let cloud_before = cloud_objects(&cloud);
+    let victim_store_id = format!("victim-{run}");
+
+    let rejected = assemble_store(&victim_store_id, "victim-device", &cloud, &attacker).await;
+    match rejected {
+        Ok(lib) => {
+            drop(lib);
+            panic!("a foreign identity must not assemble a runtime");
+        }
+        Err(error) => assert!(
+            error.contains("founder") || error.contains("owner"),
+            "the initialization error names the ownership mismatch: {error}",
+        ),
+    }
+    assert_eq!(
+        cloud_objects(&cloud),
+        cloud_before,
+        "rejected assembly leaves the cloud unchanged",
+    );
+
+    assemble_store(&victim_store_id, "owner-retry-device", &cloud, &owner)
+        .await
+        .expect("the owner can reopen the rejected local store path");
+}
+
+#[wasm_bindgen_test]
 async fn second_open_of_one_store_id_is_refused_until_the_first_handle_drops() {
     console_error_panic_hook::set_once();
 
     let run = uuid::Uuid::new_v4().simple().to_string();
     let store_id = format!("double-open-{run}");
     let cloud = InMemoryCloudHome::new();
+    let identity = UserKeypair::generate();
 
-    let first = assemble_store(&store_id, "device-a", &cloud)
+    let first = assemble_store(&store_id, "device-a", &cloud, &identity)
         .await
         .expect("first open succeeds");
-    let second = assemble_store(&store_id, "device-b", &cloud).await;
+    let second = assemble_store(&store_id, "device-b", &cloud, &identity).await;
 
     match second {
         Ok(_) => panic!("second open of the same store id must fail"),
@@ -292,9 +377,15 @@ async fn second_open_of_one_store_id_is_refused_until_the_first_handle_drops() {
 
     drop(first);
 
-    assemble_store(&store_id, "device-c", &cloud)
+    let cloud_before_reopen = cloud_objects(&cloud);
+    assemble_store(&store_id, "device-c", &cloud, &identity)
         .await
         .expect("open succeeds after the first handle drops");
+    assert_eq!(
+        cloud_objects(&cloud),
+        cloud_before_reopen,
+        "reopening under the same identity validates without rewriting membership",
+    );
 }
 
 #[wasm_bindgen_test]
@@ -323,7 +414,8 @@ async fn from_home_rejects_empty_store_id() {
     console_error_panic_hook::set_once();
 
     let cloud = InMemoryCloudHome::new();
-    let result = assemble_store("", "device-a", &cloud).await;
+    let identity = UserKeypair::generate();
+    let result = assemble_store("", "device-a", &cloud, &identity).await;
     match result {
         Ok(lib) => {
             drop(lib);
@@ -344,9 +436,15 @@ async fn runtime_and_open_share_one_clock() {
 
     let run = uuid::Uuid::new_v4().simple().to_string();
     let cloud = InMemoryCloudHome::new();
-    let lib = assemble_store(&format!("shared-clock-{run}"), "device-a", &cloud)
-        .await
-        .expect("assemble store");
+    let identity = UserKeypair::generate();
+    let lib = assemble_store(
+        &format!("shared-clock-{run}"),
+        "device-a",
+        &cloud,
+        &identity,
+    )
+    .await
+    .expect("assemble store");
 
     assert!(
         lib.runtime_hlc_is_database_hlc_for_test(),
@@ -360,9 +458,15 @@ async fn store_stamp_uses_pull_advanced_clock() {
 
     let run = uuid::Uuid::new_v4().simple().to_string();
     let cloud = InMemoryCloudHome::new();
-    let lib = assemble_store(&format!("pull-advanced-stamp-{run}"), "device-a", &cloud)
-        .await
-        .expect("assemble store");
+    let identity = UserKeypair::generate();
+    let lib = assemble_store(
+        &format!("pull-advanced-stamp-{run}"),
+        "device-a",
+        &cloud,
+        &identity,
+    )
+    .await
+    .expect("assemble store");
 
     let pulled = Timestamp::new(9_000_000_000_000, 7, "device-b".to_string());
     lib.db_hlc_for_test().advance_past(&pulled);
@@ -380,9 +484,15 @@ async fn free_without_stop_sync_halts_syncing() {
 
     let run = uuid::Uuid::new_v4().simple().to_string();
     let cloud = InMemoryCloudHome::new();
-    let lib = assemble_store(&format!("free-stops-sync-{run}"), "device-a", &cloud)
-        .await
-        .expect("assemble store");
+    let identity = UserKeypair::generate();
+    let lib = assemble_store(
+        &format!("free-stops-sync-{run}"),
+        "device-a",
+        &cloud,
+        &identity,
+    )
+    .await
+    .expect("assemble store");
 
     lib.start_sync();
     let token = lib

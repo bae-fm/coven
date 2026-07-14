@@ -727,9 +727,7 @@ async fn load_snapshot_membership(
     match load_membership_chain(storage, owner_pubkey, watermark_db).await {
         Ok(Some(chain)) => Ok(SnapshotMembership { chain: Some(chain) }),
         Ok(None) => {
-            debug!(
-                "snapshot membership load skipped: store is chain-less (no membership, no pinned owner)"
-            );
+            debug!("snapshot membership load skipped before membership initialization");
             Ok(SnapshotMembership { chain: None })
         }
         Err(e) => Err(snapshot_authorization_error(e)),
@@ -882,14 +880,13 @@ pub async fn reclaim_superseded_changesets(
         Err(e) => return Err(e),
     };
 
-    // The set of current member pubkeys, or `None` for a chain-less (browsable)
-    // store, where there is no membership to authorize against and every verified
-    // head is a participant -- the same open-by-design path the pull and snapshot
-    // authorization take when no chain exists.
+    // The set of current member pubkeys. `None` is retained for bootstrap callers
+    // that run before membership initialization; initialized cycles always have a
+    // set to authorize against.
     let members = resolved.membership.current_member_pubkeys();
 
-    // The current devices: verified heads whose author is a current member (every
-    // head when chain-less). For each, its verified ack supplies the pull cursors
+    // The current devices: verified heads whose author is a current member. For
+    // each, its verified ack supplies the pull cursors
     // that feed the floor; a missing/invalid ack contributes cursor 0 everywhere.
     let listing = storage.list_heads().await?;
 
@@ -1363,9 +1360,9 @@ mod tests {
 
     /// The keypair the snapshot tests push and sign with, when they don't care
     /// who the author is (round-trip, cursor-honesty, GC). It is not registered in
-    /// any chain, so these tests bootstrap with `owner = None` and an empty
-    /// membership listing — the open-store path that authorizes on the signature
-    /// alone. The membership-authorization tests build their own chained mock.
+    /// any chain, so these tests use the pre-initialization, unanchored test path
+    /// with `owner = None` and an empty membership listing. That path checks the
+    /// signature alone. The membership-authorization tests build their own chain.
     fn test_keypair() -> UserKeypair {
         UserKeypair::generate()
     }
@@ -3865,12 +3862,12 @@ mod authorization_tests {
         );
     }
 
-    /// An owner is pinned (an opaque store) but the `membership/*` listing is
+    /// An owner is pinned but the `membership/*` listing is
     /// empty — a wiped chain under an otherwise-intact bucket. There is no founder
     /// to anchor to, so even a snapshot whose signature verifies cannot be
-    /// authorized: bootstrap refuses rather than adopting it. (The chain-less path
-    /// that accepts on signature alone is ONLY the no-pinned-owner browsable case;
-    /// a pinned owner with no chain is the takeover this guards.)
+    /// authorized: bootstrap refuses rather than adopting it. The path that accepts
+    /// on signature alone is only for a pre-initialization database with no pinned
+    /// owner; a pinned owner with no chain is the takeover this guards.
     #[tokio::test]
     async fn bootstrap_refuses_empty_membership_when_owner_pinned() {
         let owner = UserKeypair::generate();

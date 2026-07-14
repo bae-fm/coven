@@ -408,9 +408,9 @@ async fn drop_intent_present(db: &Database, blob_id: &str) -> bool {
 /// pinned and the external source left in place, and B fetches the CacheLazy blob on read.
 #[tokio::test]
 async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
-    let storage = MockSyncStorage::new();
-    let enc = plaintext();
     let kp_a = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(kp_a.clone());
+    let enc = plaintext();
     let hlc_a = Hlc::new("A".to_string());
     let db_a = open_test_db_with_blob(photo_decl());
     let (tmp_a, lib_a) = temp_store_dir();
@@ -910,9 +910,9 @@ async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
 /// cloud blob is tombstoned, while A keeps the external file and reads from it.
 #[tokio::test]
 async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
-    let storage = MockSyncStorage::new();
-    let enc = plaintext();
     let kp_a = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(kp_a.clone());
+    let enc = plaintext();
     let kp_b = UserKeypair::generate();
     let hlc_a = Hlc::new("A".to_string());
     let hlc_b = Hlc::new("B".to_string());
@@ -1036,9 +1036,9 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 /// both cloud copies tombstoned.
 #[tokio::test]
 async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
-    let storage = MockSyncStorage::new();
-    let enc = plaintext();
     let kp_a = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(kp_a.clone());
+    let enc = plaintext();
     let hlc_a = Hlc::new("A".to_string());
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let (tmp_a, lib_a) = temp_store_dir();
@@ -1559,9 +1559,9 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
 
 #[tokio::test]
 async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
-    let storage = MockSyncStorage::new();
-    let enc = plaintext();
     let kp_a = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(kp_a.clone());
+    let enc = plaintext();
     let hlc_a = Hlc::new("A".to_string());
     let db_a = remote_root_db(cover_decl());
     let (_tmp_a, lib_a) = temp_store_dir();

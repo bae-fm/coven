@@ -204,9 +204,9 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
     let past_grace = crate::clock::FixedClock(
         chrono::Utc::now() + crate::blob::delete::BLOB_TOMBSTONE_GRACE + chrono::Duration::days(1),
     );
-    // This store is chain-less (no `membership/*` founded in this test), so the
-    // GC authorizes on the verified signature alone — the open-store path, with no
-    // pinned owner. The test below exercises the owner-anchored path.
+    // This test calls the cycle and GC primitives before membership initialization,
+    // so the GC authorizes on the verified signature alone with no pinned owner.
+    // The test below exercises the initialized, owner-anchored path.
     let reclaimed = crate::blob::delete::gc_tombstones(
         &db_a,
         &storage,
@@ -240,8 +240,8 @@ async fn blob_deletion_does_not_strand_a_peer_then_reclaims_past_the_grace() {
 /// real cycle, reclaims past the grace — and then, after the chain is wiped and
 /// refounded under an attacker's key, the attacker's tombstone leaves the blob,
 /// because the GC anchors authorization to the pinned owner A. The other end-to-end
-/// test runs only the chain-less path; this one drives the owner-anchored path the
-/// production cycle uses.
+/// test runs only the pre-initialization path; this one drives the owner-anchored
+/// path every initialized store uses.
 #[tokio::test]
 async fn gc_against_a_real_chain_reclaims_for_a_member_but_refuses_a_refounded_chain() {
     use crate::sync::membership::{MemberRole, MembershipAction};

@@ -1002,7 +1002,7 @@ impl MockSyncStorage {
         // what the pull records as each introduced blob's uploader (there is no
         // listing scan), so a blob a signed changeset introduces is downloadable
         // and later readable. A test that specifically needs an unsigned envelope
-        // (an open-store or unsigned-rejection path) uses
+        // (a pre-initialization unanchored path or an unsigned-rejection path) uses
         // [`store_unsigned_changeset`].
         let packed = envelope::pack_signed(
             device_id,
@@ -1018,8 +1018,8 @@ impl MockSyncStorage {
     }
 
     /// Store an unsigned changeset envelope (`author_pubkey`/`signature` both
-    /// `None`), for tests that exercise the open-store unsigned path or assert the
-    /// pull rejects an unsigned changeset once a membership chain exists.
+    /// `None`), for tests that exercise the pre-initialization unanchored path or
+    /// assert pull rejects an unsigned changeset once a membership chain exists.
     pub fn store_unsigned_changeset(
         &self,
         device_id: &str,
@@ -1886,4 +1886,49 @@ pub async fn pull_into_result(
         membership.pinned_owner,
     )
     .await
+}
+
+/// Drive the raw engine with an injected [`SyncStorage`] in downstream tests.
+/// Production runtimes can execute cycles only through initialized
+/// [`crate::sync::cycle::SyncComponents`].
+#[allow(clippy::too_many_arguments)]
+pub async fn run_test_cycle(
+    storage: &dyn SyncStorage,
+    store_id: &str,
+    device_id: &str,
+    hlc: &crate::sync::hlc::Hlc,
+    clock: &dyn crate::clock::Clock,
+    db: &Database,
+    cipher: &dyn crate::sync::cloud_storage::CloudCipherAccess,
+    pending_rotation: &crate::sync::cloud_storage::PendingRotation,
+    user_keypair: &UserKeypair,
+    custody: Option<&dyn MasterKeyCustody>,
+    store_dir: &StoreDir,
+    cloud_home: Option<&dyn CloudHome>,
+    observer: Option<&dyn crate::blob::BlobTransitionObserver>,
+) -> Result<crate::sync::cycle::SyncCycleResult, String> {
+    crate::sync::cycle::run_single_sync_cycle(
+        storage,
+        store_id,
+        device_id,
+        hlc,
+        clock,
+        db,
+        cipher,
+        pending_rotation,
+        user_keypair,
+        custody,
+        store_dir,
+        cloud_home,
+        observer,
+    )
+    .await
+}
+
+pub async fn publish_test_founder(
+    storage: &dyn SyncStorage,
+    owner: &UserKeypair,
+    timestamp: &str,
+) -> Result<(), String> {
+    crate::sync::membership_ops::write_founder_entry(storage, owner, timestamp).await
 }

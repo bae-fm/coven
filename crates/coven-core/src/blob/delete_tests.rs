@@ -1703,11 +1703,11 @@ async fn tombstone_by_a_forged_founder_of_a_refounded_chain_is_refused() {
 /// (no founder at all) under a pinned owner is a takeover, not an open store, so
 /// a tombstone authored over it is refused and the blob survives. The rule is the
 /// cycle's membership load's: empty + pinned owner = wiped = refuse; empty + no
-/// pin = genuinely open = accept on signature.
+/// pin = pre-initialization caller = accept on signature.
 #[tokio::test]
 async fn tombstone_over_a_wiped_chain_with_a_pinned_owner_is_refused() {
     // The store has an established owner (pinned), but `membership/*` is wiped —
-    // the storage holds no membership entries at all.
+    // the storage's membership listing is empty.
     let real_owner = UserKeypair::generate();
     let pinned_owner = pubkey_hex(&real_owner);
     let storage = MockSyncStorage::new();

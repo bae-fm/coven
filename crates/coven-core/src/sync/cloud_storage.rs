@@ -36,6 +36,137 @@ pub enum CloudCipher {
     Plaintext,
 }
 
+/// A sync session's fixed at-rest representation. The mode is selected once at
+/// construction: plaintext has no mutable key state, while encrypted sessions
+/// may merge new key generations without ever becoming plaintext.
+pub struct CloudCipherState {
+    mode: CloudCipherMode,
+}
+
+/// Read-only access to a session cipher snapshot. Production storage implements
+/// this with [`CloudCipherState`], whose mode cannot change. The test-utils
+/// implementation for a raw lock exists only for injected engine tests.
+pub trait CloudCipherAccess: crate::MaybeThreadSafe {
+    fn snapshot(&self) -> CloudCipher;
+    fn merge_key_rotation(
+        &self,
+        new_encryption: &EncryptionService,
+        custody: &dyn crate::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, crate::keys::KeyError>;
+}
+
+enum CloudCipherMode {
+    Encrypted(RwLock<EncryptionService>),
+    Plaintext,
+}
+
+impl CloudCipherState {
+    pub fn new(cipher: CloudCipher) -> Self {
+        let mode = match cipher {
+            CloudCipher::Encrypted(encryption) => {
+                CloudCipherMode::Encrypted(RwLock::new(encryption))
+            }
+            CloudCipher::Plaintext => CloudCipherMode::Plaintext,
+        };
+        Self { mode }
+    }
+
+    pub fn is_plaintext(&self) -> bool {
+        matches!(self.mode, CloudCipherMode::Plaintext)
+    }
+
+    pub fn encryption(&self) -> Option<EncryptionService> {
+        match &self.mode {
+            CloudCipherMode::Encrypted(encryption) => Some(encryption.read().unwrap().clone()),
+            CloudCipherMode::Plaintext => None,
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> CloudCipher {
+        match &self.mode {
+            CloudCipherMode::Encrypted(encryption) => {
+                CloudCipher::Encrypted(encryption.read().unwrap().clone())
+            }
+            CloudCipherMode::Plaintext => CloudCipher::Plaintext,
+        }
+    }
+
+    pub(crate) fn merge_key_rotation(
+        &self,
+        new_encryption: &EncryptionService,
+        custody: &dyn crate::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, crate::keys::KeyError> {
+        let CloudCipherMode::Encrypted(live) = &self.mode else {
+            return Err(crate::keys::KeyError::Crypto(
+                "cannot rotate the key of a plaintext cloud home".to_string(),
+            ));
+        };
+        let mut live = live.write().unwrap();
+        let merged = live.merged_with(new_encryption);
+        if merged.key_count() == live.key_count() {
+            return Ok(None);
+        }
+        custody.persist(&crate::encryption::MasterKeyring::from(merged.clone()))?;
+        *live = merged;
+        Ok(Some(live.fingerprint()))
+    }
+}
+
+impl CloudCipherAccess for CloudCipherState {
+    fn snapshot(&self) -> CloudCipher {
+        CloudCipherState::snapshot(self)
+    }
+
+    fn merge_key_rotation(
+        &self,
+        new_encryption: &EncryptionService,
+        custody: &dyn crate::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, crate::keys::KeyError> {
+        CloudCipherState::merge_key_rotation(self, new_encryption, custody)
+    }
+}
+
+impl CloudCipherAccess for Arc<CloudCipherState> {
+    fn snapshot(&self) -> CloudCipher {
+        self.as_ref().snapshot()
+    }
+
+    fn merge_key_rotation(
+        &self,
+        new_encryption: &EncryptionService,
+        custody: &dyn crate::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, crate::keys::KeyError> {
+        self.as_ref().merge_key_rotation(new_encryption, custody)
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl CloudCipherAccess for RwLock<CloudCipher> {
+    fn snapshot(&self) -> CloudCipher {
+        self.read().unwrap().clone()
+    }
+
+    fn merge_key_rotation(
+        &self,
+        new_encryption: &EncryptionService,
+        custody: &dyn crate::keys::MasterKeyCustody,
+    ) -> Result<Option<String>, crate::keys::KeyError> {
+        let mut cipher = self.write().unwrap();
+        let CloudCipher::Encrypted(live) = &mut *cipher else {
+            return Err(crate::keys::KeyError::Crypto(
+                "cannot rotate the key of a plaintext cloud home".to_string(),
+            ));
+        };
+        let merged = live.merged_with(new_encryption);
+        if merged.key_count() == live.key_count() {
+            return Ok(None);
+        }
+        custody.persist(&crate::encryption::MasterKeyring::from(merged.clone()))?;
+        *live = merged;
+        Ok(Some(live.fingerprint()))
+    }
+}
+
 /// The cloud has committed the store key to `committed_generation`, and this
 /// device's live cipher is still sealing under `live_generation`. A member
 /// removal rotates the store key on the cloud before this device necessarily
@@ -331,7 +462,7 @@ pub struct CloudSyncStorage {
     /// the life of a stream and reads across awaits, so the home is genuinely
     /// shared between this storage and the readers it spawns, not owned by one.
     home: Arc<dyn CloudHome>,
-    cipher: Arc<RwLock<CloudCipher>>,
+    cipher: Arc<CloudCipherState>,
     /// Whether a committed rotation is outstanding — see [`PendingRotation`].
     /// Shared the same way `cipher` is, so a member removal or a refresh cycle
     /// that discovers a rotation this device can't adopt blocks every seal path,
@@ -358,7 +489,7 @@ impl CloudSyncStorage {
     ) -> Self {
         CloudSyncStorage {
             home,
-            cipher: Arc::new(RwLock::new(cipher)),
+            cipher: Arc::new(CloudCipherState::new(cipher)),
             pending_rotation: Arc::new(PendingRotation::none()),
             blob_paths,
             store_id: store_id.into(),
@@ -366,11 +497,22 @@ impl CloudSyncStorage {
         }
     }
 
-    /// Return a shared reference to the cipher lock for external use (e.g.,
-    /// SyncHandle shares the same instance for snapshot creation, and a member
-    /// removal rotates the key in place through it).
-    pub fn shared_cipher(&self) -> Arc<RwLock<CloudCipher>> {
-        self.cipher.clone()
+    pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
+        self.blob_paths
+    }
+
+    pub(crate) fn store_id(&self) -> &str {
+        &self.store_id
+    }
+
+    pub(crate) fn user_keypair(&self) -> &UserKeypair {
+        &self.keypair
+    }
+
+    /// The session's fixed-mode cipher state. The state exposes key-generation
+    /// merging but no operation that can replace encrypted mode with plaintext.
+    pub(crate) fn cipher_state(&self) -> &Arc<CloudCipherState> {
+        &self.cipher
     }
 
     /// Return a shared reference to the rotation-pending marker for external use
@@ -387,9 +529,8 @@ impl CloudSyncStorage {
         &*self.home
     }
 
-    /// Convenience: read-lock the cipher.
-    fn cipher(&self) -> std::sync::RwLockReadGuard<'_, CloudCipher> {
-        self.cipher.read().unwrap()
+    fn cipher(&self) -> CloudCipher {
+        self.cipher.snapshot()
     }
 
     /// The object-key suffix the current cipher implies.
@@ -412,7 +553,7 @@ impl CloudSyncStorage {
     /// reads/opens are unaffected (they resolve their own generation from the
     /// ciphertext's tag) and keep reading the cipher plainly.
     fn cipher_for_seal(&self) -> Result<CloudCipher, StorageError> {
-        let cipher = self.cipher().clone();
+        let cipher = self.cipher();
         self.pending_rotation.check(&cipher)?;
         Ok(cipher)
     }
@@ -544,10 +685,11 @@ impl CloudSyncStorage {
     /// is an error.
     ///
     /// `Plain` uses the consumer's `cloud_path` verbatim: `{namespace}/{cloud_path}`,
-    /// keeping the bucket browsable — a browsable home has no membership chain, so it
-    /// carries no uploader segment and `uploader` is ignored. A `Plain` home with no
-    /// `cloud_path` is an error — coven never silently falls back to the hashed layout,
-    /// which would scatter readable-path blobs under unfindable shard keys.
+    /// keeping the bucket browsable. Plain blob naming carries no uploader segment
+    /// and ignores `uploader`; the store still has membership authorization. A
+    /// `Plain` home with no `cloud_path` is an error — coven never silently falls
+    /// back to the hashed layout, which would scatter readable-path blobs under
+    /// unfindable shard keys.
     pub fn blob_key(
         scheme: BlobPathScheme,
         namespace: &str,
@@ -1153,7 +1295,7 @@ impl SyncStorage for CloudSyncStorage {
         // this just resolves the key/scope/size it needs. The cipher is cloned out
         // of the lock so the reader doesn't hold the guard across its awaits.
         let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
-        let cipher = self.cipher().clone();
+        let cipher = self.cipher();
         let aad_context = self.aad_context(&key);
         let reader = BlobRangeReader::new(
             self.home.clone(),
@@ -1178,7 +1320,7 @@ impl SyncStorage for CloudSyncStorage {
         dest: &std::path::Path,
     ) -> Result<(), StorageError> {
         let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
-        let cipher = self.cipher().clone();
+        let cipher = self.cipher();
         let aad_context = self.aad_context(&key);
         let reader = BlobRangeReader::new(
             self.home.clone(),
@@ -1522,7 +1664,7 @@ mod tests {
         BoxPartSink, CloudAccessGrant, CloudAccessRevoke, CloudHomeError, CloudHomeJoinInfo,
         RevokeOutcome,
     };
-    use crate::sync::test_helpers::open_test_db;
+    use crate::sync::test_helpers::{open_test_db, TestCustody};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A committed rotation this device has not adopted survives a restart. A
@@ -1846,7 +1988,13 @@ mod tests {
             .expect("write generation one membership");
 
         let keyring = EncryptionService::from_keyring([(1, [1u8; 32]), (2, [2u8; 32])]).unwrap();
-        *storage.shared_cipher().write().unwrap() = CloudCipher::Encrypted(keyring);
+        crate::sync::membership_ops::apply_key_rotation(
+            keyring,
+            &TestCustody::default(),
+            storage.cipher_state(),
+            &storage.shared_pending_rotation(),
+        )
+        .expect("adopt generation two");
 
         assert_eq!(
             storage

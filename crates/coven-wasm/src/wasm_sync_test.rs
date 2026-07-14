@@ -4,19 +4,16 @@
 //!
 //! Two `:memory:` `Database`s stand in for two devices; each wraps the SAME
 //! backing `InMemoryCloudHome` in its own `CloudSyncStorage`, so they read
-//! and write one cloud bucket. The cipher is `Plaintext` and blobs are hashed, so
+//! and write one cloud bucket. The cipher is `Plaintext` and blob paths are plain, so
 //! the engine exercises the production `CloudSyncStorage` path end to end with no
-//! key setup. The drive entry is [`run_single_sync_cycle`] — the same single-cycle
-//! function the native sync loop calls — so this proves the engine itself, not a
-//! test shim, runs on the browser's one thread.
+//! key setup. Each drive uses the initialized sync session's cycle method, the
+//! same entry the browser runtime calls.
 //!
 //! `:memory:` (not OPFS) because this exercises the sync engine, not durability:
 //! the two DBs only need to be independent, which a fresh `:memory:` connection
 //! already is. So no `install_browser_storage` and no Worker-only OPFS handles are
 //! needed — but the test still runs in a dedicated Worker to match the rest of the
 //! wasm suite. Drive it with `wasm-pack test --headless --firefox`.
-
-use std::sync::RwLock;
 
 use rusqlite::OptionalExtension;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
@@ -26,9 +23,7 @@ use crate::database::{Database, DbError};
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
-use crate::sync::cycle::run_single_sync_cycle;
-use crate::sync::hlc::Hlc;
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::test_helpers::{test_migrations, test_synced_tables};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -52,25 +47,21 @@ fn open_device(device_id: &str) -> Database {
 }
 
 /// A `CloudSyncStorage` over a clone of the shared cloud handle, plaintext at rest
-/// with hashed blob paths. Two of these built over clones of one
+/// with plain blob paths. Two of these built over clones of one
 /// `InMemoryCloudHome` are two devices on one bucket.
-fn storage_for(cloud: &InMemoryCloudHome) -> CloudSyncStorage {
+fn storage_for(cloud: &InMemoryCloudHome, identity: &UserKeypair) -> CloudSyncStorage {
     CloudSyncStorage::new(
         std::sync::Arc::new(cloud.clone()),
         CloudCipher::Plaintext,
-        BlobPathScheme::Hashed,
+        BlobPathScheme::Plain,
         "wasm-sync-test",
-        UserKeypair::generate(),
+        identity.clone(),
     )
 }
 
 /// Run one full sync cycle for `device_id` against `storage`. No cloud home and no
 /// observer: this engine test pushes/pulls changesets only, not the blob outbox.
-async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str) {
-    let cipher = RwLock::new(CloudCipher::Plaintext);
-    let pending_rotation = PendingRotation::none();
-    let keypair = UserKeypair::generate();
-    let hlc = Hlc::new(device_id.to_string());
+async fn run_cycle(storage: CloudSyncStorage, db: &Database) {
     db.set_sync_state("snapshot_seq", "0")
         .await
         .expect("seed snapshot floor for changeset-only wasm test");
@@ -79,23 +70,13 @@ async fn run_cycle(storage: &CloudSyncStorage, db: &Database, device_id: &str) {
     // logs and continues on failure. No blobs, no snapshot bytes are read back.
     let store_dir = StoreDir::new(std::path::Path::new("/coven-wasm-sync-test"));
 
-    run_single_sync_cycle(
-        storage,
-        "test-lib",
-        device_id,
-        &hlc,
-        &SystemClock,
-        db,
-        &cipher,
-        &pending_rotation,
-        &keypair,
-        None,
-        &store_dir,
-        None,
-        None,
-    )
-    .await
-    .expect("sync cycle");
+    let components = crate::sync::cycle::init_sync_over_storage(db, storage)
+        .await
+        .expect("initialize sync session");
+    components
+        .run_cycle(&SystemClock, None, &store_dir, None)
+        .await
+        .expect("sync cycle");
 }
 
 /// Whether `db` holds a `notes` row with the given id.
@@ -124,6 +105,7 @@ async fn row_syncs_from_one_database_to_another_through_the_engine() {
 
     let db_a = open_device("device-a");
     let db_b = open_device("device-b");
+    let identity = UserKeypair::generate();
 
     // Device A writes a SHARED note (gate column `shared = 1`, so the gate keeps
     // it in the outgoing changeset) through coven's journaled write path, the same
@@ -138,8 +120,8 @@ async fn row_syncs_from_one_database_to_another_through_the_engine() {
     .expect("device A insert");
 
     // Device A: one cycle pushes its changeset (and head) to the shared cloud.
-    let storage_a = storage_for(&cloud);
-    run_cycle(&storage_a, &db_a, "device-a").await;
+    let storage_a = storage_for(&cloud, &identity);
+    run_cycle(storage_a, &db_a).await;
 
     assert!(
         cloud.get("changes/device-a/1").is_some(),
@@ -160,8 +142,8 @@ async fn row_syncs_from_one_database_to_another_through_the_engine() {
     // Device B: one cycle pulls A's changeset out of the shared cloud and applies
     // it. B sees A's head, fetches `changes/device-a/1`, verifies the signature,
     // and applies the captured INSERT.
-    let storage_b = storage_for(&cloud);
-    run_cycle(&storage_b, &db_b, "device-b").await;
+    let storage_b = storage_for(&cloud, &identity);
+    run_cycle(storage_b, &db_b).await;
 
     assert!(
         has_note(&db_b, "note-1").await,

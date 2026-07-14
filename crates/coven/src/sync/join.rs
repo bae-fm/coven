@@ -839,8 +839,8 @@ pub(crate) async fn open_db_and_pull(
     // Pin the store owner from the invite BEFORE the pull below loads and anchors
     // the membership chain (issue #102). The pull then refuses a chain whose founder
     // isn't this owner, so a tampered chain can't be adopted during join. `None`
-    // means restore or a chain-less test; restore pins the chain founder below
-    // after loading membership entries from the bootstrapped storage.
+    // means restore or a pre-initialization test; restore pins the chain founder
+    // below after loading membership entries from the bootstrapped storage.
     if let Some(owner) = owner_pubkey {
         db.set_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner)
             .await
@@ -913,10 +913,10 @@ pub(crate) async fn open_db_and_pull(
                 "restore: failed to list membership to pin owner: {e}"
             ))
         })?;
-        // An empty listing is a chain-less (plaintext/open) store — nothing to
-        // pin. A non-empty one must load and pin, or fail the restore loudly so it
-        // can be retried as a unit; leaving the owner unpinned and deferring to the
-        // first sync connect would be a silent self-heal.
+        // An empty listing represents a pre-initialization or legacy bootstrap —
+        // there is nothing to pin. A non-empty one must load and pin, or fail the
+        // restore loudly so it can be retried as a unit; leaving the owner unpinned
+        // and deferring to the first sync connect would be a silent self-heal.
         if !entries.is_empty() {
             let chain = crate::sync::membership_ops::download_chain(storage, &entries)
                 .await

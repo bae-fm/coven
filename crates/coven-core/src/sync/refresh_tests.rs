@@ -332,7 +332,20 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         ],
     )
     .await;
-    storage.store_changeset("owner-device", 1, &peer_cs, db_b.schema_version());
+    let packed = crate::sync::envelope::pack_signed(
+        "owner-device",
+        1,
+        db_b.schema_version(),
+        "",
+        "2026-02-10T00:00:00Z",
+        &owner,
+        Some(MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: 1,
+        }),
+        &peer_cs,
+    );
+    storage.put_changeset_packed("owner-device", 1, packed);
 
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);

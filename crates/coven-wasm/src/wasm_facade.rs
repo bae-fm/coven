@@ -169,8 +169,6 @@ impl CovenStore {
         // storage or database side effects.
         let cipher = build_cipher(config.storage, config.encryption_key_hex.as_deref())
             .map_err(|e| JsValue::from_str(&e))?;
-        let blob_paths = BlobPathScheme::for_storage(config.storage);
-
         let home: Box<dyn CloudHome> = Box::new(S3WasmCloudHome::new(
             config.bucket,
             config.region,
@@ -195,7 +193,7 @@ impl CovenStore {
         Self::from_home(
             home,
             cipher,
-            blob_paths,
+            config.storage,
             &config.store_id,
             config.device_id,
             migrations,
@@ -297,14 +295,14 @@ impl CovenStore {
     /// `open` passes [`production_schedule`]; the headless test passes a short one
     /// so it converges quickly.
     ///
-    /// The caller supplies `user_keypair` — `open` loads the device's persistent
+    /// The caller supplies `user_keypair` — `open` loads the store's persistent
     /// identity from the [`BrowserKeystore`](crate::wasm_keystore::BrowserKeystore),
-    /// while the test passes a fresh one per device so two simulated devices have
-    /// distinct identities (a single origin keystore would hand both the same one).
+    /// while tests pass the same identity to every simulated device belonging to
+    /// one store.
     pub(crate) async fn from_home(
         home: Box<dyn CloudHome>,
         cipher: CloudCipher,
-        blob_paths: BlobPathScheme,
+        storage_mode: HomeStorage,
         store_id: &str,
         device_id: String,
         migrations: Vec<Migration>,
@@ -338,14 +336,13 @@ impl CovenStore {
         let storage = CloudSyncStorage::new(
             std::sync::Arc::from(home),
             cipher,
-            blob_paths,
+            BlobPathScheme::for_storage(storage_mode),
             store_id,
             user_keypair.clone(),
         );
-        // The cycle and the storage must seal/open under the *same* cipher lock so a
-        // key rotation through one is seen by the other; the storage owns it, so the
-        // runtime borrows that one rather than a separate copy.
-        let cipher = storage.shared_cipher();
+        let components = crate::sync::cycle::init_sync_over_storage(&db, storage)
+            .await
+            .map_err(|error| format!("initialize sync: {error}"))?;
 
         // A store dir that never touches disk: the browser has none. The
         // changeset path's only fs touch is best-effort changeset staging, which
@@ -354,16 +351,7 @@ impl CovenStore {
         let store_dir = StoreDir::new(std::path::Path::new("/coven-browser"));
 
         let runtime = WasmSyncRuntime::new(
-            storage,
-            store_id.to_string(),
-            device_id.clone(),
-            db.hlc(),
-            cipher,
-            db.clone(),
-            // The device's signing identity. `open` loads it from the persistent
-            // browser keystore so a reopened tab keeps the identity other members
-            // trust; the headless test passes a fresh one per device.
-            user_keypair,
+            components,
             // `Clock` is a plain `Send + Sync` sync trait, so its handle is an
             // `Arc` (`ClockRef`) even on the single-threaded browser runtime.
             std::sync::Arc::new(SystemClock) as ClockRef,

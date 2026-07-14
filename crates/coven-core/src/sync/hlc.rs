@@ -138,6 +138,10 @@ impl Hlc {
         Self::try_new(device_id).expect("device_id must be a safe path token")
     }
 
+    pub(crate) fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
     fn try_new_with_wall_clock(
         device_id: String,
         clock: impl Fn() -> u64 + Send + Sync + 'static,

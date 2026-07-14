@@ -455,8 +455,8 @@ impl MembershipChain {
 
     /// Every distinct author's committed head coordinate in this chain — one
     /// `(author_pubkey, seq)` per author who has authored at least one entry, at
-    /// that author's highest committed seq. Empty for a chain-less (browsable)
-    /// store, which has no membership at all.
+    /// that author's highest committed seq. Empty only for an empty chain, before
+    /// store membership has been initialized.
     ///
     /// This is the floor an invite or restore code carries from mint time: the
     /// joiner or restorer seeds its per-author head watermark from it before its

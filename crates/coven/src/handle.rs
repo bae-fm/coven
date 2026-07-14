@@ -751,12 +751,22 @@ impl CovenHandle {
     /// name the blob it carries, is a surfaced error — see
     /// [`CloudSyncStorage::blob_key`].
     pub fn blob_cloud_key(&self, blob: &BlobRef) -> Result<String, StorageError> {
-        let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
-        // This device's own blobs key under its own public key (the host asks for
-        // the key of a blob it uploaded).
-        let uploader = crate::keys::identity_public_key(self.identity_custody.as_ref())
-            .map_err(|e| StorageError::Storage(format!("read this store's identity: {e}")))?
-            .map(hex::encode);
+        let active_loop = self
+            .sync_manager()
+            .and_then(|manager| manager.sync_loop_handle());
+        let (scheme, uploader) = match active_loop {
+            Some(sync_loop) => (
+                sync_loop.blob_path_scheme(),
+                Some(sync_loop.self_uploader()),
+            ),
+            None => {
+                let scheme = BlobPathScheme::for_storage(self.config().cloud_home.storage);
+                let uploader = crate::keys::identity_public_key(self.identity_custody.as_ref())
+                    .map_err(|e| StorageError::Storage(format!("read this store's identity: {e}")))?
+                    .map(hex::encode);
+                (scheme, uploader)
+            }
+        };
         CloudSyncStorage::blob_key(
             scheme,
             &blob.namespace,
@@ -860,26 +870,13 @@ impl CovenHandle {
     /// to).
     pub async fn drain_uploads(&self) -> Result<DrainOutcome, SyncError> {
         let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
-        let hlc = self.db.hlc();
         let sync_loop = manager
             .sync_loop_handle()
             .ok_or(SyncError::LoopNotRunning)?;
-        let storage = sync_loop.storage().clone();
-        let cipher = sync_loop.cipher().clone();
-        let pending_rotation = storage.shared_pending_rotation();
-        crate::blob::upload::drain_uploads(
-            &self.db,
-            storage.cloud_home(),
-            cipher.as_ref(),
-            pending_rotation.as_ref(),
-            &self.config().store_id,
-            &self.store_dir,
-            self.clock.as_ref(),
-            &hlc,
-            self.observer.as_deref(),
-        )
-        .await
-        .map_err(SyncError::BlobUpload)
+        sync_loop
+            .drain_uploads()
+            .await
+            .map_err(SyncError::BlobUpload)
     }
 
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, crate::DbError> {
@@ -1983,8 +1980,9 @@ mod tests {
             StoreOpenGuard::acquire_for_test(&store_dir),
         );
 
+        let home = Arc::new(InMemoryCloudHome::new());
         handle
-            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
             .await
             .expect("first connect over injected home");
         let first_loop = handle
@@ -1995,7 +1993,7 @@ mod tests {
         assert!(first_loop.is_running(), "first loop starts running");
 
         handle
-            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .connect_sync_with_test_home(home, CloudCipher::Plaintext)
             .await
             .expect("second connect over injected home");
         let replacement_loop = handle
@@ -2068,7 +2066,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_drain_uses_the_installed_sync_loop_cipher_lock() {
+    async fn encrypted_session_keeps_its_binding_after_config_changes() {
         test_keyring::install();
 
         let (tmp, store_dir) = temp_store_dir();
@@ -2080,9 +2078,15 @@ mod tests {
             store_dir.clone(),
             "Test Store".to_string(),
         );
+        let live_config = Arc::new(RwLock::new(config));
         let config_provider: ConfigProvider = {
-            let config = config.clone();
-            Arc::new(move || config.clone())
+            let live_config = live_config.clone();
+            Arc::new(move || {
+                live_config
+                    .read()
+                    .expect("test config lock is not poisoned")
+                    .clone()
+            })
         };
 
         let handle = CovenHandle::new(
@@ -2113,9 +2117,38 @@ mod tests {
             .expect("connect encrypted injected home");
         let manager = handle.sync_manager().expect("sync manager installed");
         let loop_handle = manager.sync_loop_handle().expect("sync loop installed");
-        *loop_handle.cipher().write().unwrap() = CloudCipher::Plaintext;
 
-        let plaintext = b"plain-drain-bytes-after-loop-cipher-mutation".to_vec();
+        {
+            let mut next_config = live_config
+                .write()
+                .expect("test config lock is not poisoned");
+            next_config.store_id = "next-lib".to_string();
+            next_config.store_dir = StoreDir::new(tmp.path().join("next-store"));
+            next_config.cloud_home.storage = HomeStorage::Browsable;
+        }
+
+        assert_eq!(loop_handle.config().store_id, "lib-test");
+        assert_eq!(loop_handle.store_dir(), &store_dir);
+        assert!(matches!(
+            loop_handle.blob_path_scheme(),
+            BlobPathScheme::Hashed
+        ));
+
+        let rotated = EncryptionService::from_key([7u8; 32])
+            .with_appended_generation(2, [8u8; 32])
+            .expect("append generation");
+        loop_handle
+            .adopt_key_rotation_for_test(rotated)
+            .expect("adopt encrypted generation");
+        assert_eq!(
+            loop_handle
+                .current_encryption()
+                .expect("session remains encrypted")
+                .current_generation(),
+            2,
+        );
+
+        let plaintext = b"encrypted-drain-bytes-after-key-rotation".to_vec();
         let source = tmp.path().join("plain-source.jpg");
         std::fs::write(&source, &plaintext).expect("write source file");
         let cloud_key = "images/ab/cd/plain-cover";
@@ -2135,10 +2168,36 @@ mod tests {
             .await
             .expect("drain through the handle");
         assert_eq!(outcome.uploaded, 1, "the queued blob uploaded");
+
+        let stored = home.get(cloud_key).expect("uploaded cloud object");
+        assert_ne!(
+            stored.as_slice(),
+            plaintext.as_slice(),
+            "an encrypted session must never upload plaintext cloud bytes",
+        );
+
+        let aad_context = |store_id: &str| {
+            let mut context = Vec::new();
+            context.extend_from_slice(&(store_id.len() as u64).to_le_bytes());
+            context.extend_from_slice(store_id.as_bytes());
+            context.extend_from_slice(&(cloud_key.len() as u64).to_le_bytes());
+            context.extend_from_slice(cloud_key.as_bytes());
+            context
+        };
+        let cipher = CloudCipher::Encrypted(
+            loop_handle
+                .current_encryption()
+                .expect("session remains encrypted"),
+        );
         assert_eq!(
-            home.get(cloud_key).as_deref(),
-            Some(plaintext.as_slice()),
-            "the host-driven drain used the mutated loop cipher lock",
+            cipher
+                .open(stored.clone(), &aad_context("lib-test"))
+                .expect("open with the installed session binding"),
+            plaintext,
+        );
+        assert!(
+            cipher.open(stored, &aad_context("next-lib")).is_err(),
+            "a later config must not change the installed session's store binding",
         );
     }
 
@@ -2223,15 +2282,16 @@ mod tests {
         // Subscribe before any provider is connected — valid because the channel
         // is handle-owned.
         let mut rx = handle.subscribe_sync_status();
+        let home = Arc::new(InMemoryCloudHome::new());
 
         handle
-            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
             .await
             .expect("first connect");
         // Reconnect immediately: this drops the first loop and starts a second one
-        // over a fresh home before the first loop's startup delay elapses.
+        // over the same store home before the first loop's startup delay elapses.
         handle
-            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .connect_sync_with_test_home(home, CloudCipher::Plaintext)
             .await
             .expect("reconnect");
 

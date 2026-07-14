@@ -49,13 +49,13 @@ pub struct RestoreCode {
     pub sk: String,
     /// Every author's membership-head coordinate at mint time
     /// ([`MembershipChain::author_heads`](crate::sync::membership::MembershipChain::author_heads)),
-    /// empty for a chain-less (browsable) store. The restorer seeds its
-    /// per-author head watermark from this before its first sync cycle, so a
-    /// storage provider serving an older, otherwise validly signed membership
-    /// state is refused as a regression rather than accepted for having no
-    /// watermark yet. Required, not optional: a code minted without this floor
-    /// carries no protection, so it is refused at decode rather than silently
-    /// treated as "no floor."
+    /// non-empty for every initialized store, including a browsable one. The
+    /// restorer seeds its per-author head watermark from this before its first sync
+    /// cycle, so a storage provider serving an older, otherwise validly signed
+    /// membership state is refused as a regression rather than accepted for
+    /// having no watermark yet. The decoder requires the field but accepts an
+    /// empty vector; an empty floor seeds no watermark and provides no rollback
+    /// protection.
     pub membership_floor: Vec<MembershipCoord>,
 }
 

@@ -24,7 +24,8 @@ pub struct ChangesetEnvelope {
     /// coordinate. A puller that does not yet see that entry fetches it by this
     /// coordinate to resolve a membership-propagation gap instead of skipping the
     /// changeset as non-member. Covered by the signature, so it can't be forged.
-    /// None for a solo (no membership chain) store or an unsigned changeset.
+    /// None for legacy unsigned data or a pre-initialization producer. Every
+    /// changeset accepted by an initialized session names its write grant.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub membership_grant: Option<MembershipCoord>,
     /// Hex-encoded detached Ed25519 signature over the envelope metadata and

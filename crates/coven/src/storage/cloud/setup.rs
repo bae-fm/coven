@@ -256,8 +256,8 @@ pub async fn sign_in_onedrive(
 /// responsibility to fetch, since this function itself never touches the
 /// network. The restorer seeds its watermark from it before its first sync
 /// cycle, so this must be the CURRENT chain state, not a stale or empty
-/// placeholder — an empty floor is only correct for a chain-less (browsable)
-/// store, which has no membership to protect.
+/// placeholder. Every initialized store, including a browsable one, has a
+/// committed founder floor.
 pub fn generate_restore_code(
     config: &Config,
     key_service: &StoreKeys,

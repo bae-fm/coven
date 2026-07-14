@@ -20,7 +20,7 @@ use super::apply::resolve_and_apply_changeset_with_schema;
 use super::conflict::TableSchema;
 use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
-use super::membership::{MemberRole, MembershipChain, MembershipCoord, MembershipEntry};
+use super::membership::{MemberRole, MembershipChain, MembershipCoord};
 use super::session::SyncedTable;
 use super::storage::{DeviceHead, StorageError, SyncStorage};
 use crate::blob::decl::BlobDecls;
@@ -51,23 +51,10 @@ fn cursor_for_device(cursors: &HashMap<String, u64>, device_id: &str) -> u64 {
     }
 }
 
-/// Whether `pubkey` is a current member in any role (Owner, Member, or the
-/// read-only Follower). The gate for honoring a device's *head*: a Follower
-/// reads, so its head is legitimate even though it may not author changesets.
-fn is_current_member(members: &[(String, MemberRole)], pubkey: &str) -> bool {
-    members.iter().any(|(pk, _)| pk == pubkey)
-}
-
 fn is_current_owner(members: &[(String, MemberRole)], pubkey: &str) -> bool {
     members
         .iter()
         .any(|(pk, role)| pk == pubkey && *role == MemberRole::Owner)
-}
-
-fn can_write_now(members: &[(String, MemberRole)], pubkey: &str) -> bool {
-    members
-        .iter()
-        .any(|(pk, role)| pk == pubkey && role.can_write())
 }
 
 /// A changeset skipped because its author is not a write-capable member, judged
@@ -217,10 +204,10 @@ struct CompletedChangeset<'a> {
 ///
 /// [`load_anchored_chain`]: super::membership_ops::load_anchored_chain
 pub struct CycleMembership {
-    /// The owner-anchored, committed chain. `None` for a browsable store, which
-    /// has no chain and is open by design.
+    /// The owner-anchored, committed chain. `None` is representable for
+    /// pre-initialization bootstrap callers; initialized cycles always carry one.
     pub chain: Option<MembershipChain>,
-    /// The store's pinned owner (issue #102). `None` for a browsable store.
+    /// The store's pinned owner (issue #102). `None` only before initialization.
     /// An owner-pinned store that fails to produce a valid chain aborts the load,
     /// so `Some(owner)` here always travels with `Some(chain)`.
     pub pinned_owner: Option<String>,
@@ -234,16 +221,15 @@ pub struct CycleMembership {
 /// Load and anchor the cycle's membership chain once. Every successful listing
 /// is validated; a loader error aborts regardless of owner pin because an
 /// unpinned database may already have accepted author floors. Only the loader's
-/// explicit `Ok(None)` is an unpinned chain-less store. LIST transport errors
-/// retain their separate pinned/unpinned classification.
+/// explicit `Ok(None)` represents an unpinned pre-initialization read. LIST
+/// transport errors retain their separate pinned/unpinned classification.
 pub async fn load_cycle_membership(
     storage: &dyn SyncStorage,
     db: &Database,
 ) -> Result<CycleMembership, PullError> {
     // The store's established owner, pinned at create/join/restore (issue #102).
-    // `Some` for an opaque (encrypted) store — its membership chain is anchored
-    // to this pubkey; `None` for a browsable store, which has no chain and is
-    // open by design.
+    // An initialized plaintext or encrypted store has `Some`; `None` is reserved
+    // for bootstrap callers that run before owner establishment.
     let pinned_owner = db
         .get_sync_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
         .await
@@ -254,7 +240,8 @@ pub async fn load_cycle_membership(
         Err(e) => {
             // Can't even list membership. For an owner-pinned store we cannot
             // verify authorship, so fail closed (abort, retry next cycle) rather
-            // than apply changesets unvalidated. Browsable stays open.
+            // than apply changesets unvalidated. Only an unpinned
+            // pre-initialization caller can proceed without a chain.
             if pinned_owner.is_some() {
                 return Err(PullError::Storage(e));
             }
@@ -335,7 +322,7 @@ pub async fn pull_changes(
     // here (with the store's pinned owner). `resolve_membership_authorization`
     // may still refresh it mid-pull to catch an authorizing entry the cycle-start
     // listing lagged, so it stays mutable.
-    let mut membership_members = membership_chain
+    let membership_members = membership_chain
         .as_ref()
         .map(MembershipChain::current_members);
 
@@ -344,8 +331,8 @@ pub async fn pull_changes(
     // a current *owner*: a non-owner-signed (or, with a chain present, unsigned)
     // floor is a freeze/downgrade attempt and is ignored. `get_min_schema_version`
     // already verified the signature and surfaced the author; this is the
-    // authorization half. With no chain (a browsable store) we keep the prior
-    // behavior and honor any floor present.
+    // authorization half. With no chain (only before initialization) any
+    // verified floor is honored because no owner has been established yet.
     if let Some(min) = storage
         .get_min_schema_version()
         .await
@@ -371,14 +358,11 @@ pub async fn pull_changes(
         }
     }
 
-    // List heads, then drop any the membership chain doesn't authorize. A head is
-    // a signed control object (`list_heads` verified its signature is valid for the
-    // slot and surfaced the author); when a chain is present, a head whose author
-    // is not a current member is a forgery that would otherwise pollute sync status
-    // and drive a per-seq fetch loop, so it is skipped here. Our own head goes
-    // through the same gate — its author is this device, a current member, so it is
-    // kept (and dropped if this device was removed, which is correct). With no chain
-    // (browsable) every head is kept, as before.
+    // List every verified head. Membership authorization happens on each signed
+    // envelope because a newly-added member's head can become visible before this
+    // cycle's membership listing exposes its committed grant. Filtering the head
+    // against the cycle-start chain would discard that stream before the grant's
+    // signed author head can be resolved.
     // The pull uses the verified heads and ignores the unreadable-slot count: one
     // member's bad head must not wedge every device's sync. (Changeset reclamation
     // reads that same count to fail closed — a different, destructive decision.)
@@ -387,23 +371,6 @@ pub async fn pull_changes(
         .await
         .map_err(PullError::Storage)?
         .heads;
-    let heads: Vec<DeviceHead> = heads
-        .into_iter()
-        .filter(|head| match membership_members.as_ref() {
-            Some(members) => {
-                let authorized = is_current_member(members, &head.author_pubkey);
-                if !authorized {
-                    warn!(
-                        device_id = %head.device_id,
-                        author = %head.author_pubkey,
-                        "skipping head not authored by a current member"
-                    );
-                }
-                authorized
-            }
-            None => true,
-        })
-        .collect();
 
     // Per-table `_updated_at` column index map. Built once from the live schema
     // (so column additions stay safe) and shared by both the apply — every
@@ -566,6 +533,29 @@ pub async fn pull_changes(
                 break;
             }
 
+            // The verified device head commits this stream to one signer. The
+            // envelope must carry the same signer: another member's authentic
+            // changeset cannot be relocated into this stream, and an unsigned
+            // envelope cannot occupy a signed member stream. This mismatch is
+            // permanent attacker-controlled content, so reject and advance rather
+            // than letting it hold the stream forever.
+            if env.author_pubkey.as_deref() != Some(head.author_pubkey.as_str()) {
+                error!(
+                    device_id = %head.device_id,
+                    seq,
+                    head_author = %head.author_pubkey,
+                    envelope_author = ?env.author_pubkey,
+                    "changeset signer does not match the verified device-head signer; rejecting"
+                );
+                result.rejected_unauthorized.push(RejectedUnauthorized {
+                    device_id: head.device_id.clone(),
+                    seq,
+                    author: env.author_pubkey.clone(),
+                });
+                updated_cursors.insert(head.device_id.clone(), seq);
+                continue;
+            }
+
             // Schema version check: skip changesets from a newer schema. The
             // envelope is authenticated above, so this schema_version is the one the
             // author actually wrote against.
@@ -612,80 +602,60 @@ pub async fn pull_changes(
                 break;
             }
 
-            // Membership validation: in a chain-enabled store every changeset
-            // must be signed (its signature is verified above) by a current
-            // write-capable member. Coven always signs at creation, so an unsigned
-            // or non-member changeset is forged. But an authorized member's
-            // changeset can also legitimately arrive *before* the entry that
-            // authorizes them is visible locally — membership entries and
-            // changesets are separate, unordered object streams. Judging against
-            // the cycle-start chain alone would skip such a changeset permanently.
-            //
-            // So when the cycle-start chain does not already authorize the author,
-            // resolve the gap against the exact membership entry the changeset is
-            // signed under (a keyed GET is strongly consistent) before deciding.
-            // The check stays non-temporal: revocation is enforced by the key
-            // rotation `remove_member` performs and by merging any Remove we hold,
-            // not by an author-supplied timestamp. A Follower is registered but not
-            // write-capable, so a changeset it authored is rejected here too.
-            if membership_chain.is_some() {
-                let author = env.author_pubkey.as_deref();
-                let authorized = membership_members
-                    .as_ref()
-                    .is_some_and(|members| author.is_some_and(|pk| can_write_now(members, pk)));
-                if !authorized {
-                    match resolve_membership_authorization(
-                        storage,
-                        db,
-                        membership_chain.as_ref().unwrap(),
-                        owner_pubkey.as_deref(),
-                        author,
-                        env.membership_grant.as_ref(),
-                    )
-                    .await
-                    {
-                        MembershipJudgment::Authorized(refreshed) => {
-                            // We were behind: a refreshed chain (and, if needed, the
-                            // named grant entry) authorizes the author. Adopt it for
-                            // the rest of this cycle so other newly-authorized peers
-                            // don't each re-trigger a reload.
-                            membership_members = Some(refreshed.current_members());
-                            membership_chain = Some(refreshed);
-                        }
-                        MembershipJudgment::Unauthorized => {
-                            // We hold the exact entry the author claims authorizes
-                            // them (or it provably does not exist) and it does not
-                            // grant write — forged or revoked. Skip and advance so
-                            // the client is not stuck, and surface it.
-                            error!(
-                                device_id = %head.device_id,
-                                seq,
-                                author = ?env.author_pubkey,
-                                "changeset author is not a write-capable member \
-                                 against the membership entry it is signed under; \
-                                 skipping (forged or revoked)"
-                            );
-                            result.rejected_unauthorized.push(RejectedUnauthorized {
-                                device_id: head.device_id.clone(),
-                                seq,
-                                author: env.author_pubkey.clone(),
-                            });
-                            updated_cursors.insert(head.device_id.clone(), seq);
-                            continue;
-                        }
-                        MembershipJudgment::Indeterminate => {
-                            // Membership isn't consistently readable yet, so we
-                            // can't tell behind-vs-forged. Leave the cursor and stop
-                            // this device's pull so the next cycle retries rather
-                            // than skipping a possibly-legitimate changeset.
-                            warn!(
-                                device_id = %head.device_id,
-                                seq,
-                                "cannot yet authorize changeset author (membership \
-                                 not readable); leaving cursor for retry"
-                            );
-                            break;
-                        }
+            // Every initialized-store changeset binds itself to its exact effective
+            // write grant. Current membership alone is insufficient: the coordinate
+            // is what ties the signed envelope to the committed membership prefix.
+            // A newly-added author is resolved by reloading the signed author heads
+            // with the named grant's author included as a discovery candidate.
+            if let Some(current) = membership_chain.as_ref() {
+                match resolve_membership_authorization(
+                    storage,
+                    db,
+                    current,
+                    owner_pubkey.as_deref(),
+                    env.author_pubkey.as_deref(),
+                    env.membership_grant.as_ref(),
+                )
+                .await
+                {
+                    MembershipJudgment::Authorized(refreshed) => {
+                        // Adopt any newly committed membership state for later
+                        // changesets in this cycle.
+                        membership_chain = Some(refreshed);
+                    }
+                    MembershipJudgment::Unauthorized => {
+                        // We hold the exact entry the author claims authorizes
+                        // them (or it provably does not exist) and it does not
+                        // grant write — forged or revoked. Skip and advance so
+                        // the client is not stuck, and surface it.
+                        error!(
+                            device_id = %head.device_id,
+                            seq,
+                            author = ?env.author_pubkey,
+                            "changeset author is not a write-capable member \
+                             against the membership entry it is signed under; \
+                             skipping (forged or revoked)"
+                        );
+                        result.rejected_unauthorized.push(RejectedUnauthorized {
+                            device_id: head.device_id.clone(),
+                            seq,
+                            author: env.author_pubkey.clone(),
+                        });
+                        updated_cursors.insert(head.device_id.clone(), seq);
+                        continue;
+                    }
+                    MembershipJudgment::Indeterminate => {
+                        // Membership isn't consistently readable yet, so we
+                        // can't tell behind-vs-forged. Leave the cursor and stop
+                        // this device's pull so the next cycle retries rather
+                        // than skipping a possibly-legitimate changeset.
+                        warn!(
+                            device_id = %head.device_id,
+                            seq,
+                            "cannot yet authorize changeset author (membership \
+                             not readable); leaving cursor for retry"
+                        );
+                        break;
                     }
                 }
             }
@@ -1039,24 +1009,15 @@ enum MembershipJudgment {
     Indeterminate,
 }
 
-/// Decide whether `author` may write when the cycle-start chain didn't already
-/// say so. The cycle-start chain is built from a LIST that can lag the entry that
-/// authorizes a freshly-added member, so this reloads the chain — through the
-/// same head-committed, tip-hash-checked, watermarked loader the cycle start
-/// uses, never a plain listing — and if still unauthorized, fetches the exact
-/// entry the changeset is signed under by coordinate — a keyed GET is strongly
-/// consistent, so a `NotFound` is authoritative — then re-judges against the
-/// merged chain.
+/// Decide whether the envelope names the exact committed entry that currently
+/// grants `author` write access. A grant already present in `current` is decided
+/// without storage reads. Otherwise the chain is reloaded through signed author
+/// heads, including the grant coordinate's author as a discovery candidate, so a
+/// lagging LIST cannot hide a committed grant and a bare stored entry can never
+/// authorize a write.
 ///
-/// A hash-linked chain built from a bare listing can't detect a missing TAIL
-/// entry (nothing points forward to it): a listing that omits a committed
-/// `Remove` would validate cleanly and read the removed member as current. Only a
-/// signed `AuthorHead` names how far a chain actually reaches, so the reload must
-/// go through the loader that checks it — the same one the cycle start uses —
-/// rather than building a chain from whatever the listing happens to show.
-///
-/// `owner_pubkey` is the store's pinned owner (issue #102) when it is an opaque
-/// (owner-anchored) store. Any chain this adopts or merges must still be founded
+/// `owner_pubkey` is the store's pinned owner after initialization, for either
+/// storage representation. Any chain this adopts or merges must still be founded
 /// by that owner; a refreshed/merged chain that is not is a takeover attempt and
 /// does not authorize anyone, so it is treated as unauthorized — never adopted.
 async fn resolve_membership_authorization(
@@ -1072,164 +1033,61 @@ async fn resolve_membership_authorization(
         return MembershipJudgment::Unauthorized;
     };
 
-    // Best-effort fresh reload to catch an authorizing entry the cycle-start LIST
-    // lagged. This is ONLY an optimization to refresh the broader chain; nothing
-    // here decides retry-vs-skip, so nothing here returns Indeterminate. On a
-    // reload error — a storage read failure, an unparseable/undecryptable entry,
-    // a chain that won't validate, a head that regresses this reader's watermark,
-    // or a chain that no longer anchors to the pinned owner — fall back to the
-    // known-good cycle-start chain. A successful load with no listed or persisted
-    // authors does not reuse that chain. The keyed grant GET below is the sole
-    // authority: it fetches the one specific entry (bypassing a poisoned whole
-    // set) and it alone separates a real I/O error (retry) from forged content
-    // (skip). A genuine storage outage therefore still surfaces as Indeterminate
-    // via that GET, while no bogus entry can stall the pull.
-    let fresh = match storage.list_membership_entries().await {
-        Ok(entries) => {
-            match super::membership_ops::load_anchored_chain_if_known(
-                storage,
-                &entries,
-                owner_pubkey,
-                Some(db),
-            )
-            .await
-            {
-                Ok(Some(chain)) => chain,
-                Ok(None) => {
-                    warn!(
-                        "membership reload found no listed or persisted authors; \
-                         treating the changeset as unauthorized"
-                    );
-                    return MembershipJudgment::Unauthorized;
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "reloaded membership chain failed to load or validate; \
-                         falling back to the cycle-start chain"
-                    );
-                    current.clone()
-                }
-            }
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                "membership re-list failed while resolving authorization; \
-                 keeping the cycle-start chain"
-            );
-            current.clone()
-        }
-    };
-    if fresh.can_write_now(author) {
-        return MembershipJudgment::Authorized(fresh);
-    }
-
-    // Still unauthorized against a fresh chain. Resolve via the coordinate the
-    // changeset is signed under.
     let Some(coord) = grant else {
-        // A chain-store changeset must carry its authorizing coordinate; its
-        // absence means forged or pre-binding — genuinely unauthorized.
         return MembershipJudgment::Unauthorized;
     };
-    let entry = match storage
-        .get_membership_entry(&coord.author_pubkey, coord.seq)
-        .await
-    {
-        Ok(bytes) => match super::membership_ops::parse_membership_entry_at(coord, &bytes) {
-            Ok(entry) => entry,
-            // The named object exists but either is not a membership entry or
-            // declares a different author than its storage coordinate. Reject the
-            // bogus claim; this is not a reason to stall.
-            Err(error) => {
-                warn!(
-                    grant_author = %coord.author_pubkey,
-                    grant_seq = coord.seq,
-                    error = %error,
-                    "membership grant entry the changeset names did not bind to its coordinate; \
-                     treating the changeset as unauthorized"
-                );
-                return MembershipJudgment::Unauthorized;
-            }
-        },
-        // A keyed GET is strongly consistent: NotFound means the claimed grant
-        // does not exist, so the changeset is forged.
-        Err(super::storage::StorageError::NotFound(_)) => return MembershipJudgment::Unauthorized,
-        // A transient storage error: we can't tell yet, so retry next cycle.
-        Err(e) => {
+    if current.can_write_now(author) && current.write_grant_coord(author).as_ref() == Some(coord) {
+        return MembershipJudgment::Authorized(current.clone());
+    }
+
+    let entries = match storage.list_membership_entries().await {
+        Ok(entries) => entries,
+        Err(error) => {
             warn!(
-                grant_author = %coord.author_pubkey,
-                grant_seq = coord.seq,
-                error = %e,
-                "transient storage error fetching the named membership grant; \
-                 leaving the cursor to retry next cycle"
+                error = %error,
+                "membership listing unavailable while resolving a changeset grant"
             );
             return MembershipJudgment::Indeterminate;
         }
     };
 
-    // Merge the named grant into the fresh chain and re-judge against the whole,
-    // so a Remove we already hold still revokes write. The merged chain must STILL
-    // be anchored to the pinned owner — a grant that, once merged, would re-found
-    // the chain under a different key does not authorize anyone.
-    let mut entries = fresh.entries().to_vec();
-    entries.push(entry);
-    match build_anchored_chain(entries, owner_pubkey) {
-        Some(merged) if merged.can_write_now(author) => MembershipJudgment::Authorized(merged),
-        Some(_) => MembershipJudgment::Unauthorized,
-        // The fresh chain plus the fetched grant did not form a valid owner-anchored
-        // chain: the named grant is invalid (bad signature, signed by someone who is
-        // not a current owner, or it un-anchors the chain) and so does not establish
-        // this author's write access. Treat it as unauthorized — skip and advance —
-        // NEVER indeterminate. Indeterminate is reserved strictly for storage *read*
-        // failures (handled above); routing a validation failure there would let a
-        // member plant a parseable-but-invalid entry, name it as the grant, and stall
-        // every other device's pull forever — the exact failure this fix prevents. The
-        // rare cost is a genuinely-lagging intermediate entry (an owner who was
-        // themselves only just added); those rows still reach this device through the
-        // snapshot channel, so nothing is lost.
-        None => {
+    let fresh = match super::membership_ops::load_anchored_chain_with_candidates(
+        storage,
+        &entries,
+        std::slice::from_ref(coord),
+        owner_pubkey,
+        Some(db),
+    )
+    .await
+    {
+        Ok(Some(chain)) => chain,
+        Ok(None) => return MembershipJudgment::Unauthorized,
+        Err(super::membership_ops::AnchoredChainError::StorageUnavailable {
+            operation,
+            source,
+        }) => {
+            warn!(
+                %operation,
+                error = %source,
+                "membership storage unavailable while resolving a changeset grant"
+            );
+            return MembershipJudgment::Indeterminate;
+        }
+        Err(error) => {
             warn!(
                 grant_author = %coord.author_pubkey,
                 grant_seq = coord.seq,
-                "membership chain did not validate (or lost its owner anchor) after \
-                 merging the named grant; treating the changeset as unauthorized"
+                error = %error,
+                "named membership grant is not in a valid committed chain; rejecting changeset"
             );
-            MembershipJudgment::Unauthorized
-        }
-    }
-}
-
-/// Build a validated chain from `entries` that is also anchored to `owner_pubkey`
-/// when one is pinned (issue #102). Returns `None` if the entries don't form a
-/// valid chain OR the resulting chain's founder isn't the pinned owner — either
-/// way the chain must not be trusted to authorize a write. A store with no
-/// pinned owner (browsable) skips the anchor check.
-///
-/// `MembershipChain::from_entries` only hash-links its input: it has no notion of
-/// a signed `AuthorHead` or a watermark, so it cannot tell a complete listing from
-/// one missing its tail (nothing points forward to a dropped last entry) and
-/// cannot refuse a head that regresses a reader's prior view. So this must never
-/// be called on a listing-derived entry set — that is what
-/// [`load_anchored_chain`](super::membership_ops::load_anchored_chain) is for.
-/// Its only caller is [`resolve_membership_authorization`]'s merge step, where
-/// `entries` is the already head-committed, watermarked reload plus the one
-/// keyed-GET grant entry — both individually authenticated before they reach
-/// here, so re-validating their union with a bare hash-link check is safe.
-fn build_anchored_chain(
-    entries: Vec<MembershipEntry>,
-    owner_pubkey: Option<&str>,
-) -> Option<MembershipChain> {
-    let chain = match MembershipChain::from_entries(entries) {
-        Ok(chain) => chain,
-        Err(e) => {
-            warn!("membership entries did not form a valid chain: {e}");
-            return None;
+            return MembershipJudgment::Unauthorized;
         }
     };
-    match owner_pubkey {
-        Some(owner) if !chain.is_founded_by(owner) => None,
-        _ => Some(chain),
+
+    if fresh.can_write_now(author) && fresh.write_grant_coord(author).as_ref() == Some(coord) {
+        MembershipJudgment::Authorized(fresh)
+    } else {
+        MembershipJudgment::Unauthorized
     }
 }
 
@@ -1512,8 +1370,8 @@ pub(crate) fn cache_eager_blobs(
 /// author of a changeset uploads the blobs its rows introduce, into its own cloud
 /// prefix). A row updated without changing its blob re-references an existing
 /// object and introduces nothing, so it is not recorded here. Empty when the
-/// author is unknown (an unsigned browsable-store changeset carries no uploader
-/// segment). Returns `(namespace, blob_id, uploader)` for the local uploader index.
+/// author is unknown, which is possible only before membership initialization.
+/// Returns `(namespace, blob_id, uploader)` for the local uploader index.
 fn introduced_blob_uploads(
     blob_decls: &BlobDecls,
     old_changes: &[RowChange],

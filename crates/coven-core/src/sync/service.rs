@@ -290,7 +290,9 @@ pub async fn sync(
 }
 
 /// The storage coordinate of the membership entry that authorizes this device
-/// to write, or `None` for a solo/browsable store (no membership chain).
+/// to write. `None` means a pre-initialization caller supplied no chain or the
+/// current identity has no write grant; an initialized authorized writer has a
+/// coordinate.
 /// Embedded in the outgoing changeset so a puller can resolve a
 /// membership-propagation gap. Read off the cycle's once-loaded chain, so it
 /// judges the same membership state as the rest of the cycle rather than

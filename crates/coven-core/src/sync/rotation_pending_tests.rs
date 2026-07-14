@@ -24,7 +24,7 @@ use crate::storage::cloud::{
     RevokeOutcome,
 };
 use crate::sync::cloud_storage::{
-    cloud_aad_context, BlobPathScheme, CloudCipher, CloudSyncStorage,
+    cloud_aad_context, BlobPathScheme, CloudCipher, CloudCipherAccess, CloudSyncStorage,
 };
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
@@ -162,7 +162,7 @@ async fn found_add_and_fail_to_adopt_a_removal(
 
     custody.set_initial_key(old_key);
     custody.fail_writes();
-    let cipher_lock = storage.shared_cipher();
+    let cipher_lock = storage.cipher_state().clone();
     let pending_rotation = storage.shared_pending_rotation();
     let err = remove_member(
         &storage,
@@ -218,7 +218,7 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
     insert_shareable_row(&db, "n1", "0000000005000-0000-owner-device").await;
 
     let (_tmp, store_dir) = temp_store_dir();
-    let cipher_lock = storage.shared_cipher();
+    let cipher_lock = storage.cipher_state().clone();
     let pending_rotation = storage.shared_pending_rotation();
     let result = run_single_sync_cycle(
         &storage,
@@ -283,7 +283,7 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     insert_shareable_row(&db, "n1", "0000000005000-0000-owner-device").await;
 
     let (_tmp, store_dir) = temp_store_dir();
-    let cipher_lock = storage.shared_cipher();
+    let cipher_lock = storage.cipher_state().clone();
     let pending_rotation = storage.shared_pending_rotation();
 
     // Still stuck: a cycle now seals nothing.
@@ -379,7 +379,7 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     insert_shareable_row(&db, "n1", "0000000005000-0000-owner-device").await;
 
     let (_tmp, store_dir) = temp_store_dir();
-    let cipher_lock = storage.shared_cipher();
+    let cipher_lock = storage.cipher_state().clone();
     let pending_rotation = storage.shared_pending_rotation();
 
     run_single_sync_cycle(
@@ -436,13 +436,13 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
 fn assert_generation_two_opens_but_generation_one_does_not(
     home: &InMemoryCloudHome,
     key: &str,
-    cipher_lock: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     old_key: [u8; 32],
 ) {
     let sealed = home.get(key).expect("changeset object present at rest");
     let aad = cloud_aad_context(LIB_ID, key);
 
-    let current = cipher_lock.read().unwrap().clone();
+    let current = cipher.snapshot();
     current
         .open(sealed.clone(), &aad)
         .expect("the current (post-rotation) cipher opens the changeset");

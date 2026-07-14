@@ -11,16 +11,16 @@
 //! (`resume_drain_promptly`) are covered in `blob::transition_tests`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::blob::{BlobScope, CacheFill, Provenance};
 use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
-use crate::storage::cloud::CloudHome;
+use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::cycle::{self, run_single_sync_cycle};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
@@ -102,13 +102,13 @@ async fn seed_pending_upload(db: &Database) {
 /// gated-false row, which is what withholds a not-yet-uploaded unit.
 #[tokio::test]
 async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
-    let storage = MockSyncStorage::new();
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db();
     let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [5u8; 32],
     )));
-    let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
     // A slow/stuck upload for some OTHER unit is pending the whole time.
@@ -167,13 +167,13 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
 /// flips the gate when a manage's blobs land; here the flip is written directly.)
 #[tokio::test]
 async fn gated_false_row_propagates_once_its_gate_flips() {
-    let storage = MockSyncStorage::new();
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db();
     let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [8u8; 32],
     )));
-    let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
     // A note whose blobs aren't up yet: gate off.
@@ -381,7 +381,9 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
 async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     use crate::sync::cycle::ensure_owner_anchored_chain;
     use crate::sync::membership::founder_entry;
-    use crate::sync::membership_ops::{download_chain, OWNER_PUBKEY_STATE_KEY};
+    use crate::sync::membership_ops::{
+        download_chain, write_founder_entry, OWNER_PUBKEY_STATE_KEY,
+    };
 
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
@@ -420,6 +422,9 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
             .is_founded_by(&owner_pk),
         "the persisted chain is still founded by the owner after re-connect",
     );
+    let owner_before = db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap();
+    let floor_key = format!("membership_head_seq/{owner_pk}");
+    let floor_before = db.get_sync_state(&floor_key).await.unwrap();
 
     // Wiped membership/* with the owner still pinned → refuse (do not re-found).
     let wiped = MockSyncStorage::new();
@@ -429,6 +434,11 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
             .is_err(),
         "an empty chain with a pinned owner is tampering, not a fresh store",
     );
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        owner_before,
+    );
+    assert_eq!(db.get_sync_state(&floor_key).await.unwrap(), floor_before);
 
     // Refounded under an attacker's key with the owner pinned → refuse.
     let attacker = UserKeypair::generate();
@@ -448,6 +458,27 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
             .is_err(),
         "a chain refounded under a different key is a takeover attempt",
     );
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        owner_before,
+    );
+    assert_eq!(db.get_sync_state(&floor_key).await.unwrap(), floor_before);
+
+    let committed_foreign = MockSyncStorage::new();
+    write_founder_entry(&committed_foreign, &attacker, "0000000001000-0000-attacker")
+        .await
+        .unwrap();
+    assert!(
+        ensure_owner_anchored_chain(&committed_foreign, &db, &owner, &hlc)
+            .await
+            .is_err(),
+        "a committed foreign founder must not replace the pinned owner",
+    );
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        owner_before,
+    );
+    assert_eq!(db.get_sync_state(&floor_key).await.unwrap(), floor_before);
 }
 
 /// Founding writes the cloud founder entry before pinning the owner, so a crash
@@ -504,6 +535,302 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
             .is_err(),
         "a foreign chain with no pinned owner must be refused, not adopted on trust",
     );
+}
+
+fn cloud_objects(home: &InMemoryCloudHome) -> BTreeMap<String, Vec<u8>> {
+    home.keys()
+        .into_iter()
+        .map(|key| {
+            let bytes = home.get(&key).expect("listed cloud object");
+            (key, bytes)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
+    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+
+    let home = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+    let db = open_test_db();
+    let cipher = CloudCipher::Plaintext;
+    let storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        cipher.clone(),
+        BlobPathScheme::Plain,
+        "test-lib",
+        owner.clone(),
+    );
+
+    cycle::init_sync_over_storage(&db, storage)
+        .await
+        .expect("initialize plaintext storage");
+
+    assert!(
+        home.get(&format!("membership/{owner_pk}/1")).is_some(),
+        "plaintext initialization publishes the founder entry",
+    );
+    assert!(
+        home.get(&format!("membership/{owner_pk}/head")).is_some(),
+        "plaintext initialization publishes the signed founder head",
+    );
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        Some(owner_pk.clone()),
+    );
+    assert_eq!(
+        db.get_sync_state(&format!("membership_head_seq/{owner_pk}"))
+            .await
+            .unwrap(),
+        Some("1".to_string()),
+        "the owner pin and committed head floor are both persisted",
+    );
+}
+
+#[tokio::test]
+async fn initialization_completes_a_listed_self_founder_without_a_head() {
+    use crate::sync::membership::founder_entry;
+    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+
+    let home = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+    let storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        owner.clone(),
+    );
+    let founder_bytes = serde_json::to_vec(&founder_entry(
+        &owner,
+        "0000000001000-0000-interrupted-founder",
+    ))
+    .unwrap();
+    storage
+        .put_membership_entry(&owner_pk, 1, founder_bytes.clone())
+        .await
+        .unwrap();
+
+    let db = open_test_db();
+    cycle::init_sync_over_storage(&db, storage)
+        .await
+        .expect("complete the interrupted self-founding operation");
+
+    assert_eq!(
+        home.get(&format!("membership/{owner_pk}/1")),
+        Some(founder_bytes),
+        "the existing self-founder entry is preserved byte-for-byte",
+    );
+    assert!(home.get(&format!("membership/{owner_pk}/head")).is_some());
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        Some(owner_pk.clone()),
+    );
+    assert_eq!(
+        db.get_sync_state(&format!("membership_head_seq/{owner_pk}"))
+            .await
+            .unwrap(),
+        Some("1".to_string()),
+    );
+}
+
+#[tokio::test]
+async fn initialization_ignores_a_listed_foreign_founder_without_a_head() {
+    use crate::sync::membership::founder_entry;
+    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+
+    let home = InMemoryCloudHome::new();
+    let attacker = UserKeypair::generate();
+    let attacker_pk = pubkey_hex(&attacker);
+    let attacker_storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        attacker.clone(),
+    );
+    let foreign_bytes = serde_json::to_vec(&founder_entry(
+        &attacker,
+        "0000000001000-0000-uncommitted-foreign-founder",
+    ))
+    .unwrap();
+    attacker_storage
+        .put_membership_entry(&attacker_pk, 1, foreign_bytes.clone())
+        .await
+        .unwrap();
+
+    let owner = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+    let storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        owner,
+    );
+    let db = open_test_db();
+    cycle::init_sync_over_storage(&db, storage)
+        .await
+        .expect("unsigned foreign entries do not establish store ownership");
+
+    assert_eq!(
+        home.get(&format!("membership/{attacker_pk}/1")),
+        Some(foreign_bytes),
+        "initialization does not rewrite an unrelated uncommitted entry",
+    );
+    assert!(home
+        .get(&format!("membership/{attacker_pk}/head"))
+        .is_none());
+    assert!(home.get(&format!("membership/{owner_pk}/head")).is_some());
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        Some(owner_pk.clone()),
+    );
+    assert_eq!(
+        db.get_sync_state(&format!("membership_head_seq/{owner_pk}"))
+            .await
+            .unwrap(),
+        Some("1".to_string()),
+    );
+}
+
+#[tokio::test]
+async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
+    use crate::sync::membership_ops::{write_founder_entry, OWNER_PUBKEY_STATE_KEY};
+
+    let home = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+    let storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        owner.clone(),
+    );
+    write_founder_entry(&storage, &owner, "0000000001000-0000-founder")
+        .await
+        .unwrap();
+    let cloud_before = cloud_objects(&home);
+
+    let db = open_test_db();
+    cycle::init_sync_over_storage(&db, storage)
+        .await
+        .expect("accept the identity's committed founder");
+
+    assert_eq!(cloud_objects(&home), cloud_before);
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        Some(owner_pk.clone()),
+    );
+    assert_eq!(
+        db.get_sync_state(&format!("membership_head_seq/{owner_pk}"))
+            .await
+            .unwrap(),
+        Some("1".to_string()),
+    );
+}
+
+#[tokio::test]
+async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mutation() {
+    use crate::sync::membership_ops::{write_founder_entry, OWNER_PUBKEY_STATE_KEY};
+
+    let home = InMemoryCloudHome::new();
+    let attacker = UserKeypair::generate();
+    let attacker_storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        attacker.clone(),
+    );
+    write_founder_entry(&attacker_storage, &attacker, "0000000001000-0000-attacker")
+        .await
+        .unwrap();
+    let cloud_before = cloud_objects(&home);
+
+    let victim = UserKeypair::generate();
+    let victim_pk = pubkey_hex(&victim);
+    let db = open_test_db();
+    let cipher = CloudCipher::Plaintext;
+    let victim_storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        cipher.clone(),
+        BlobPathScheme::Plain,
+        "test-lib",
+        victim.clone(),
+    );
+
+    assert!(
+        cycle::init_sync_over_storage(&db, victim_storage)
+            .await
+            .is_err(),
+        "a committed foreign founder prevents initialization",
+    );
+    assert_eq!(
+        db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        None,
+    );
+    assert_eq!(
+        db.get_sync_state(&format!("membership_head_seq/{victim_pk}"))
+            .await
+            .unwrap(),
+        None,
+    );
+    let cloud_after = cloud_objects(&home);
+    assert_eq!(cloud_after, cloud_before, "cloud objects are unchanged");
+}
+
+#[tokio::test]
+async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
+    for (cipher, blob_paths) in [
+        (CloudCipher::Plaintext, BlobPathScheme::Hashed),
+        (
+            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+            BlobPathScheme::Plain,
+        ),
+    ] {
+        let home = InMemoryCloudHome::new();
+        let owner = UserKeypair::generate();
+        let db = open_test_db();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            cipher.clone(),
+            blob_paths,
+            "test-lib",
+            owner.clone(),
+        );
+        db.set_sync_state(crate::sync::cloud_storage::PENDING_ROTATION_STATE_KEY, "9")
+            .await
+            .unwrap();
+        let pending_rotation = storage.shared_pending_rotation();
+
+        assert!(
+            cycle::init_sync_over_storage(&db, storage).await.is_err(),
+            "incoherent at-rest representation must be refused",
+        );
+        assert!(home.is_empty(), "the cloud is unchanged");
+        assert_eq!(
+            db.get_sync_state("owner_pubkey").await.unwrap(),
+            None,
+            "the local owner is not pinned",
+        );
+        assert_eq!(
+            pending_rotation.pending_generation(),
+            None,
+            "the in-memory pending-rotation marker is not restored",
+        );
+        assert_eq!(
+            db.get_sync_state(crate::sync::cloud_storage::PENDING_ROTATION_STATE_KEY)
+                .await
+                .unwrap(),
+            Some("9".to_string()),
+            "the durable pending-rotation state is unchanged",
+        );
+    }
 }
 
 // ---- Host writes journal; applies never do ----
@@ -815,7 +1142,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
 
     // A peer A has published one changeset (an insert of note 'a1') to shared
     // storage, so M's cycle has something to fetch — the await we inject at.
-    let inner = MockSyncStorage::new();
+    let inner = MockSyncStorage::with_keypair(keypair.clone());
     let a_src = open_test_db();
     let a_cs = capture_bytes(
         &a_src,
@@ -880,7 +1207,7 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     )));
 
     // Peer A publishes a changeset; M pulls and applies it in cycle 1.
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let a_src = open_test_db();
     let a_cs = capture_bytes(
         &a_src,

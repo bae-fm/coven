@@ -21,7 +21,6 @@ use crate::keys::{StoreKeys, UserKeypair};
 use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::store_dir::StoreLayout;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
-use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::join::{
     bootstrap_and_save_store, cleanup_after_bootstrap_failure, open_db_and_pull, BootstrapContext,
@@ -37,6 +36,7 @@ use crate::sync::snapshot::{
     bootstrap_from_snapshot, create_snapshot, push_snapshot, SnapshotBlobPreflight,
 };
 use crate::sync::storage::SyncStorage;
+use crate::sync::test_helpers::run_test_cycle;
 use crate::sync::test_helpers::{
     append_membership_entry, exec, founder_entry, open_test_db, open_test_db_with_blob, pubkey_hex,
     publish_membership_chain_head, temp_store_dir, test_migrations, test_synced_tables,
@@ -392,10 +392,9 @@ async fn failed_restore_does_not_block_a_retry_with_store_exists() {
 /// call — and blocks its final write by seeding a directory at the exact path
 /// `config.yaml` needs.
 ///
-/// The store is chain-less (no membership entries published), so `open_db_and_pull`
-/// takes the no-owner-to-pin path and this test needs no invite/membership
-/// setup — only a snapshot the owner published, mirroring the bootstrap tests
-/// in `join_tests.rs`.
+/// The membership listing is empty, so `open_db_and_pull` exercises its
+/// pre-initialization, no-owner-to-pin path. This test needs only a snapshot the
+/// owner published, mirroring the bootstrap tests in `join_tests.rs`.
 #[tokio::test]
 async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     crate::keys::test_keyring::install();
@@ -709,7 +708,7 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
     // B's first real sync cycle, with no local changes of its own.
     let enc_lock = RwLock::new(cipher.clone());
     let b_hlc = Hlc::new("device-b".to_string());
-    run_single_sync_cycle(
+    run_test_cycle(
         &joiner_storage,
         store_id,
         "device-b",
@@ -758,8 +757,8 @@ async fn restore_pins_the_chain_founder_as_owner() {
     append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
     publish_membership_chain_head(&storage, &chain, &owner_keypair).await;
 
-    // A chain-less-looking but chain-bearing store: the owner also publishes an
-    // (empty) snapshot, the shape `bootstrap_from_snapshot` needs to succeed.
+    // The owner also publishes an empty snapshot, the shape
+    // `bootstrap_from_snapshot` needs to succeed.
     let db_owner = open_test_db();
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
@@ -832,7 +831,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
 /// a restore code seeds the same per-author watermark from its own floor. Owner
 /// pinning follows this call in the restore flow, but the accepted floor is
 /// already authoritative: the bootstrap pull must reject a lower signed head
-/// instead of treating a failed unpinned chain load as a chain-less store.
+/// instead of treating a failed unpinned chain load as pre-initialization.
 #[tokio::test]
 async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap() {
     use crate::sync::membership::{entry_hash, AuthorHead, MemberRole, MembershipAction};

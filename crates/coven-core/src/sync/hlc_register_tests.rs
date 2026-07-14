@@ -145,7 +145,7 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         "dev-a",
         &HashMap::new(),
         &temp_store_dir().1,
-        // No membership: this test's storage holds no chain (a browsable pull).
+        // Exercise pull directly before membership initialization.
         None,
         None,
     )
@@ -200,7 +200,7 @@ async fn pull_advances_register_as_each_changeset_applies() {
         "dev-b",
         &HashMap::new(),
         &temp_store_dir().1,
-        // No membership: this test's storage holds no chain (a browsable pull).
+        // Exercise pull directly before membership initialization.
         None,
         None,
     )
@@ -251,11 +251,11 @@ fn reconstructed_clock_does_not_regress_below_persisted_high_water() {
 /// Revocation is enforced by current membership, not by when a changeset claims
 /// to have been authored. A removed member signs a changeset whose envelope
 /// timestamp falls between their Add and Remove entries; pull must still reject it
-/// because the author is not a current member. The removed member's device signs
-/// its own head, so the rejection now lands at the head check (a removed member's
-/// head is skipped before its changesets are even fetched) — strictly stronger
-/// than the changeset-level check, and still keyed on *current* membership rather
-/// than the (spoofable) envelope timestamp.
+/// because the author lacks an exact current membership grant. Pull examines every
+/// verified head so a newly-added member's stream is not lost before its grant is
+/// discovered, then rejects this envelope against the current chain and advances
+/// past it. Authorization is keyed on current membership rather than the
+/// author-supplied envelope timestamp.
 #[tokio::test]
 async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     let owner = UserKeypair::generate();
@@ -333,9 +333,11 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         "a removed member's changeset must be rejected",
     );
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    // The removed member's head is skipped, so its changeset is never fetched and
-    // its cursor is never advanced (nothing was examined to advance past).
-    assert_eq!(updated.get("member-device"), None);
+    // Every verified head is examined so a newly-added member stream cannot be
+    // discarded before its grant is discovered. This envelope lacks an exact
+    // current grant, so it is rejected without applying its row and the cursor
+    // advances past the examined position.
+    assert_eq!(updated.get("member-device"), Some(&1));
 }
 
 /// `Database::open` seeds the register from the persisted high-water mark, so the

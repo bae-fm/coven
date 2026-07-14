@@ -8,8 +8,8 @@
 //! single-threaded task on the event loop: [`wasm_bindgen_futures::spawn_local`]
 //! schedules it, and a [`gloo_timers::future::TimeoutFuture`] is the idle/backoff
 //! wait between cycles in place of `tokio::time::sleep`. The loop holds the
-//! clone-shareable [`Database`] / `CloudSyncStorage`, browser-local `Rc` control
-//! state, and shared core handles such as the database's `Arc<Hlc>`.
+//! initialized [`SyncComponents`], browser-local `Rc` control state, and per-run
+//! host services.
 //!
 //! The loop mirrors the native one's shape: an initial delay so it does not race
 //! page startup, then run-cycle → wait → repeat. Shared loop policy resets or
@@ -19,7 +19,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::{Arc, RwLock};
 
 use futures_util::future::{select, Either};
 use gloo_timers::future::TimeoutFuture;
@@ -27,14 +26,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
-use crate::database::Database;
-use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
 
-use super::cloud_storage::{CloudCipher, CloudSyncStorage};
-use super::hlc::Hlc;
+use super::cycle::SyncComponents;
 use super::loop_policy::{self, LoopWait, SyncLoopAlerts, SyncLoopReport};
-use super::storage::SyncStorage;
 
 /// Timing knobs for the loop. The native loop's cadence — which a host wires up —
 /// is a 3 s startup grace, a 30 s idle interval, and a 300 s failure-backoff cap;
@@ -50,35 +45,21 @@ pub struct WasmSyncSchedule {
 }
 
 /// What a sync cycle needs, owned together so the loop re-borrows them each
-/// iteration. The wasm counterpart of the native loop's `SyncLoopInner`, but with
-/// single-threaded types: the clone-shareable [`Database`] and
-/// [`CloudSyncStorage`] are held directly, while browser-local loop state stays
-/// behind `Rc`.
+/// iteration. The wasm counterpart of the native loop's `SyncLoopInner`, with the
+/// initialized session kept whole while browser-local loop state stays behind
+/// `Rc`.
 ///
 /// The whole bundle lives behind one `Rc` so [`WasmSyncRuntime::start`] can move a
 /// clone into the spawned task without moving the runtime itself.
 struct CycleInputs {
-    storage: CloudSyncStorage,
-    hlc: Arc<Hlc>,
-    store_id: String,
-    device_id: String,
-    /// The at-rest cipher, shared with `storage` (the same `Arc<RwLock<CloudCipher>>`
-    /// the [`CloudSyncStorage`] seals/opens with, via its
-    /// [`shared_cipher`](CloudSyncStorage::shared_cipher)). One lock so a key
-    /// rotation through either is seen by both — the cycle re-seals control objects
-    /// under the rotated key while the storage reads/writes under it. `Arc` (not
-    /// `Rc`) because that is the type the storage exposes; on the single-threaded
-    /// browser runtime the choice is immaterial to behavior.
-    cipher: Arc<RwLock<CloudCipher>>,
-    db: Database,
-    user_keypair: UserKeypair,
+    components: SyncComponents,
     clock: ClockRef,
     store_dir: StoreDir,
     observer: Option<Rc<dyn BlobTransitionObserver>>,
 }
 
-/// Drives [`super::cycle::run_single_sync_cycle`] repeatedly on the browser event
-/// loop. Construct, then [`start`](Self::start); [`trigger`](Self::trigger) /
+/// Drives [`SyncComponents::run_cycle`] repeatedly on the browser event loop.
+/// Construct, then [`start`](Self::start); [`trigger`](Self::trigger) /
 /// [`sync_now`](Self::sync_now) wake it immediately, [`stop`](Self::stop) ends it.
 pub struct WasmSyncRuntime {
     inputs: Rc<CycleInputs>,
@@ -92,21 +73,10 @@ pub struct WasmSyncRuntime {
 }
 
 impl WasmSyncRuntime {
-    /// Assemble a runtime over the cycle's inputs. The [`Database`] and
-    /// [`CloudSyncStorage`] are clone-shareable; the runtime takes ownership of
-    /// the clones the host hands it. Pass the storage's own cipher lock
-    /// ([`CloudSyncStorage::shared_cipher`]) as `cipher` so the cycle and the
-    /// storage seal/open under one rotating key. Does not start the loop — call
-    /// [`start`](Self::start).
-    #[allow(clippy::too_many_arguments)]
+    /// Assemble a runtime over an initialized sync session. Does not start the
+    /// loop — call [`start`](Self::start).
     pub fn new(
-        storage: CloudSyncStorage,
-        store_id: String,
-        device_id: String,
-        hlc: Arc<Hlc>,
-        cipher: Arc<RwLock<CloudCipher>>,
-        db: Database,
-        user_keypair: UserKeypair,
+        components: SyncComponents,
         clock: ClockRef,
         store_dir: StoreDir,
         observer: Option<Rc<dyn BlobTransitionObserver>>,
@@ -114,13 +84,7 @@ impl WasmSyncRuntime {
     ) -> Self {
         Self {
             inputs: Rc::new(CycleInputs {
-                storage,
-                hlc,
-                store_id,
-                device_id,
-                cipher,
-                db,
-                user_keypair,
+                components,
                 clock,
                 store_dir,
                 observer,
@@ -237,8 +201,8 @@ impl WasmSyncRuntime {
     }
 
     #[cfg(all(test, target_arch = "wasm32"))]
-    pub(crate) fn hlc_is_for_test(&self, expected: &Arc<Hlc>) -> bool {
-        Arc::ptr_eq(&self.inputs.hlc, expected)
+    pub(crate) fn hlc_is_for_test(&self, expected: &std::sync::Arc<super::hlc::Hlc>) -> bool {
+        std::sync::Arc::ptr_eq(self.inputs.components.hlc(), expected)
     }
 }
 
@@ -251,28 +215,15 @@ impl Drop for WasmSyncRuntime {
 /// Run one sync cycle over the owned inputs. Re-borrows each input per call (the
 /// loop owns them); no borrow spans the awaits inside the cycle.
 async fn run_one_cycle(inputs: &CycleInputs) -> Result<super::cycle::SyncCycleResult, String> {
-    let storage: &dyn SyncStorage = &inputs.storage;
-    let cloud_home = inputs.storage.cloud_home();
-    let pending_rotation = inputs.storage.shared_pending_rotation();
-
-    let result = super::cycle::run_single_sync_cycle(
-        storage,
-        &inputs.store_id,
-        &inputs.device_id,
-        &inputs.hlc,
-        inputs.clock.as_ref(),
-        &inputs.db,
-        &inputs.cipher,
-        &pending_rotation,
-        &inputs.user_keypair,
-        None,
-        &inputs.store_dir,
-        Some(cloud_home),
-        inputs.observer.as_deref(),
-    )
-    .await?;
-
-    Ok(result)
+    inputs
+        .components
+        .run_cycle(
+            inputs.clock.as_ref(),
+            None,
+            &inputs.store_dir,
+            inputs.observer.as_deref(),
+        )
+        .await
 }
 
 fn log_alerts(alerts: &SyncLoopAlerts) {

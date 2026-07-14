@@ -5,6 +5,12 @@ append-only, Ed25519-signed log of membership changes, the membership chain.
 Pull verifies both each changeset's own signature and the chain itself, so the
 cloud provider never has to be trusted with who is allowed to write.
 
+Every initialized store has this chain, including a store with one writer and a
+browsable cloud home. Creation publishes a self-signed Owner entry and its
+signed head, then pins that founder locally before a sync runtime can start.
+"Browsable" describes cloud visibility and readable blob paths; it does not
+disable membership authorization.
+
 coven shares a store by **membership**: it grants the *whole store* to
 another *writer*, a peer with their own identity in the chain, by sealing the
 store keyring to that member's keypair. The store is the unit of sharing —
@@ -189,8 +195,8 @@ For each incoming changeset envelope,
 1. Verifies the envelope's signature against its embedded `author_pubkey`. A
    bad signature holds that device's cursor and stops that stream for the
    cycle (see [Sync](/docs/sync-model#one-bad-object-stops-one-stream)).
-2. If the store has a membership chain, checks the author against the exact
-   membership entry the changeset names. Every changeset carries the
+2. Checks the author against the exact membership entry the changeset names.
+   Every accepted changeset carries the
    [`MembershipCoord`](rustdoc:struct:coven::sync::membership::MembershipCoord)
    of the entry that grants its author write access; a puller whose chain
    listing has not caught up fetches exactly that one object by key (a keyed
@@ -200,9 +206,9 @@ For each incoming changeset envelope,
    Follower, or forged) is skipped and the cursor advances past it, surfaced
    in `PullResult::rejected_unauthorized`.
 
-A store with no membership entries (one person, no chain established yet)
-accepts unsigned envelopes; the chain check only runs once the chain is
-non-empty.
+An initialized store never accepts an unsigned envelope or a changeset without
+a valid write grant. A missing, wiped, malformed, or differently founded chain
+prevents the sync runtime from starting instead of opening authorization.
 
 ## Revocation is key rotation
 
@@ -359,4 +365,3 @@ consumer cloud the user re-authenticates during restore.
 Because the code contains the store keyring and any stored credentials, it is
 the most sensitive string coven produces; anyone holding it has full access to
 the store.
-

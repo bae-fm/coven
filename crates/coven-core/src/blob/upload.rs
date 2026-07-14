@@ -39,7 +39,7 @@ use crate::database::{Database, DbError};
 use crate::db::{OutboxEntry, OutboxOperation};
 use crate::storage::cloud::{BlobBody, CloudHome, CloudHomeError};
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
+use crate::sync::cloud_storage::{CloudCipherAccess, PendingRotation};
 use crate::sync::gate::Gates;
 use crate::sync::hlc::Hlc;
 
@@ -159,7 +159,7 @@ async fn record_failure(
 /// (warn + record + skip). A rotation this device has not adopted surfaces the
 /// same way — the entry stays queued and is retried once adoption clears it.
 async fn open_scoped_body(
-    cipher: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
     file_path: &Path,
     store_id: &str,
@@ -168,7 +168,7 @@ async fn open_scoped_body(
 ) -> Result<BlobBody, String> {
     // Snapshot the cipher out of the lock so the (streaming, await-holding) body
     // doesn't keep the guard across the upload.
-    let cipher = cipher.read().unwrap().clone();
+    let cipher = cipher.snapshot();
     pending_rotation.check(&cipher).map_err(|e| e.to_string())?;
     let aad_context = crate::sync::cloud_storage::cloud_aad_context(store_id, cloud_key);
     cipher.open_body(scope, file_path, &aad_context).await
@@ -216,7 +216,7 @@ pub struct DrainOutcome {
 pub async fn drain_uploads(
     db: &Database,
     cloud_home: &dyn CloudHome,
-    cipher: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
     store_id: &str,
     store_dir: &StoreDir,
@@ -370,7 +370,7 @@ fn next_ready_entry(
 async fn upload_entry(
     db: &Database,
     cloud_home: &dyn CloudHome,
-    cipher: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
     store_id: &str,
     store_dir: &StoreDir,
@@ -485,7 +485,7 @@ async fn upload_entry(
     // row is removed below), so the tombstone-cancel drain retries until the tombstone
     // is gone. If even that enqueue fails, leave the outbox row so next cycle's
     // idempotent re-upload retries — never remove the row and strand the tombstone.
-    let suffix = cipher.read().unwrap().suffix();
+    let suffix = cipher.snapshot().suffix();
     if let Err(e) = crate::blob::delete::cancel_tombstone_or_enqueue(
         db,
         cloud_home,

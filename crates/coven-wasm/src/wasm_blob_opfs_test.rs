@@ -16,21 +16,18 @@
 //! browser profile (so OPFS starts empty); within one run, tests use disjoint
 //! path prefixes so they don't collide.
 
-use std::path::Path;
-use std::sync::RwLock;
-
 use rusqlite::OptionalExtension;
+use std::path::Path;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 use crate::blob::{local_files, BlobRef, BlobScope, CacheFill, Provenance};
 use crate::clock::SystemClock;
 use crate::database::{Database, DbError};
+use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
-use crate::sync::cycle::run_single_sync_cycle;
-use crate::sync::hlc::Hlc;
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::session::BlobDecl;
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{test_migrations, test_synced_tables_with_blob};
@@ -59,39 +56,20 @@ fn open_device(device_id: &str) -> Database {
 }
 
 /// Run one full sync cycle for `device_id` over `storage`. coven derives
-/// `note_photos`'s blob from the declaration on the synced set. Plaintext at rest,
-/// no live cloud home (changeset + blob I/O go through `storage`).
-async fn run_cycle(
-    storage: &CloudSyncStorage,
-    db: &Database,
-    device_id: &str,
-    store_dir: &StoreDir,
-) {
-    let cipher = RwLock::new(CloudCipher::Plaintext);
-    let pending_rotation = PendingRotation::none();
-    let keypair = UserKeypair::generate();
-    let hlc = Hlc::new(device_id.to_string());
+/// `note_photos`'s blob from the declaration on the synced set. Changeset and
+/// blob I/O use the supplied storage, including its fixed at-rest cipher.
+async fn run_cycle(storage: CloudSyncStorage, db: &Database, store_dir: &StoreDir) {
     db.set_sync_state("snapshot_seq", "0")
         .await
         .expect("seed snapshot floor for blob wasm test");
 
-    run_single_sync_cycle(
-        storage,
-        "test-lib",
-        device_id,
-        &hlc,
-        &SystemClock,
-        db,
-        &cipher,
-        &pending_rotation,
-        &keypair,
-        None,
-        store_dir,
-        None,
-        None,
-    )
-    .await
-    .expect("sync cycle");
+    let components = crate::sync::cycle::init_sync_over_storage(db, storage)
+        .await
+        .expect("initialize sync session");
+    components
+        .run_cycle(&SystemClock, None, store_dir, None)
+        .await
+        .expect("sync cycle");
 }
 
 /// `local_blob` over OPFS: write creates parent directories, read returns the
@@ -174,6 +152,7 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
 
     let db_a = open_device("device-a");
     let db_b = open_device("device-b");
+    let identity = UserKeypair::generate();
     let photo_bytes = b"\x89PNG\r\n\x1a\n fake image bytes for photo-1".to_vec();
 
     // Device A: a shared note plus a `note_photos` row (the blob-bearing child,
@@ -201,12 +180,12 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
 
     let storage_a = CloudSyncStorage::new(
         std::sync::Arc::new(cloud.clone()),
-        CloudCipher::Plaintext,
+        CloudCipher::Encrypted(EncryptionService::from_key([8u8; 32])),
         BlobPathScheme::Hashed,
         "wasm-blob-opfs-test",
-        UserKeypair::generate(),
+        identity.clone(),
     );
-    run_cycle(&storage_a, &db_a, "device-a", &lib_a).await;
+    run_cycle(storage_a, &db_a, &lib_a).await;
 
     // B has not pulled, so the blob is not in B's cache yet.
     let b_cache = lib_b
@@ -222,12 +201,12 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
     // `download_blobs` writes the photo (a CacheEager blob) into B's evictable cache.
     let storage_b = CloudSyncStorage::new(
         std::sync::Arc::new(cloud.clone()),
-        CloudCipher::Plaintext,
+        CloudCipher::Encrypted(EncryptionService::from_key([8u8; 32])),
         BlobPathScheme::Hashed,
         "wasm-blob-opfs-test",
-        UserKeypair::generate(),
+        identity,
     );
-    run_cycle(&storage_b, &db_b, "device-b", &lib_b).await;
+    run_cycle(storage_b, &db_b, &lib_b).await;
 
     // The row crossed...
     let has_photo_row = db_b

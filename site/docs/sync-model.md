@@ -80,6 +80,12 @@ nothing and produces empty changesets forever, so
 [`init_sync_over_storage`](rustdoc:fn:coven::sync::cycle::init_sync_over_storage)
 treats an empty set as a hard error and refuses to start.
 
+Initialization also requires a signed, owner-anchored membership chain. A new
+store publishes its self-signed Owner founder and signed head, then records the
+founder and complete accepted head floor together before it returns a runnable
+session. This applies to both opaque and browsable cloud homes; browsable changes
+object visibility and blob path naming, not authorization.
+
 ## Reads
 
 Reads don't need capture, and they don't get it. Two read paths exist, and
@@ -113,9 +119,8 @@ rows while capturing nothing, which is routine and silent.
 Everything this page promises is enforced in one loop that runs the same
 steps in the same order every cycle. A background loop runs one cycle at a
 time.
-[`run_single_sync_cycle`](rustdoc:fn:coven::sync::cycle::run_single_sync_cycle)
-loads the persisted sync state each cycle (rather than holding it across calls)
-and drives these steps:
+The initialized sync session loads the persisted sync state each cycle (rather
+than holding it across calls) and drives these steps:
 
 1. Capture the outgoing changeset and reset the recorded batch. Capture stays
    enabled: a host write that lands later in this cycle is recorded into the next
@@ -182,8 +187,8 @@ order. For each one it:
   [`Database::schema_version`](rustdoc:method:coven::database::Database::schema_version);
 - verifies the Ed25519 signature
   ([`verify_changeset_signature`](rustdoc:fn:coven::sync::envelope::verify_changeset_signature));
-- if the store has a membership chain, checks the author could write under
-  the exact membership entry the changeset is signed against;
+- checks the author could write under the exact membership entry the changeset
+  is signed against;
 - applies the changeset (the [merge](/docs/merge), with capture disabled only
   around this one apply), advancing the clock past its stamps;
 - downloads any `CacheEager` blobs it references into the [cache](/docs/cache).
@@ -252,9 +257,8 @@ Pull enforces it two ways:
   [`PullError::SchemaVersionTooOld`](rustdoc:enum:coven::sync::pull::PullError)
   and syncs nothing. Its `Display` is the message shown to the user: update the
   app to keep syncing. This is permanent until the user upgrades. The floor
-  object is untrusted input, so with a membership chain present it is honored
-  only when signed by a current Owner; anything else is a freeze or downgrade
-  attempt and is ignored.
+  object is untrusted input, so it is honored only when signed by a current
+  Owner; anything else is a freeze or downgrade attempt and is ignored.
 - **Per-changeset skip.** A single changeset whose `schema_version` is above the
   local one is skipped (counted in `PullResult::skipped_schema`); the device
   leaves its cursor where it is and stops pulling that device for the cycle. The
@@ -292,28 +296,23 @@ The loop runs on a dedicated OS thread with its own current-thread tokio runtime
 Database access goes through async calls on the `Database` handle, so the loop
 holds nothing tied to a thread; the dedicated thread is for stack size
 (aws-sdk-s3's endpoint resolution recurses deeply enough to overflow the default
-secondary-thread stack in debug builds). After each cycle it emits a
-[`SyncLoopStatus`](rustdoc:struct:coven::sync::sync_loop::SyncLoopStatus) over a
-broadcast channel; the host observes the stream with
-[`SyncLoopHandle::subscribe`](rustdoc:method:coven::sync::sync_loop::SyncLoopHandle::subscribe):
+secondary-thread stack in debug builds). Each cycle emits a
+[`SyncLoopStatus`](rustdoc:enum:coven::SyncLoopStatus) over a broadcast channel;
+the host observes the stream with
+[`CovenHandle::subscribe_sync_status`](rustdoc:method:coven::CovenHandle::subscribe_sync_status):
 
 ```rust
-pub struct SyncLoopStatus {
-    pub configured: bool,
-    pub syncing: bool,
-    pub last_sync_time: Option<String>,
-    pub error: Option<String>,
-    pub device_count: u32,
-    pub data_changed: bool,
-    pub row_changes: Option<Vec<RowChange>>,
+pub enum SyncLoopStatus {
+    Started,
+    Succeeded(SyncLoopSuccess),
+    Failed { error: String },
 }
 ```
 
-`error` carries a user-facing message when a cycle hit a hard failure, a
-schema-too-old floor, asset-download failures, or schema skips. `data_changed`
-is true when any changeset applied, and `row_changes` then carries those changes
-([`RowChange`](rustdoc:struct:coven::changeset::RowChange)) for the host to map
-to its own domain events.
+`Failed` carries a user-facing message for a whole-cycle failure. `Succeeded`
+carries [`SyncLoopSuccess`](rustdoc:struct:coven::SyncLoopSuccess), including
+alerts, device activity, and applied row changes for the host to map to its own
+domain events.
 
 ## Backoff
 

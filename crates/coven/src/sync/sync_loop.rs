@@ -21,16 +21,15 @@ use tracing::{debug, error, info};
 
 use crate::blob::BlobTransitionObserver;
 use crate::clock::ClockRef;
+use crate::config::Config;
 use crate::coven::StoreOpenGuard;
-use crate::database::Database;
-use crate::keys::{MasterKeyCustody, UserKeypair};
+use crate::keys::MasterKeyCustody;
 use crate::store_dir::StoreDir;
 
-use super::cloud_storage::{CloudCipher, CloudSyncStorage};
+use super::cloud_storage::{BlobPathScheme, CloudSyncStorage};
 use super::cycle::SyncComponents;
 use super::hlc::Hlc;
 use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
-use super::storage::SyncStorage;
 
 /// Why starting or stopping the background sync loop failed.
 #[derive(Debug, thiserror::Error)]
@@ -78,6 +77,7 @@ pub enum SyncLoopStatus {
 pub(crate) struct SyncLoopHandle {
     inner: Arc<SyncLoopInner>,
     clock: ClockRef,
+    config: Config,
     store_dir: StoreDir,
     trigger_tx: tokio::sync::mpsc::Sender<()>,
     trigger_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
@@ -92,13 +92,7 @@ pub(crate) struct SyncLoopHandle {
 }
 
 struct SyncLoopInner {
-    storage: Arc<CloudSyncStorage>,
-    hlc: Arc<Hlc>,
-    store_id: String,
-    device_id: String,
-    cipher: Arc<std::sync::RwLock<CloudCipher>>,
-    db: Database,
-    user_keypair: UserKeypair,
+    components: SyncComponents,
     custody: Arc<dyn MasterKeyCustody>,
     observer: Option<Arc<dyn BlobTransitionObserver>>,
 
@@ -113,31 +107,26 @@ struct SyncLoopInner {
 impl SyncLoopHandle {
     pub(crate) fn new(
         components: SyncComponents,
-        db: Database,
         custody: Arc<dyn MasterKeyCustody>,
         clock: ClockRef,
-        store_dir: StoreDir,
+        config: Config,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,
         status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
     ) -> Self {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let store_dir = config.store_dir.clone();
 
         Self {
             inner: Arc::new(SyncLoopInner {
-                storage: components.storage,
-                hlc: components.hlc,
-                store_id: components.store_id,
-                device_id: components.device_id,
-                cipher: components.cipher,
-                db,
-                user_keypair: components.user_keypair,
+                components,
                 custody,
                 observer,
                 _open_guard: open_guard,
             }),
             clock,
+            config,
             store_dir,
             trigger_tx,
             trigger_rx: std::sync::Mutex::new(Some(trigger_rx)),
@@ -329,19 +318,81 @@ impl SyncLoopHandle {
     // -- Accessors for membership operations --
 
     pub(crate) fn storage(&self) -> &Arc<CloudSyncStorage> {
-        &self.inner.storage
+        self.inner.components.storage()
     }
 
-    pub(crate) fn user_keypair(&self) -> &UserKeypair {
-        &self.inner.user_keypair
+    pub(crate) fn store_dir(&self) -> &StoreDir {
+        &self.store_dir
+    }
+
+    pub(crate) fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
+        self.inner.components.blob_path_scheme()
+    }
+
+    pub(crate) fn self_uploader(&self) -> String {
+        self.inner.components.self_uploader()
     }
 
     pub(crate) fn hlc(&self) -> &Arc<Hlc> {
-        &self.inner.hlc
+        self.inner.components.hlc()
     }
 
-    pub(crate) fn cipher(&self) -> &Arc<std::sync::RwLock<CloudCipher>> {
-        &self.inner.cipher
+    pub(crate) fn current_encryption(&self) -> Option<crate::encryption::EncryptionService> {
+        self.inner.components.current_encryption()
+    }
+
+    pub(crate) async fn invite_member(
+        &self,
+        public_key_hex: &str,
+        invitee_email: Option<&str>,
+        role: super::membership::MemberRole,
+        store_name: &str,
+    ) -> Result<crate::join_code::InviteCode, super::membership_ops::MembershipOpsError> {
+        self.inner
+            .components
+            .invite_member(public_key_hex, invitee_email, role, store_name)
+            .await
+    }
+
+    pub(crate) async fn remove_member(
+        &self,
+        public_key_hex: &str,
+    ) -> Result<String, super::membership_ops::MembershipOpsError> {
+        self.inner
+            .components
+            .remove_member(public_key_hex, self.inner.custody.as_ref())
+            .await
+    }
+
+    pub(crate) async fn persist_pending_rotation(&self) -> Result<(), crate::database::DbError> {
+        self.inner.components.persist_pending_rotation().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn adopt_key_rotation_for_test(
+        &self,
+        encryption: crate::encryption::EncryptionService,
+    ) -> Result<String, crate::keys::KeyError> {
+        self.inner
+            .components
+            .adopt_key_rotation(encryption, self.inner.custody.as_ref())
+    }
+
+    pub(crate) async fn drain_uploads(
+        &self,
+    ) -> Result<crate::blob::upload::DrainOutcome, crate::database::DbError> {
+        self.inner
+            .components
+            .drain_uploads(
+                self.clock.as_ref(),
+                &self.store_dir,
+                self.inner.observer.as_deref(),
+            )
+            .await
     }
 }
 
@@ -361,24 +412,13 @@ async fn run_single_cycle(
     clock: &dyn crate::clock::Clock,
     store_dir: &StoreDir,
 ) -> Result<super::cycle::SyncCycleResult, String> {
-    let storage: &dyn SyncStorage = &*inner.storage;
-    let cloud_home = inner.storage.cloud_home();
-    let pending_rotation = inner.storage.shared_pending_rotation();
-
-    super::cycle::run_single_sync_cycle(
-        storage,
-        &inner.store_id,
-        &inner.device_id,
-        &inner.hlc,
-        clock,
-        &inner.db,
-        &inner.cipher,
-        &pending_rotation,
-        &inner.user_keypair,
-        Some(inner.custody.as_ref()),
-        store_dir,
-        Some(cloud_home),
-        inner.observer.as_deref(),
-    )
-    .await
+    inner
+        .components
+        .run_cycle(
+            clock,
+            Some(inner.custody.as_ref()),
+            store_dir,
+            inner.observer.as_deref(),
+        )
+        .await
 }

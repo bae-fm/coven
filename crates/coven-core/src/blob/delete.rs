@@ -69,7 +69,7 @@ use tracing::{debug, warn};
 use crate::database::Database;
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::{no_progress, CloudHome};
-use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
+use crate::sync::cloud_storage::{CloudCipherAccess, PendingRotation};
 use crate::sync::membership::MembershipChain;
 use crate::sync::membership_ops::{
     authorize_loaded_membership_author, MembershipAuthorRequirement,
@@ -210,7 +210,7 @@ fn tombstone_signing_payload(store_id: &str, cloud_key: &str, deleted_at: &str) 
 
 async fn existing_tombstone_state(
     cloud_home: &dyn CloudHome,
-    cipher: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     store_id: &str,
     key: &str,
     expected_cloud_key: &str,
@@ -223,7 +223,7 @@ async fn existing_tombstone_state(
         Err(e) => return Err(format!("tombstone read failed: {e}")),
     };
     let aad_context = crate::sync::cloud_storage::cloud_aad_context(store_id, key);
-    let decoded = match cipher.read().unwrap().open(stored, &aad_context) {
+    let decoded = match cipher.snapshot().open(stored, &aad_context) {
         Ok(decoded) => decoded,
         Err(e) => return Ok(ExistingTombstone::Invalid(format!("open failed: {e}"))),
     };
@@ -247,7 +247,7 @@ async fn existing_tombstone_state(
 
 async fn write_signed_tombstone(
     cloud_home: &dyn CloudHome,
-    cipher: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
     store_id: &str,
     key: &str,
@@ -264,7 +264,7 @@ async fn write_signed_tombstone(
     let bytes = serde_json::to_vec(&tombstone)
         .map_err(|e| format!("tombstone serialization failed: {e}"))?;
     let aad_context = crate::sync::cloud_storage::cloud_aad_context(store_id, key);
-    let cipher = cipher.read().unwrap().clone();
+    let cipher = cipher.snapshot();
     pending_rotation.check(&cipher).map_err(|e| e.to_string())?;
     let sealed = cipher.seal(bytes, &aad_context);
     cloud_home
@@ -304,7 +304,7 @@ async fn write_signed_tombstone(
 pub async fn drain_tombstones(
     db: &Database,
     cloud_home: &dyn CloudHome,
-    cipher: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
     store_id: &str,
     keypair: &UserKeypair,
@@ -317,7 +317,7 @@ pub async fn drain_tombstones(
 
     let now = clock.now();
     let now_rfc = now.to_rfc3339();
-    let suffix = cipher.read().unwrap().suffix();
+    let suffix = cipher.snapshot().suffix();
     let mut count = 0;
     for entry in deletes {
         if let Some(last) = entry.last_attempt_at.as_deref() {
@@ -523,22 +523,23 @@ enum RowReference {
 /// trust-on-first-use: this GC runs in production and deletes user blobs, so it
 /// must refuse a wiped-and-refounded chain exactly like the snapshot restore path.
 /// The signature has already proven *who* authored the tombstone; the owner-anchored
-/// chain proves they *may* delete. `None` is the chain-less (browsable) store,
-/// which has no membership to gate against.
+/// chain proves they *may* delete. `None` is reserved for pre-initialization
+/// callers; every initialized store has a membership chain, regardless of its
+/// storage representation.
 ///
 /// Returns the number of blobs deleted this pass. A per-tombstone error is logged
 /// and skipped so one bad object doesn't block reclaiming the rest.
 pub async fn gc_tombstones(
     db: &Database,
     cloud_home: &dyn CloudHome,
-    cipher: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     store_id: &str,
     self_pubkey: &str,
     membership_chain: Option<&MembershipChain>,
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
 ) -> Result<usize, String> {
-    let suffix = cipher.read().unwrap().suffix();
+    let suffix = cipher.snapshot().suffix();
     let keys = cloud_home
         .list(TOMBSTONE_PREFIX)
         .await
@@ -576,7 +577,7 @@ pub async fn gc_tombstones(
             }
         };
         let aad_context = crate::sync::cloud_storage::cloud_aad_context(store_id, &key);
-        let decoded = match cipher.read().unwrap().open(stored, &aad_context) {
+        let decoded = match cipher.snapshot().open(stored, &aad_context) {
             Ok(d) => d,
             Err(e) => {
                 // A tombstone we can't decrypt is a foreign store's object in a
@@ -617,9 +618,9 @@ pub async fn gc_tombstones(
         // already anchored to the pinned owner: only a current write-capable member
         // of the pinned-owner-founded chain may delete a blob. A non-member tombstone
         // (a bucket writer forging a deletion), or one authored by the forged founder
-        // of a wiped/refounded chain, fails here and is skipped. A chain-less
-        // (browsable) store has nothing to gate against, so the object stands on
-        // its verified signature alone.
+        // of a wiped/refounded chain, fails here and is skipped. Only a
+        // pre-initialization caller can supply no chain and rely on the verified
+        // signature alone.
         match authorize_loaded_membership_author(
             membership_chain,
             &tombstone.author_pubkey,
@@ -721,7 +722,8 @@ pub async fn gc_tombstones(
         // members' orphans). A blob under another member's prefix is left standing
         // — its own GC, or an owner sweep, reclaims it — so the tombstone stays too,
         // for whichever party can act. A plain-scheme key carries no uploader
-        // segment (a browsable home has no membership ACL), so it is never gated.
+        // segment, so this path-level ownership gate does not apply; membership
+        // authorization above still applies.
         if let Some(uploader) = blob_key_uploader(&tombstone.cloud_key) {
             if uploader != self_pubkey && !is_owner {
                 debug!(
@@ -869,7 +871,7 @@ pub(crate) async fn cancel_tombstone_or_enqueue(
 pub async fn drain_tombstone_cancels(
     db: &Database,
     cloud_home: &dyn CloudHome,
-    cipher: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     clock: &dyn crate::clock::Clock,
 ) -> Result<usize, String> {
     let cancels = db
@@ -879,7 +881,7 @@ pub async fn drain_tombstone_cancels(
 
     let now = clock.now();
     let now_rfc = now.to_rfc3339();
-    let suffix = cipher.read().unwrap().suffix();
+    let suffix = cipher.snapshot().suffix();
     let mut count = 0;
     for entry in cancels {
         // Per-row backoff, exactly like the delete drain: skip an entry still

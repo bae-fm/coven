@@ -377,6 +377,7 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
         &cs,
     );
     storage.put_changeset_packed("dev1", 1, packed);
+    storage.publish_head_as("dev1", 1, &author);
 
     let db2 = open_test_db();
     let (updated, result) =
@@ -619,7 +620,8 @@ async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
 /// next cycle re-examines the same object instead of suppressing the seq.
 #[tokio::test]
 async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
-    let storage = MockSyncStorage::new();
+    let author = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(author.clone());
 
     // A real changeset from dev1, packed into an envelope whose `changeset_size`
     // is deliberately wrong (one byte short of the actual payload), as a truncated
@@ -633,7 +635,7 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         ],
     )
     .await;
-    let env = envelope::ChangesetEnvelope {
+    let mut env = envelope::ChangesetEnvelope {
         device_id: "dev1".to_string(),
         seq: 1,
         schema_version: SCHEMA_VERSION,
@@ -645,6 +647,7 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         membership_grant: None,
         signature: None,
     };
+    envelope::sign_envelope(&mut env, &author, &cs);
     storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &cs));
 
     let db2 = open_test_db();
@@ -833,6 +836,7 @@ async fn a_changeset_at_its_own_position_still_applies() {
         &cs,
     );
     storage.put_changeset_packed("dev", 1, packed);
+    storage.publish_head_as("dev", 1, &author);
 
     let db2 = open_test_db();
     let (updated, result) =
@@ -1046,7 +1050,8 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
 
 #[tokio::test]
 async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
-    let storage = MockSyncStorage::new();
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let decl = photo_decl_with_blob_id_column();
     let tables = test_synced_tables_with_blob(decl.clone());
 
@@ -1077,7 +1082,6 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     )
     .await;
 
-    let keypair = UserKeypair::generate();
     let result = sync_for_test(
         "dev1",
         &db1,
@@ -1219,7 +1223,8 @@ async fn update_to_null_drops_old_local_blob_copy() {
 /// `note_photos` carries a user-provided · `CacheLazy` blob here.
 #[tokio::test]
 async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
-    let storage = MockSyncStorage::new();
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let audio_tables = || {
         test_synced_tables_with_blob(BlobDecl::new(
             "audio",
@@ -1259,7 +1264,6 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     // Drive the real push path. The inline push uploads only host-provided blobs, so
     // the user-provided audio is NOT uploaded here — it goes via the durable outbox in
     // the make_remote flow, not this changeset-blob upload.
-    let keypair = UserKeypair::generate();
     let (_t1, ld1) = temp_store_dir();
     let result = sync_for_test(
         "dev1",
@@ -1728,12 +1732,13 @@ fn readable_photo_decl() -> BlobDecl {
 /// path, end to end over a real `CloudSyncStorage` in `BlobPathScheme::Plain`.
 #[tokio::test]
 async fn plain_scheme_blob_round_trips_at_the_readable_key() {
+    let keypair = UserKeypair::generate();
     let storage = CloudSyncStorage::new(
         std::sync::Arc::new(InMemoryCloudHome::new()),
         CloudCipher::Encrypted(EncryptionService::from_key([5u8; 32])),
         BlobPathScheme::Plain,
         "test-lib",
-        UserKeypair::generate(),
+        keypair.clone(),
     );
 
     // Device A: a shared note + a cover photo whose file is present locally.
@@ -1760,7 +1765,6 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     )
     .await;
 
-    let keypair = UserKeypair::generate();
     let result = sync_for_test(
         "dev1",
         &db1,
@@ -3357,10 +3361,14 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         "",
         "2026-03-01T00:02:00Z",
         &member,
-        None,
+        Some(MembershipCoord {
+            author_pubkey: owner_pubkey.clone(),
+            seq: 2,
+        }),
         &changeset,
     );
     storage.put_changeset_packed("devM", 1, packed);
+    storage.publish_head_as("devM", 1, &member);
 
     let (_tmp, store_dir) = temp_store_dir();
     let (updated, result) = crate::sync::pull::pull_changes(
@@ -3488,6 +3496,131 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
     assert_eq!(updated.get("devOwner"), Some(&1));
 }
 
+/// Every changeset in an initialized store names the exact committed membership
+/// entry that grants its signer write access. Being a current member does not
+/// make an absent grant acceptable.
+#[tokio::test]
+async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key());
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+
+    let source = open_test_db();
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'MissingGrant', NULL, '0000000001000-0000-owner', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "devOwner",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:01:00Z",
+        &owner,
+        None,
+        &changeset,
+    );
+    storage.put_changeset_packed("devOwner", 1, packed);
+
+    let target = open_test_db();
+    target
+        .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+    let (updated, result) = pull_into(
+        &target,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_store_dir().1,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.rejected_unauthorized.len(), 1);
+    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get("devOwner"), Some(&1));
+}
+
+/// A signed device head commits a stream to one member identity. An authentic
+/// changeset signed by another current member cannot be replayed into that
+/// stream, even when its membership grant is otherwise valid.
+#[tokio::test]
+async fn pull_rejects_a_changeset_whose_signer_differs_from_the_device_head() {
+    let owner = UserKeypair::generate();
+    let owner_pk = hex::encode(owner.public_key());
+    let member = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(owner.clone());
+
+    let founder = founder_entry(&owner, "2026-03-01T00:00:00Z");
+    let mut chain = MembershipChain::new();
+    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+    let add_member = make_linked_entry(
+        &chain,
+        &owner,
+        MembershipAction::Add,
+        &member,
+        MemberRole::Member,
+        "2026-03-01T00:01:00Z",
+    );
+    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
+    publish_membership_chain_head(&storage, &chain, &owner).await;
+
+    let source = open_test_db();
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'WrongStreamSigner', NULL, '0000000002000-0000-devOwner', '2026-01-01')",
+        ],
+    )
+    .await;
+    let packed = envelope::pack_signed(
+        "devOwner",
+        1,
+        SCHEMA_VERSION,
+        "",
+        "2026-03-01T00:02:00Z",
+        &member,
+        Some(MembershipCoord {
+            author_pubkey: owner_pk.clone(),
+            seq: 2,
+        }),
+        &changeset,
+    );
+    // `put_changeset_packed` advances the stream head with the mock's owner key,
+    // while the envelope above is signed by the member.
+    storage.put_changeset_packed("devOwner", 1, packed);
+
+    let target = open_test_db();
+    target
+        .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+        .await
+        .unwrap();
+    let (updated, result) = pull_into(
+        &target,
+        &storage,
+        "dev2",
+        &HashMap::new(),
+        &temp_store_dir().1,
+    )
+    .await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.rejected_unauthorized.len(), 1);
+    assert!(!row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get("devOwner"), Some(&1));
+}
+
 /// Issue #84 — the membership-propagation lag, the core bug. A member's signed
 /// changeset is pulled BEFORE the LIST that rebuilds the chain shows the Add that
 /// authorizes them (membership entries and changesets are separate, unordered
@@ -3549,6 +3682,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         &cs,
     );
     storage.put_changeset_packed("devM", 1, packed);
+    storage.publish_head_as("devM", 1, &member);
 
     let db2 = open_test_db();
     db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
@@ -3763,6 +3897,7 @@ async fn pull_skips_a_removed_members_changeset() {
         &cs,
     );
     storage.put_changeset_packed("devM", 1, packed);
+    storage.publish_head_as("devM", 1, &member);
 
     let db2 = open_test_db();
     db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
@@ -3853,6 +3988,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
         &cs,
     );
     storage.put_changeset_packed("devM", 1, packed);
+    storage.publish_head_as("devM", 1, &member);
 
     let db2 = open_test_db();
     db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
@@ -3875,17 +4011,11 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
     assert_eq!(updated.get("devM"), Some(&1));
 }
 
-/// The cycle-start chain only ever admits a member through a committed prefix —
-/// entries `1..=head.seq` — so an Add that exists in storage but that no head
-/// covers yet is genuinely uncommitted, not merely list-lagging: the cycle-start
-/// load recovers a listing lag by keyed GET within a published head's range
-/// (`pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing` covers
-/// that), but nothing recovers an entry beyond it. This is the gap the mid-cycle
-/// reload's own keyed grant GET exists to close, naming the entry directly by the
-/// coordinate the changeset carries, bypassing both the listing AND the head
-/// entirely.
+/// A membership entry is not authoritative until its author publishes a signed
+/// head covering it. A changeset cannot turn a stored-but-uncommitted Add into an
+/// authorization grant merely by naming that entry's coordinate.
 #[tokio::test]
-async fn pull_resolves_a_changeset_naming_a_grant_no_head_yet_covers() {
+async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
@@ -3933,6 +4063,7 @@ async fn pull_resolves_a_changeset_naming_a_grant_no_head_yet_covers() {
         &cs,
     );
     storage.put_changeset_packed("devM", 1, packed);
+    storage.publish_head_as("devM", 1, &member);
 
     let db2 = open_test_db();
     db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
@@ -3942,13 +4073,11 @@ async fn pull_resolves_a_changeset_naming_a_grant_no_head_yet_covers() {
     let (updated, result) =
         pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
 
-    // The reload was reached (the cycle-start chain, capped at the published
-    // head, did not yet authorize the member) and the grant GET resolved the
-    // entry directly — applied, not dropped as non-member.
+    // The Add is visible by keyed GET but absent from the signed committed prefix.
     assert_eq!(storage.membership_list_count(), 2);
-    assert_eq!(result.changesets_applied, 1);
-    assert!(result.rejected_unauthorized.is_empty());
-    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.rejected_unauthorized.len(), 1);
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
     assert_eq!(updated.get("devM"), Some(&1));
 }
 
@@ -4006,6 +4135,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         &changeset,
     );
     storage.put_changeset_packed("devM", 1, packed);
+    storage.publish_head_as("devM", 1, &member);
 
     let target = open_test_db();
     target
@@ -4027,15 +4157,11 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
     assert_eq!(updated.get("devM"), Some(&1));
 }
 
-/// The mid-cycle membership reload is a best-effort refresh: nothing about it
-/// decides retry-vs-skip, so a problem reloading it (here the reload's own
-/// re-list, distinct from the cycle-start listing, hitting a storage error) must
-/// fall back to the known-good cycle-start chain rather than stalling the pull.
-/// The member's changeset still resolves through the keyed grant GET, which is a
-/// direct fetch by coordinate and unaffected by the LIST failure — the sole
-/// authority that separates a real outage (retry) from forged content (skip).
+/// A storage read failure while resolving a grant leaves the cursor at the
+/// undecided changeset. The pull must not replace an unavailable committed-chain
+/// read with a bare keyed entry.
 #[tokio::test]
-async fn pull_falls_back_to_the_cycle_start_chain_when_the_mid_cycle_relist_fails() {
+async fn pull_holds_the_cursor_when_the_mid_cycle_membership_list_fails() {
     let owner = UserKeypair::generate();
     let owner_pk = hex::encode(owner.public_key());
     let member = UserKeypair::generate();
@@ -4087,6 +4213,7 @@ async fn pull_falls_back_to_the_cycle_start_chain_when_the_mid_cycle_relist_fail
         &cs,
     );
     storage.put_changeset_packed("devM", 1, packed);
+    storage.publish_head_as("devM", 1, &member);
 
     let db2 = open_test_db();
     db2.set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
@@ -4096,14 +4223,12 @@ async fn pull_falls_back_to_the_cycle_start_chain_when_the_mid_cycle_relist_fail
     let (updated, result) =
         pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
 
-    // The reload's re-list did fail (confirming the fallback was actually
-    // exercised, not skipped), yet the changeset still applied via the keyed
-    // grant GET — the pull is not stalled by the reload's storage error.
+    // The failed read leaves authorization undecided and the cursor unchanged.
     assert_eq!(storage.membership_list_count(), 2);
-    assert_eq!(result.changesets_applied, 1);
+    assert_eq!(result.changesets_applied, 0);
     assert!(result.rejected_unauthorized.is_empty());
-    assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    assert_eq!(updated.get("devM"), Some(&1));
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get("devM"), None);
 }
 
 /// Cycle start and the mid-cycle reload now share the same head-committed,
@@ -4207,12 +4332,12 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
     );
 }
 
-/// A head whose author is not a current member is skipped by `pull_changes` when
-/// a chain exists: its changesets are never fetched and its cursor never advances,
-/// even though the changeset bytes sit in the bucket. A forged head (anyone with
-/// the bucket credential can write one) must not drive a per-seq fetch loop.
+/// A verified head whose signer is not a current member is examined so a newly
+/// added member can resolve a committed grant that appeared after cycle start.
+/// When the envelope's named grant does not authorize the signer, the changeset
+/// is rejected and the cursor advances instead of holding on attacker content.
 #[tokio::test]
-async fn pull_skips_a_head_authored_by_a_non_member() {
+async fn pull_rejects_a_stream_authored_by_a_non_member() {
     // The mock signs every head it publishes with `outsider`, who is not in the
     // chain — so the head it writes for `dev1` fails the membership check.
     let outsider = UserKeypair::generate();
@@ -4248,10 +4373,9 @@ async fn pull_skips_a_head_authored_by_a_non_member() {
 
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    // The head was skipped, so dev1 was never examined and its cursor is absent.
-    assert_eq!(updated.get("dev1"), None);
-    // The skipped head is also absent from the surfaced remote heads.
-    assert!(!result.remote_heads.iter().any(|h| h.device_id == "dev1"));
+    assert_eq!(result.rejected_unauthorized.len(), 1);
+    assert_eq!(updated.get("dev1"), Some(&1));
+    assert!(result.remote_heads.iter().any(|h| h.device_id == "dev1"));
 }
 
 /// The honored case: a head authored by a current member (here a second device

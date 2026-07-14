@@ -3,14 +3,17 @@
 //! These are the high-level orchestration functions that download the membership
 //! chain from the storage, perform the operation, and upload the results.
 
+use rusqlite::OptionalExtension;
 use tracing::{debug, info};
 
-use crate::encryption::{EncryptionService, MasterKeyring};
+use crate::encryption::EncryptionService;
+#[cfg(test)]
+use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 #[cfg(test)]
 use crate::storage::cloud::CloudHome;
 
-use super::cloud_storage::{CloudCipher, PendingRotation};
+use super::cloud_storage::{CloudCipherAccess, PendingRotation};
 use super::hlc::Hlc;
 use super::invite::InviteError;
 use super::membership::{
@@ -67,6 +70,8 @@ pub enum MembershipOpsError {
     NoMembershipChain,
     #[error("membership chain has no founder")]
     ChainHasNoFounder,
+    #[error("sharing requires an encrypted cloud home")]
+    NotEncryptedHome,
 }
 
 /// `sync_state` key holding the hex Ed25519 pubkey of the store's established
@@ -76,10 +81,10 @@ pub enum MembershipOpsError {
 pub const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
 
 /// The per-author membership-head floor at the chain's current committed state:
-/// empty for a chain-less (browsable) store, otherwise every author's highest
-/// committed seq ([`MembershipChain::author_heads`]). Minted into an invite or
-/// restore code so the joiner or restorer can seed its watermark
-/// ([`seed_head_watermark`]) before its first sync cycle.
+/// every author's highest committed seq ([`MembershipChain::author_heads`]). A
+/// pre-initialization bootstrap read can return an empty floor before a founder is
+/// established. Minted into an invite or restore code so the joiner or restorer
+/// can seed its watermark ([`seed_head_watermark`]) before its first sync cycle.
 ///
 /// `watermark_db`, when present, makes this read monotonic the same way every
 /// other chain load is: the minting device's own view of the chain never
@@ -238,7 +243,7 @@ pub async fn remove_member(
     store_id: &str,
     current_encryption: &EncryptionService,
     custody: &dyn MasterKeyCustody,
-    cipher_lock: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
 ) -> Result<String, MembershipOpsError> {
     // Download existing membership entries and build the chain.
@@ -274,7 +279,7 @@ pub async fn remove_member(
     // Adopt the rotated key into this device's live cipher and custody. The cloud
     // rotation is already committed, so a failure here is not a generic membership
     // error but the specific half-applied state its own variant names.
-    apply_key_rotation(new_key, custody, cipher_lock, pending_rotation)
+    apply_key_rotation(new_key, custody, cipher, pending_rotation)
         .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source })
 }
 
@@ -303,51 +308,21 @@ pub async fn remove_member(
 pub fn apply_key_rotation(
     new_encryption: EncryptionService,
     custody: &dyn MasterKeyCustody,
-    cipher_lock: &std::sync::RwLock<CloudCipher>,
+    cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
 ) -> Result<String, KeyError> {
     // Mark first, so a seal that clones the live cipher during the persist+swap
     // below refuses under the superseded generation until the swap lands.
     pending_rotation.mark_committed(new_encryption.current_generation());
-    let new_fingerprint = {
-        let mut cipher = cipher_lock.write().unwrap();
-        match &mut *cipher {
-            CloudCipher::Encrypted(live) => {
-                // Merge, never replace: fold the incoming keyring into the live
-                // one so a key once adopted is never dropped. Re-check, under this
-                // same write lock, that the merge genuinely extends what is live —
-                // a concurrent member op may have committed and adopted a newer
-                // rotation between the caller's is-it-newer check (an earlier,
-                // separate read lock, with a network scan in between) and here.
-                // Adopting a keyring that adds nothing would regress the seal key
-                // and custody, so a stale apply fails loud instead. A persistence
-                // failure returns early with the mark left set — the rotation is
-                // committed on the cloud and this device is still on the old key.
-                let merged = live.merged_with(&new_encryption);
-                if merged.key_count() == live.key_count() {
-                    None
-                } else {
-                    custody.persist(&MasterKeyring::from(merged.clone()))?;
-                    *live = merged;
-                    Some(live.fingerprint())
-                }
-            }
-            // Both callers confirm an encrypted home before rotating: the sync
-            // manager's `require_encrypted_home` gate (surfacing NotEncryptedHome)
-            // and the refresh cycle's own plaintext check. A plaintext home here is
-            // a broken invariant, not a user-facing condition.
-            CloudCipher::Plaintext => {
-                unreachable!(
-                    "apply_key_rotation runs only after the caller has confirmed an \
-                     encrypted home"
-                )
-            }
-        }
-    };
+    // Merge, never replace: the fixed-mode cipher state can extend an encrypted
+    // keyring but has no transition to plaintext. Re-check under its keyring lock
+    // because another member operation may have adopted a newer rotation while
+    // this caller was reading the cloud.
+    let new_fingerprint = cipher.merge_key_rotation(&new_encryption, custody)?;
     // Re-derive the pause from the live cipher: a merge (or an already-covered
     // stale apply) that now covers everything committed clears it; a strictly
     // newer generation still pending stays paused.
-    pending_rotation.resolve(&cipher_lock.read().unwrap());
+    pending_rotation.resolve(&cipher.snapshot());
     match new_fingerprint {
         Some(fingerprint) => Ok(fingerprint),
         None => Err(KeyError::StaleKeyRotation),
@@ -511,6 +486,14 @@ pub async fn publish_membership_head(
 /// `MembershipTampered`; the snapshot authorize maps both to `UnauthorizedAuthor`.
 #[derive(Debug, thiserror::Error)]
 pub enum AnchoredChainError {
+    /// A cloud read required to decide the committed membership prefix was
+    /// unavailable. Pull callers retain their cursor and retry this case.
+    #[error("membership storage unavailable while {operation}: {source}")]
+    StorageUnavailable {
+        operation: String,
+        #[source]
+        source: StorageError,
+    },
     /// The entries didn't download, parse, or validate into a well-formed chain.
     #[error("membership chain failed to load/validate: {0}")]
     LoadFailed(String),
@@ -551,8 +534,9 @@ impl MembershipAuthorRequirement {
     }
 }
 
-/// Authorize an already-loaded membership chain. `None` is the chain-less open
-/// store case.
+/// Authorize an already-loaded membership chain. `None` exists for
+/// pre-initialization bootstrap callers; an initialized sync session always has
+/// an owner-anchored chain.
 pub(crate) fn authorize_loaded_membership_author(
     chain: Option<&MembershipChain>,
     author_pubkey: &str,
@@ -562,8 +546,7 @@ pub(crate) fn authorize_loaded_membership_author(
         debug!(
             author = %author_pubkey,
             required_role = ?requirement,
-            "membership author authorization skipped: store is chain-less (no membership, \
-             no pinned owner), so authorization is not applicable"
+            "membership author authorization skipped before membership initialization"
         );
         return Ok(());
     };
@@ -587,8 +570,10 @@ pub(crate) enum MembershipAuthorAuthorizationError {
 }
 
 /// Load the store membership chain when one exists, anchored to the pinned owner
-/// when known. `watermark_db` threads through to [`load_anchored_chain`]'s
-/// monotonic head guard for readers that re-evaluate authorization each cycle.
+/// when known. The optional result supports pre-initialization bootstrap reads;
+/// an initialized cycle requires `Some`. `watermark_db` threads through to
+/// [`load_anchored_chain`]'s monotonic head guard for readers that re-evaluate
+/// authorization each cycle.
 pub(crate) async fn load_membership_chain(
     storage: &dyn SyncStorage,
     pinned_owner: Option<&str>,
@@ -612,8 +597,8 @@ pub(crate) async fn load_membership_chain(
 /// run: validation proves the chain is well-formed (signatures, owner-only
 /// authorship), and the anchor proves it descends from the store's established
 /// owner rather than a wiped-and-refounded chain under an attacker's key. A
-/// store with no pinned owner (browsable) skips the anchor check — it is open by
-/// design and has no owner to anchor to.
+/// caller with no pinned owner is performing a pre-initialization bootstrap read;
+/// ordinary sync sessions establish the owner before they can run.
 ///
 /// The committed set is the union of every known author's committed prefix. Known
 /// authors come from both the current entry listing and this reader's persisted
@@ -645,9 +630,9 @@ pub(crate) async fn load_anchored_chain(
         })
 }
 
-/// The central membership loader for callers that distinguish an actual
-/// chain-less store from a required chain. `entry_keys` is the caller's one
-/// already-fetched LIST result; persisted floors can supply authors it omits.
+/// The central membership loader for callers that distinguish an absent
+/// pre-initialization chain from a required chain. `entry_keys` is the caller's
+/// one already-fetched LIST result; persisted floors can supply authors it omits.
 pub(crate) async fn load_anchored_chain_if_known(
     storage: &dyn SyncStorage,
     entry_keys: &[(String, u64)],
@@ -664,17 +649,61 @@ pub(crate) async fn load_anchored_chain_if_known(
             .map_err(AnchoredChainError::LoadFailed)?,
         None => BTreeMap::new(),
     };
+    let loaded =
+        validate_anchored_chain(storage, entry_keys, owner_pubkey, &persisted_floors).await?;
+    if let (Some(owner), None) = (owner_pubkey, loaded.as_ref()) {
+        return Err(AnchoredChainError::LoadFailed(format!(
+            "membership chain has no committed heads but owner {owner} is pinned"
+        )));
+    }
+    if let (Some(db), Some(loaded)) = (watermark_db, loaded.as_ref()) {
+        persist_head_watermarks(db, &loaded.head_floor)
+            .await
+            .map_err(AnchoredChainError::LoadFailed)?;
+    }
+    Ok(loaded.map(|loaded| loaded.chain))
+}
+
+/// Load the same signed, watermarked, owner-anchored committed chain as
+/// [`load_anchored_chain_if_known`], while requiring the signed head for every
+/// author named by `candidate_coords` to participate in discovery. A changeset's
+/// membership grant uses this path when LIST has not exposed that author's
+/// prefix yet. The coordinate itself is never appended: only the author's
+/// verified head determines the committed prefix, and the caller checks that the
+/// resulting chain's effective grant equals the named coordinate.
+pub(crate) async fn load_anchored_chain_with_candidates(
+    storage: &dyn SyncStorage,
+    entry_keys: &[(String, u64)],
+    candidate_coords: &[MembershipCoord],
+    owner_pubkey: Option<&str>,
+    watermark_db: Option<&Database>,
+) -> Result<Option<MembershipChain>, AnchoredChainError> {
+    let mut augmented = entry_keys.to_vec();
+    augmented.extend(
+        candidate_coords
+            .iter()
+            .map(|coord| (coord.author_pubkey.clone(), coord.seq)),
+    );
+    load_anchored_chain_if_known(storage, &augmented, owner_pubkey, watermark_db).await
+}
+
+struct ValidatedAnchoredChain {
+    chain: MembershipChain,
+    head_floor: Vec<MembershipCoord>,
+}
+
+async fn validate_anchored_chain(
+    storage: &dyn SyncStorage,
+    entry_keys: &[(String, u64)],
+    owner_pubkey: Option<&str>,
+    persisted_floors: &BTreeMap<String, u64>,
+) -> Result<Option<ValidatedAnchoredChain>, AnchoredChainError> {
     let mut authors: BTreeSet<String> = entry_keys
         .iter()
         .map(|(author, _)| author.clone())
         .collect();
     authors.extend(persisted_floors.keys().cloned());
     if authors.is_empty() {
-        if let Some(owner) = owner_pubkey {
-            return Err(AnchoredChainError::LoadFailed(format!(
-                "membership chain is empty but owner {owner} is pinned (wiped membership/*)"
-            )));
-        }
         return Ok(None);
     }
 
@@ -693,10 +722,16 @@ pub(crate) async fn load_anchored_chain_if_known(
                 debug!(%author, "membership head absent; author's entries are uncommitted");
                 continue;
             }
+            Err(e @ (StorageError::Storage(_) | StorageError::RotationPending(_))) => {
+                return Err(AnchoredChainError::StorageUnavailable {
+                    operation: format!("reading membership head {author}"),
+                    source: e,
+                });
+            }
             Err(e) => {
                 return Err(AnchoredChainError::LoadFailed(format!(
                     "Failed to get membership head {author}: {e}"
-                )))
+                )));
             }
         };
         let head: AuthorHead = serde_json::from_slice(&bytes).map_err(|e| {
@@ -724,13 +759,15 @@ pub(crate) async fn load_anchored_chain_if_known(
         heads.push(head);
     }
 
+    if heads.is_empty() {
+        return Ok(None);
+    }
+
     let committed_entry_keys: Vec<(String, u64)> = heads
         .iter()
         .flat_map(|head| (1..=head.seq).map(|seq| (head.author_pubkey.clone(), seq)))
         .collect();
-    let chain = download_chain(storage, &committed_entry_keys)
-        .await
-        .map_err(AnchoredChainError::LoadFailed)?;
+    let chain = download_committed_chain(storage, &committed_entry_keys).await?;
 
     // Each head must match the prefix it certifies: same tip seq, same tip hash.
     for head in &heads {
@@ -754,15 +791,78 @@ pub(crate) async fn load_anchored_chain_if_known(
         }
     }
 
-    if let Some(db) = watermark_db {
-        for head in &heads {
-            persist_head_watermark(db, &head.author_pubkey, head.seq)
-                .await
-                .map_err(AnchoredChainError::LoadFailed)?;
-        }
+    let head_floor = heads
+        .into_iter()
+        .map(|head| MembershipCoord {
+            author_pubkey: head.author_pubkey,
+            seq: head.seq,
+        })
+        .collect();
+    Ok(Some(ValidatedAnchoredChain { chain, head_floor }))
+}
+
+/// Download the complete prefixes certified by the accepted signed heads. Cloud
+/// availability failures remain typed for pull retry; absent, undecryptable, or
+/// malformed committed objects are invalid membership content and cannot hold a
+/// cursor indefinitely.
+async fn download_committed_chain(
+    storage: &dyn SyncStorage,
+    entry_keys: &[(String, u64)],
+) -> Result<MembershipChain, AnchoredChainError> {
+    let mut entries = Vec::with_capacity(entry_keys.len());
+    for (author, seq) in entry_keys {
+        let coord = MembershipCoord {
+            author_pubkey: author.clone(),
+            seq: *seq,
+        };
+        let data = match storage.get_membership_entry(author, *seq).await {
+            Ok(data) => data,
+            Err(error @ (StorageError::Storage(_) | StorageError::RotationPending(_))) => {
+                return Err(AnchoredChainError::StorageUnavailable {
+                    operation: format!("reading membership entry {author}/{seq}"),
+                    source: error,
+                });
+            }
+            Err(error) => {
+                return Err(AnchoredChainError::LoadFailed(format!(
+                    "Failed to get membership entry {author}/{seq}: {error}"
+                )));
+            }
+        };
+        let entry =
+            parse_membership_entry_at(&coord, &data).map_err(AnchoredChainError::LoadFailed)?;
+        entries.push((coord, entry));
     }
 
-    Ok(Some(chain))
+    MembershipChain::from_entries_with_coords(entries).map_err(|error| {
+        AnchoredChainError::LoadFailed(format!("Invalid membership chain: {error}"))
+    })
+}
+
+/// Validate the signed committed membership state against `owner_pubkey`, then
+/// record the owner and every accepted head floor in one local transaction.
+/// `None` means no signed head commits any listed prefix; no trust state is
+/// persisted in that case.
+pub(crate) async fn load_and_persist_owner_anchor(
+    storage: &dyn SyncStorage,
+    entry_keys: &[(String, u64)],
+    owner_pubkey: &str,
+    db: &Database,
+) -> Result<Option<MembershipChain>, AnchoredChainError> {
+    let _membership_load = db.lock_membership_load().await;
+    let persisted_floors = read_head_watermarks(db)
+        .await
+        .map_err(AnchoredChainError::LoadFailed)?;
+    let loaded =
+        validate_anchored_chain(storage, entry_keys, Some(owner_pubkey), &persisted_floors).await?;
+    if let Some(loaded) = loaded {
+        persist_owner_and_head_watermarks(db, owner_pubkey, &loaded.head_floor)
+            .await
+            .map_err(AnchoredChainError::LoadFailed)?;
+        Ok(Some(loaded.chain))
+    } else {
+        Ok(None)
+    }
 }
 
 /// `sync_state` key holding the greatest membership-head seq this reader has
@@ -821,20 +921,75 @@ async fn read_head_watermarks(db: &Database) -> Result<BTreeMap<String, u64>, St
 /// below it would then be accepted, the exact rollback the watermark exists to
 /// refuse. The values are unpadded decimal strings, so the guard compares
 /// numerically, never lexically.
-async fn persist_head_watermark(db: &Database, author: &str, seq: u64) -> Result<(), String> {
-    let key = head_watermark_key(author);
+fn upsert_head_watermark_on(
+    conn: &rusqlite::Connection,
+    author: &str,
+    seq: u64,
+) -> Result<(), crate::database::DbError> {
+    conn.execute(
+        "INSERT INTO sync_state (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value \
+         WHERE CAST(excluded.value AS INTEGER) > CAST(sync_state.value AS INTEGER)",
+        rusqlite::params![head_watermark_key(author), seq.to_string()],
+    )
+    .map(|_| ())
+    .map_err(crate::database::DbError::from)
+}
+
+async fn persist_head_watermarks(db: &Database, floor: &[MembershipCoord]) -> Result<(), String> {
+    let floor = floor.to_vec();
     db.call(move |conn| {
-        conn.execute(
-            "INSERT INTO sync_state (key, value) VALUES (?1, ?2) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value \
-             WHERE CAST(excluded.value AS INTEGER) > CAST(sync_state.value AS INTEGER)",
-            rusqlite::params![key, seq.to_string()],
-        )
-        .map(|_| ())
-        .map_err(crate::database::DbError::from)
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(crate::database::DbError::from)?;
+        for coord in &floor {
+            upsert_head_watermark_on(&tx, &coord.author_pubkey, coord.seq)?;
+        }
+        tx.commit().map_err(crate::database::DbError::from)
     })
     .await
-    .map_err(|e| format!("persist membership head watermark for {author}: {e}"))
+    .map_err(|error| format!("persist membership head watermarks: {error}"))
+}
+
+async fn persist_owner_and_head_watermarks(
+    db: &Database,
+    owner_pubkey: &str,
+    floor: &[MembershipCoord],
+) -> Result<(), String> {
+    let owner_pubkey = owner_pubkey.to_string();
+    let floor = floor.to_vec();
+    db.call(move |conn| {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(crate::database::DbError::from)?;
+        let pinned: Option<String> = tx
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = ?1",
+                [OWNER_PUBKEY_STATE_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(crate::database::DbError::from)?;
+        if let Some(pinned) = pinned {
+            if pinned != owner_pubkey {
+                return Err(crate::database::DbError(format!(
+                    "owner {pinned} is already pinned; refusing to replace it with {owner_pubkey}"
+                )));
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO sync_state (key, value) VALUES (?1, ?2)",
+                rusqlite::params![OWNER_PUBKEY_STATE_KEY, owner_pubkey],
+            )
+            .map_err(crate::database::DbError::from)?;
+        }
+        for coord in &floor {
+            upsert_head_watermark_on(&tx, &coord.author_pubkey, coord.seq)?;
+        }
+        tx.commit().map_err(crate::database::DbError::from)
+    })
+    .await
+    .map_err(|error| format!("persist owner and membership head watermarks: {error}"))
 }
 
 /// Seed this reader's per-author membership-head watermark from `floor` — the
@@ -851,10 +1006,7 @@ pub async fn seed_head_watermark(
     db: &Database,
     floor: &[super::membership::MembershipCoord],
 ) -> Result<(), String> {
-    for coord in floor {
-        persist_head_watermark(db, &coord.author_pubkey, coord.seq).await?;
-    }
-    Ok(())
+    persist_head_watermarks(db, floor).await
 }
 
 #[cfg(test)]
@@ -872,6 +1024,7 @@ mod tests {
     struct CommittedRemoval {
         storage: MockSyncStorage,
         db: Database,
+        founder: UserKeypair,
         founder_pubkey: String,
         second_owner_pubkey: String,
         removed_member_pubkey: String,
@@ -946,10 +1099,53 @@ mod tests {
         CommittedRemoval {
             storage,
             db,
+            founder,
             founder_pubkey,
             second_owner_pubkey,
             removed_member_pubkey,
         }
+    }
+
+    async fn pin_fixture_anchor(
+        fixture: &CommittedRemoval,
+    ) -> (Option<String>, BTreeMap<String, u64>) {
+        let visible = fixture.storage.list_membership_entries().await.unwrap();
+        load_and_persist_owner_anchor(
+            &fixture.storage,
+            &visible,
+            &fixture.founder_pubkey,
+            &fixture.db,
+        )
+        .await
+        .expect("pin valid fixture anchor")
+        .expect("fixture has committed membership");
+        (
+            fixture
+                .db
+                .get_sync_state(OWNER_PUBKEY_STATE_KEY)
+                .await
+                .unwrap(),
+            read_head_watermarks(&fixture.db).await.unwrap(),
+        )
+    }
+
+    async fn assert_fixture_trust_state(
+        fixture: &CommittedRemoval,
+        expected_owner: &Option<String>,
+        expected_floors: &BTreeMap<String, u64>,
+    ) {
+        assert_eq!(
+            &fixture
+                .db
+                .get_sync_state(OWNER_PUBKEY_STATE_KEY)
+                .await
+                .unwrap(),
+            expected_owner,
+        );
+        assert_eq!(
+            &read_head_watermarks(&fixture.db).await.unwrap(),
+            expected_floors,
+        );
     }
 
     #[tokio::test]
@@ -1136,6 +1332,7 @@ mod tests {
     #[tokio::test]
     async fn persisted_author_floor_requires_readable_head() {
         let fixture = committed_removal_by_second_owner().await;
+        let (owner_before, floors_before) = pin_fixture_anchor(&fixture).await;
         fixture
             .storage
             .hide_membership_from_listing(&fixture.second_owner_pubkey, 1);
@@ -1144,11 +1341,11 @@ mod tests {
             .remove_membership_head(&fixture.second_owner_pubkey);
         let visible = fixture.storage.list_membership_entries().await.unwrap();
 
-        let error = load_anchored_chain(
+        let error = load_and_persist_owner_anchor(
             &fixture.storage,
             &visible,
-            Some(&fixture.founder_pubkey),
-            Some(&fixture.db),
+            &fixture.founder_pubkey,
+            &fixture.db,
         )
         .await
         .expect_err("a persisted author floor requires a readable head");
@@ -1157,11 +1354,13 @@ mod tests {
             error.to_string().contains(&fixture.second_owner_pubkey),
             "missing-head error must name the persisted author: {error}",
         );
+        assert_fixture_trust_state(&fixture, &owner_before, &floors_before).await;
     }
 
     #[tokio::test]
     async fn membership_head_must_match_storage_author() {
         let fixture = committed_removal_by_second_owner().await;
+        let (owner_before, floors_before) = pin_fixture_anchor(&fixture).await;
         fixture
             .storage
             .hide_membership_from_listing(&fixture.second_owner_pubkey, 1);
@@ -1179,11 +1378,11 @@ mod tests {
         let mut visible = fixture.storage.list_membership_entries().await.unwrap();
         visible.push((other_author.clone(), 1));
 
-        let error = load_anchored_chain(
+        let error = load_and_persist_owner_anchor(
             &fixture.storage,
             &visible,
-            Some(&fixture.founder_pubkey),
-            None,
+            &fixture.founder_pubkey,
+            &fixture.db,
         )
         .await
         .expect_err("a signed head must match the author namespace it was read from");
@@ -1191,6 +1390,66 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains(&other_author), "{message}");
         assert!(message.contains(&fixture.second_owner_pubkey), "{message}");
+        assert_fixture_trust_state(&fixture, &owner_before, &floors_before).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_membership_head_signature_preserves_owner_and_floors() {
+        let fixture = committed_removal_by_second_owner().await;
+        let (owner_before, floors_before) = pin_fixture_anchor(&fixture).await;
+        let bytes = fixture
+            .storage
+            .get_membership_head(&fixture.founder_pubkey)
+            .await
+            .unwrap();
+        let mut head: AuthorHead = serde_json::from_slice(&bytes).unwrap();
+        head.signature = hex::encode([0u8; 64]);
+        fixture
+            .storage
+            .put_membership_head(&fixture.founder_pubkey, serde_json::to_vec(&head).unwrap())
+            .await
+            .unwrap();
+        let visible = fixture.storage.list_membership_entries().await.unwrap();
+
+        let error = load_and_persist_owner_anchor(
+            &fixture.storage,
+            &visible,
+            &fixture.founder_pubkey,
+            &fixture.db,
+        )
+        .await
+        .expect_err("an invalid signed head must reject anchor refresh");
+
+        assert!(error.to_string().contains("invalid signature"), "{error}");
+        assert_fixture_trust_state(&fixture, &owner_before, &floors_before).await;
+    }
+
+    #[tokio::test]
+    async fn membership_head_tip_mismatch_preserves_owner_and_floors() {
+        let fixture = committed_removal_by_second_owner().await;
+        let (owner_before, floors_before) = pin_fixture_anchor(&fixture).await;
+        let mismatched = AuthorHead::signed(3, hex::encode([0u8; 32]), &fixture.founder);
+        fixture
+            .storage
+            .put_membership_head(
+                &fixture.founder_pubkey,
+                serde_json::to_vec(&mismatched).unwrap(),
+            )
+            .await
+            .unwrap();
+        let visible = fixture.storage.list_membership_entries().await.unwrap();
+
+        let error = load_and_persist_owner_anchor(
+            &fixture.storage,
+            &visible,
+            &fixture.founder_pubkey,
+            &fixture.db,
+        )
+        .await
+        .expect_err("a head whose tip does not match its prefix must be rejected");
+
+        assert!(error.to_string().contains("chain tip"), "{error}");
+        assert_fixture_trust_state(&fixture, &owner_before, &floors_before).await;
     }
 
     #[tokio::test]
@@ -1763,8 +2022,24 @@ mod tests {
         let db = open_test_db();
         let author = "aabbccdd";
 
-        persist_head_watermark(&db, author, 10).await.unwrap();
-        persist_head_watermark(&db, author, 9).await.unwrap();
+        persist_head_watermarks(
+            &db,
+            &[MembershipCoord {
+                author_pubkey: author.to_string(),
+                seq: 10,
+            }],
+        )
+        .await
+        .unwrap();
+        persist_head_watermarks(
+            &db,
+            &[MembershipCoord {
+                author_pubkey: author.to_string(),
+                seq: 9,
+            }],
+        )
+        .await
+        .unwrap();
         assert_eq!(
             read_head_watermarks(&db)
                 .await
@@ -1775,7 +2050,15 @@ mod tests {
             "an out-of-order lower persist must not regress the stored watermark",
         );
 
-        persist_head_watermark(&db, author, 11).await.unwrap();
+        persist_head_watermarks(
+            &db,
+            &[MembershipCoord {
+                author_pubkey: author.to_string(),
+                seq: 11,
+            }],
+        )
+        .await
+        .unwrap();
         assert_eq!(
             read_head_watermarks(&db)
                 .await
@@ -1784,6 +2067,81 @@ mod tests {
                 .copied(),
             Some(11),
             "a higher persist still advances it",
+        );
+    }
+
+    #[tokio::test]
+    async fn seeding_a_complete_head_floor_is_atomic() {
+        use crate::sync::test_helpers::open_test_db;
+
+        let db = open_test_db();
+        db.call(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER reject_second_membership_floor \
+                 BEFORE INSERT ON sync_state \
+                 WHEN NEW.key = 'membership_head_seq/bbbb' \
+                 BEGIN SELECT RAISE(ABORT, 'forced second floor failure'); END;",
+            )
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .unwrap();
+        let floor = vec![
+            MembershipCoord {
+                author_pubkey: "aaaa".to_string(),
+                seq: 3,
+            },
+            MembershipCoord {
+                author_pubkey: "bbbb".to_string(),
+                seq: 7,
+            },
+        ];
+
+        assert!(seed_head_watermark(&db, &floor).await.is_err());
+        assert_eq!(
+            read_head_watermarks(&db).await.unwrap(),
+            BTreeMap::new(),
+            "a failed complete-floor seed rolls back every author",
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_pin_and_complete_head_floor_commit_atomically() {
+        use crate::sync::test_helpers::open_test_db;
+
+        let fixture = committed_removal_by_second_owner().await;
+        let db = open_test_db();
+        let rejected_key = head_watermark_key(&fixture.second_owner_pubkey);
+        db.call(move |conn| {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER reject_second_anchor_floor \
+                 BEFORE INSERT ON sync_state \
+                 WHEN NEW.key = '{rejected_key}' \
+                 BEGIN SELECT RAISE(ABORT, 'forced second floor failure'); END;",
+            ))
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .unwrap();
+        let visible = fixture.storage.list_membership_entries().await.unwrap();
+
+        assert!(load_and_persist_owner_anchor(
+            &fixture.storage,
+            &visible,
+            &fixture.founder_pubkey,
+            &db,
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            db.get_sync_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+            None,
+            "a failed floor write rolls back the owner pin",
+        );
+        assert_eq!(
+            read_head_watermarks(&db).await.unwrap(),
+            BTreeMap::new(),
+            "a failed floor write rolls back every author's floor",
         );
     }
 

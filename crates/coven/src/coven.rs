@@ -944,10 +944,10 @@ mod tests {
     };
     use crate::store_dir::StoreDir;
     use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
-    use crate::sync::cycle::run_single_sync_cycle;
     use crate::sync::hlc::Hlc;
     use crate::sync::session::BlobDecl;
     use crate::sync::storage::SyncStorage;
+    use crate::sync::test_helpers::run_test_cycle as drive_test_cycle;
     use crate::sync::test_helpers::{pull_into, query_text, row_exists, MockSyncStorage};
     use async_trait::async_trait;
     use rusqlite::params;
@@ -1095,16 +1095,19 @@ mod tests {
         try_open(&dir).expect("open handle")
     }
 
-    async fn run_test_cycle(storage: &MockSyncStorage, handle: &CovenHandle) {
+    async fn run_test_cycle(
+        storage: &MockSyncStorage,
+        handle: &CovenHandle,
+        keypair: &crate::keys::UserKeypair,
+    ) {
         let cipher = RwLock::new(CloudCipher::Plaintext);
-        let keypair = crate::keys::UserKeypair::generate();
         let hlc = Hlc::new("device-test".to_string());
         handle
             .db()
             .set_sync_state("snapshot_seq", "0")
             .await
             .expect("seed snapshot floor");
-        run_single_sync_cycle(
+        drive_test_cycle(
             storage,
             "lib-test",
             "device-test",
@@ -1113,7 +1116,7 @@ mod tests {
             handle.db(),
             &cipher,
             &PendingRotation::none(),
-            &keypair,
+            keypair,
             None,
             &handle.store_dir(),
             None,
@@ -1142,8 +1145,9 @@ mod tests {
         drop(handle);
 
         let reopened = open_files_handle_in(dir);
-        let storage = MockSyncStorage::new();
-        run_test_cycle(&storage, &reopened).await;
+        let keypair = crate::keys::UserKeypair::generate();
+        let storage = MockSyncStorage::with_keypair(keypair.clone());
+        run_test_cycle(&storage, &reopened, &keypair).await;
 
         let (_peer_tmp, peer) = open_files_handle();
         pull_into(
@@ -1184,8 +1188,9 @@ mod tests {
         drop(handle);
 
         let reopened = open_files_handle_in(dir);
-        let storage = MockSyncStorage::new();
-        run_test_cycle(&storage, &reopened).await;
+        let keypair = crate::keys::UserKeypair::generate();
+        let storage = MockSyncStorage::with_keypair(keypair.clone());
+        run_test_cycle(&storage, &reopened, &keypair).await;
 
         let (_peer_tmp, peer) = open_files_handle();
         pull_into(
@@ -1216,8 +1221,9 @@ mod tests {
             })
             .await
             .expect("insert before first cycle");
-        let storage = MockSyncStorage::new();
-        run_test_cycle(&storage, &handle).await;
+        let keypair = crate::keys::UserKeypair::generate();
+        let storage = MockSyncStorage::with_keypair(keypair.clone());
+        run_test_cycle(&storage, &handle, &keypair).await;
 
         let (_peer_tmp, peer) = open_files_handle();
         pull_into(
@@ -1248,7 +1254,7 @@ mod tests {
         drop(handle);
 
         let reopened = open_files_handle_in(dir);
-        run_test_cycle(&storage, &reopened).await;
+        run_test_cycle(&storage, &reopened, &keypair).await;
 
         let mut cursors = HashMap::new();
         cursors.insert("device-test".to_string(), 1);
@@ -1277,10 +1283,11 @@ mod tests {
             })
             .await
             .expect("write before failed push");
-        let storage = MockSyncStorage::new();
+        let keypair = crate::keys::UserKeypair::generate();
+        let storage = MockSyncStorage::with_keypair(keypair.clone());
         storage.fail_next_changeset_puts(1);
 
-        let first = run_single_sync_cycle(
+        let first = drive_test_cycle(
             &storage,
             "lib-test",
             "device-test",
@@ -1289,7 +1296,7 @@ mod tests {
             handle.db(),
             &RwLock::new(CloudCipher::Plaintext),
             &PendingRotation::none(),
-            &crate::keys::UserKeypair::generate(),
+            &keypair,
             None,
             &handle.store_dir(),
             None,
@@ -1302,7 +1309,7 @@ mod tests {
         );
         assert!(storage.get_changeset("device-test", 1).await.is_err());
 
-        run_test_cycle(&storage, &handle).await;
+        run_test_cycle(&storage, &handle, &keypair).await;
         assert!(
             storage.get_changeset("device-test", 1).await.is_ok(),
             "the pending write is still published after the failed push",

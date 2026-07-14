@@ -18,16 +18,15 @@ use crate::clock::ClockRef;
 use crate::config::{Config, HomeStorage};
 use crate::coven::StoreOpenGuard;
 use crate::database::{Database, DbError};
-use crate::encryption::EncryptionService;
 use crate::keys::{DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys};
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 use crate::storage::cloud::{CloudHome, CloudHomeError};
-use crate::store_dir::StoreDir;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::sync::cloud_storage::BlobPathScheme;
+use crate::sync::cloud_storage::CloudCipher;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::sync::cloud_storage::CloudSyncStorage;
-use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher};
 use crate::sync::cycle::{InitSyncError, SyncComponents};
-use crate::sync::hlc::Hlc;
 /// `MemberInfo` lives next to `MemberRole` in the membership module; coven's
 /// public path reaches it through here (re-exported from `lib.rs`).
 pub(crate) use crate::sync::membership::MemberInfo;
@@ -35,9 +34,10 @@ use crate::sync::membership::MemberRole;
 use crate::sync::storage::SyncStorage;
 use crate::sync::sync_loop::{SyncLoopError, SyncLoopHandle, SyncLoopStatus};
 
-/// Supplies the host's current config on demand. coven reads it fresh each call
-/// — never snapshotting or writing it — so a host with reactive config sees
-/// changes without rebuilding the manager.
+/// Supplies the host's current config for building the next connection. Starting
+/// a loop captures one snapshot; commands on that running loop use its immutable
+/// store identity, representation, provider settings, and directory even if the
+/// host's next config changes meanwhile.
 pub(crate) type ConfigProvider = Arc<dyn Fn() -> Config + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
@@ -70,16 +70,6 @@ pub enum SyncError {
     Loop(SyncLoopError),
 }
 
-/// Refuse a membership operation on a plaintext home. Inviting wraps the store
-/// key to a member and removing rotates it — both meaningless without a key — so
-/// the caller must bail before mutating the membership chain or re-wrapping keys.
-fn require_encrypted_home(cipher: &RwLock<CloudCipher>) -> Result<EncryptionService, SyncError> {
-    match &*cipher.read().unwrap() {
-        CloudCipher::Encrypted(encryption) => Ok(encryption.clone()),
-        CloudCipher::Plaintext => Err(SyncError::NotEncryptedHome),
-    }
-}
-
 /// High-level sync manager.
 ///
 /// Holds the store's master-key custody; the at-rest cipher is resolved from
@@ -102,11 +92,6 @@ pub(crate) struct SyncManager {
     /// handle — is gone, never while a detached loop thread is still writing.
     open_guard: Arc<StoreOpenGuard>,
 
-    /// coven's `_updated_at` register, the same `Arc<Hlc>` the owned [`Database`]
-    /// holds. The sync loop advances it past pulled rows and stamps envelopes off
-    /// it, so it shares the clock the host stamps rows from.
-    hlc: Arc<Hlc>,
-
     /// The status broadcast the [`CovenHandle`](crate::CovenHandle) owns, cloned
     /// into every sync loop this manager starts so a subscription outlives the
     /// loop restarts a reconnect performs.
@@ -128,10 +113,9 @@ pub(crate) struct SyncManager {
 }
 
 impl SyncManager {
-    /// Build the manager off the owned [`Database`]. The database already seeded
-    /// its register clock past every value on disk at `open`; the manager shares
-    /// that `Arc<Hlc>` so the sync loop's advance-on-pull and envelope stamps use
-    /// the same instance the host stamps rows from.
+    /// Build the manager off the owned [`Database`]. Session initialization takes
+    /// the database's already-seeded register clock into [`SyncComponents`], and
+    /// every connected command reads that captured clock from the installed loop.
     ///
     /// Construction is infallible and synchronous: seeding already happened in
     /// the open path. The manager is built lazily, only once a provider is
@@ -149,7 +133,6 @@ impl SyncManager {
         open_guard: Arc<StoreOpenGuard>,
         status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
     ) -> Self {
-        let hlc = db.hlc();
         Self {
             config_provider,
             key_service,
@@ -160,7 +143,6 @@ impl SyncManager {
             cloudkit_ops,
             observer,
             open_guard,
-            hlc,
             status_tx,
             sync_loop_handle: RwLock::new(None),
             cloud_home: RwLock::new(None),
@@ -247,7 +229,6 @@ impl SyncManager {
         // Connect never mints a device identity: a locked agent with no
         // identity established must fail here with `KeyError::NoDeviceIdentity`,
         // not silently forge one.
-        let user_keypair = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let storage = crate::storage::cloud::setup::create_sync_storage_with_home(
             &config,
             self.custody.as_ref(),
@@ -255,20 +236,16 @@ impl SyncManager {
             cloud_home.clone(),
             Some(cipher.clone()),
         )
-        .map_err(SyncError::StorageSetup)?;
+        .map_err(|error| match error {
+            crate::storage::cloud::setup::StorageSetupError::Key(error) => SyncError::Key(error),
+            error => SyncError::StorageSetup(error),
+        })?;
 
-        let components = crate::sync::cycle::init_sync_over_storage(
-            &config,
-            &self.db,
-            &cipher,
-            self.hlc.clone(),
-            user_keypair,
-            storage,
-        )
-        .await
-        .map_err(SyncError::from)?;
+        let components = crate::sync::cycle::init_sync_over_storage(&self.db, storage)
+            .await
+            .map_err(SyncError::from)?;
 
-        let _handle = self.install_sync_loop(components, config.store_dir.clone())?;
+        let _handle = self.install_sync_loop(components, config)?;
         *self.cloud_home.write().unwrap() = Some(cloud_home);
 
         Ok(())
@@ -282,14 +259,13 @@ impl SyncManager {
     fn install_sync_loop(
         &self,
         components: SyncComponents,
-        store_dir: StoreDir,
+        config: Config,
     ) -> Result<Arc<SyncLoopHandle>, SyncError> {
         let handle = Arc::new(SyncLoopHandle::new(
             components,
-            self.db.clone(),
             self.custody.clone(),
             self.clock.clone(),
-            store_dir,
+            config,
             self.observer.clone(),
             self.open_guard.clone(),
             self.status_tx.clone(),
@@ -334,26 +310,24 @@ impl SyncManager {
         self.stop_current_connection()?;
 
         let keypair = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let blob_paths = if cipher.is_plaintext() {
+            BlobPathScheme::Plain
+        } else {
+            BlobPathScheme::Hashed
+        };
         let storage = CloudSyncStorage::new(
             home.clone(),
             cipher.clone(),
-            BlobPathScheme::for_storage(config.cloud_home.storage),
+            blob_paths,
             config.store_id.clone(),
-            keypair.clone(),
+            keypair,
         );
 
-        let components = crate::sync::cycle::init_sync_over_storage(
-            &config,
-            &self.db,
-            &cipher,
-            self.hlc.clone(),
-            keypair,
-            storage,
-        )
-        .await
-        .map_err(SyncError::from)?;
+        let components = crate::sync::cycle::init_sync_over_storage(&self.db, storage)
+            .await
+            .map_err(SyncError::from)?;
 
-        let _handle = self.install_sync_loop(components, config.store_dir.clone())?;
+        let _handle = self.install_sync_loop(components, config)?;
         *self.cloud_home.write().unwrap() = Some(home);
 
         Ok(())
@@ -431,13 +405,6 @@ impl SyncManager {
     // Blob locality transitions (make_remote / make_local / cancel_make_remote)
     // =========================================================================
 
-    /// The blob-path scheme the configured home keys objects under (`Hashed` for an
-    /// opaque home, `Plain` for a browsable one) — how coven derives each blob's
-    /// cloud object key at transition time.
-    fn blob_path_scheme(&self) -> BlobPathScheme {
-        BlobPathScheme::for_storage((self.config_provider)().cloud_home.storage)
-    }
-
     /// Make `(root_table, root_id)` Remote (Local → Remote): enqueue an upload per
     /// user-provided blob from its external file and record the make_remote intent,
     /// then return. The drain uploads each and flips the gate true on the last (see
@@ -454,11 +421,14 @@ impl SyncManager {
         if !self.is_sync_ready() {
             return Err(MakeRemoteError::SyncNotReady);
         }
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(MakeRemoteError::SyncNotReady)?;
         transition::make_remote(
             &self.db,
-            self.blob_path_scheme(),
-            &self.self_uploader()?,
-            &self.hlc,
+            sync_loop.blob_path_scheme(),
+            &sync_loop.self_uploader(),
+            sync_loop.hlc(),
             root_table,
             root_id,
             pin,
@@ -466,27 +436,6 @@ impl SyncManager {
         .await?;
         self.trigger_sync();
         Ok(())
-    }
-
-    /// This device's hex public key — the `{uploader}` segment its own blob
-    /// uploads key under. Ready only once the keypair is loaded, which
-    /// `is_sync_ready` has already established at the call sites below.
-    fn self_uploader(&self) -> Result<String, MakeRemoteError> {
-        match crate::keys::identity_public_key(self.identity_custody.as_ref()) {
-            Ok(Some(pk)) => Ok(hex::encode(pk)),
-            // No keypair loaded yet: sync genuinely isn't ready.
-            Ok(None) => Err(MakeRemoteError::SyncNotReady),
-            // A key-store failure (e.g. the keychain is unavailable) is not "not
-            // configured" — surface the real cause rather than silently reporting
-            // the transition as not-ready.
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "reading this device's public key failed; cannot start the transition",
-                );
-                Err(MakeRemoteError::SyncNotReady)
-            }
-        }
     }
 
     /// Cancel an in-flight make_remote of `(root_table, root_id)`: clear its intent
@@ -500,13 +449,15 @@ impl SyncManager {
         if !self.is_sync_ready() {
             return Err(MakeRemoteError::SyncNotReady);
         }
-        let store_dir = (self.config_provider)().store_dir;
+        let sync_loop = self
+            .sync_loop_handle()
+            .ok_or(MakeRemoteError::SyncNotReady)?;
         transition::cancel_make_remote(
             &self.db,
-            &store_dir,
-            self.blob_path_scheme(),
-            &self.self_uploader()?,
-            &self.hlc,
+            sync_loop.store_dir(),
+            sync_loop.blob_path_scheme(),
+            &sync_loop.self_uploader(),
+            sync_loop.hlc(),
             root_table,
             root_id,
         )
@@ -536,14 +487,13 @@ impl SyncManager {
         let sync_loop = self
             .sync_loop_handle()
             .ok_or(MakeLocalError::SyncNotReady)?;
-        let store_dir = (self.config_provider)().store_dir;
         let storage: &dyn SyncStorage = &**sync_loop.storage();
         transition::make_local(
             &self.db,
             storage,
-            &store_dir,
-            self.blob_path_scheme(),
-            &self.hlc,
+            sync_loop.store_dir(),
+            sync_loop.blob_path_scheme(),
+            sync_loop.hlc(),
             self.observer.as_deref(),
             root_table,
             root_id,
@@ -564,15 +514,17 @@ impl SyncManager {
     // =========================================================================
 
     pub(crate) async fn get_members(&self) -> Result<Vec<MemberInfo>, SyncError> {
-        let config = (self.config_provider)();
-        if config.cloud_home.provider.is_none() {
+        let active_loop = self.sync_loop_handle();
+        let config = active_loop
+            .as_ref()
+            .map(|handle| handle.config().clone())
+            .unwrap_or_else(|| (self.config_provider)());
+        if active_loop.is_none() && config.cloud_home.provider.is_none() {
             info!("get_members: sync not configured; returning no members");
             return Ok(Vec::new());
         }
 
-        let loop_storage = self
-            .sync_loop_handle()
-            .map(|handle| handle.storage().clone());
+        let loop_storage = active_loop.map(|handle| handle.storage().clone());
         let owned_storage;
         let storage: &dyn SyncStorage = if let Some(storage) = loop_storage.as_deref() {
             storage
@@ -612,21 +564,23 @@ impl SyncManager {
     }
 
     /// Build a restore code for this store: fetch the current membership-head
-    /// floor from the cloud (empty for a chain-less/browsable store) and mint
-    /// the code from it, so the restorer can seed its watermark from mint-time
+    /// floor from the cloud and mint the code from it, so the restorer can seed
+    /// its watermark from mint-time
     /// state rather than accepting any signed head as a fresh device would
     /// otherwise have to. Requires a connected provider — unlike the old,
     /// storage-free `generate_restore_code`, minting a trustworthy floor is a
     /// network read, not a pure function of local config and keyring state.
     pub(crate) async fn generate_restore_code(&self) -> Result<String, SyncError> {
-        let config = (self.config_provider)();
-        if config.cloud_home.provider.is_none() {
+        let active_loop = self.sync_loop_handle();
+        let config = active_loop
+            .as_ref()
+            .map(|handle| handle.config().clone())
+            .unwrap_or_else(|| (self.config_provider)());
+        if active_loop.is_none() && config.cloud_home.provider.is_none() {
             return Err(SyncError::NotConfigured);
         }
 
-        let loop_storage = self
-            .sync_loop_handle()
-            .map(|handle| handle.storage().clone());
+        let loop_storage = active_loop.map(|handle| handle.storage().clone());
         let owned_storage;
         let storage: &dyn SyncStorage = if let Some(storage) = loop_storage.as_deref() {
             storage
@@ -696,30 +650,14 @@ impl SyncManager {
 
         // Inviting a member wraps the store key to them, which only an encrypted
         // home has. Refuse before touching the membership chain.
-        let encryption = require_encrypted_home(sync_loop.cipher())?;
-
-        let (store_id, store_name) = {
-            let config = (self.config_provider)();
-            (config.store_id.clone(), config.store_name.clone())
-        };
-
-        let storage: &dyn SyncStorage = &**sync_loop.storage();
-        let cloud_home = sync_loop.storage().cloud_home();
-
-        let invite_code = crate::sync::membership_ops::invite_member(
-            storage,
-            cloud_home,
-            sync_loop.user_keypair(),
-            sync_loop.hlc(),
-            public_key_hex,
-            invitee_email,
-            role,
-            &encryption,
-            &store_id,
-            &store_name,
-        )
-        .await
-        .map_err(SyncError::Membership)?;
+        if sync_loop.current_encryption().is_none() {
+            return Err(SyncError::NotEncryptedHome);
+        }
+        let store_name = sync_loop.config().store_name.clone();
+        let invite_code = sync_loop
+            .invite_member(public_key_hex, invitee_email, role, &store_name)
+            .await
+            .map_err(SyncError::Membership)?;
 
         Ok(crate::join_code::encode(&invite_code))
     }
@@ -740,13 +678,9 @@ impl SyncManager {
         // Removing a member rotates the store key, which only an encrypted home
         // has. Refuse up front so a plaintext home never mutates the membership
         // chain or re-wraps keys before the rotation fails.
-        let current_encryption = require_encrypted_home(sync_loop.cipher())?;
-
-        let store_id = (self.config_provider)().store_id.clone();
-
-        let storage: &dyn SyncStorage = &**sync_loop.storage();
-        let cloud_home = sync_loop.storage().cloud_home();
-        let pending_rotation = sync_loop.storage().shared_pending_rotation();
+        if sync_loop.current_encryption().is_none() {
+            return Err(SyncError::NotEncryptedHome);
+        }
 
         // Removing a member commits the cloud key rotation and then adopts the
         // rotated key into this device's keyring and live cipher. The host records
@@ -755,26 +689,14 @@ impl SyncManager {
         // half-applied state and its remedies — and, structurally, this device
         // seals nothing new for the cloud until one of those remedies adopts it
         // (`pending_rotation`, shared with the sync loop this same store runs).
-        let outcome = crate::sync::membership_ops::remove_member(
-            storage,
-            cloud_home,
-            sync_loop.user_keypair(),
-            sync_loop.hlc(),
-            public_key_hex,
-            &store_id,
-            &current_encryption,
-            self.custody.as_ref(),
-            sync_loop.cipher(),
-            &pending_rotation,
-        )
-        .await;
+        let outcome = sync_loop.remove_member(public_key_hex).await;
 
         // Durably record the marker's state whether adoption succeeded or failed:
         // on a failed adoption the rotation is committed on the cloud but this
         // device is still sealing under the superseded generation, so a restart
         // must remember the pause; on success the marker is already cleared and
         // this deletes the durable record.
-        crate::sync::cloud_storage::persist_pending_rotation(&self.db, &pending_rotation).await?;
+        sync_loop.persist_pending_rotation().await?;
 
         let fingerprint = outcome.map_err(SyncError::Membership)?;
         Ok(fingerprint)
@@ -958,8 +880,9 @@ mod tests {
             tokio::sync::broadcast::channel(16).0,
         );
 
+        let home = Arc::new(InMemoryCloudHome::new());
         manager
-            .start_sync_with_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .start_sync_with_home(home.clone(), CloudCipher::Plaintext)
             .await
             .expect("first test home starts");
         let first_loop = manager
@@ -968,7 +891,7 @@ mod tests {
         assert!(first_loop.is_running(), "first loop starts running");
 
         manager
-            .start_sync_with_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .start_sync_with_home(home, CloudCipher::Plaintext)
             .await
             .expect("replacement test home starts");
         let replacement_loop = manager
@@ -1104,6 +1027,70 @@ mod tests {
         assert!(
             manager.cloud_home().is_none(),
             "a failed connect installs no cloud home",
+        );
+    }
+
+    #[tokio::test]
+    async fn browsable_test_home_with_a_foreign_founder_installs_nothing() {
+        test_keyring::install();
+
+        let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        let store_id = "lib-foreign-browsable-founder";
+        let mut config = Config::with_defaults(
+            store_id.to_string(),
+            "test-device".to_string(),
+            store_dir.clone(),
+            "Test Store".to_string(),
+        );
+        config.cloud_home.storage = HomeStorage::Browsable;
+        let home = Arc::new(InMemoryCloudHome::new());
+        let attacker = crate::keys::UserKeypair::generate();
+        let attacker_storage = CloudSyncStorage::new(
+            home.clone(),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            store_id,
+            attacker.clone(),
+        );
+        crate::sync::test_helpers::publish_test_founder(
+            &attacker_storage,
+            &attacker,
+            "0000000001000-0000-attacker",
+        )
+        .await
+        .expect("publish foreign founder");
+
+        let victim = crate::keys::UserKeypair::generate();
+        let db = crate::sync::test_helpers::open_test_db();
+        let manager = SyncManager::new(
+            Arc::new(move || config.clone()),
+            StoreKeys::new(store_id.to_string()),
+            Arc::new(NoKeyCustody),
+            crate::identity_custody::IdentityCustody::InMemory(victim)
+                .resolve(store_id, &store_dir),
+            db.clone(),
+            Arc::new(SystemClock),
+            None,
+            None,
+            StoreOpenGuard::acquire_for_test(&store_dir),
+            tokio::sync::broadcast::channel(16).0,
+        );
+
+        let error = manager
+            .start_sync_with_home(home, CloudCipher::Plaintext)
+            .await
+            .expect_err("foreign founder must prevent sync startup");
+        assert!(
+            matches!(error, SyncError::Init(InitSyncError::MembershipAnchor(_))),
+            "unexpected startup error: {error:?}",
+        );
+        assert!(manager.sync_loop_handle().is_none());
+        assert!(manager.cloud_home().is_none());
+        assert_eq!(
+            db.get_sync_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
+                .await
+                .unwrap(),
+            None,
         );
     }
 
