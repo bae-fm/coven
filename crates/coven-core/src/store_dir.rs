@@ -114,6 +114,17 @@ pub fn validate_path_token(token: &str) -> Result<(), PathTokenError> {
     Ok(())
 }
 
+fn validate_content_hash(content_hash: &str) -> Result<(), PathTokenError> {
+    if content_hash.len() != 64
+        || !content_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(PathTokenError::InvalidContentHash);
+    }
+    Ok(())
+}
+
 /// Reject an untrusted `cloud_path` (the consumer's readable object key under the
 /// plain scheme, e.g. `"Artist - Album/cover.jpg"`) that could escape its
 /// namespace prefix in the bucket. Unlike a path token, an interior `/` is
@@ -323,42 +334,56 @@ impl StoreDir {
     }
 
     /// A kept (budget-exempt) cache copy of a **Remote** blob:
-    /// `storage/pinned/<namespace>/{ab}/{cd}/<id>`. The kept sibling of
+    /// `storage/pinned/<namespace>/{ab}/{cd}/<id>/<content_hash>`. The kept sibling of
     /// [`Self::cache_blob_path`] — same per-namespace shard layout, in the `pinned`
     /// folder instead of `cache`. The cache's truth is the folder a blob's file lives
     /// in, not a table; a file here is a Remote blob's cache copy the user pinned for
-    /// offline (kept from eviction). `Err` if `namespace`/`id` is unsafe or `id` is
-    /// not indexable (see [`Self::id_shard`]).
-    pub fn pinned_blob_path(&self, namespace: &str, id: &str) -> Result<PathBuf, PathTokenError> {
-        self.cache_folder_blob_path("pinned", namespace, id)
+    /// offline (kept from eviction). `Err` if `namespace`/`id` is unsafe, `id` is
+    /// not indexable, or `content_hash` is not a lowercase hexadecimal SHA-256.
+    pub fn pinned_blob_path(
+        &self,
+        namespace: &str,
+        id: &str,
+        content_hash: &str,
+    ) -> Result<PathBuf, PathTokenError> {
+        self.cache_folder_blob_path("pinned", namespace, id, content_hash)
     }
 
     /// An opportunistic (evictable) cache copy of a **Remote** blob:
-    /// `storage/cache/<namespace>/{ab}/{cd}/<id>`. A file here is a cached-but-unpinned
+    /// `storage/cache/<namespace>/{ab}/{cd}/<id>/<content_hash>`. A file here is a cached-but-unpinned
     /// blob — fetched on read or eagerly on pull, droppable by the budget sweep. The
     /// folder it lives in, not a table, is what makes it evictable rather than kept.
     /// Segmented by `namespace` so each namespace's budget evicts only its own
     /// subtree (see [`Self::cache_namespace_dir`]). `Err` if
-    /// `namespace`/`id` is unsafe or `id` is not indexable (see [`Self::id_shard`]).
-    pub fn cache_blob_path(&self, namespace: &str, id: &str) -> Result<PathBuf, PathTokenError> {
-        self.cache_folder_blob_path("cache", namespace, id)
+    /// `namespace`/`id` is unsafe, `id` is not indexable, or `content_hash` is not
+    /// a lowercase hexadecimal SHA-256.
+    pub fn cache_blob_path(
+        &self,
+        namespace: &str,
+        id: &str,
+        content_hash: &str,
+    ) -> Result<PathBuf, PathTokenError> {
+        self.cache_folder_blob_path("cache", namespace, id, content_hash)
     }
 
-    /// `storage/<folder>/<namespace>/{ab}/{cd}/<id>` — the single blob-path builder
+    /// `storage/<folder>/<namespace>/{ab}/{cd}/<id>/<content_hash>` — the single blob-path builder
     /// behind [`Self::cache_blob_path`] (`folder` = `cache`) and
     /// [`Self::pinned_blob_path`] (`folder` = `pinned`), which differ only by the
     /// folder token. Composes the per-namespace dir
     /// ([`Self::cache_folder_namespace_dir`]) with the id shard, so the layout lives
-    /// in one place. `namespace`/`id` validated.
+    /// in one place. `namespace`/`id` and `content_hash` are validated.
     fn cache_folder_blob_path(
         &self,
         folder: &str,
         namespace: &str,
         id: &str,
+        content_hash: &str,
     ) -> Result<PathBuf, PathTokenError> {
+        validate_content_hash(content_hash)?;
         Ok(self
             .cache_folder_namespace_dir(folder, namespace)?
-            .join(Self::id_shard(id)?))
+            .join(Self::id_shard(id)?)
+            .join(content_hash))
     }
 
     /// `storage/<folder>/<namespace>` for a cache folder (`cache` evictable / `pinned`
@@ -390,13 +415,7 @@ impl StoreDir {
     ) -> Result<PathBuf, PathTokenError> {
         validate_path_token(namespace)?;
         validate_path_token(id)?;
-        if content_hash.len() != 64
-            || !content_hash
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(PathTokenError::InvalidContentHash);
-        }
+        validate_content_hash(content_hash)?;
         Ok(self
             .path
             .join("storage")

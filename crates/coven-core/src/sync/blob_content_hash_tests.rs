@@ -166,7 +166,9 @@ async fn a_planted_blob_under_another_uploader_is_not_served() {
         other => panic!("expected a content-hash mismatch, got {other:?}"),
     }
     assert!(
-        !ld.cache_blob_path("photos", BLOB_ID).unwrap().exists(),
+        !ld.cache_blob_path("photos", BLOB_ID, &content_hash(&real))
+            .unwrap()
+            .exists(),
         "the refused attacker bytes are not cached",
     );
 
@@ -234,7 +236,9 @@ async fn a_rolled_back_blob_version_is_refused() {
         other => panic!("expected a content-hash mismatch, got {other:?}"),
     }
     assert!(
-        !ld.cache_blob_path("photos", BLOB_ID).unwrap().exists(),
+        !ld.cache_blob_path("photos", BLOB_ID, &content_hash(&v2))
+            .unwrap()
+            .exists(),
         "the rolled-back bytes are not cached",
     );
 

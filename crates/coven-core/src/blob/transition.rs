@@ -327,6 +327,15 @@ pub async fn make_remote(
             .external_blob(&blob.id)
             .await?
             .ok_or_else(|| MakeRemoteError::NotExternal(blob.id.clone()))?;
+        let content =
+            cache::live_blob_content(db, blob)
+                .await
+                .map_err(|error| MakeRemoteError::Source {
+                    blob_id: blob.id.clone(),
+                    path: ext.path.display().to_string(),
+                    detail: error.to_string(),
+                })?;
+        let blob = &content.blob;
         let len = crate::local_blob::file_len(&ext.path)
             .await
             .map_err(|detail| MakeRemoteError::Source {
@@ -334,24 +343,16 @@ pub async fn make_remote(
                 path: ext.path.display().to_string(),
                 detail,
             })?;
-        if len != ext.size {
+        if len != ext.size || len != content.plaintext_size {
             return Err(MakeRemoteError::Source {
                 blob_id: blob.id.clone(),
                 path: ext.path.display().to_string(),
                 detail: format!(
-                    "length {len} no longer matches the registered size {}",
-                    ext.size
+                    "length {len} does not match registered size {} and signed row size {}",
+                    ext.size, content.plaintext_size
                 ),
             });
         }
-        let expected_hash =
-            cache::expected_blob_hash(db, blob)
-                .await
-                .map_err(|error| MakeRemoteError::Source {
-                    blob_id: blob.id.clone(),
-                    path: ext.path.display().to_string(),
-                    detail: error.to_string(),
-                })?;
         let actual_hash = crate::blob::content_hash_file(&ext.path)
             .await
             .map_err(|detail| MakeRemoteError::Source {
@@ -359,12 +360,13 @@ pub async fn make_remote(
                 path: ext.path.display().to_string(),
                 detail,
             })?;
-        if actual_hash != expected_hash {
+        if actual_hash != content.content_hash {
             return Err(MakeRemoteError::Source {
                 blob_id: blob.id.clone(),
                 path: ext.path.display().to_string(),
                 detail: format!(
-                    "content hash {actual_hash} does not match the row's signed hash {expected_hash}"
+                    "content hash {actual_hash} does not match the row's signed hash {}",
+                    content.content_hash
                 ),
             });
         }
@@ -392,7 +394,7 @@ pub async fn make_remote(
             source.to_string(),
             blob.scope.clone(),
             location,
-            expected_hash,
+            content.content_hash,
         ));
     }
 
@@ -475,8 +477,12 @@ pub async fn cancel_make_remote(
     // The exact immutable cloud key + cache namespace per blob. The location was
     // recorded atomically with the upload enqueue, so cancellation never rebuilds
     // a key from the current device identity.
-    let mut keyed: Vec<(String, String, String)> = Vec::new();
+    let mut keyed: Vec<(String, String, String, String)> = Vec::new();
     for blob in &user_provided {
+        let content = cache::live_blob_content(db, blob)
+            .await
+            .map_err(|e| MakeRemoteError::CloudKey(blob.id.clone(), e.to_string()))?;
+        let blob = &content.blob;
         let location = db
             .blob_location(&blob.namespace, &blob.id)
             .await?
@@ -488,23 +494,28 @@ pub async fn cancel_make_remote(
             })?;
         let cloud_key = cloud_key_for_location(scheme, &location, blob)
             .map_err(|e| MakeRemoteError::CloudKey(blob.id.clone(), e))?;
-        keyed.push((blob.id.clone(), blob.namespace.clone(), cloud_key));
+        keyed.push((
+            blob.id.clone(),
+            blob.namespace.clone(),
+            content.content_hash,
+            cloud_key,
+        ));
     }
 
     let now = hlc.now().to_string();
     let (root_table_owned, root_id_owned) = (root_table.to_string(), root_id.to_string());
     // Returns the (id, namespace) of blobs that were already uploaded (so their cache
     // copies are dropped post-commit).
-    let dropped: Vec<(String, String)> = db
+    let dropped: Vec<(String, String, String)> = db
         .call(move |conn| {
             let tx = conn.unchecked_transaction()?;
             if !Database::make_remote_intent_exists(&tx, &root_table_owned, &root_id_owned)? {
                 return Ok(Vec::new());
             }
             let mut dropped = Vec::new();
-            for (id, namespace, cloud_key) in &keyed {
+            for (id, namespace, content_hash, cloud_key) in &keyed {
                 Database::enqueue_delete_on(&tx, cloud_key, &now)?;
-                dropped.push((id.clone(), namespace.clone()));
+                dropped.push((id.clone(), namespace.clone(), content_hash.clone()));
                 Database::clear_blob_location_on(&tx, namespace, id, &now)?;
             }
             Database::delete_make_remote_intent_on(&tx, &root_table_owned, &root_id_owned)?;
@@ -513,8 +524,8 @@ pub async fn cancel_make_remote(
         })
         .await?;
 
-    for (id, namespace) in dropped {
-        if let Err(e) = cache::drop_cached_blob(store_dir, &namespace, &id).await {
+    for (id, namespace, content_hash) in dropped {
+        if let Err(e) = cache::drop_cached_blob(store_dir, &namespace, &id, &content_hash).await {
             tracing::warn!(
                 "cancel_make_remote: failed to drop cache copy of {namespace}/{id}: {e}"
             );
@@ -644,6 +655,7 @@ struct Materialized {
     blob: BlobRef,
     dest: Option<PathBuf>,
     size: u64,
+    content_hash: String,
     cloud_key: String,
 }
 
@@ -855,7 +867,9 @@ pub async fn make_local(
     // pure redundancy — drop them. A failure leaves only stray cache space; a read
     // serves the local file. Log and go on.
     for m in &materialized {
-        if let Err(e) = cache::drop_cached_blob(store_dir, &m.blob.namespace, &m.blob.id).await {
+        if let Err(e) =
+            cache::drop_cached_blob(store_dir, &m.blob.namespace, &m.blob.id, &m.content_hash).await
+        {
             tracing::warn!(
                 "make_local: failed to drop cache copy of {}/{}: {e}",
                 m.blob.namespace,
@@ -904,6 +918,10 @@ async fn materialize_blobs(
         // The cloud object this make_local will tombstone may sit under a peer's
         // prefix (a peer made this root remote), so resolve its uploader rather than
         // assuming ourselves.
+        let content = cache::live_blob_content(db, blob)
+            .await
+            .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
+        let blob = &content.blob;
         let location = crate::blob::cache::resolve_blob_location(db, storage, blob)
             .await
             .map_err(|e| MakeLocalError::CloudKey(blob.id.clone(), e.to_string()))?;
@@ -939,7 +957,7 @@ async fn materialize_blobs(
                     db,
                     store_dir,
                     Some(storage),
-                    blob,
+                    &content,
                     &temp_path,
                 )
                 .await
@@ -991,15 +1009,13 @@ async fn materialize_blobs(
                     blob: blob.clone(),
                     dest: Some(dest_path),
                     size,
+                    content_hash: content.content_hash,
                     cloud_key,
                 }
             }
             Provenance::HostProvided => {
-                let content_hash = cache::expected_blob_hash(db, blob)
-                    .await
-                    .map_err(|e| MakeLocalError::Read(blob.id.clone(), e.to_string()))?;
                 let store_path = store_dir
-                    .local_blob_path(&blob.namespace, &blob.id, &content_hash)
+                    .local_blob_path(&blob.namespace, &blob.id, &content.content_hash)
                     .map_err(|e| MakeLocalError::Write {
                         blob_id: blob.id.clone(),
                         path: format!("local/{}/{}", blob.namespace, blob.id),
@@ -1009,7 +1025,7 @@ async fn materialize_blobs(
                     db,
                     store_dir,
                     Some(storage),
-                    blob,
+                    &content,
                     &store_path,
                 )
                 .await
@@ -1025,6 +1041,7 @@ async fn materialize_blobs(
                     blob: blob.clone(),
                     dest: None,
                     size,
+                    content_hash: content.content_hash,
                     cloud_key,
                 }
             }

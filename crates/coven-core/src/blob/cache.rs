@@ -1,4 +1,5 @@
-//! The device-local cache for **Remote** blobs: bytes on disk, keyed by blob id,
+//! The device-local cache for **Remote** blobs: bytes on disk, keyed by the
+//! blob's namespace, id, and signed content hash,
 //! with the folder the file lives in as the only retention truth.
 //!
 //! The cache holds copies of Remote blobs only — re-fetchable from the cloud,
@@ -14,9 +15,9 @@
 //! namespace, so each namespace's cache evicts against its own budget without
 //! touching another's:
 //!
-//! - `storage/pinned/<namespace>/{ab}/{cd}/<id>` — kept, budget-exempt. A Remote
+//! - `storage/pinned/<namespace>/{ab}/{cd}/<id>/<content_hash>` — kept, budget-exempt. A Remote
 //!   blob's cache copy the user pinned for offline (kept from eviction).
-//! - `storage/cache/<namespace>/{ab}/{cd}/<id>` — opportunistic, evictable. A blob
+//! - `storage/cache/<namespace>/{ab}/{cd}/<id>/<content_hash>` — opportunistic, evictable. A blob
 //!   fetched on read (`CacheLazy`) or eagerly on pull (`CacheEager`).
 //! - neither — not cached. No file; fetched from the cloud on the next read.
 //!
@@ -73,7 +74,7 @@
 
 use futures_util::stream::TryStreamExt;
 
-use crate::blob::{BlobRef, Provenance};
+use crate::blob::{BlobRef, LiveBlobContent, Provenance};
 use crate::database::{Database, DbError};
 use crate::store_dir::{PathTokenError, StoreDir};
 use crate::sync::storage::{StorageError, SyncStorage};
@@ -200,6 +201,9 @@ pub enum BlobCacheError {
     /// so an absent one is bad data (a row that predates the field, or a NULL where
     /// a hash must be), surfaced rather than serving unverified bytes.
     MissingContentHash { namespace: String, id: String },
+    /// A blob's row carries no plaintext size, so reads cannot validate a local
+    /// file or bound a cloud range against the signed row metadata.
+    MissingPlaintextSize { namespace: String, id: String },
     /// A Remote blob has no recorded uploader — the member whose cloud prefix holds
     /// it. The uploader is authoritative state recorded from the signed changeset
     /// that introduced the blob (or carried in the signed snapshot a device
@@ -280,6 +284,9 @@ impl std::fmt::Display for BlobCacheError {
                 f,
                 "blob {namespace}/{id} has no content hash to verify its bytes against"
             ),
+            BlobCacheError::MissingPlaintextSize { namespace, id } => {
+                write!(f, "blob {namespace}/{id} has no declared plaintext size")
+            }
             BlobCacheError::UploaderUnresolved { namespace, id } => write!(
                 f,
                 "blob {namespace}/{id} has no recorded uploader to resolve its cloud prefix"
@@ -312,7 +319,7 @@ impl From<crate::blob::local_files::LocalBlobError> for BlobCacheError {
     }
 }
 
-/// Write a Remote blob's plaintext into the evictable cache (`storage/cache/<id>`),
+/// Write a Remote blob's plaintext into the evictable cache (`storage/cache/<namespace>/<id>/<content_hash>`),
 /// so a later length-checked read serves it locally without a cloud round-trip and
 /// a pin can promote it to `pinned/`.
 ///
@@ -334,7 +341,8 @@ pub(crate) async fn write_blob(
     id: &str,
     bytes: &[u8],
 ) -> Result<(), BlobCacheError> {
-    let dest = store_dir.cache_blob_path(namespace, id)?;
+    let content_hash = crate::blob::content_hash(bytes);
+    let dest = store_dir.cache_blob_path(namespace, id, &content_hash)?;
     crate::local_blob::write_atomic(&dest, bytes)
         .await
         .map_err(BlobCacheError::Io)?;
@@ -353,9 +361,10 @@ pub(crate) async fn write_blob_from_file(
     store_dir: &StoreDir,
     namespace: &str,
     id: &str,
+    content_hash: &str,
     src_path: &std::path::Path,
 ) -> Result<(), BlobCacheError> {
-    let dest = store_dir.cache_blob_path(namespace, id)?;
+    let dest = store_dir.cache_blob_path(namespace, id, content_hash)?;
     crate::local_blob::copy_atomic(src_path, &dest)
         .await
         .map_err(BlobCacheError::Io)?;
@@ -364,9 +373,9 @@ pub(crate) async fn write_blob_from_file(
 }
 
 /// Write a Remote blob's plaintext straight into the KEPT cache folder
-/// (`storage/pinned/<id>`), so a just-uploaded blob the user pinned for offline is
+/// (`storage/pinned/<namespace>/<id>/<content_hash>`), so a just-uploaded blob the user pinned for offline is
 /// kept local and budget-exempt with no later cloud round-trip. The kept sibling of
-/// [`write_blob`] (which writes into the evictable `storage/cache/<id>`).
+/// [`write_blob`] (which writes into the evictable `storage/cache/<namespace>/<id>/<content_hash>`).
 ///
 /// Called by the upload drain after a successful upload whose entry is
 /// `retain_pinned`: the same plaintext the drain already read to seal is written
@@ -382,16 +391,17 @@ pub(crate) async fn populate_pinned(
     store_dir: &StoreDir,
     namespace: &str,
     id: &str,
+    content_hash: &str,
     src_path: &std::path::Path,
 ) -> Result<(), BlobCacheError> {
-    let dest = store_dir.pinned_blob_path(namespace, id)?;
+    let dest = store_dir.pinned_blob_path(namespace, id, content_hash)?;
     crate::local_blob::copy_atomic(src_path, &dest)
         .await
         .map_err(BlobCacheError::Io)
 }
 
-/// Read a Remote blob's plaintext from the cache only — `pinned/<id>` then
-/// `cache/<id>`, in order — returning `None` when it is in neither folder. No cloud
+/// Read a Remote blob's plaintext from the cache only — `pinned/<namespace>/<id>/<content_hash>` then
+/// `cache/<namespace>/<id>/<content_hash>`, in order — returning `None` when it is in neither folder. No cloud
 /// fetch and no local-store check: just the two cache folders. A failure to even
 /// check existence (broken filesystem) is surfaced, never collapsed into `None`. Two
 /// callers share this probe:
@@ -408,8 +418,9 @@ pub async fn read_staged(
     namespace: &str,
     id: &str,
     expected_size: u64,
+    expected_hash: &str,
 ) -> Result<Option<Vec<u8>>, BlobCacheError> {
-    read_cached_blob(store_dir, namespace, id, expected_size).await
+    read_cached_blob(store_dir, namespace, id, expected_size, expected_hash).await
 }
 
 /// Return the cached plaintext file path for a Remote blob when either cache
@@ -419,16 +430,17 @@ pub(crate) async fn staged_path(
     namespace: &str,
     id: &str,
     expected_size: u64,
+    expected_hash: &str,
 ) -> Result<Option<std::path::PathBuf>, BlobCacheError> {
     Ok(
-        cached_blob_path_with_size(store_dir, namespace, id, expected_size)
+        cached_blob_path_with_size(store_dir, namespace, id, expected_size, expected_hash)
             .await?
             .map(CachedBlobPath::into_path),
     )
 }
 
-/// Drop a Remote blob's cache copy from BOTH folders (`pinned/<id>` and
-/// `cache/<id>`), part of the apply-side cleanup when an incoming changeset deletes
+/// Drop a Remote blob's cache copy from BOTH folders (`pinned/<namespace>/<id>/<content_hash>` and
+/// `cache/<namespace>/<id>/<content_hash>`), part of the apply-side cleanup when an incoming changeset deletes
 /// a blob-bearing row (a gate retract or a genuine delete). A peer drops only its
 /// own cache copy here — it never writes a cloud tombstone, which belongs to the
 /// deleting / make-Local owner. The `pinned/` copy is budget-exempt, so without
@@ -442,10 +454,11 @@ pub async fn drop_cached_blob(
     store_dir: &StoreDir,
     namespace: &str,
     id: &str,
+    content_hash: &str,
 ) -> Result<(), BlobCacheError> {
     for path in [
-        store_dir.pinned_blob_path(namespace, id)?,
-        store_dir.cache_blob_path(namespace, id)?,
+        store_dir.pinned_blob_path(namespace, id, content_hash)?,
+        store_dir.cache_blob_path(namespace, id, content_hash)?,
     ] {
         // An absent file in either folder is the expected case (`remove_file`
         // reports it as `Ok(false)`, not an error); every real I/O failure surfaces.
@@ -467,25 +480,47 @@ pub async fn drop_all_local_copies(
     id: &str,
     content_hash: &str,
 ) -> Result<(), BlobCacheError> {
-    drop_cached_blob(store_dir, namespace, id).await?;
+    drop_cached_blob(store_dir, namespace, id, content_hash).await?;
     crate::blob::local_files::drop_blob(store_dir, namespace, id, content_hash)
         .await
         .map_err(BlobCacheError::from)?;
     Ok(())
 }
 
+/// Drop every on-device copy of the exact content version named by the blob's
+/// current live row.
+pub async fn evict_blob(
+    db: &Database,
+    store_dir: &StoreDir,
+    blob: &BlobRef,
+) -> Result<(), BlobCacheError> {
+    let content = live_blob_content(db, blob).await?;
+    drop_all_local_copies(
+        store_dir,
+        &content.blob.namespace,
+        &content.blob.id,
+        &content.content_hash,
+    )
+    .await
+}
+
 /// Whether a Remote blob's cache copy is currently pinned — present in
-/// `storage/pinned/<namespace>/<id>`. The pin truth is the folder a blob's file
+/// `storage/pinned/<namespace>/<id>/<content_hash>`. The pin truth is the folder a blob's file
 /// lives in, not a table (see the module docs), so this is a single existence
 /// check on the kept folder: a blob in `cache/` or in neither folder is not
 /// pinned. A failure to even check existence (broken filesystem) is surfaced,
 /// never collapsed into "not pinned".
 pub async fn is_pinned(
+    db: &Database,
     store_dir: &StoreDir,
-    namespace: &str,
-    id: &str,
+    blob: &BlobRef,
 ) -> Result<bool, BlobCacheError> {
-    let pinned = store_dir.pinned_blob_path(namespace, id)?;
+    let content = live_blob_content(db, blob).await?;
+    let pinned = store_dir.pinned_blob_path(
+        &content.blob.namespace,
+        &content.blob.id,
+        &content.content_hash,
+    )?;
     crate::local_blob::exists(&pinned)
         .await
         .map_err(BlobCacheError::Io)
@@ -497,11 +532,11 @@ pub async fn is_pinned(
 ///
 /// [`resolve_source`] reads the locality root first: **Remote** (gate on, or remote
 /// root) ⇒ the bytes live in the cloud fronted by the device cache, so the first
-/// legitimate probe checks `pinned/<id>` then `cache/<id>` for a per-device cache
+/// legitimate probe checks `pinned/<namespace>/<id>/<content_hash>` then `cache/<namespace>/<id>/<content_hash>` for a per-device cache
 /// copy and serves a hit. For host-provided Remote blobs only, a cache miss checks
 /// the local store for upload staging. A miss there resolves the blob's scope to its
 /// encryption key, downloads + decrypts it via [`SyncStorage::get_blob`], writes the
-/// whole blob to `cache/<id>` (evictable — a fetch-on-read populates the evictable
+/// whole blob to `cache/<namespace>/<id>/<content_hash>` (evictable — a fetch-on-read populates the evictable
 /// cache, never the kept folder), and returns the bytes it just fetched. Later cache
 /// hits verify the file length against the row before trusting it (the post-populate
 /// [`evict_to_budget`] sweep is best-effort: a successful fetch returns its bytes
@@ -523,44 +558,46 @@ pub async fn read_blob(
     storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    match resolve_source(db, blob).await? {
+    let content = live_blob_content(db, blob).await?;
+    match resolve_source(db, &content.blob).await? {
         // Remote: the bytes live in the cloud fronted by the device cache.
-        BlobSource::Cache => read_remote_whole(db, store_dir, storage, blob).await,
+        BlobSource::Cache => read_remote_whole(db, store_dir, storage, &content).await,
         // Local + user-provided: the user's own external file. Its ref must be present
         // — gate-resolved Local + UserProvided with no ref is corruption, not a miss.
         BlobSource::External => {
-            let ext = lookup_external_ref(db, &blob.id).await?.ok_or_else(|| {
-                BlobCacheError::NoExternalRef {
-                    id: blob.id.clone(),
-                }
-            })?;
-            let expected_hash = expected_blob_hash(db, blob).await?;
-            read_external_file(&blob.id, ext, &expected_hash, ExternalRead::Whole).await
+            let ext = lookup_external_ref(db, &content.blob.id)
+                .await?
+                .ok_or_else(|| BlobCacheError::NoExternalRef {
+                    id: content.blob.id.clone(),
+                })?;
+            read_external_file(
+                &content.blob.id,
+                ext,
+                &content.content_hash,
+                ExternalRead::Whole,
+            )
+            .await
         }
         // Local + host-provided: the local store is the ONLY copy (a Local blob has no
         // cloud copy). A miss is fail-loud corruption, not a cache miss to refetch.
-        BlobSource::LocalStore => {
-            let expected_size = expected_blob_size(db, blob).await?;
-            let expected_hash = expected_blob_hash(db, blob).await?;
-            crate::blob::local_files::read(
-                store_dir,
-                &blob.namespace,
-                &blob.id,
-                expected_size,
-                &expected_hash,
-            )
-            .await?
-            .ok_or_else(|| BlobCacheError::NoLocalCopy {
-                namespace: blob.namespace.clone(),
-                id: blob.id.clone(),
-            })
-        }
+        BlobSource::LocalStore => crate::blob::local_files::read(
+            store_dir,
+            &content.blob.namespace,
+            &content.blob.id,
+            content.plaintext_size,
+            &content.content_hash,
+        )
+        .await?
+        .ok_or_else(|| BlobCacheError::NoLocalCopy {
+            namespace: content.blob.namespace.clone(),
+            id: content.blob.id.clone(),
+        }),
     }
 }
 
 /// Serve a Remote blob whole. The one legitimate probe — per-device cache
-/// materialization, a filesystem fact no shared state holds — checks `pinned/<id>`
-/// then `cache/<id>` (via [`read_staged`]) and serves a hit. For host-provided Remote
+/// materialization, a filesystem fact no shared state holds — checks `pinned/<namespace>/<id>/<content_hash>`
+/// then `cache/<namespace>/<id>/<content_hash>` (via [`read_staged`]) and serves a hit. For host-provided Remote
 /// blobs only, a cache miss checks the local store for upload staging before a cloud
 /// read. Split from [`read_blob`] so the whole-blob Remote path reads as one branch
 /// of the locality dispatch.
@@ -568,23 +605,14 @@ async fn read_remote_whole(
     db: &Database,
     store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
-    blob: &BlobRef,
+    content: &LiveBlobContent,
 ) -> Result<Vec<u8>, BlobCacheError> {
-    let expected_size = expected_blob_size(db, blob).await?;
-    let expected_hash = expected_blob_hash(db, blob).await?;
+    let blob = &content.blob;
     // A cache hit (`pinned/` or `cache/`) serves the file straight off disk — the same
     // pinned→cache probe [`read_staged`] runs. An existence-check failure there is
     // surfaced, not collapsed into a miss: re-downloading over a present file would be
     // wasteful and could mask a real fault.
-    if let Some(bytes) = read_verified_cached_blob(
-        store_dir,
-        blob,
-        expected_size,
-        &expected_hash,
-        CachedRead::Whole,
-    )
-    .await?
-    {
+    if let Some(bytes) = read_verified_cached_blob(store_dir, content, CachedRead::Whole).await? {
         return Ok(bytes);
     }
 
@@ -593,8 +621,8 @@ async fn read_remote_whole(
             store_dir,
             &blob.namespace,
             &blob.id,
-            expected_size,
-            &expected_hash,
+            content.plaintext_size,
+            &content.content_hash,
         )
         .await?
         {
@@ -605,7 +633,7 @@ async fn read_remote_whole(
     // Miss: fetch from the cloud and populate the evictable cache. A home-less
     // store reaches here only when a Remote blob is read with no provider
     // connected — there is no storage to fetch it from, so surface that fault.
-    let cache = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
+    let cache = store_dir.cache_blob_path(&blob.namespace, &blob.id, &content.content_hash)?;
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
     let bytes = fetch_from_cloud(db, storage, blob).await?;
     // Verify the fetched plaintext against the row before caching or returning it —
@@ -613,22 +641,22 @@ async fn read_remote_whole(
     // [`cached_blob_path_with_size`] path runs), then the author-signed content hash,
     // which is the authority: it refuses a tampered object, a rolled-back prior
     // version, or a same-size object planted under another uploader's prefix. A
-    // mismatch caches nothing here, so it can't poison `cache/<id>` into a later
+    // mismatch caches nothing here, so it can't poison `cache/<namespace>/<id>/<content_hash>` into a later
     // cache hit (which checks only length) serving the wrong bytes.
-    if bytes.len() as u64 != expected_size {
+    if bytes.len() as u64 != content.plaintext_size {
         return Err(BlobCacheError::CloudSizeMismatch {
             namespace: blob.namespace.clone(),
             id: blob.id.clone(),
-            expected: expected_size,
+            expected: content.plaintext_size,
             actual: bytes.len() as u64,
         });
     }
     let actual_hash = crate::blob::content_hash(&bytes);
-    if actual_hash != expected_hash {
+    if actual_hash != content.content_hash {
         return Err(BlobCacheError::CloudHashMismatch {
             namespace: blob.namespace.clone(),
             id: blob.id.clone(),
-            expected: expected_hash,
+            expected: content.content_hash.clone(),
             actual: actual_hash,
         });
     }
@@ -670,7 +698,7 @@ async fn read_remote_whole(
 ///
 /// The serving paths mirror [`read_blob`], dispatched the same way ([`resolve_source`]
 /// reads the gate, then provenance): **Remote** serves the range off a cache hit
-/// (`pinned/<id>` OR `cache/<id>`) — the whole-plaintext local file read at `offset`,
+/// (`pinned/<namespace>/<id>/<content_hash>` OR `cache/<namespace>/<id>/<content_hash>`) — the whole-plaintext local file read at `offset`,
 /// no decryption, no cloud. For host-provided Remote blobs only, a cache miss checks
 /// the local store for upload staging and serves the same bounded range from that
 /// whole plaintext file when present. A miss there fetches and decrypts the range
@@ -694,10 +722,11 @@ pub async fn open_blob_stream(
     store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
-    source_size: u64,
     offset: u64,
     len: u64,
 ) -> Result<Vec<u8>, BlobCacheError> {
+    let content = live_blob_content(db, blob).await?;
+    let source_size = content.plaintext_size;
     // The range contract, applied once for all serving paths. A zero-length read
     // is empty without touching disk or cloud; an out-of-range read is an error
     // before any path runs, so the local-file path can't silently short-read.
@@ -717,52 +746,46 @@ pub async fn open_blob_stream(
         )));
     }
 
-    match resolve_source(db, blob).await? {
+    match resolve_source(db, &content.blob).await? {
         // Remote: the cache copy, else a ranged cloud read (populating nothing).
-        BlobSource::Cache => {
-            read_remote_range(db, store_dir, storage, blob, source_size, offset, len).await
-        }
+        BlobSource::Cache => read_remote_range(db, store_dir, storage, &content, offset, len).await,
         // Local + user-provided: range-read the user's external file. The window was
         // validated against `source_size`, and `read_range` reads exactly `len`
         // (failing loud on a short file). The ref must be present — no fallback.
         BlobSource::External => {
-            let ext = lookup_external_ref(db, &blob.id).await?.ok_or_else(|| {
-                BlobCacheError::NoExternalRef {
-                    id: blob.id.clone(),
-                }
-            })?;
-            let expected_hash = expected_blob_hash(db, blob).await?;
+            let ext = lookup_external_ref(db, &content.blob.id)
+                .await?
+                .ok_or_else(|| BlobCacheError::NoExternalRef {
+                    id: content.blob.id.clone(),
+                })?;
             read_external_file(
-                &blob.id,
+                &content.blob.id,
                 ext,
-                &expected_hash,
+                &content.content_hash,
                 ExternalRead::Range { offset, len },
             )
             .await
         }
         // Local + host-provided: range-read the local store, coven's only copy. A miss
         // is fail-loud corruption, never a cloud fetch.
-        BlobSource::LocalStore => {
-            let expected_hash = expected_blob_hash(db, blob).await?;
-            crate::blob::local_files::read_range(
-                store_dir,
-                &blob.namespace,
-                &blob.id,
-                source_size,
-                &expected_hash,
-                offset,
-                len,
-            )
-            .await?
-            .ok_or_else(|| BlobCacheError::NoLocalCopy {
-                namespace: blob.namespace.clone(),
-                id: blob.id.clone(),
-            })
-        }
+        BlobSource::LocalStore => crate::blob::local_files::read_range(
+            store_dir,
+            &content.blob.namespace,
+            &content.blob.id,
+            source_size,
+            &content.content_hash,
+            offset,
+            len,
+        )
+        .await?
+        .ok_or_else(|| BlobCacheError::NoLocalCopy {
+            namespace: content.blob.namespace.clone(),
+            id: content.blob.id.clone(),
+        }),
     }
 }
 
-/// Serve a Remote blob's plaintext range. A cache hit (`pinned/<id>` OR `cache/<id>`)
+/// Serve a Remote blob's plaintext range. A cache hit (`pinned/<namespace>/<id>/<content_hash>` OR `cache/<namespace>/<id>/<content_hash>`)
 /// reads the slice off the whole-plaintext local file. For host-provided Remote
 /// blobs only, a cache miss checks the local store for upload staging. A miss there
 /// range-reads + decrypts from the cloud and writes NO cache file. Split from
@@ -772,24 +795,17 @@ async fn read_remote_range(
     db: &Database,
     store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
-    blob: &BlobRef,
-    source_size: u64,
+    content: &LiveBlobContent,
     offset: u64,
     len: u64,
 ) -> Result<Vec<u8>, BlobCacheError> {
+    let blob = &content.blob;
     // A hit in either folder serves the slice from the local plaintext file. The
     // file must match the whole blob length, so the validated range is in bounds
     // and `read_range` reads exactly `len` bytes. An existence-check failure is
     // surfaced, not read as a miss.
-    let expected_hash = expected_blob_hash(db, blob).await?;
-    if let Some(bytes) = read_verified_cached_blob(
-        store_dir,
-        blob,
-        source_size,
-        &expected_hash,
-        CachedRead::Range { offset, len },
-    )
-    .await?
+    if let Some(bytes) =
+        read_verified_cached_blob(store_dir, content, CachedRead::Range { offset, len }).await?
     {
         return Ok(bytes);
     }
@@ -799,8 +815,8 @@ async fn read_remote_range(
             store_dir,
             &blob.namespace,
             &blob.id,
-            source_size,
-            &expected_hash,
+            content.plaintext_size,
+            &content.content_hash,
             offset,
             len,
         )
@@ -814,7 +830,7 @@ async fn read_remote_range(
     // scope) WITHOUT writing a cache file. Only `read_blob` populates the cache. A
     // home-less store has no storage to range-read a Remote blob from; surface it.
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
-    fetch_range_from_cloud(db, storage, blob, source_size, offset, len).await
+    fetch_range_from_cloud(db, storage, blob, content.plaintext_size, offset, len).await
 }
 
 /// Materialize a Remote blob's whole plaintext into `dest` without holding the
@@ -826,13 +842,12 @@ pub(crate) async fn materialize_remote_blob_to_file(
     db: &Database,
     store_dir: &StoreDir,
     storage: Option<&dyn SyncStorage>,
-    blob: &BlobRef,
+    content: &LiveBlobContent,
     dest: &std::path::Path,
 ) -> Result<u64, BlobCacheError> {
-    let expected_size = expected_blob_size(db, blob).await?;
-    let expected_hash = expected_blob_hash(db, blob).await?;
-    if copy_verified_cached_blob(store_dir, blob, expected_size, &expected_hash, dest).await? {
-        return Ok(expected_size);
+    let blob = &content.blob;
+    if copy_verified_cached_blob(store_dir, content, dest).await? {
+        return Ok(content.plaintext_size);
     }
 
     if blob.provenance == Provenance::HostProvided
@@ -840,13 +855,13 @@ pub(crate) async fn materialize_remote_blob_to_file(
             store_dir,
             &blob.namespace,
             &blob.id,
-            expected_size,
-            &expected_hash,
+            content.plaintext_size,
+            &content.content_hash,
             dest,
         )
         .await?
     {
-        return Ok(expected_size);
+        return Ok(content.plaintext_size);
     }
 
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
@@ -859,15 +874,15 @@ pub(crate) async fn materialize_remote_blob_to_file(
             &blob.id,
             blob.scope.clone(),
             blob.cloud_path.as_deref(),
-            expected_size,
-            &expected_hash,
+            content.plaintext_size,
+            &content.content_hash,
             dest,
         )
         .await?;
-    Ok(expected_size)
+    Ok(content.plaintext_size)
 }
 
-/// Ensure a blob is local AND protected: present in `storage/pinned/<id>`, exempt
+/// Ensure a blob is local AND protected: present in `storage/pinned/<namespace>/<id>/<content_hash>`, exempt
 /// from the evictable cache. A pin POPULATES — if the blob isn't cached it is
 /// fetched first — so it is not a flag flip. Idempotent.
 ///
@@ -905,24 +920,13 @@ async fn pin_one(
     storage: Option<&dyn SyncStorage>,
     blob: &BlobRef,
 ) -> Result<(), BlobCacheError> {
-    let pinned = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-    let pinned_exists = crate::local_blob::exists(&pinned)
-        .await
-        .map_err(BlobCacheError::Io)?;
-    let expected_size = match expected_blob_size(db, blob).await {
-        Ok(size) => size,
-        Err(BlobCacheError::LocalityUnresolved { .. }) if pinned_exists => return Ok(()),
-        Err(error @ BlobCacheError::LocalityUnresolved { .. }) => {
-            let cache = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
-            return match crate::local_blob::exists(&cache).await {
-                Ok(true) => rename_within_storage(&cache, &pinned).await,
-                Ok(false) => Err(error),
-                Err(io_error) => Err(BlobCacheError::Io(io_error)),
-            };
-        }
-        Err(error) => return Err(error),
-    };
-    match verified_cached_blob_path(db, store_dir, blob, expected_size).await? {
+    let content = live_blob_content(db, blob).await?;
+    let pinned = store_dir.pinned_blob_path(
+        &content.blob.namespace,
+        &content.blob.id,
+        &content.content_hash,
+    )?;
+    match verified_cached_blob_path(store_dir, &content).await? {
         Some(CachedBlobPath::Pinned(_)) => return Ok(()),
         Some(CachedBlobPath::Cache(path)) => {
             return rename_within_storage(&path, &pinned).await;
@@ -932,21 +936,34 @@ async fn pin_one(
 
     // In neither folder — fetch from the cloud straight into `pinned/`. A
     // home-less store has no storage to fetch a Remote blob from; surface it.
-    materialize_remote_blob_to_file(db, store_dir, storage, blob, &pinned).await?;
+    materialize_remote_blob_to_file(db, store_dir, storage, &content, &pinned).await?;
     Ok(())
 }
 
-/// Drop a Remote blob's pin: move `storage/pinned/<id>` → `storage/cache/<id>` so
+/// Drop a Remote blob's pin: move `storage/pinned/<namespace>/<id>/<content_hash>` → `storage/cache/<namespace>/<id>/<content_hash>` so
 /// the cache copy stays (still readable) but is now evictable. Not a delete.
 ///
 /// A pin keeps a specific Remote blob's cache copy from eviction; unpin reverses it
 /// regardless of the blob's [`CacheFill`] — a `CacheEager` blob lands in the
 /// evictable cache on pull (it is not auto-pinned), so unpinning one that was never
 /// pinned is simply a no-op (it is already as-evictable-as-it-gets).
-pub async fn unpin(store_dir: &StoreDir, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
+pub async fn unpin(
+    db: &Database,
+    store_dir: &StoreDir,
+    blobs: &[BlobRef],
+) -> Result<(), BlobCacheError> {
     for blob in blobs {
-        let pinned = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-        let cache = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
+        let content = live_blob_content(db, blob).await?;
+        let pinned = store_dir.pinned_blob_path(
+            &content.blob.namespace,
+            &content.blob.id,
+            &content.content_hash,
+        )?;
+        let cache = store_dir.cache_blob_path(
+            &content.blob.namespace,
+            &content.blob.id,
+            &content.content_hash,
+        )?;
 
         // Move it into the evictable cache if it is currently pinned. If it isn't in
         // `pinned/` (already in `cache/`, or remote), there is nothing to demote —
@@ -1007,7 +1024,7 @@ pub async fn clear_cache(store_dir: &StoreDir) -> Result<(), BlobCacheError> {
 /// file is evicted first; pinning, not access tracking, is how a blob is kept.
 ///
 /// `protect` is the file a just-finished populate wrote (the trigger passes its
-/// `cache/<id>` path; a bare sweep passes `None`): it is **excluded from the
+/// `cache/<namespace>/<id>/<content_hash>` path; a bare sweep passes `None`): it is **excluded from the
 /// candidates outright**, never deleted, so the populate that triggered this sweep
 /// can't evict the very bytes it just produced. Its size still counts toward the
 /// total it must fit under, so if that one file alone exceeds the budget the cache
@@ -1213,10 +1230,11 @@ async fn cached_blob_path_with_size(
     namespace: &str,
     id: &str,
     expected_size: u64,
+    expected_hash: &str,
 ) -> Result<Option<CachedBlobPath>, BlobCacheError> {
     for hit in [
-        CachedBlobPath::Pinned(store_dir.pinned_blob_path(namespace, id)?),
-        CachedBlobPath::Cache(store_dir.cache_blob_path(namespace, id)?),
+        CachedBlobPath::Pinned(store_dir.pinned_blob_path(namespace, id, expected_hash)?),
+        CachedBlobPath::Cache(store_dir.cache_blob_path(namespace, id, expected_hash)?),
     ] {
         match crate::local_blob::exists(hit.path()).await {
             Ok(true) => {
@@ -1241,15 +1259,21 @@ async fn cached_blob_path_with_size(
 }
 
 async fn verified_cached_blob_path(
-    db: &Database,
     store_dir: &StoreDir,
-    blob: &BlobRef,
-    expected_size: u64,
+    content: &LiveBlobContent,
 ) -> Result<Option<CachedBlobPath>, BlobCacheError> {
-    let expected_hash = expected_blob_hash(db, blob).await?;
+    let blob = &content.blob;
     for hit in [
-        CachedBlobPath::Pinned(store_dir.pinned_blob_path(&blob.namespace, &blob.id)?),
-        CachedBlobPath::Cache(store_dir.cache_blob_path(&blob.namespace, &blob.id)?),
+        CachedBlobPath::Pinned(store_dir.pinned_blob_path(
+            &blob.namespace,
+            &blob.id,
+            &content.content_hash,
+        )?),
+        CachedBlobPath::Cache(store_dir.cache_blob_path(
+            &blob.namespace,
+            &blob.id,
+            &content.content_hash,
+        )?),
     ] {
         match crate::local_blob::exists(hit.path()).await {
             Ok(false) => continue,
@@ -1259,7 +1283,7 @@ async fn verified_cached_blob_path(
         let size = crate::local_blob::file_len(hit.path())
             .await
             .map_err(BlobCacheError::Io)?;
-        let hash = if size == expected_size {
+        let hash = if size == content.plaintext_size {
             Some(
                 crate::blob::content_hash_file(hit.path())
                     .await
@@ -1268,15 +1292,16 @@ async fn verified_cached_blob_path(
         } else {
             None
         };
-        if size == expected_size && hash.as_deref() == Some(expected_hash.as_str()) {
+        if size == content.plaintext_size && hash.as_deref() == Some(content.content_hash.as_str())
+        {
             return Ok(Some(hit));
         }
         tracing::warn!(
             path = %hit.path().display(),
             actual_size = size,
-            expected_size,
+            expected_size = content.plaintext_size,
             actual_hash = ?hash,
-            expected_hash = ?expected_hash,
+            expected_hash = ?content.content_hash,
             "cached blob does not match its live row; removing it before exact refetch"
         );
         crate::local_blob::remove_file(hit.path())
@@ -1294,14 +1319,13 @@ enum CachedRead {
 
 async fn read_verified_cached_blob(
     store_dir: &StoreDir,
-    blob: &BlobRef,
-    expected_size: u64,
-    expected_hash: &str,
+    content: &LiveBlobContent,
     op: CachedRead,
 ) -> Result<Option<Vec<u8>>, BlobCacheError> {
+    let blob = &content.blob;
     for path in [
-        store_dir.pinned_blob_path(&blob.namespace, &blob.id)?,
-        store_dir.cache_blob_path(&blob.namespace, &blob.id)?,
+        store_dir.pinned_blob_path(&blob.namespace, &blob.id, &content.content_hash)?,
+        store_dir.cache_blob_path(&blob.namespace, &blob.id, &content.content_hash)?,
     ] {
         match crate::local_blob::exists(&path).await {
             Ok(false) => continue,
@@ -1310,13 +1334,18 @@ async fn read_verified_cached_blob(
         }
         let read = match op {
             CachedRead::Whole => {
-                crate::local_blob::read_verified(&path, expected_size, expected_hash).await
+                crate::local_blob::read_verified(
+                    &path,
+                    content.plaintext_size,
+                    &content.content_hash,
+                )
+                .await
             }
             CachedRead::Range { offset, len } => {
                 crate::local_blob::read_range_verified(
                     &path,
-                    expected_size,
-                    expected_hash,
+                    content.plaintext_size,
+                    &content.content_hash,
                     offset,
                     len,
                 )
@@ -1341,19 +1370,10 @@ async fn read_verified_cached_blob(
 
 async fn copy_verified_cached_blob(
     store_dir: &StoreDir,
-    blob: &BlobRef,
-    expected_size: u64,
-    expected_hash: &str,
+    content: &LiveBlobContent,
     destination: &std::path::Path,
 ) -> Result<bool, BlobCacheError> {
-    let Some(bytes) = read_verified_cached_blob(
-        store_dir,
-        blob,
-        expected_size,
-        expected_hash,
-        CachedRead::Whole,
-    )
-    .await?
+    let Some(bytes) = read_verified_cached_blob(store_dir, content, CachedRead::Whole).await?
     else {
         return Ok(false);
     };
@@ -1368,8 +1388,10 @@ async fn read_cached_blob(
     namespace: &str,
     id: &str,
     expected_size: u64,
+    expected_hash: &str,
 ) -> Result<Option<Vec<u8>>, BlobCacheError> {
-    let Some(hit) = cached_blob_path_with_size(store_dir, namespace, id, expected_size).await?
+    let Some(hit) =
+        cached_blob_path_with_size(store_dir, namespace, id, expected_size, expected_hash).await?
     else {
         return Ok(None);
     };
@@ -1536,44 +1558,39 @@ fn validate_blob_ref(blob: &BlobRef) -> Result<(), BlobCacheError> {
     Ok(())
 }
 
-pub(crate) async fn expected_blob_size(
+/// Resolve one live blob row's logical reference, signed plaintext size, and
+/// signed content hash in one database query. Callers keep this value through the
+/// complete filesystem or cloud operation instead of re-reading individual fields.
+pub(crate) async fn live_blob_content(
     db: &Database,
     blob: &BlobRef,
-) -> Result<u64, BlobCacheError> {
+) -> Result<LiveBlobContent, BlobCacheError> {
     let decls = db.blob_decls();
     let namespace = blob.namespace.clone();
     let id = blob.id.clone();
-    db.call(move |conn| {
-        decls
-            .size_for_blob_in_namespace(conn, &namespace, &id)
-            .map_err(|e| DbError(e.to_string()))
-    })
-    .await
-    .map_err(BlobCacheError::Metadata)?
-    .ok_or_else(|| BlobCacheError::LocalityUnresolved {
-        id: blob.id.clone(),
-    })
-}
-
-/// The author-signed content hash from the row that owns `blob` — the value a
-/// whole-blob download verifies the decrypted plaintext against. An absent hash
-/// (a row with no such column value) is refused rather than serving unverified
-/// bytes: the hash is the authority that pins the bytes to the row's author.
-pub async fn expected_blob_hash(db: &Database, blob: &BlobRef) -> Result<String, BlobCacheError> {
-    let decls = db.blob_decls();
-    let namespace = blob.namespace.clone();
-    let id = blob.id.clone();
-    db.call(move |conn| {
-        decls
-            .hash_for_blob_in_namespace(conn, &namespace, &id)
-            .map_err(|e| DbError(e.to_string()))
-    })
-    .await
-    .map_err(BlobCacheError::Metadata)?
-    .ok_or_else(|| BlobCacheError::MissingContentHash {
-        namespace: blob.namespace.clone(),
-        id: blob.id.clone(),
-    })
+    let resolved = db
+        .call(move |conn| Ok(decls.live_content_for_blob_in_namespace(conn, &namespace, &id)))
+        .await
+        .map_err(BlobCacheError::Metadata)?;
+    match resolved {
+        Ok(Some(content)) => Ok(content),
+        Ok(None) => Err(BlobCacheError::LocalityUnresolved {
+            id: blob.id.clone(),
+        }),
+        Err(crate::blob::decl::BlobDeclError::MissingContentHash { .. }) => {
+            Err(BlobCacheError::MissingContentHash {
+                namespace: blob.namespace.clone(),
+                id: blob.id.clone(),
+            })
+        }
+        Err(crate::blob::decl::BlobDeclError::MissingPlaintextSize { .. }) => {
+            Err(BlobCacheError::MissingPlaintextSize {
+                namespace: blob.namespace.clone(),
+                id: blob.id.clone(),
+            })
+        }
+        Err(error) => Err(BlobCacheError::Metadata(DbError(error.to_string()))),
+    }
 }
 
 /// The plaintext byte length on row `pk` of `table` — the value a changeset UPDATE omitted

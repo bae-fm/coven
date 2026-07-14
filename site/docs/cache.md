@@ -156,7 +156,7 @@ fill**, declared per blob in the table's
 
 - `CacheEager`: fetched into the cache on every device's pull. Part of "having the
   store", e.g. an album's cover art, so a grid renders from local bytes without a
-  fetch. It lands in the **evictable** `storage/cache/<namespace>/<id>`; it is not
+  fetch. It lands in the **evictable** `storage/cache/<namespace>/<id>/<content_hash>`; it is not
   pinned, so if it later falls out of its namespace's budget it shows a placeholder
   until the next read re-fetches it.
 - `CacheLazy`: skipped on pull. A pulling device does not fetch it up front; the
@@ -173,7 +173,7 @@ The cache is evictable. Pinning is how a user keeps a chosen Remote blob local a
 safe from eviction (an offline-for-the-flight gesture).
 
 [`CovenHandle::pin`](rustdoc:method:coven::CovenHandle::pin) ensures a blob is
-both present and protected, in `storage/pinned/<namespace>/<id>`:
+both present and protected, in `storage/pinned/<namespace>/<id>/<content_hash>`:
 
 ```rust
 handle.pin(&blobs).await?;

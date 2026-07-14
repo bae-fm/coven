@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::blob::{BlobRef, BlobScope, CacheFill, Provenance};
+use crate::blob::{BlobRef, BlobScope, CacheFill, LiveBlobContent, Provenance};
 use crate::changeset::RowChange;
 use crate::sync::gate::Gates;
 use crate::sync::session::{quote_ident, table_columns as session_table_columns, SyncedTable};
@@ -43,6 +43,14 @@ pub enum BlobDeclError {
     InvalidSizeValue { table: String, value: String },
     /// A row's declared size column is negative.
     InvalidSize { table: String, value: i64 },
+    /// A live blob row selected by its blob-id column did not yield that id.
+    MissingBlobId { table: String },
+    /// A live blob row is missing its required plaintext size.
+    MissingPlaintextSize { table: String },
+    /// A live blob row is missing its required content hash.
+    MissingContentHash { table: String },
+    /// A live blob row's content hash is not a lowercase hexadecimal SHA-256.
+    InvalidContentHash { table: String, value: String },
     /// New and old changeset walks produced different row counts.
     ChangesetWalkMismatch { old_count: usize, new_count: usize },
     /// Walking the gate's FK graph for [`BlobDecls::refs_for_root`] failed.
@@ -67,6 +75,18 @@ impl std::fmt::Display for BlobDeclError {
             }
             BlobDeclError::InvalidSize { table, value } => {
                 write!(f, "blob declaration found invalid size in {table}: {value}")
+            }
+            BlobDeclError::MissingBlobId { table } => {
+                write!(f, "blob row in {table} has no required blob id")
+            }
+            BlobDeclError::MissingPlaintextSize { table } => {
+                write!(f, "blob row in {table} has no required plaintext size")
+            }
+            BlobDeclError::MissingContentHash { table } => {
+                write!(f, "blob row in {table} has no required content hash")
+            }
+            BlobDeclError::InvalidContentHash { table, value } => {
+                write!(f, "blob row in {table} has invalid content hash {value:?}")
             }
             BlobDeclError::ChangesetWalkMismatch {
                 old_count,
@@ -429,33 +449,62 @@ impl BlobDecls {
         Ok(pk_carrying_blob(conn, table, tb, blob_id)?.map(|pk| (table.clone(), pk)))
     }
 
-    /// The plaintext byte length from the row carrying `blob_id` in `namespace`.
-    pub fn size_for_blob_in_namespace(
+    /// The exact live row content for `(namespace, blob_id)`, read from one
+    /// `SELECT *` row so its logical reference, signed size, and signed hash cannot
+    /// come from different same-id versions.
+    pub(crate) fn live_content_for_blob_in_namespace(
         &self,
         conn: &Connection,
         namespace: &str,
         blob_id: &str,
-    ) -> Result<Option<u64>, BlobDeclError> {
+    ) -> Result<Option<LiveBlobContent>, BlobDeclError> {
         let Some((table, tb)) = self.tables.iter().find(|(_, tb)| tb.namespace == namespace) else {
             return Ok(None);
         };
-        pk_carrying_blob_size(conn, table, tb, blob_id)
-    }
-
-    /// The author-signed content hash from the row carrying `blob_id` in
-    /// `namespace` — the value a whole-blob download verifies the decrypted
-    /// plaintext against. `None` when no declared table owns `namespace`, that
-    /// table has no row with the id, or the row's hash column is NULL.
-    pub fn hash_for_blob_in_namespace(
-        &self,
-        conn: &Connection,
-        namespace: &str,
-        blob_id: &str,
-    ) -> Result<Option<String>, BlobDeclError> {
-        let Some((table, tb)) = self.tables.iter().find(|(_, tb)| tb.namespace == namespace) else {
+        let sql = format!(
+            "SELECT * FROM {} WHERE {} = ?1",
+            quote_ident(table),
+            quote_ident(&tb.id_col_name),
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([blob_id])?;
+        let Some(row) = rows.next()? else {
             return Ok(None);
         };
-        pk_carrying_blob_hash(conn, table, tb, blob_id)
+        let blob = tb
+            .ref_from_row(row)?
+            .ok_or_else(|| BlobDeclError::MissingBlobId {
+                table: table.clone(),
+            })?;
+        let size = row.get::<_, Option<i64>>(tb.size_col)?.ok_or_else(|| {
+            BlobDeclError::MissingPlaintextSize {
+                table: table.clone(),
+            }
+        })?;
+        let plaintext_size = u64::try_from(size).map_err(|_| BlobDeclError::InvalidSize {
+            table: table.clone(),
+            value: size,
+        })?;
+        let content_hash = row.get::<_, Option<String>>(tb.hash_col)?.ok_or_else(|| {
+            BlobDeclError::MissingContentHash {
+                table: table.clone(),
+            }
+        })?;
+        if content_hash.len() != 64
+            || !content_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(BlobDeclError::InvalidContentHash {
+                table: table.clone(),
+                value: content_hash,
+            });
+        }
+        Ok(Some(LiveBlobContent {
+            blob,
+            plaintext_size,
+            content_hash,
+        }))
     }
 
     /// The readable cloud path from the row carrying `blob_id` in `namespace` — the key
@@ -580,49 +629,6 @@ fn pk_carrying_blob(
     );
     conn.query_row(&sql, [blob_id], |row| row.get::<_, String>(0))
         .optional()
-        .map_err(BlobDeclError::from)
-}
-
-fn pk_carrying_blob_size(
-    conn: &Connection,
-    table: &str,
-    tb: &TableBlob,
-    blob_id: &str,
-) -> Result<Option<u64>, BlobDeclError> {
-    let sql = format!(
-        "SELECT {} FROM {} WHERE {} = ?1",
-        quote_ident(&tb.size_col_name),
-        quote_ident(table),
-        quote_ident(&tb.id_col_name),
-    );
-    let size = conn
-        .query_row(&sql, [blob_id], |row| row.get::<_, i64>(0))
-        .optional()
-        .map_err(BlobDeclError::from)?;
-    size.map(|value| {
-        u64::try_from(value).map_err(|_| BlobDeclError::InvalidSize {
-            table: table.to_string(),
-            value,
-        })
-    })
-    .transpose()
-}
-
-fn pk_carrying_blob_hash(
-    conn: &Connection,
-    table: &str,
-    tb: &TableBlob,
-    blob_id: &str,
-) -> Result<Option<String>, BlobDeclError> {
-    let sql = format!(
-        "SELECT {} FROM {} WHERE {} = ?1",
-        quote_ident(&tb.hash_col_name),
-        quote_ident(table),
-        quote_ident(&tb.id_col_name),
-    );
-    conn.query_row(&sql, [blob_id], |row| row.get::<_, Option<String>>(0))
-        .optional()
-        .map(Option::flatten)
         .map_err(BlobDeclError::from)
 }
 

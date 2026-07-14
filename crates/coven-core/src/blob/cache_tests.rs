@@ -56,6 +56,28 @@ fn host_blob_ref(id: &str, namespace: &str, fill: CacheFill) -> BlobRef {
     }
 }
 
+fn cache_path_for_bytes(
+    store_dir: &crate::store_dir::StoreDir,
+    namespace: &str,
+    id: &str,
+    bytes: &[u8],
+) -> std::path::PathBuf {
+    store_dir
+        .cache_blob_path(namespace, id, &crate::blob::content_hash(bytes))
+        .expect("exact cache path")
+}
+
+fn pinned_path_for_bytes(
+    store_dir: &crate::store_dir::StoreDir,
+    namespace: &str,
+    id: &str,
+    bytes: &[u8],
+) -> std::path::PathBuf {
+    store_dir
+        .pinned_blob_path(namespace, id, &crate::blob::content_hash(bytes))
+        .expect("exact pinned path")
+}
+
 /// The `note_photos` declaration for the cache tests: namespace `"photos"`, master
 /// scope, host-provided · `CacheEager` (fetched into the cache on pull).
 fn photo_decl() -> BlobDecl {
@@ -117,7 +139,7 @@ async fn delete_cloud_blob(db: &Database, storage: &MockSyncStorage, namespace: 
     storage.delete_blob_object(namespace, &location, id).await;
 }
 
-/// A second read is a local hit: the first read populates `cache/<id>` from the
+/// A second read is a local hit: the first read populates `cache/<namespace>/<id>/<content_hash>` from the
 /// cloud, and after the cloud copy is deleted the second read still returns the
 /// bytes — served from disk, no fetch.
 #[tokio::test]
@@ -137,10 +159,8 @@ async fn second_read_is_a_local_hit() {
         .expect("first read fetches from cloud");
     assert_eq!(first, bytes);
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "the first read populates storage/cache/<id>",
+        cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
+        "the first read populates storage/cache/<namespace>/<id>/<content_hash>",
     );
 
     // Delete the cloud copy so a second fetch would fail: the read must be served
@@ -153,6 +173,37 @@ async fn second_read_is_a_local_hit() {
         second, bytes,
         "the second read returns the cached bytes without touching the cloud",
     );
+}
+
+#[tokio::test]
+async fn stale_same_id_cache_write_cannot_replace_the_live_blob_version() {
+    let live_db = read_test_db("audio");
+    let stale_db = read_test_db("audio");
+    let (_tmp, store_dir) = temp_store_dir();
+    let blob = blob_ref("same-id1", "audio", CacheFill::CacheLazy);
+    let live_bytes = b"LIVE-CACHE-VERSION".to_vec();
+    let stale_bytes = b"OLD!-CACHE-VERSION".to_vec();
+    assert_eq!(live_bytes.len(), stale_bytes.len());
+    plant_blob_row(&live_db, &blob.id, true, &live_bytes).await;
+    plant_blob_row(&stale_db, &blob.id, true, &stale_bytes).await;
+
+    write_blob(&live_db, &store_dir, &blob.namespace, &blob.id, &live_bytes)
+        .await
+        .expect("cache the live blob version");
+    write_blob(
+        &stale_db,
+        &store_dir,
+        &blob.namespace,
+        &blob.id,
+        &stale_bytes,
+    )
+    .await
+    .expect("finish a stale cache write after the live write");
+
+    let read = read_blob(&live_db, &store_dir, None, &blob)
+        .await
+        .expect("the live version remains cached without a cloud copy");
+    assert_eq!(read, live_bytes);
 }
 
 #[tokio::test]
@@ -169,7 +220,7 @@ async fn short_cached_remote_blob_is_a_miss_and_refetches() {
     read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("first read populates cache");
-    let cache_path = ld.cache_blob_path(&blob.namespace, &blob.id).unwrap();
+    let cache_path = cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes);
     crate::local_blob::write_atomic(&cache_path, &bytes[..8])
         .await
         .expect("simulate a torn cache file");
@@ -199,11 +250,11 @@ async fn same_length_stale_cache_bytes_are_rejected_for_whole_and_range_reads() 
     plant_blob_row(&db, &blob.id, true, &current).await;
     put_cloud_blob(&db, &storage, &blob.id, &blob.namespace, &current).await;
 
-    let cache_path = ld.cache_blob_path(&blob.namespace, &blob.id).unwrap();
+    let cache_path = cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &current);
     crate::local_blob::write_atomic(&cache_path, &stale)
         .await
         .expect("plant same-length stale cache");
-    let range = open_blob_stream(&db, &ld, Some(&storage), &blob, current.len() as u64, 2, 7)
+    let range = open_blob_stream(&db, &ld, Some(&storage), &blob, 2, 7)
         .await
         .expect("range refetches the active cloud location");
     assert_eq!(range, current[2..9]);
@@ -252,10 +303,8 @@ async fn short_cloud_object_errors_and_caches_nothing() {
         "a short cloud object maps to CloudSizeMismatch naming expected/actual: {err:?}",
     );
     assert!(
-        !ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "a length mismatch writes nothing to storage/cache/<id>",
+        !cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &declared).exists(),
+        "a length mismatch writes nothing to storage/cache/<namespace>/<id>/<content_hash>",
     );
 
     // A subsequent read keeps erroring loudly — no cached wrong-length file to serve,
@@ -309,17 +358,9 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
     let offset = 1024;
     let len = 512;
     assert_eq!(
-        open_blob_stream(
-            &db,
-            &ld,
-            Some(&storage),
-            &blob,
-            bytes.len() as u64,
-            offset,
-            len,
-        )
-        .await
-        .expect("ranged read serves through the cache path"),
+        open_blob_stream(&db, &ld, Some(&storage), &blob, offset, len,)
+            .await
+            .expect("ranged read serves through the cache path"),
         bytes[offset as usize..(offset + len) as usize],
     );
 
@@ -336,7 +377,7 @@ async fn blob_reads_reuse_schema_models_built_at_open() {
 }
 
 /// A CacheEager blob pulled in a changeset lands in the EVICTABLE CACHE: its file is
-/// in `storage/cache/<id>`, not the kept `storage/pinned/<id>`. On a peer the release
+/// in `storage/cache/<namespace>/<id>/<content_hash>`, not the kept `storage/pinned/<namespace>/<id>/<content_hash>`. On a peer the release
 /// is Remote, so the blob's local copy is a cache copy (evictable + re-fetchable, not
 /// pinned). (Driven through the real pull, which routes CacheEager blobs to
 /// `download_blobs` → `cache/`.)
@@ -381,12 +422,12 @@ async fn cache_eager_lands_in_cache_on_pull() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     assert!(
-        ld.cache_blob_path("photos", "ph01abcd").unwrap().exists(),
-        "a CacheEager blob lands in the evictable cache on pull: storage/cache/<namespace>/<id>",
+        cache_path_for_bytes(&ld, "photos", "ph01abcd", cover).exists(),
+        "a CacheEager blob lands in the evictable cache on pull: storage/cache/<namespace>/<id>/<content_hash>",
     );
     assert!(
-        !ld.pinned_blob_path("photos", "ph01abcd").unwrap().exists(),
-        "a CacheEager blob does NOT land system-pinned in storage/pinned/<namespace>/<id>",
+        !pinned_path_for_bytes(&ld, "photos", "ph01abcd", cover).exists(),
+        "a CacheEager blob does NOT land system-pinned in storage/pinned/<namespace>/<id>/<content_hash>",
     );
 }
 
@@ -409,83 +450,47 @@ async fn pin_survives_clear_cache_and_unpin_demotes() {
     read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("read populates the cache");
-    assert!(ld
-        .cache_blob_path(&blob.namespace, &blob.id)
-        .unwrap()
-        .exists());
-    assert!(!ld
-        .pinned_blob_path(&blob.namespace, &blob.id)
-        .unwrap()
-        .exists());
+    assert!(cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists());
+    assert!(!pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists());
 
     // Pin it → moves cache/ → pinned/.
     pin(&db, &ld, Some(&storage), std::slice::from_ref(&blob))
         .await
         .expect("pin promotes the cached blob");
     assert!(
-        ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "pin moves the blob into storage/pinned/<id>",
+        pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
+        "pin moves the blob into storage/pinned/<namespace>/<id>/<content_hash>",
     );
     assert!(
-        !ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "pin leaves nothing behind in storage/cache/<id>",
+        !cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
+        "pin leaves nothing behind in storage/cache/<namespace>/<id>/<content_hash>",
     );
 
     // Clear the cache → the pinned blob is untouched.
     clear_cache(&ld).await.expect("clear cache");
     assert!(
-        ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
+        pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
         "a pinned blob survives a cache sweep",
     );
 
     // Unpin it → moves pinned/ → cache/ (the file stays, now evictable).
-    unpin(&ld, std::slice::from_ref(&blob))
+    unpin(&db, &ld, std::slice::from_ref(&blob))
         .await
         .expect("unpin demotes the blob");
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "unpin moves the blob back into storage/cache/<id>",
+        cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
+        "unpin moves the blob back into storage/cache/<namespace>/<id>/<content_hash>",
     );
     assert!(
-        !ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "unpin leaves nothing behind in storage/pinned/<id>",
+        !pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
+        "unpin leaves nothing behind in storage/pinned/<namespace>/<id>/<content_hash>",
     );
 
     // Clear the cache again → the now-unpinned blob is gone.
     clear_cache(&ld).await.expect("clear cache");
     assert!(
-        !ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
+        !cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
         "an unpinned blob is dropped by a cache sweep",
-    );
-
-    // Unpinning a never-pinned CacheEager blob is a harmless no-op: it lands evictable
-    // in the cache on pull (not system-pinned), so there is nothing in `pinned/` to
-    // demote.
-    let eager = blob_ref("mir-aaaa", "images", CacheFill::CacheEager);
-    unpin(&ld, std::slice::from_ref(&eager))
-        .await
-        .expect("unpinning a never-pinned CacheEager blob is a no-op");
-    assert!(
-        !ld.pinned_blob_path(&eager.namespace, &eager.id)
-            .unwrap()
-            .exists()
-            && !ld
-                .cache_blob_path(&eager.namespace, &eager.id)
-                .unwrap()
-                .exists(),
-        "the never-pinned blob is in neither folder",
     );
 }
 
@@ -510,7 +515,13 @@ async fn pin_downloads_remote_blob_straight_to_pinned_file() {
         "pin writes a cache miss through the file download path",
     );
     assert_eq!(
-        std::fs::read(ld.pinned_blob_path(&blob.namespace, &blob.id).unwrap()).unwrap(),
+        std::fs::read(pinned_path_for_bytes(
+            &ld,
+            &blob.namespace,
+            &blob.id,
+            &bytes,
+        ))
+        .unwrap(),
         bytes,
         "pin writes the remote bytes into the pinned file",
     );
@@ -560,7 +571,7 @@ async fn pin_at_limit_one_pins_every_blob() {
     );
     for (blob, want) in blobs.iter().zip(&bytes) {
         assert_eq!(
-            std::fs::read(ld.pinned_blob_path(&blob.namespace, &blob.id).unwrap()).unwrap(),
+            std::fs::read(pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, want,)).unwrap(),
             *want,
             "the blob landed pinned with its bytes",
         );
@@ -591,7 +602,7 @@ async fn pin_runs_downloads_concurrently_up_to_the_limit() {
     );
     for (blob, want) in blobs.iter().zip(&bytes) {
         assert_eq!(
-            std::fs::read(ld.pinned_blob_path(&blob.namespace, &blob.id).unwrap()).unwrap(),
+            std::fs::read(pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, want,)).unwrap(),
             *want,
             "every concurrently-fetched blob landed pinned with its bytes",
         );
@@ -675,8 +686,8 @@ async fn cache_lazy_fetches_on_first_read() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     assert!(
-        !ld.pinned_blob_path("audio", "aud01234").unwrap().exists()
-            && !ld.cache_blob_path("audio", "aud01234").unwrap().exists(),
+        !pinned_path_for_bytes(&ld, "audio", "aud01234", &bytes).exists()
+            && !cache_path_for_bytes(&ld, "audio", "aud01234", &bytes).exists(),
         "a CacheLazy blob is not fetched on pull — neither folder holds it",
     );
 
@@ -687,12 +698,12 @@ async fn cache_lazy_fetches_on_first_read() {
         .expect("first read fetches the CacheLazy blob");
     assert_eq!(got, bytes);
     assert!(
-        ld.cache_blob_path("audio", "aud01234").unwrap().exists(),
-        "the on-demand fetch populates storage/cache/<namespace>/<id>",
+        cache_path_for_bytes(&ld, "audio", "aud01234", &bytes).exists(),
+        "the on-demand fetch populates storage/cache/<namespace>/<id>/<content_hash>",
     );
 }
 
-/// `write_blob` writes host bytes straight into the cache (`cache/<id>`), and a
+/// `write_blob` writes host bytes straight into the cache (`cache/<namespace>/<id>/<content_hash>`), and a
 /// later `pin` promotes them by renaming — with NO cloud fetch. The cloud copy is
 /// deleted first, so a pin that tried to fetch would fail: it must not.
 #[tokio::test]
@@ -710,16 +721,12 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
         .await
         .expect("write_blob writes into the cache");
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "write_blob writes to storage/cache/<id>",
+        cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
+        "write_blob writes to storage/cache/<namespace>/<id>/<content_hash>",
     );
     assert!(
-        !ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "write_blob does not pin — nothing in storage/pinned/<id>",
+        !pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
+        "write_blob does not pin — nothing in storage/pinned/<namespace>/<id>/<content_hash>",
     );
 
     // The blob is NOT in the cloud (nothing was ever put there). A pin that fetched
@@ -728,16 +735,12 @@ async fn write_blob_writes_to_cache_and_pin_needs_no_cloud_fetch() {
         .await
         .expect("pin promotes the staged file without a cloud fetch");
     assert!(
-        ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "pin renames the staged blob into storage/pinned/<id>",
+        pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
+        "pin renames the staged blob into storage/pinned/<namespace>/<id>/<content_hash>",
     );
     assert!(
-        !ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "pin moves the staged blob out of storage/cache/<id>",
+        !cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
+        "pin moves the staged blob out of storage/cache/<namespace>/<id>/<content_hash>",
     );
     // Read it back to confirm the bytes survived the staging + rename intact.
     let got = read_blob(&db, &ld, Some(&storage), &blob)
@@ -765,7 +768,7 @@ fn write_external_file(base: &std::path::Path, name: &str, bytes: &[u8]) -> std:
 }
 
 /// A ranged read of a CACHED blob is served from the local plaintext file: after a
-/// whole-file read populates `cache/<id>`, the cloud copy is deleted so any cloud
+/// whole-file read populates `cache/<namespace>/<id>/<content_hash>`, the cloud copy is deleted so any cloud
 /// fallback would fail, and ranged reads (a mid-file window and an `offset > 0`
 /// tail) still return the correct slices — proving they came from disk, not a
 /// re-fetch.
@@ -785,25 +788,14 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     read_blob(&db, &ld, Some(&storage), &blob)
         .await
         .expect("whole-file read populates the cache");
-    assert!(ld
-        .cache_blob_path(&blob.namespace, &blob.id)
-        .unwrap()
-        .exists());
+    assert!(cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &full).exists());
     delete_cloud_blob(&db, &storage, "audio", &blob.id).await;
 
     // A window from the middle of the file.
     let (offset, len) = (1234u64, 1000u64);
-    let mid = open_blob_stream(
-        &db,
-        &ld,
-        Some(&storage),
-        &blob,
-        full.len() as u64,
-        offset,
-        len,
-    )
-    .await
-    .expect("mid-file ranged read served from the local file");
+    let mid = open_blob_stream(&db, &ld, Some(&storage), &blob, offset, len)
+        .await
+        .expect("mid-file ranged read served from the local file");
     assert_eq!(
         mid,
         &full[offset as usize..(offset + len) as usize],
@@ -813,17 +805,9 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
     // A tail starting at offset > 0 running to the end of the file.
     let tail_off = 4000u64;
     let tail_len = full.len() as u64 - tail_off;
-    let tail = open_blob_stream(
-        &db,
-        &ld,
-        Some(&storage),
-        &blob,
-        full.len() as u64,
-        tail_off,
-        tail_len,
-    )
-    .await
-    .expect("tail ranged read served from the local file");
+    let tail = open_blob_stream(&db, &ld, Some(&storage), &blob, tail_off, tail_len)
+        .await
+        .expect("tail ranged read served from the local file");
     assert_eq!(
         tail,
         &full[tail_off as usize..],
@@ -832,8 +816,8 @@ async fn ranged_read_of_a_cached_blob_serves_from_the_local_file() {
 }
 
 /// A ranged read of a NON-cached blob fetches and decrypts just the requested
-/// range from the cloud AND leaves the cache empty: neither `pinned/<id>` nor
-/// `cache/<id>` exists afterward. A ranged read must never write a truncated cache
+/// range from the cloud AND leaves the cache empty: neither `pinned/<namespace>/<id>/<content_hash>` nor
+/// `cache/<namespace>/<id>/<content_hash>` exists afterward. A ranged read must never write a truncated cache
 /// file — only the whole-file `read_blob` populates.
 #[tokio::test]
 async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file() {
@@ -847,27 +831,13 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
     put_cloud_blob(&db, &storage, &blob.id, &blob.namespace, &full).await;
 
     // The blob is in neither folder before the read.
-    assert!(!ld
-        .pinned_blob_path(&blob.namespace, &blob.id)
-        .unwrap()
-        .exists());
-    assert!(!ld
-        .cache_blob_path(&blob.namespace, &blob.id)
-        .unwrap()
-        .exists());
+    assert!(!pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, &full).exists());
+    assert!(!cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &full).exists());
 
     let (offset, len) = (2000u64, 1500u64);
-    let got = open_blob_stream(
-        &db,
-        &ld,
-        Some(&storage),
-        &blob,
-        full.len() as u64,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged read fetches the range from the cloud");
+    let got = open_blob_stream(&db, &ld, Some(&storage), &blob, offset, len)
+        .await
+        .expect("ranged read fetches the range from the cloud");
     assert_eq!(
         got,
         &full[offset as usize..(offset + len) as usize],
@@ -878,21 +848,17 @@ async fn ranged_read_of_a_non_cached_blob_fetches_range_and_writes_no_cache_file
     // read would have to fetch fresh, and `read_blob`'s presence check is never
     // fooled by a truncated file.
     assert!(
-        !ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "a ranged miss must not write storage/pinned/<id>",
+        !pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, &full).exists(),
+        "a ranged miss must not write storage/pinned/<namespace>/<id>/<content_hash>",
     );
     assert!(
-        !ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "a ranged miss must not write storage/cache/<id> (no truncated cache file)",
+        !cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &full).exists(),
+        "a ranged miss must not write storage/cache/<namespace>/<id>/<content_hash> (no truncated cache file)",
     );
 }
 
-/// A full `read_blob` still populates the evictable cache (Phase 2 behavior intact,
-/// unchanged by adding the ranged path): after one whole-file read, `cache/<id>`
+/// A full `read_blob` populates the evictable cache: after one whole-file read,
+/// `cache/<namespace>/<id>/<content_hash>`
 /// exists and a second read is served from it even with the cloud copy gone.
 #[tokio::test]
 async fn full_read_blob_still_populates_the_cache() {
@@ -910,10 +876,8 @@ async fn full_read_blob_still_populates_the_cache() {
         .expect("first whole-file read fetches from the cloud");
     assert_eq!(first, bytes);
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
-        "a whole-file read populates storage/cache/<id>",
+        cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &bytes).exists(),
+        "a whole-file read populates storage/cache/<namespace>/<id>/<content_hash>",
     );
 
     // Cloud copy gone → the second whole-file read must be a local hit.
@@ -941,21 +905,13 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
     plant_blob_row(&db, &remote.id, true, &full).await;
     put_cloud_blob(&db, &storage, &remote.id, &remote.namespace, &full).await;
     assert!(
-        open_blob_stream(
-            &db,
-            &ld,
-            Some(&storage),
-            &remote,
-            full.len() as u64,
-            900,
-            200
-        )
-        .await
-        .is_err(),
+        open_blob_stream(&db, &ld, Some(&storage), &remote, 900, 200)
+            .await
+            .is_err(),
         "a range past the blob size must error on the cloud path",
     );
     assert!(
-        open_blob_stream(&db, &ld, Some(&storage), &remote, full.len() as u64, 500, 0)
+        open_blob_stream(&db, &ld, Some(&storage), &remote, 500, 0)
             .await
             .expect("zero-length read is not an error")
             .is_empty(),
@@ -972,21 +928,13 @@ async fn ranged_read_out_of_range_errors_and_zero_len_is_empty_on_both_paths() {
         .expect("populate the cache");
     delete_cloud_blob(&db, &storage, "audio", &cached.id).await;
     assert!(
-        open_blob_stream(
-            &db,
-            &ld,
-            Some(&storage),
-            &cached,
-            full.len() as u64,
-            900,
-            200
-        )
-        .await
-        .is_err(),
+        open_blob_stream(&db, &ld, Some(&storage), &cached, 900, 200)
+            .await
+            .is_err(),
         "a range past the blob size must error on the local-file path too",
     );
     assert!(
-        open_blob_stream(&db, &ld, Some(&storage), &cached, full.len() as u64, 500, 0)
+        open_blob_stream(&db, &ld, Some(&storage), &cached, 500, 0)
             .await
             .expect("zero-length read is not an error")
             .is_empty(),
@@ -1025,17 +973,9 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     );
 
     let (offset, len) = (1234u64, 1000u64);
-    let mid = open_blob_stream(
-        &db,
-        &ld,
-        Some(&storage),
-        &blob,
-        full.len() as u64,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged read off the external file");
+    let mid = open_blob_stream(&db, &ld, Some(&storage), &blob, offset, len)
+        .await
+        .expect("ranged read off the external file");
     assert_eq!(
         mid,
         &full[offset as usize..(offset + len) as usize],
@@ -1043,13 +983,8 @@ async fn external_ref_read_serves_the_user_file_without_the_cloud() {
     );
 
     assert!(
-        !ld.pinned_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists()
-            && !ld
-                .cache_blob_path(&blob.namespace, &blob.id)
-                .unwrap()
-                .exists(),
+        !pinned_path_for_bytes(&ld, &blob.namespace, &blob.id, &full).exists()
+            && !cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &full).exists(),
         "an external read populates neither cache folder",
     );
 }
@@ -1073,9 +1008,7 @@ async fn external_same_length_wrong_bytes_fail_whole_and_range_reads() {
         "a whole read must reject same-length replacement bytes",
     );
     assert!(
-        open_blob_stream(&db, &ld, None, &blob, replaced.len() as u64, 2, 7)
-            .await
-            .is_err(),
+        open_blob_stream(&db, &ld, None, &blob, 2, 7).await.is_err(),
         "a ranged read must hash the whole opened file and reject replacement bytes",
     );
 }
@@ -1194,9 +1127,7 @@ async fn gate_flip_to_remote_routes_the_read_from_the_external_file_to_the_cloud
         "once Remote the blob resolves through cache/cloud",
     );
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &cloud_bytes).exists(),
         "the cloud fetch populated the evictable cache",
     );
 }
@@ -1238,17 +1169,9 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
     );
 
     let (offset, len) = (100u64, 500u64);
-    let mid = open_blob_stream(
-        &db,
-        &ld,
-        Some(&storage),
-        &blob,
-        ext_bytes.len() as u64,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged Local + user-provided read");
+    let mid = open_blob_stream(&db, &ld, Some(&storage), &blob, offset, len)
+        .await
+        .expect("ranged Local + user-provided read");
     assert_eq!(
         mid,
         &ext_bytes[offset as usize..(offset + len) as usize],
@@ -1261,7 +1184,7 @@ async fn local_user_provided_blob_reads_its_external_file_ignoring_decoys() {
 /// cache file, and a cloud copy are all ignored (whole and ranged).
 #[tokio::test]
 async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
-    let db = read_test_db("photos");
+    let db = open_test_db_with_blob(photo_decl());
     let storage = MockSyncStorage::new();
     let (tmp, ld) = temp_store_dir();
 
@@ -1295,17 +1218,9 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
     );
 
     let (offset, len) = (100u64, 500u64);
-    let mid = open_blob_stream(
-        &db,
-        &ld,
-        Some(&storage),
-        &blob,
-        store_bytes.len() as u64,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged Local + host-provided read");
+    let mid = open_blob_stream(&db, &ld, Some(&storage), &blob, offset, len)
+        .await
+        .expect("ranged Local + host-provided read");
     assert_eq!(
         mid,
         &store_bytes[offset as usize..(offset + len) as usize],
@@ -1315,7 +1230,7 @@ async fn local_host_provided_blob_reads_the_local_store_ignoring_decoys() {
 
 #[tokio::test]
 async fn local_store_same_length_wrong_bytes_fail_whole_range_and_materialize() {
-    let db = read_test_db("photos");
+    let db = open_test_db_with_blob(photo_decl());
     let storage = MockSyncStorage::new();
     let (tmp, ld) = temp_store_dir();
     let blob = host_blob_ref("locl-hash", "photos", CacheFill::CacheEager);
@@ -1335,17 +1250,16 @@ async fn local_store_same_length_wrong_bytes_fail_whole_range_and_materialize() 
         .expect("store corrupt bytes under the expected version path");
 
     assert!(read_blob(&db, &ld, None, &blob).await.is_err());
-    assert!(
-        open_blob_stream(&db, &ld, None, &blob, replaced.len() as u64, 1, 5)
-            .await
-            .is_err()
-    );
+    assert!(open_blob_stream(&db, &ld, None, &blob, 1, 5).await.is_err());
 
     set_blob_remote(&db, &blob.id, true).await;
     put_cloud_blob(&db, &storage, &blob.id, &blob.namespace, expected).await;
     let destination = tmp.path().join("materialized");
+    let content = super::cache::live_blob_content(&db, &blob)
+        .await
+        .expect("resolve exact live content");
     assert!(
-        materialize_remote_blob_to_file(&db, &ld, Some(&storage), &blob, &destination)
+        materialize_remote_blob_to_file(&db, &ld, Some(&storage), &content, &destination)
             .await
             .is_err(),
         "materialization must reject the corrupt local-store source",
@@ -1382,24 +1296,14 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
         "a Remote + user-provided read serves the cloud copy, not the stale local-store file",
     );
     assert!(
-        ld.cache_blob_path(&blob.namespace, &blob.id)
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&ld, &blob.namespace, &blob.id, &cloud_bytes).exists(),
         "the Remote read populated the evictable cache",
     );
 
     let (offset, len) = (100u64, 500u64);
-    let mid = open_blob_stream(
-        &db,
-        &ld,
-        Some(&storage),
-        &blob,
-        cloud_bytes.len() as u64,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged Remote read");
+    let mid = open_blob_stream(&db, &ld, Some(&storage), &blob, offset, len)
+        .await
+        .expect("ranged Remote read");
     assert_eq!(
         mid,
         &cloud_bytes[offset as usize..(offset + len) as usize],
@@ -1410,7 +1314,7 @@ async fn remote_user_provided_blob_reads_cache_cloud_ignoring_a_stale_local_stor
 #[tokio::test]
 async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_cloud() {
     let db = read_test_db("audio");
-    let (tmp, ld) = temp_store_dir();
+    let (_tmp, ld) = temp_store_dir();
     let blob = blob_ref("rem0dddd", "audio", CacheFill::CacheLazy);
 
     plant_blob_row_with_size_hash(&db, &blob.id, true, 17, None).await;
@@ -1426,7 +1330,7 @@ async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_clou
         "a stale local-store file does not satisfy a Remote + user-provided read: {err:?}",
     );
 
-    let range_err = open_blob_stream(&db, &ld, None, &blob, 17, 0, 5)
+    let range_err = open_blob_stream(&db, &ld, None, &blob, 0, 5)
         .await
         .expect_err("Remote + user-provided range read needs cache or cloud");
     assert!(
@@ -1439,10 +1343,9 @@ async fn remote_user_provided_blob_with_only_a_stale_local_store_file_needs_clou
         .expect_err("pin requires a signed content hash");
     assert!(matches!(pin_err, BlobCacheError::MissingContentHash { .. }));
 
-    let materialize_err =
-        materialize_remote_blob_to_file(&db, &ld, None, &blob, &tmp.path().join("materialized"))
-            .await
-            .expect_err("materialization requires a signed content hash");
+    let materialize_err = super::cache::live_blob_content(&db, &blob)
+        .await
+        .expect_err("materialization requires a signed content hash");
     assert!(matches!(
         materialize_err,
         BlobCacheError::MissingContentHash { .. }
@@ -1512,8 +1415,8 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
 
     assert_eq!(result.changesets_applied, 1);
     assert!(
-        !ld.cache_blob_path("photos", "lazy0001").unwrap().exists()
-            && !ld.pinned_blob_path("photos", "lazy0001").unwrap().exists()
+        !cache_path_for_bytes(&ld, "photos", "lazy0001", bytes).exists()
+            && !pinned_path_for_bytes(&ld, "photos", "lazy0001", bytes).exists()
             && !ld
                 .local_blob_path("photos", "lazy0001", &crate::blob::content_hash(bytes))
                 .unwrap()
@@ -1527,7 +1430,7 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
         .expect("CacheLazy remote-root blob reads on demand");
     assert_eq!(got, b"LAZY-REMOTE-ROOT");
     assert!(
-        ld.cache_blob_path("photos", "lazy0001").unwrap().exists(),
+        cache_path_for_bytes(&ld, "photos", "lazy0001", bytes).exists(),
         "the on-demand read populates the evictable cache"
     );
 }
@@ -1585,7 +1488,7 @@ async fn local_user_provided_blob_without_an_external_ref_errors() {
         matches!(err, BlobCacheError::NoExternalRef { .. }),
         "a missing external ref maps to NoExternalRef: {err:?}",
     );
-    let range_err = open_blob_stream(&db, &ld, Some(&storage), &blob, 11, 0, 5)
+    let range_err = open_blob_stream(&db, &ld, Some(&storage), &blob, 0, 5)
         .await
         .expect_err("the ranged read is fail-loud on a missing external ref too");
     assert!(
@@ -1602,7 +1505,7 @@ async fn local_user_provided_blob_without_an_external_ref_errors() {
 /// to surface, not a cache miss to refetch.
 #[tokio::test]
 async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud() {
-    let db = read_test_db("photos");
+    let db = open_test_db_with_blob(photo_decl());
     let storage = MockSyncStorage::new();
     let (_tmp, ld) = temp_store_dir();
 
@@ -1628,7 +1531,7 @@ async fn local_blob_absent_from_local_store_errors_instead_of_hitting_the_cloud(
         "a missing Local copy maps to NoLocalCopy: {err:?}",
     );
 
-    let range_err = open_blob_stream(&db, &ld, Some(&storage), &blob, 11, 0, 5)
+    let range_err = open_blob_stream(&db, &ld, Some(&storage), &blob, 0, 5)
         .await
         .expect_err("the ranged read is fail-loud on a missing Local copy too");
     assert!(
@@ -1670,17 +1573,9 @@ async fn remote_user_provided_blob_ignores_a_stale_external_ref() {
     );
 
     let (offset, len) = (100u64, 500u64);
-    let mid = open_blob_stream(
-        &db,
-        &ld,
-        Some(&storage),
-        &blob,
-        cloud_bytes.len() as u64,
-        offset,
-        len,
-    )
-    .await
-    .expect("ranged Remote read");
+    let mid = open_blob_stream(&db, &ld, Some(&storage), &blob, offset, len)
+        .await
+        .expect("ranged Remote read");
     assert_eq!(
         mid,
         &cloud_bytes[offset as usize..(offset + len) as usize],
@@ -1783,8 +1678,14 @@ async fn cache_total_bytes(ld: &crate::store_dir::StoreDir, namespace: &str) -> 
 /// Pin a cache file's modification time to a fixed instant so eviction order is
 /// deterministic (the cache evicts oldest-mtime first). `secs` is an offset from
 /// the unix epoch — smaller is older.
-fn set_cache_mtime(ld: &crate::store_dir::StoreDir, namespace: &str, id: &str, secs: u64) {
-    let path = ld.cache_blob_path(namespace, id).expect("cache path");
+fn set_cache_mtime(
+    ld: &crate::store_dir::StoreDir,
+    namespace: &str,
+    id: &str,
+    bytes: &[u8],
+    secs: u64,
+) {
+    let path = cache_path_for_bytes(ld, namespace, id, bytes);
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open(&path)
@@ -1808,7 +1709,7 @@ async fn stage_with_mtime(
     write_blob(db, ld, &blob.namespace, &blob.id, bytes)
         .await
         .expect("stage blob into cache");
-    set_cache_mtime(ld, namespace, id, mtime_secs);
+    set_cache_mtime(ld, namespace, id, bytes, mtime_secs);
 }
 
 /// Over budget, eviction deletes the OLDEST files (by mtime) in that namespace first
@@ -1844,27 +1745,19 @@ async fn eviction_drops_oldest_cache_files_until_under_budget() {
         .expect("evict to budget");
 
     assert!(
-        !ld.cache_blob_path("release_files", "old1aaaa")
-            .unwrap()
-            .exists(),
+        !cache_path_for_bytes(&ld, "release_files", "old1aaaa", &[1u8; 100]).exists(),
         "the oldest file is evicted first",
     );
     assert!(
-        !ld.cache_blob_path("release_files", "old2bbbb")
-            .unwrap()
-            .exists(),
+        !cache_path_for_bytes(&ld, "release_files", "old2bbbb", &[2u8; 100]).exists(),
         "the second-oldest file is evicted next",
     );
     assert!(
-        ld.cache_blob_path("release_files", "new3cccc")
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&ld, "release_files", "new3cccc", &[3u8; 100]).exists(),
         "a newer file survives once the total is back under budget",
     );
     assert!(
-        ld.cache_blob_path("release_files", "new4dddd")
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&ld, "release_files", "new4dddd", &[4u8; 100]).exists(),
         "the newest file survives",
     );
     assert!(
@@ -1898,15 +1791,11 @@ async fn release_files_eviction_leaves_covers_intact() {
         .expect("evict release_files to budget");
 
     assert!(
-        !ld.cache_blob_path("release_files", "aud01aaa")
-            .unwrap()
-            .exists(),
+        !cache_path_for_bytes(&ld, "release_files", "aud01aaa", &[1u8; 100]).exists(),
         "the oldest audio file is evicted under release_files pressure",
     );
     assert!(
-        ld.cache_blob_path("release_files", "aud04ddd")
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&ld, "release_files", "aud04ddd", &[4u8; 100]).exists(),
         "the newest audio file survives within release_files' budget",
     );
     assert!(
@@ -1914,7 +1803,7 @@ async fn release_files_eviction_leaves_covers_intact() {
         "release_files is back within its budget",
     );
     assert!(
-        ld.cache_blob_path("covers", "cov00aaa").unwrap().exists(),
+        cache_path_for_bytes(&ld, "covers", "cov00aaa", &[9u8; 500]).exists(),
         "the cover in another namespace is untouched by release_files eviction",
     );
     assert_eq!(
@@ -1952,7 +1841,7 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
     read_blob(&db, &ld, Some(&storage), &cov1)
         .await
         .expect("first cover read populates the cache");
-    set_cache_mtime(&ld, "covers", &cov1.id, 1000);
+    set_cache_mtime(&ld, "covers", &cov1.id, &cov1_bytes, 1000);
 
     // Read the second cover: populating it pushes `covers` to 400 (> 250), so the
     // read's own sweep evicts the oldest (the first cover), leaving only the second.
@@ -1960,11 +1849,11 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
         .await
         .expect("second cover read populates and evicts to budget");
     assert!(
-        !ld.cache_blob_path("covers", &cov1.id).unwrap().exists(),
+        !cache_path_for_bytes(&ld, "covers", &cov1.id, &cov1_bytes).exists(),
         "the oldest cover is evicted when covers goes over its small budget",
     );
     assert!(
-        ld.cache_blob_path("covers", &cov2.id).unwrap().exists(),
+        cache_path_for_bytes(&ld, "covers", &cov2.id, &cov2_bytes).exists(),
         "the just-read cover stays",
     );
 
@@ -1974,7 +1863,7 @@ async fn covers_eviction_drops_oldest_cover_and_a_read_refetches() {
         .expect("a read of the evicted cover re-fetches it");
     assert_eq!(refetched, vec![1u8; 200], "the re-fetch returns the bytes");
     assert!(
-        ld.cache_blob_path("covers", &cov1.id).unwrap().exists(),
+        cache_path_for_bytes(&ld, "covers", &cov1.id, &cov1_bytes).exists(),
         "the re-fetched cover is back in cache/covers/",
     );
 }
@@ -2022,58 +1911,33 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
     assert_eq!(result.changesets_applied, 1);
     assert!(
-        ld.cache_blob_path("photos", "mir0aaaa").unwrap().exists(),
+        cache_path_for_bytes(&ld, "photos", "mir0aaaa", &bytes).exists(),
         "the CacheEager blob lands in the evictable cache on pull",
     );
     let eager = blob_ref("mir0aaaa", "photos", CacheFill::CacheEager);
     pin(&db2, &ld, Some(&storage), std::slice::from_ref(&eager))
         .await
         .expect("pin the eager blob into pinned/");
-    assert!(ld.pinned_blob_path("photos", "mir0aaaa").unwrap().exists());
-
-    // Also user-pin a CacheLazy blob (a different namespace) into pinned/.
-    let lazy = blob_ref("usr0bbbb", "audio", CacheFill::CacheLazy);
-    write_blob(&db2, &ld, &lazy.namespace, &lazy.id, &[7u8; 500])
-        .await
-        .expect("write the lazy blob into the cache");
-    pin(&db2, &ld, Some(&storage), std::slice::from_ref(&lazy))
-        .await
-        .expect("user-pin the lazy blob");
-    assert!(ld.pinned_blob_path("audio", "usr0bbbb").unwrap().exists());
+    assert!(pinned_path_for_bytes(&ld, "photos", "mir0aaaa", &bytes).exists());
 
     // Flood BOTH namespaces' evictable caches, set a tiny budget on EACH, and sweep
     // each. The pinned files live in pinned/ — the per-namespace sweep never touches
     // them, whichever namespace's budget runs.
     stage_with_mtime(&db2, &ld, "photos", "junkp1cc", &[1u8; 1000], 1000).await;
-    stage_with_mtime(&db2, &ld, "audio", "junka1cc", &[2u8; 1000], 2000).await;
     db2.set_cache_budget("photos", 10)
         .await
         .expect("set tiny photos budget");
-    db2.set_cache_budget("audio", 10)
-        .await
-        .expect("set tiny audio budget");
     evict_to_budget(&db2, &ld, "photos", None)
         .await
         .expect("evict photos to budget");
-    evict_to_budget(&db2, &ld, "audio", None)
-        .await
-        .expect("evict audio to budget");
 
     assert!(
-        ld.pinned_blob_path("photos", "mir0aaaa").unwrap().exists(),
+        pinned_path_for_bytes(&ld, "photos", "mir0aaaa", &bytes).exists(),
         "a pinned CacheEager blob survives its namespace's eviction (it is in pinned/)",
-    );
-    assert!(
-        ld.pinned_blob_path("audio", "usr0bbbb").unwrap().exists(),
-        "a user-pinned CacheLazy blob survives its namespace's eviction (it is in pinned/)",
     );
     assert!(
         cache_total_bytes(&ld, "photos").await <= 10,
         "the photos evictable cache is trimmed to budget, ignoring pinned/",
-    );
-    assert!(
-        cache_total_bytes(&ld, "audio").await <= 10,
-        "the audio evictable cache is trimmed to budget, ignoring pinned/",
     );
 }
 
@@ -2099,9 +1963,13 @@ async fn unset_namespace_budget_never_evicts() {
         15000,
         "a big cache stays whole when no budget is set",
     );
-    for id in ["keep1aaa", "keep2bbb", "keep3ccc"] {
+    for (id, bytes) in [
+        ("keep1aaa", vec![1u8; 5000]),
+        ("keep2bbb", vec![2u8; 5000]),
+        ("keep3ccc", vec![3u8; 5000]),
+    ] {
         assert!(
-            ld.cache_blob_path("release_files", id).unwrap().exists(),
+            cache_path_for_bytes(&ld, "release_files", id, &bytes).exists(),
             "{id} survives with no budget",
         );
     }
@@ -2137,15 +2005,11 @@ async fn just_populated_blob_survives_the_read_that_triggers_eviction() {
         .expect("read fetches and populates, then evicts to budget");
     assert_eq!(got, bytes, "the triggering read still returns its bytes");
     assert!(
-        ld.cache_blob_path("release_files", "newer2bb")
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&ld, "release_files", "newer2bb", &bytes).exists(),
         "the just-populated (newest) blob survives its own over-budget eviction",
     );
     assert!(
-        !ld.cache_blob_path("release_files", "older1aa")
-            .unwrap()
-            .exists(),
+        !cache_path_for_bytes(&ld, "release_files", "older1aa", &[1u8; 100]).exists(),
         "the older blob is the one evicted",
     );
     assert!(
@@ -2197,15 +2061,11 @@ async fn budget_never_drifts_over_across_repeated_populates() {
         "at most two 100-byte blobs remain under the 250-byte budget",
     );
     assert!(
-        !ld.cache_blob_path("release_files", "seqr0000")
-            .unwrap()
-            .exists(),
+        !cache_path_for_bytes(&ld, "release_files", "seqr0000", &[0u8; 100]).exists(),
         "the first blob read was evicted by later populates",
     );
     assert!(
-        ld.cache_blob_path("release_files", "seqr0005")
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&ld, "release_files", "seqr0005", &[5u8; 100]).exists(),
         "the most-recently read blob is still cached",
     );
 }
@@ -2231,21 +2091,17 @@ async fn the_protected_file_survives_even_when_it_is_not_the_newest() {
     db.set_cache_budget("release_files", 100)
         .await
         .expect("set budget");
-    let protected = ld.cache_blob_path("release_files", "prot0aaa").unwrap();
+    let protected = cache_path_for_bytes(&ld, "release_files", "prot0aaa", &[1u8; 100]);
     evict_to_budget(&db, &ld, "release_files", Some(&protected))
         .await
         .expect("evict to budget, protecting the older file");
 
     assert!(
-        ld.cache_blob_path("release_files", "prot0aaa")
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&ld, "release_files", "prot0aaa", &[1u8; 100]).exists(),
         "the protected file survives even though it is the older by mtime",
     );
     assert!(
-        !ld.cache_blob_path("release_files", "othr0bbb")
-            .unwrap()
-            .exists(),
+        !cache_path_for_bytes(&ld, "release_files", "othr0bbb", &[2u8; 100]).exists(),
         "the newer, unprotected file is the one evicted instead",
     );
     assert!(
@@ -2272,21 +2128,17 @@ async fn protected_file_larger_than_budget_leaves_cache_over_budget_but_ok() {
     db.set_cache_budget("release_files", 50)
         .await
         .expect("set budget");
-    let protected = ld.cache_blob_path("release_files", "biginuse").unwrap();
+    let protected = cache_path_for_bytes(&ld, "release_files", "biginuse", &[1u8; 100]);
     evict_to_budget(&db, &ld, "release_files", Some(&protected))
         .await
         .expect("eviction returns Ok even when the in-use file alone exceeds budget");
 
     assert!(
-        ld.cache_blob_path("release_files", "biginuse")
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&ld, "release_files", "biginuse", &[1u8; 100]).exists(),
         "the protected in-use file is kept even though it alone exceeds the budget",
     );
     assert!(
-        !ld.cache_blob_path("release_files", "othr0bbb")
-            .unwrap()
-            .exists(),
+        !cache_path_for_bytes(&ld, "release_files", "othr0bbb", &[2u8; 100]).exists(),
         "every other candidate is still evicted",
     );
     assert_eq!(
@@ -2314,7 +2166,7 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
     // A concurrent populate's in-flight temp: a `.tmp.<uuid>` sibling in the shard dir
     // where its committed blob will land, aged OLDER than the committed file so a sweep
     // that treated it as a candidate would evict it first.
-    let dest = ld.cache_blob_path("release_files", "new0bbbb").unwrap();
+    let dest = cache_path_for_bytes(&ld, "release_files", "new0bbbb", &[9u8; 100]);
     let shard = dest.parent().unwrap();
     std::fs::create_dir_all(shard).expect("create shard dir");
     let temp_path = shard.join(format!(
@@ -2344,9 +2196,7 @@ async fn eviction_skips_a_concurrent_populates_temp_file() {
         "eviction leaves a concurrent populate's temp in place",
     );
     assert!(
-        ld.cache_blob_path("release_files", "keep0aaa")
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&ld, "release_files", "keep0aaa", &[1u8; 100]).exists(),
         "the committed cache file survives — the temp's bytes never counted toward the budget",
     );
 

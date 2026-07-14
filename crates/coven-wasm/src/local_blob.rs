@@ -2,7 +2,7 @@
 //!
 //! coven reads a blob file on push (then encrypts and uploads it) and writes it on
 //! pull (after downloading and decrypting); the cache ([`coven_core::blob::cache`])
-//! decides where each file lives (`storage/pinned/<id>` or `storage/cache/<id>`,
+//! decides where each file lives (`storage/pinned/<namespace>/<id>/<content_hash>` or `storage/cache/<namespace>/<id>/<content_hash>`,
 //! built from the validated blob id). `coven_core::local_blob` is the public
 //! facade; this module registers its browser implementation over the Origin
 //! Private File System.

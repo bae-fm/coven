@@ -1270,11 +1270,15 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
 
     // Device B bootstraps from the snapshot, then runs the real bootstrap path,
     // which derives `note_photos`'s blob from the declaration. A `CacheEager` blob
-    // lands in B's evictable cache folder (`storage/cache/<id>`) on reconciliation,
-    // which coven builds from the validated id.
+    // lands in B's evictable cache folder (`storage/cache/<namespace>/<id>/<content_hash>`) on reconciliation,
+    // which coven builds from the validated namespace, id, and signed content hash.
     let (_tmp_b, lib_b) = temp_store_dir();
     let expected_blob = lib_b
-        .cache_blob_path("photos", "photo1")
+        .cache_blob_path(
+            "photos",
+            "photo1",
+            &crate::blob::content_hash(b"cover-bytes"),
+        )
         .expect("cache blob path");
 
     let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
@@ -1375,7 +1379,11 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
     let (_tmp_b, lib_b) = temp_store_dir();
     // A reconciled `CacheEager` blob lands in B's evictable cache folder.
     let expected_blob = lib_b
-        .cache_blob_path("photos", "photo1")
+        .cache_blob_path(
+            "photos",
+            "photo1",
+            &crate::blob::content_hash(b"cover-bytes"),
+        )
         .expect("cache blob path");
 
     let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
@@ -1474,7 +1482,11 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
 
     let (_tmp_b, lib_b) = temp_store_dir();
     let expected_blob = lib_b
-        .cache_blob_path("photos", "photo1")
+        .cache_blob_path(
+            "photos",
+            "photo1",
+            &crate::blob::content_hash(b"cover-bytes"),
+        )
         .expect("cache blob path");
 
     let (tx, cancel) = tokio::sync::watch::channel(false);

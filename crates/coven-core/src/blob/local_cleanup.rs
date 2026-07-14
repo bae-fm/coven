@@ -39,6 +39,27 @@ impl LocalBlobCleanupIntent {
     pub fn content_hash(&self) -> &str {
         &self.content_hash
     }
+
+    /// Build a cleanup intent for the exact content version on the blob's
+    /// current live row.
+    pub fn for_live_blob_on(
+        conn: &Connection,
+        decls: &BlobDecls,
+        blob: &crate::blob::BlobRef,
+    ) -> Result<Option<Self>, DbError> {
+        decls
+            .live_content_for_blob_in_namespace(conn, &blob.namespace, &blob.id)
+            .map(|content| {
+                content.map(|content| {
+                    Self::new(
+                        content.blob.namespace,
+                        content.blob.id,
+                        content.content_hash,
+                    )
+                })
+            })
+            .map_err(|error| DbError(error.to_string()))
+    }
 }
 
 /// Record `intent` only when no row references the blob in this transaction.
@@ -49,10 +70,13 @@ pub fn record_if_unreferenced_on(
     decls: &BlobDecls,
     intent: &LocalBlobCleanupIntent,
 ) -> Result<bool, DbError> {
-    let live_hash = decls
-        .hash_for_blob_in_namespace(conn, intent.namespace(), intent.blob_id())
+    let live_content = decls
+        .live_content_for_blob_in_namespace(conn, intent.namespace(), intent.blob_id())
         .map_err(|error| DbError(error.to_string()))?;
-    if live_hash.as_deref() == Some(intent.content_hash()) {
+    if live_content
+        .as_ref()
+        .is_some_and(|content| content.content_hash == intent.content_hash())
+    {
         return Ok(false);
     }
     let inserted = conn

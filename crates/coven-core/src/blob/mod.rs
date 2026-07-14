@@ -68,7 +68,8 @@
 //! This module is the engine; its halves move a blob through its lifecycle:
 //!
 //! - [`cache`] — the device-local cache for **Remote** blobs: bytes on disk keyed
-//!   by blob id, with the folder a file lives in as the only retention truth
+//!   by namespace, blob id, and signed content hash, with the folder a file lives
+//!   in as the only retention truth
 //!   (`storage/pinned/` protected, `storage/cache/` evictable). Read (whole and
 //!   ranged), pin/unpin, clear, and budget eviction.
 //! - [`local_files`] — coven's own copy of a **host-provided Local** blob, in the
@@ -382,8 +383,9 @@ pub enum CacheFill {
 /// live depends on its locality and provenance: a user-provided Local blob is the
 /// user's file at its path; a host-provided Local blob is in coven's local store
 /// (`storage/local/<namespace>/<id>/<content_hash>`); a Remote blob's device-local copy is a cache
-/// copy (`storage/pinned/<namespace>/<id>` / `storage/cache/<namespace>/<id>`, built
-/// from the validated namespace + id — see [`cache`]).
+/// copy (`storage/pinned/<namespace>/<id>/<content_hash>` /
+/// `storage/cache/<namespace>/<id>/<content_hash>`, built from the validated
+/// namespace, id, and signed content hash — see [`cache`]).
 #[derive(Debug, Clone)]
 pub struct BlobRef {
     /// Cloud namespace, e.g. `"images"`. It is the first segment of either current
@@ -406,6 +408,17 @@ pub struct BlobRef {
     /// cache right away ([`CacheFill::CacheEager`]) or on first read
     /// ([`CacheFill::CacheLazy`]). See [`CacheFill`].
     pub fill: CacheFill,
+}
+
+/// One live blob-bearing row's exact content identity, read as a single database
+/// snapshot. The logical [`BlobRef`] and its required signed plaintext size and
+/// content hash travel together so filesystem and cloud work cannot mix metadata
+/// from two same-id row versions.
+#[derive(Debug, Clone)]
+pub(crate) struct LiveBlobContent {
+    pub blob: BlobRef,
+    pub plaintext_size: u64,
+    pub content_hash: String,
 }
 
 /// Notified about coven's blob transitions, for host-specific bookkeeping and UI:

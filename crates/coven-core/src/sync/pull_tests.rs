@@ -28,6 +28,28 @@ use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::*;
 
+fn cache_path_for_bytes(
+    store_dir: &crate::store_dir::StoreDir,
+    namespace: &str,
+    id: &str,
+    bytes: &[u8],
+) -> std::path::PathBuf {
+    store_dir
+        .cache_blob_path(namespace, id, &crate::blob::content_hash(bytes))
+        .expect("exact cache path")
+}
+
+fn pinned_path_for_bytes(
+    store_dir: &crate::store_dir::StoreDir,
+    namespace: &str,
+    id: &str,
+    bytes: &[u8],
+) -> std::path::PathBuf {
+    store_dir
+        .pinned_blob_path(namespace, id, &crate::blob::content_hash(bytes))
+        .expect("exact pinned path")
+}
+
 /// Drive `service::sync` the way the cycle does: load the cycle's membership chain
 /// once and hand it in. Test call sites pass the same positional args they always
 /// did — this is the non-cycle standalone entry that loads the membership itself.
@@ -1575,14 +1597,15 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     );
 
     // Destination pulls. A `CacheEager` photo lands in the store dir's evictable
-    // cache (`storage/cache/<id>`) on pull — which coven builds from the validated id.
+    // cache (`storage/cache/<namespace>/<id>/<content_hash>`) on pull — which coven
+    // builds from the validated namespace, id, and signed content hash.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_t, ld) = temp_store_dir();
     let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
-    let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1ab").expect("cache path"))
+    let downloaded = std::fs::read(cache_path_for_bytes(&ld, "photos", "p1ab", b"PHOTOBYTES"))
         .expect("downloaded photo");
     assert_eq!(downloaded, b"PHOTOBYTES");
 }
@@ -1631,7 +1654,7 @@ async fn stale_same_length_cache_is_replaced_before_the_cursor_advances() {
 
     let db2 = open_test_db_with_blob(photo_decl());
     let (_tmp, store_dir) = temp_store_dir();
-    let cache_path = store_dir.cache_blob_path("photos", "stale001").unwrap();
+    let cache_path = cache_path_for_bytes(&store_dir, "photos", "stale001", current);
     crate::local_blob::write_atomic(&cache_path, stale)
         .await
         .unwrap();
@@ -1660,11 +1683,13 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     .await;
     exec(
         &db1,
-        "INSERT INTO note_photos \
+        &format!(
+            "INSERT INTO note_photos \
          (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
          VALUES ('p-row', 'n1', 'cover', 8, \
-                 'f3f47f35e084260cb147209c1985f34a9b9b07cda169516f91b30be0fdf3c6f7', \
-                 '0000000001000-0000-dev1', '2026-01-01', 'oldaaaa')",
+                 '{}', '0000000001000-0000-dev1', '2026-01-01', 'oldaaaa')",
+            crate::blob::content_hash(b"OLD-BLOB"),
+        ),
     )
     .await;
     // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
@@ -1725,16 +1750,17 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     .await;
     exec(
         &db2,
-        "INSERT INTO note_photos \
+        &format!(
+            "INSERT INTO note_photos \
          (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
          VALUES ('p-row', 'n1', 'cover', 8, \
-                 'f3f47f35e084260cb147209c1985f34a9b9b07cda169516f91b30be0fdf3c6f7', \
-                 '0000000001000-0000-dev2', '2026-01-01', 'oldaaaa')",
+                 '{}', '0000000001000-0000-dev2', '2026-01-01', 'oldaaaa')",
+            crate::blob::content_hash(b"OLD-BLOB"),
+        ),
     )
     .await;
     crate::local_blob::write_atomic(
-        &ld2.cache_blob_path("photos", "oldaaaa")
-            .expect("old cache path"),
+        &cache_path_for_bytes(&ld2, "photos", "oldaaaa", b"OLD-BLOB"),
         b"OLD-BLOB",
     )
     .await
@@ -1743,15 +1769,11 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     let (_updated, pull) = pull_into(&db2, &storage, "dev2", &ld2).await;
     assert_eq!(pull.changesets_applied, 1);
     assert!(
-        ld2.cache_blob_path("photos", "newaaaa")
-            .expect("new cache path")
-            .exists(),
+        cache_path_for_bytes(&ld2, "photos", "newaaaa", b"NEW-BLOB").exists(),
         "pull downloads the UPDATE's new blob id"
     );
     assert!(
-        !ld2.cache_blob_path("photos", "oldaaaa")
-            .expect("old cache path")
-            .exists(),
+        !cache_path_for_bytes(&ld2, "photos", "oldaaaa", b"OLD-BLOB").exists(),
         "pull cleanup drops the UPDATE's old blob id"
     );
 }
@@ -1769,11 +1791,13 @@ async fn update_to_null_drops_old_local_blob_copy() {
     .await;
     exec(
         &db1,
-        "INSERT INTO note_photos \
+        &format!(
+            "INSERT INTO note_photos \
          (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
          VALUES ('p-row', 'n1', 'cover', 8, \
-                 'f3f47f35e084260cb147209c1985f34a9b9b07cda169516f91b30be0fdf3c6f7', \
-                 '0000000001000-0000-dev1', '2026-01-01', 'oldnull')",
+                 '{}', '0000000001000-0000-dev1', '2026-01-01', 'oldnull')",
+            crate::blob::content_hash(b"OLD-BLOB"),
+        ),
     )
     .await;
     // The rows above are seed (raw `exec`, unjournaled), so the captured changeset
@@ -1798,16 +1822,17 @@ async fn update_to_null_drops_old_local_blob_copy() {
     .await;
     exec(
         &db2,
-        "INSERT INTO note_photos \
+        &format!(
+            "INSERT INTO note_photos \
          (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
          VALUES ('p-row', 'n1', 'cover', 8, \
-                 'f3f47f35e084260cb147209c1985f34a9b9b07cda169516f91b30be0fdf3c6f7', \
-                 '0000000001000-0000-dev2', '2026-01-01', 'oldnull')",
+                 '{}', '0000000001000-0000-dev2', '2026-01-01', 'oldnull')",
+            crate::blob::content_hash(b"OLD-BLOB"),
+        ),
     )
     .await;
     crate::local_blob::write_atomic(
-        &ld.cache_blob_path("photos", "oldnull")
-            .expect("old cache path"),
+        &cache_path_for_bytes(&ld, "photos", "oldnull", b"OLD-BLOB"),
         b"OLD-BLOB",
     )
     .await
@@ -1816,9 +1841,7 @@ async fn update_to_null_drops_old_local_blob_copy() {
     let (_updated, pull) = pull_into(&db2, &storage, "dev2", &ld).await;
     assert_eq!(pull.changesets_applied, 1);
     assert!(
-        !ld.cache_blob_path("photos", "oldnull")
-            .expect("old cache path")
-            .exists(),
+        !cache_path_for_bytes(&ld, "photos", "oldnull", b"OLD-BLOB").exists(),
         "pull cleanup drops the old blob when UPDATE removes the blob id"
     );
 }
@@ -1938,8 +1961,8 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
     // ...but the blob was NOT downloaded to the puller's cache: CacheLazy is fetched
     // on first read, not eagerly on pull.
     assert!(
-        !ld.pinned_blob_path("audio", "audio1").unwrap().exists()
-            && !ld.cache_blob_path("audio", "audio1").unwrap().exists(),
+        !pinned_path_for_bytes(&ld, "audio", "audio1", b"AUDIO-PAYLOAD").exists()
+            && !cache_path_for_bytes(&ld, "audio", "audio1", b"AUDIO-PAYLOAD").exists(),
         "a CacheLazy blob must NOT be downloaded on pull — it stays in the cloud for on-demand fetch",
     );
 }
@@ -1963,8 +1986,13 @@ async fn user_provided_blob_with_external_ref_aborts_before_changeset_publish() 
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('audio1', 'n1', 'audio', 11, '{}', \
+                         '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(b"local audio"),
+            ),
         ],
     )
     .await;
@@ -2019,8 +2047,13 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         &[
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'WithAudio', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
-            "INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
-         VALUES ('audio1', 'n1', 'audio', '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('audio1', 'n1', 'audio', 14, '{}', \
+                         '0000000001000-0000-dev1', '2026-01-01')",
+                crate::blob::content_hash(b"missing remote"),
+            ),
         ],
     )
     .await;
@@ -2303,7 +2336,7 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
     local_files::drop_blob(&ld, "photos", "p1cover", &crate::blob::content_hash(bytes))
         .await
         .expect("drop any local-store copy");
-    let cached = ld.cache_blob_path("photos", "p1cover").expect("cache path");
+    let cached = cache_path_for_bytes(&ld, "photos", "p1cover", bytes);
     if cached.exists() {
         std::fs::remove_file(&cached).expect("evict the cached copy");
     }
@@ -2452,7 +2485,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     // A `CacheEager` cover lands in B's evictable cache on pull.
-    let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1cover").expect("cache path"))
+    let downloaded = std::fs::read(cache_path_for_bytes(&ld, "photos", "p1cover", plaintext))
         .expect("device B downloaded cover");
     assert_eq!(
         downloaded, plaintext,
@@ -2632,11 +2665,8 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
         "device B must download a cover matching the row's hash",
     );
     assert_eq!(result.changesets_applied, 1);
-    let cached = std::fs::read(
-        ld2.cache_blob_path("photos", "p2cover")
-            .expect("cache path"),
-    )
-    .expect("device B cached the replacement cover");
+    let cached = std::fs::read(cache_path_for_bytes(&ld2, "photos", "p2cover", new_bytes))
+        .expect("device B cached the replacement cover");
     assert_eq!(
         cached,
         new_bytes.as_slice(),
@@ -2792,7 +2822,7 @@ async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
         "pBcover" => from_b.as_slice(),
         other => panic!("the row must converge to one of the two replacements, got {other:?}"),
     };
-    let cached = std::fs::read(ld_c.cache_blob_path("photos", &winner).expect("cache path"))
+    let cached = std::fs::read(cache_path_for_bytes(&ld_c, "photos", &winner, expected))
         .expect("the third device cached the cover its row names");
     assert_eq!(
         cached, expected,
@@ -2889,11 +2919,8 @@ async fn plain_scheme_a_changeset_older_than_a_replacement_still_finds_its_blob(
         result.changesets_applied, 2,
         "both changesets apply: the laggard is not wedged at the one it cannot satisfy",
     );
-    let cached = std::fs::read(
-        ld2.cache_blob_path("photos", "p2cover")
-            .expect("cache path"),
-    )
-    .expect("the laggard cached the current cover");
+    let cached = std::fs::read(cache_path_for_bytes(&ld2, "photos", "p2cover", new_bytes))
+        .expect("the laggard cached the current cover");
     assert_eq!(
         cached,
         new_bytes.as_slice(),
@@ -2966,11 +2993,8 @@ async fn plain_scheme_blob_keeps_a_stable_readable_path() {
     let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
     assert!(!result.asset_downloads_failed);
     assert_eq!(result.changesets_applied, 1);
-    let cached = std::fs::read(
-        ld2.cache_blob_path("photos", "f1audio")
-            .expect("cache path"),
-    )
-    .expect("device B cached the audio");
+    let cached = std::fs::read(cache_path_for_bytes(&ld2, "photos", "f1audio", bytes))
+        .expect("device B cached the audio");
     assert_eq!(cached, bytes.as_slice());
 }
 
@@ -3182,20 +3206,15 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
         "device B must download a cover matching the row's hash",
     );
     assert_eq!(result.changesets_applied, 1);
-    let cached = std::fs::read(
-        ld2.cache_blob_path("photos", "p2cover")
-            .expect("cache path"),
-    )
-    .expect("device B cached the replacement cover");
+    let cached = std::fs::read(cache_path_for_bytes(&ld2, "photos", "p2cover", new_bytes))
+        .expect("device B cached the replacement cover");
     assert_eq!(
         cached,
         new_bytes.as_slice(),
         "device B serves the replacement bytes, not the cover it replaced",
     );
     assert!(
-        !ld2.cache_blob_path("photos", "p1cover")
-            .expect("cache path")
-            .exists(),
+        !cache_path_for_bytes(&ld2, "photos", "p1cover", old_bytes).exists(),
         "device B drops its cached copy of the blob the row no longer points at",
     );
 }
@@ -3451,7 +3470,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         "WithPhoto"
     );
     // A `CacheEager` cover lands in B's evictable cache on pull.
-    let downloaded = std::fs::read(ld.cache_blob_path("photos", "p1cover").expect("cache path"))
+    let downloaded = std::fs::read(cache_path_for_bytes(&ld, "photos", "p1cover", plaintext))
         .expect("device B downloaded photo");
     assert_eq!(
         downloaded, plaintext,
@@ -3558,7 +3577,7 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
     // CacheEager: warmed into the cache, gone from the local store. The first read
     // is a local cache hit.
     assert!(
-        ld1.cache_blob_path("photos", "peager01").unwrap().exists(),
+        cache_path_for_bytes(&ld1, "photos", "peager01", b"EAGER-BYTES").exists(),
         "an eager blob's local copy is moved into the cache",
     );
     assert!(
@@ -3585,7 +3604,7 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
         "a lazy blob's local copy is dropped after upload",
     );
     assert!(
-        !ld1.cache_blob_path("covers", "clazy001").unwrap().exists(),
+        !cache_path_for_bytes(&ld1, "covers", "clazy001", b"LAZY-BYTES").exists(),
         "a lazy blob is not pre-primed into the cache — it streams on first read",
     );
 }
@@ -3642,7 +3661,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     let (_t, ld) = temp_store_dir();
     pull_into(&db2, &storage, "dev2", &ld).await;
     assert!(
-        ld.cache_blob_path("photos", "pdel1234").unwrap().exists(),
+        cache_path_for_bytes(&ld, "photos", "pdel1234", b"COVERBYTES").exists(),
         "the cover lands in the evictable cache after the first pull",
     );
 
@@ -3653,8 +3672,8 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
 
     assert_eq!(result.changesets_applied, 1, "the DELETE changeset applied");
     assert!(
-        !ld.pinned_blob_path("photos", "pdel1234").unwrap().exists()
-            && !ld.cache_blob_path("photos", "pdel1234").unwrap().exists(),
+        !pinned_path_for_bytes(&ld, "photos", "pdel1234", b"COVERBYTES").exists()
+            && !cache_path_for_bytes(&ld, "photos", "pdel1234", b"COVERBYTES").exists(),
         "applying the blob-bearing DELETE drops the cache copies",
     );
 }
@@ -4034,7 +4053,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
     let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld).await;
     assert_eq!(result.changesets_applied, 1);
     assert!(
-        ld.cache_blob_path("photos", "sharedblob").unwrap().exists(),
+        cache_path_for_bytes(&ld, "photos", "sharedblob", b"SHARED-BYTES").exists(),
         "the shared CacheEager blob lands in the cache",
     );
 
@@ -4083,11 +4102,11 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
         "another row still references the old blob",
     );
     assert!(
-        ld.cache_blob_path("photos", "sharedblob").unwrap().exists(),
+        cache_path_for_bytes(&ld, "photos", "sharedblob", b"SHARED-BYTES").exists(),
         "a blob-changing update must not drop a copy another live row still references",
     );
     assert!(
-        ld.cache_blob_path("photos", "newblob").unwrap().exists(),
+        cache_path_for_bytes(&ld, "photos", "newblob", b"NEW-BYTES").exists(),
         "the replacement blob lands in the cache",
     );
 }
@@ -5633,7 +5652,7 @@ mod blob_path_traversal {
         assert_eq!(result.changesets_applied, 1, "a well-formed row applies");
         assert!(!result.asset_downloads_failed);
         assert_eq!(updated.get("dev1"), Some(&1));
-        let written = std::fs::read(ld.cache_blob_path("photos", "p1ab").expect("cache path"))
+        let written = std::fs::read(cache_path_for_bytes(&ld, "photos", "p1ab", b"PHOTOBYTES"))
             .expect("blob written");
         assert_eq!(
             written, b"PHOTOBYTES",

@@ -107,6 +107,18 @@ fn cover_ref(id: &str, cloud_path: &str) -> BlobRef {
     }
 }
 
+fn cache_path_for_bytes(store_dir: &StoreDir, namespace: &str, id: &str, bytes: &[u8]) -> PathBuf {
+    store_dir
+        .cache_blob_path(namespace, id, &crate::blob::content_hash(bytes))
+        .expect("exact cache path")
+}
+
+fn pinned_path_for_bytes(store_dir: &StoreDir, namespace: &str, id: &str, bytes: &[u8]) -> PathBuf {
+    store_dir
+        .pinned_blob_path(namespace, id, &crate::blob::content_hash(bytes))
+        .expect("exact pinned path")
+}
+
 /// Records the transition observer's completion + materialize callbacks.
 #[derive(Default)]
 struct Recorder {
@@ -533,7 +545,7 @@ async fn multi_device_make_remote_publishes_only_after_blobs_are_up() {
         src.exists(),
         "the user-provided source file is left in place post-commit"
     );
-    let pinned = lib_a.pinned_blob_path("photos", "photoaaa").unwrap();
+    let pinned = pinned_path_for_bytes(&lib_a, "photos", "photoaaa", &bytes);
     assert_eq!(
         std::fs::read(&pinned).unwrap(),
         bytes,
@@ -684,7 +696,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
 
     assert_eq!(shared_flag(&db, "n1").await, 1, "the release is Remote");
     assert!(
-        lib.pinned_blob_path("photos", "photoaaa").unwrap().exists(),
+        pinned_path_for_bytes(&lib, "photos", "photoaaa", &bytes).exists(),
         "the drained upload pins, honoring the second make_remote's choice",
     );
 }
@@ -899,7 +911,7 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
         "the intent survives a cycle that failed before recording the disposition",
     );
     assert!(
-        !lib.pinned_blob_path("covers", "coveraaa").unwrap().exists(),
+        !pinned_path_for_bytes(&lib, "covers", "coveraaa", &cover).exists(),
         "the pin disposition was not recorded, so nothing pinned the cover yet",
     );
 
@@ -916,7 +928,7 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
         "the completed retry consumed the intent",
     );
     assert!(
-        lib.pinned_blob_path("covers", "coveraaa").unwrap().exists(),
+        pinned_path_for_bytes(&lib, "covers", "coveraaa", &cover).exists(),
         "the retry recorded and applied the pinned disposition",
     );
 }
@@ -993,7 +1005,7 @@ async fn make_local_rejects_same_length_corrupt_cache_before_tombstoning_cloud()
     let corrupt = vec![b'x'; bytes.len()];
 
     seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
-    let cache_path = lib.cache_blob_path("photos", "photoaaa").unwrap();
+    let cache_path = cache_path_for_bytes(&lib, "photos", "photoaaa", &bytes);
     std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
     std::fs::write(&cache_path, &corrupt).unwrap();
 
@@ -1214,10 +1226,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         "the host-provided cover is uploaded to the cloud",
     );
     assert!(
-        lib_a
-            .pinned_blob_path("covers", "coveraaa")
-            .unwrap()
-            .exists(),
+        pinned_path_for_bytes(&lib_a, "covers", "coveraaa", &cover).exists(),
         "the cover's local-store copy moved into the pinned cache",
     );
     assert!(
@@ -1233,21 +1242,12 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
     let (_tmp_b, lib_b) = temp_store_dir();
     crate::sync::test_helpers::pull_into(&db_b, &storage, "B", &lib_b).await;
     assert!(
-        lib_b
-            .cache_blob_path("covers", "coveraaa")
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&lib_b, "covers", "coveraaa", &cover).exists(),
         "B fetches the CacheEager cover eagerly into its cache",
     );
     assert!(
-        !lib_b
-            .cache_blob_path("photos", "photoaaa")
-            .unwrap()
-            .exists()
-            && !lib_b
-                .pinned_blob_path("photos", "photoaaa")
-                .unwrap()
-                .exists(),
+        !cache_path_for_bytes(&lib_b, "photos", "photoaaa", &photo).exists()
+            && !pinned_path_for_bytes(&lib_b, "photos", "photoaaa", &photo).exists(),
         "B does not fetch the CacheLazy photo on pull",
     );
     assert_eq!(
@@ -1444,10 +1444,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
         "inline upload consumes the make_remote intent"
     );
     assert!(
-        lib_a
-            .pinned_blob_path("covers", "coverhost")
-            .unwrap()
-            .exists(),
+        pinned_path_for_bytes(&lib_a, "covers", "coverhost", &cover).exists(),
         "pin=true keeps the host-provided blob in the protected cache"
     );
     assert!(
@@ -1560,9 +1557,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "the pin disposition is committed durably with the flip, not applied in memory",
     );
     assert!(
-        !lib.pinned_blob_path("covers", "cover-pin")
-            .unwrap()
-            .exists(),
+        !pinned_path_for_bytes(&lib, "covers", "cover-pin", &pin_bytes).exists(),
         "the disposition is deferred to the drain, so the pin has not been applied yet",
     );
     assert!(
@@ -1580,13 +1575,13 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
     assert!(
-        lib.pinned_blob_path("covers", "cover-pin")
-            .unwrap()
-            .exists(),
+        pinned_path_for_bytes(&lib, "covers", "cover-pin", &pin_bytes).exists(),
         "recovery pins the retained cover",
     );
     assert!(
-        cache::is_pinned(&lib, "covers", "cover-pin").await.unwrap(),
+        cache::is_pinned(&db, &lib, &cover_ref("cover-pin", "cv/cover-pin.jpg"),)
+            .await
+            .unwrap(),
         "is_pinned reports the recovered pin",
     );
     assert!(
@@ -1610,7 +1605,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "recovery drops the un-pinned cover's local copy",
     );
     assert!(
-        !cache::is_pinned(&lib, "covers", "cover-drop")
+        !cache::is_pinned(&db, &lib, &cover_ref("cover-drop", "cv/cover-drop.jpg"),)
             .await
             .unwrap(),
         "the dropped cover is not pinned",
@@ -1643,7 +1638,7 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     let (_tmp, lib) = temp_store_dir();
     let bytes = b"ALREADY-PINNED".to_vec();
 
-    let pinned = lib.pinned_blob_path("covers", "cov-pin").unwrap();
+    let pinned = pinned_path_for_bytes(&lib, "covers", "cov-pin", &bytes);
     crate::local_blob::create_dir_all(pinned.parent().unwrap())
         .await
         .unwrap();
@@ -1683,7 +1678,7 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     let (_tmp, lib) = temp_store_dir();
     let bytes = b"ALREADY-CACHED".to_vec();
 
-    let cached = lib.cache_blob_path("covers", "cov-cache").unwrap();
+    let cached = cache_path_for_bytes(&lib, "covers", "cov-cache", &bytes);
     crate::local_blob::create_dir_all(cached.parent().unwrap())
         .await
         .unwrap();
@@ -1742,7 +1737,7 @@ async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
         "a disposition missing from both the local store and its destination stays pending",
     );
     assert!(
-        !lib.pinned_blob_path("covers", "cov-lost").unwrap().exists(),
+        !pinned_path_for_bytes(&lib, "covers", "cov-lost", b"missing").exists(),
         "no destination copy was conjured",
     );
 }
@@ -1800,10 +1795,7 @@ async fn remote_root_host_provided_blob_uploads_before_peer_reads_the_row() {
         "the peer receives the remote-root row"
     );
     assert!(
-        lib_b
-            .cache_blob_path("covers", "coverrrr")
-            .unwrap()
-            .exists(),
+        cache_path_for_bytes(&lib_b, "covers", "coverrrr", &cover).exists(),
         "the peer eagerly caches the host-provided blob"
     );
     let got = cache::read_blob(
@@ -2263,7 +2255,7 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
         "every upload key owned by the cancelled operation is tombstoned",
     );
     assert!(
-        !lib.pinned_blob_path("photos", "photoaaa").unwrap().exists(),
+        !pinned_path_for_bytes(&lib, "photos", "photoaaa", b"first").exists(),
         "the orphan's pinned cache copy is dropped",
     );
 }
@@ -2332,7 +2324,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
         "the orphan blob is tombstoned",
     );
     assert!(
-        !lib.pinned_blob_path("photos", "photoaaa").unwrap().exists(),
+        !pinned_path_for_bytes(&lib, "photos", "photoaaa", b"orphan-bytes").exists(),
         "the orphan's cache copy is dropped",
     );
 }

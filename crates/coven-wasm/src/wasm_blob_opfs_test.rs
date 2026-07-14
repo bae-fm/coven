@@ -146,7 +146,8 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
 
     let cloud = InMemoryCloudHome::new();
     // Each device's own store dir; B's pull writes the blob into its pinned cache
-    // (`storage/pinned/<id>`), which coven owns and builds from the validated id.
+    // (`storage/pinned/<namespace>/<id>/<content_hash>`), which coven owns and
+    // builds from the validated namespace, id, and signed content hash.
     let lib_a = StoreDir::new(std::path::Path::new("/coven-blob-test/lib-a"));
     let lib_b = StoreDir::new(std::path::Path::new("/coven-blob-test/lib-b"));
 
@@ -189,7 +190,11 @@ async fn photo_blob_syncs_across_devices_through_opfs() {
 
     // B has not pulled, so the blob is not in B's cache yet.
     let b_cache = lib_b
-        .cache_blob_path("photos", "photo-1")
+        .cache_blob_path(
+            "photos",
+            "photo-1",
+            &crate::blob::content_hash(&photo_bytes),
+        )
         .expect("cache blob path");
     assert_eq!(
         coven_core::local_blob::exists(&b_cache).await,
@@ -285,7 +290,11 @@ async fn truncated_cached_blob_refetches_instead_of_serving_short_bytes() {
         .expect("record exact cloud location");
 
     let cache_path = lib_b
-        .cache_blob_path("photos", "photo-torn")
+        .cache_blob_path(
+            "photos",
+            "photo-torn",
+            &crate::blob::content_hash(&photo_bytes),
+        )
         .expect("cache blob path");
     coven_core::local_blob::write_atomic(&cache_path, &photo_bytes[..8])
         .await

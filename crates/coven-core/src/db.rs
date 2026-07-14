@@ -43,7 +43,7 @@ macro_rules! coven_tables {
     -- this table does not sync.
     scope TEXT,
     -- Whether a successful upload should also populate coven's protected cache
-    -- folder (storage/pinned/<id>) from the plaintext, so the blob is kept local
+    -- folder (storage/pinned/<namespace>/<id>/<content_hash>) from the plaintext, so the blob is kept local
     -- and budget-exempt with no later cloud round-trip. Upload-only and honestly
     -- 0 for a delete (it retains nothing), so unlike scope/source_path
     -- it has a meaningful default rather than NULL.
@@ -287,10 +287,10 @@ pub enum OutboxOperation {
         /// always has one — a delete, which touches no key, has none.
         scope: crate::blob::BlobScope,
         /// Whether the drain populates the protected cache folder
-        /// (`storage/pinned/<namespace>/<id>`) from the plaintext on a successful
+        /// (`storage/pinned/<namespace>/<id>/<content_hash>`) from the plaintext on a successful
         /// upload, so a pinned Remote blob is kept local and budget-exempt with no
         /// later cloud round-trip. `false` populates nothing on write — the evictable
-        /// `storage/cache/<namespace>/<id>` fills on a later read-miss instead.
+        /// `storage/cache/<namespace>/<id>/<content_hash>` fills on a later read-miss instead.
         retain_pinned: bool,
     },
     /// Delete a cloud blob. The drain turns it into a signed cloud tombstone (the

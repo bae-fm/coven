@@ -66,13 +66,12 @@ pub(crate) async fn ensure_publishable_blobs(
             continue;
         }
 
-        // The remote check below keys the blob, so it needs the cloud path a browsable
-        // home keys it at — which a ref derived from a changeset UPDATE can be missing
-        // (the change reports only the columns whose values changed, and a repointed row
-        // leaves its cloud path alone). Read it from the row that owns the blob.
-        let blob = &super::service::with_row_cloud_path(db, blob)
+        // A changeset UPDATE can omit unchanged content columns. Resolve the exact
+        // live row once before checking the object that will be published.
+        let content = crate::blob::cache::live_blob_content(db, blob)
             .await
             .map_err(|e| PublishBlobError::ChangesetScan(e.to_string()))?;
+        let blob = &content.blob;
 
         if db
             .external_blob(&blob.id)

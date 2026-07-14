@@ -167,7 +167,6 @@ impl CovenReadHandle {
     pub async fn open_blob_stream(
         &self,
         blob: &BlobRef,
-        source_size: u64,
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, BlobCacheError> {
@@ -177,7 +176,6 @@ impl CovenReadHandle {
             &self.store_dir,
             storage.as_deref(),
             blob,
-            source_size,
             offset,
             len,
         )
@@ -205,7 +203,7 @@ impl CovenReadHandle {
     /// stats the folder, never writes.
     pub async fn is_pinned(&self, blobs: &[BlobRef]) -> Result<bool, BlobCacheError> {
         for blob in blobs {
-            if !crate::blob::cache::is_pinned(&self.store_dir, &blob.namespace, &blob.id).await? {
+            if !crate::blob::cache::is_pinned(&self.db, &self.store_dir, blob).await? {
                 return Ok(false);
             }
         }

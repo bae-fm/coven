@@ -244,18 +244,15 @@ pub async fn sync(
                         blob.namespace, blob.id
                     ))
                 })?;
-            let plaintext_size = crate::blob::cache::expected_blob_size(db, &blob)
-                .await
-                .map_err(|error| SyncCycleError::AssetScan(error.to_string()))?;
-            let content_hash = crate::blob::cache::expected_blob_hash(db, &blob)
+            let content = crate::blob::cache::live_blob_content(db, &blob)
                 .await
                 .map_err(|error| SyncCycleError::AssetScan(error.to_string()))?;
             outgoing_blob_locations.push(envelope::BlobLocationRecord {
                 namespace: blob.namespace,
                 blob_id: blob.id,
                 location,
-                plaintext_size,
-                content_hash,
+                plaintext_size: content.plaintext_size,
+                content_hash: content.content_hash,
             });
         }
     }
@@ -425,16 +422,15 @@ impl LocalHostBlob {
 /// Find the blob's local plaintext: its Local home first, then the cache.
 async fn local_host_blob(
     store_dir: &StoreDir,
-    blob: &BlobRef,
-    expected_size: u64,
-    expected_hash: &str,
+    content: &crate::blob::LiveBlobContent,
 ) -> Result<Option<LocalHostBlob>, SyncCycleError> {
+    let blob = &content.blob;
     if let Some(path) = crate::blob::local_files::path_if_present(
         store_dir,
         &blob.namespace,
         &blob.id,
-        expected_size,
-        expected_hash,
+        content.plaintext_size,
+        &content.content_hash,
     )
     .await
     .map_err(|e| {
@@ -442,12 +438,17 @@ async fn local_host_blob(
     })? {
         return Ok(Some(LocalHostBlob::LocalStore(path)));
     }
-    let cached =
-        crate::blob::cache::staged_path(store_dir, &blob.namespace, &blob.id, expected_size)
-            .await
-            .map_err(|e| {
-                SyncCycleError::AssetUpload(format!("reading cached blob for {}: {e}", blob.id))
-            })?;
+    let cached = crate::blob::cache::staged_path(
+        store_dir,
+        &blob.namespace,
+        &blob.id,
+        content.plaintext_size,
+        &content.content_hash,
+    )
+    .await
+    .map_err(|e| {
+        SyncCycleError::AssetUpload(format!("reading cached blob for {}: {e}", blob.id))
+    })?;
     Ok(cached.map(LocalHostBlob::Cache))
 }
 
@@ -458,13 +459,11 @@ async fn upload_host_provided_blob(
     blob: &BlobRef,
     timestamp: &str,
 ) -> Result<UploadedHostBlob, SyncCycleError> {
-    let blob = &with_row_cloud_path(db, blob).await?;
-    let expected_size = expected_blob_size(db, blob).await?;
-
-    let expected_hash = crate::blob::cache::expected_blob_hash(db, blob)
+    let content = crate::blob::cache::live_blob_content(db, blob)
         .await
         .map_err(|error| SyncCycleError::AssetUpload(error.to_string()))?;
-    let local = local_host_blob(store_dir, blob, expected_size, &expected_hash).await?;
+    let blob = &content.blob;
+    let local = local_host_blob(store_dir, &content).await?;
     // Every cloud key names the blob standing at it — the hashed scheme carries the id in
     // the key, and a browsable home's readable path is required to name it
     // ([`crate::sync::cloud_storage::CloudSyncStorage::blob_key`]). So no two blobs share
@@ -518,7 +517,7 @@ async fn upload_host_provided_blob(
                 &blob.namespace,
                 &blob.id,
                 &format!("host:{timestamp}:{}:{}", blob.namespace, blob.id),
-                &expected_hash,
+                &content.content_hash,
             )
             .await
             .map_err(SyncCycleError::AssetUpload)?;
@@ -552,47 +551,9 @@ async fn upload_host_provided_blob(
 
     Ok(UploadedHostBlob {
         blob: blob.clone(),
-        expected_size,
-        expected_hash,
+        expected_size: content.plaintext_size,
+        expected_hash: content.content_hash,
         cleanup_local_store_after_publish: local.is_some_and(|local| local.in_local_store()),
-    })
-}
-
-async fn expected_blob_size(db: &Database, blob: &BlobRef) -> Result<u64, SyncCycleError> {
-    let decls = db.blob_decls();
-    let namespace = blob.namespace.clone();
-    let id = blob.id.clone();
-    db.call(move |conn| {
-        decls
-            .size_for_blob_in_namespace(conn, &namespace, &id)
-            .map_err(|e| crate::database::DbError(e.to_string()))
-    })
-    .await
-    .map_err(|e| SyncCycleError::AssetScan(e.0))?
-    .ok_or_else(|| {
-        SyncCycleError::AssetScan(format!(
-            "cannot read expected size for blob {}/{}: no carrying row",
-            blob.namespace, blob.id
-        ))
-    })
-}
-
-/// `blob` with its readable cloud path — the key a browsable home stores it at — read
-/// off its carrying row, the same source its size and content hash come from. A ref
-/// derived from a changeset row can be missing one the row has: a changeset UPDATE
-/// reports only the columns whose values changed, so a row repointed at a new blob
-/// carries the new blob id and not the (unchanged) cloud path. The row is the one
-/// source that always holds it.
-pub(super) async fn with_row_cloud_path(
-    db: &Database,
-    blob: &BlobRef,
-) -> Result<BlobRef, SyncCycleError> {
-    let cloud_path = crate::blob::cache::row_cloud_path(db, blob)
-        .await
-        .map_err(|e| SyncCycleError::AssetScan(e.to_string()))?;
-    Ok(BlobRef {
-        cloud_path,
-        ..blob.clone()
     })
 }
 
@@ -613,7 +574,7 @@ pub async fn apply_deferred_local_blob_drop(
     match (deferred.disposition, local) {
         (DeferredLocalBlobDisposition::Pin, Some(source)) => {
             let pinned = store_dir
-                .pinned_blob_path(&deferred.namespace, &deferred.id)
+                .pinned_blob_path(&deferred.namespace, &deferred.id, &deferred.content_hash)
                 .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
             crate::local_blob::copy_atomic(&source, &pinned)
                 .await
@@ -625,6 +586,7 @@ pub async fn apply_deferred_local_blob_drop(
                 store_dir,
                 &deferred.namespace,
                 &deferred.id,
+                &deferred.content_hash,
                 &source,
             )
             .await
@@ -638,13 +600,13 @@ pub async fn apply_deferred_local_blob_drop(
         // the intent — and fail loud only when the destination is ALSO empty.
         (DeferredLocalBlobDisposition::Pin, None) => {
             let pinned = store_dir
-                .pinned_blob_path(&deferred.namespace, &deferred.id)
+                .pinned_blob_path(&deferred.namespace, &deferred.id, &deferred.content_hash)
                 .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
             return recognize_applied_disposition_or_fail(&pinned, deferred).await;
         }
         (DeferredLocalBlobDisposition::Cache, None) => {
             let cached = store_dir
-                .cache_blob_path(&deferred.namespace, &deferred.id)
+                .cache_blob_path(&deferred.namespace, &deferred.id, &deferred.content_hash)
                 .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
             return recognize_applied_disposition_or_fail(&cached, deferred).await;
         }

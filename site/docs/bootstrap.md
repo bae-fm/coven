@@ -251,7 +251,7 @@ but none of the files they point at (a synced album shows a placeholder cover).
 closes that gap. It derives the blobs the
 [declarations](/docs/blobs#declaring-which-rows-carry-blobs) find in the
 bootstrapped database and downloads the `CacheEager` ones into the [cache](/docs/cache)
-(`storage/cache/<namespace>/<id>`), skipping any already present. `CacheLazy` blobs are
+(`storage/cache/<namespace>/<id>/<content_hash>`), skipping any already present. `CacheLazy` blobs are
 left for first read, the same as in a steady-state pull. The bootstrap records a pending
 flag in `sync_state`; each later cycle re-runs the reconciliation until every
 referenced `CacheEager` blob is on disk, so a blob whose object was not yet in the

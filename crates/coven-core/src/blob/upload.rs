@@ -222,7 +222,7 @@ pub struct DrainOutcome {
 
 /// Drain pending blob uploads: read each local file, seal it under its scope,
 /// write it to the cloud — and, for an entry marked `retain_pinned`, keep the
-/// plaintext in the protected local cache (`storage/pinned/<id>`) so the blob
+/// plaintext in the protected local cache (`storage/pinned/<namespace>/<id>/<content_hash>`) so the blob
 /// stays local without a later fetch.
 ///
 /// A failing entry is recorded and skipped rather than stopping the drain, with a
@@ -535,12 +535,18 @@ async fn upload_entry(
     }
 
     // A pinned upload keeps its blob local: stream-copy the source plaintext file
-    // into the protected cache folder (`storage/pinned/<id>`), so the blob is
+    // into the protected cache folder (`storage/pinned/<namespace>/<id>/<content_hash>`), so the blob is
     // budget-exempt and serves from disk with no later cloud round-trip — and a large
     // pinned blob is never materialized in RAM.
     if *retain_pinned {
-        if let Err(e) =
-            crate::blob::cache::populate_pinned(store_dir, namespace, file_id, &upload_source).await
+        if let Err(e) = crate::blob::cache::populate_pinned(
+            store_dir,
+            namespace,
+            file_id,
+            expected_hash,
+            &upload_source,
+        )
+        .await
         {
             let message = match crate::local_blob::remove_file(&upload_source).await {
                 Ok(_) => format!("cloud write completed but retaining its pinned copy failed: {e}"),
@@ -602,7 +608,8 @@ async fn upload_entry(
             // `retain_pinned` upload populated `pinned/`, which is budget-exempt and
             // would otherwise leak).
             if let Err(e) =
-                crate::blob::cache::drop_cached_blob(store_dir, namespace, file_id).await
+                crate::blob::cache::drop_cached_blob(store_dir, namespace, file_id, expected_hash)
+                    .await
             {
                 warn!("failed to drop the cache copy of orphaned blob {namespace}/{file_id}: {e}");
             }

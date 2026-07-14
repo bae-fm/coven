@@ -1118,7 +1118,11 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
 
     let (_tmp_b, lib_b) = temp_store_dir();
     let expected_blob = lib_b
-        .cache_blob_path("photos", "photo1")
+        .cache_blob_path(
+            "photos",
+            "photo1",
+            &crate::blob::content_hash(b"cover-bytes"),
+        )
         .expect("cache blob path");
 
     let joiner_keypair = UserKeypair::generate();

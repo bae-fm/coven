@@ -702,13 +702,12 @@ impl CovenHandle {
     }
 
     /// Serve `len` plaintext bytes of a blob starting at `offset`, for streaming
-    /// or seeking without loading the whole file. `source_size` is the blob's
-    /// plaintext length (the row that owns the blob carries it), used to bound the
-    /// range. The ranged sibling of [`read_blob`](Self::read_blob).
+    /// or seeking without loading the whole file. Coven reads the signed plaintext
+    /// size from the row that owns the blob to bound the range. The ranged sibling
+    /// of [`read_blob`](Self::read_blob).
     pub async fn open_blob_stream(
         &self,
         blob: &BlobRef,
-        source_size: u64,
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, BlobCacheError> {
@@ -718,7 +717,6 @@ impl CovenHandle {
             &self.store_dir,
             storage.as_deref(),
             blob,
-            source_size,
             offset,
             len,
         )
@@ -736,7 +734,7 @@ impl CovenHandle {
     /// Unpin a Remote blob set: coven moves each from `storage/pinned/` to the
     /// evictable `storage/cache/` (still readable, now droppable). No cloud read.
     pub async fn unpin(&self, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
-        crate::blob::cache::unpin(&self.store_dir, blobs).await
+        crate::blob::cache::unpin(&self.db, &self.store_dir, blobs).await
     }
 
     /// The exact immutable cloud object key recorded for a blob. The hashed layout is
@@ -777,7 +775,7 @@ impl CovenHandle {
     /// surfaced, never read as "not pinned".
     pub async fn is_pinned(&self, blobs: &[BlobRef]) -> Result<bool, BlobCacheError> {
         for blob in blobs {
-            if !crate::blob::cache::is_pinned(&self.store_dir, &blob.namespace, &blob.id).await? {
+            if !crate::blob::cache::is_pinned(&self.db, &self.store_dir, blob).await? {
                 return Ok(false);
             }
         }
@@ -796,14 +794,7 @@ impl CovenHandle {
     /// delete path only — a Remote blob's cloud copy is tombstoned separately via
     /// [`blob_cloud_key`](Self::blob_cloud_key).
     pub async fn evict_blob(&self, blob: &BlobRef) -> Result<(), BlobCacheError> {
-        let content_hash = crate::blob::cache::expected_blob_hash(&self.db, blob).await?;
-        crate::blob::cache::drop_all_local_copies(
-            &self.store_dir,
-            &blob.namespace,
-            &blob.id,
-            &content_hash,
-        )
-        .await
+        crate::blob::cache::evict_blob(&self.db, &self.store_dir, blob).await
     }
 
     /// Make `(root_table, root_id)` Remote (Local → Remote): enqueue an upload per
@@ -945,7 +936,10 @@ mod tests {
     use crate::storage::cloud::CloudHomeError;
     use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::sync_manager::{ConfigProvider, SyncError};
-    use crate::sync::test_helpers::{plant_blob_row, read_test_db, temp_store_dir};
+    use crate::sync::test_helpers::{
+        open_test_db_with_blob, plant_blob_row, read_test_db, temp_store_dir,
+    };
+    use crate::BlobDecl;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -1160,7 +1154,10 @@ mod tests {
         // `note_photos` carries a blob in the `images` namespace so the read path can
         // resolve a planted row up to its gated `notes` root (the gate that decides
         // Local vs Remote).
-        let db = read_test_db("images");
+        let db = open_test_db_with_blob(
+            BlobDecl::new("images", Provenance::UserProvided, CacheFill::CacheLazy)
+                .with_cloud_path_column("cloud_path"),
+        );
 
         // A browsable home: plaintext at rest, with a readable suffix below each
         // immutable generated blob identity. The cipher below is the matching `Plaintext`.
@@ -1251,6 +1248,16 @@ mod tests {
         // child carrying this id) so the read resolves the blob's locality to Remote
         // and fetches it back out of the home (rather than failing locality resolution).
         plant_blob_row(&db, "cover-1", true, &plaintext).await;
+        db.call(|conn| {
+            conn.execute(
+                "UPDATE note_photos SET cloud_path = 'cover-cover-1.jpg' WHERE id = 'cover-1'",
+                [],
+            )
+            .map(|_| ())
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("record readable cloud path on the live blob row");
         crate::sync::test_helpers::record_test_blob_location(&db, "images", "cover-1", &location)
             .await;
 

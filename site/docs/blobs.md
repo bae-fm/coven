@@ -78,7 +78,7 @@ pub struct BlobRef {
 ```
 
 A pulled blob is Remote: its bytes land in coven's own [cache](/docs/cache)
-(`storage/cache/<namespace>/<id>`, built from the validated namespace + id); the
+(`storage/cache/<namespace>/<id>/<content_hash>`, built from the validated namespace + id); the
 host never names where a blob file lives.
 
 `cloud_path` is consulted only by a [browsable home](#browsable-home-blob-paths);
@@ -261,7 +261,7 @@ The pull has no inbox table. It is inline:
 [`pull_changes`](rustdoc:fn:coven::sync::pull::pull_changes) downloads the blobs an
 incoming changeset references (derived from the declarations) *before* applying it,
 so a row is never applied before its blobs are durable. A downloaded blob lands in
-the [cache](/docs/cache), at `storage/cache/<namespace>/<id>` under the store
+the [cache](/docs/cache), at `storage/cache/<namespace>/<id>/<content_hash>` under the store
 directory, decrypted under its scope. A download is skipped when the file is already
 present, which makes the step idempotent.
 

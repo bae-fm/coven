@@ -1367,9 +1367,10 @@ impl BlobDownload {
                     .await
                     .map_err(|e| e.to_string())
             }
-            BlobDownloadSize::InstalledRow => crate::blob::cache::expected_blob_size(db, blob)
-                .await
-                .map_err(|e| e.to_string()),
+            BlobDownloadSize::InstalledRow => Err(format!(
+                "installed blob {}/{} size was not resolved from its live row",
+                blob.namespace, blob.id
+            )),
             BlobDownloadSize::Missing => Err(format!(
                 "incoming blob {}/{} has no declared size",
                 blob.namespace, blob.id
@@ -1402,9 +1403,10 @@ impl BlobDownload {
                     .await
                     .map_err(|e| e.to_string())
             }
-            BlobDownloadHash::InstalledRow => crate::blob::cache::expected_blob_hash(db, blob)
-                .await
-                .map_err(|e| e.to_string()),
+            BlobDownloadHash::InstalledRow => Err(format!(
+                "installed blob {}/{} content hash was not resolved from its live row",
+                blob.namespace, blob.id
+            )),
             BlobDownloadHash::Missing => Err(format!(
                 "incoming blob {}/{} has no declared content hash",
                 blob.namespace, blob.id
@@ -1702,14 +1704,14 @@ fn resolve_local_blob_cleanup_intents(
 }
 
 /// Download each blob in `blobs` into the evictable cache
-/// `storage/cache/<namespace>/<id>` under `store_dir`, decrypting via storage
+/// `storage/cache/<namespace>/<id>/<content_hash>` under `store_dir`, decrypting via storage
 /// (which returns plaintext) and writing the bytes atomically. Returns true if every
 /// blob succeeded. Skips blobs already present in either cache folder (`pinned/` or
 /// `cache/`).
 ///
 /// Only `CacheEager` blobs reach here (callers filter). On a peer the release is
 /// Remote, so a `CacheEager` blob's bytes are a cache copy — evictable +
-/// re-fetchable, not pinned: it lands in `storage/cache/<namespace>/<id>`, where it
+/// re-fetchable, not pinned: it lands in `storage/cache/<namespace>/<id>/<content_hash>`, where it
 /// evicts against its own namespace's budget (a cover never wiped by audio pressure).
 /// (A cover that later falls out of that budget shows a placeholder until the next
 /// read re-fetches it; covers are not pinned.) The destination is coven-built from
@@ -1730,11 +1732,35 @@ pub(crate) async fn download_blobs(
     let mut all_ok = true;
     for download in blobs {
         let BlobDownload {
-            blob,
-            size,
-            hash,
-            cloud_path,
+            mut blob,
+            mut size,
+            mut hash,
+            mut cloud_path,
         } = download;
+        let size_from_installed_row = matches!(size, BlobDownloadSize::InstalledRow);
+        let hash_from_installed_row = matches!(hash, BlobDownloadHash::InstalledRow);
+        if size_from_installed_row != hash_from_installed_row {
+            error!(id = %blob.id, namespace = %blob.namespace, "installed blob metadata source is incomplete; refusing");
+            all_ok = false;
+            continue;
+        }
+        if size_from_installed_row {
+            let content = match crate::blob::cache::live_blob_content(db, &blob).await {
+                Ok(content) => content,
+                Err(error) => {
+                    warn!(id = %blob.id, namespace = %blob.namespace, %error, "cannot read installed blob content, skipping download");
+                    all_ok = false;
+                    continue;
+                }
+            };
+            blob = content.blob;
+            size = BlobDownloadSize::Declared(content.plaintext_size);
+            hash = BlobDownloadHash::Declared(content.content_hash);
+            cloud_path = match blob.cloud_path.clone() {
+                Some(path) => BlobDownloadCloudPath::Declared(path),
+                None => BlobDownloadCloudPath::Absent,
+            };
+        }
         // The blob's `id`/`namespace`/`cloud_path` come from a row in an incoming
         // changeset authored by any write-capable member. An id or namespace that is
         // not a single safe path token, or a cloud_path that escapes its prefix,
@@ -1791,7 +1817,7 @@ pub(crate) async fn download_blobs(
             }
         };
 
-        let dest = match store_dir.cache_blob_path(&blob.namespace, &blob.id) {
+        let dest = match store_dir.cache_blob_path(&blob.namespace, &blob.id, &expected_hash) {
             Ok(path) => path,
             Err(error) => {
                 error!(id = %blob.id, %error, "cannot build cache blob path; refusing");
@@ -1799,7 +1825,7 @@ pub(crate) async fn download_blobs(
                 continue;
             }
         };
-        let pinned = match store_dir.pinned_blob_path(&blob.namespace, &blob.id) {
+        let pinned = match store_dir.pinned_blob_path(&blob.namespace, &blob.id, &expected_hash) {
             Ok(path) => path,
             Err(error) => {
                 error!(id = %blob.id, %error, "cannot build pinned blob path; refusing");

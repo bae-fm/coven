@@ -768,23 +768,33 @@ fn run_write_batch_on_connection<R>(
             let deletion_intents = deleted
                 .iter()
                 .map(|blob| {
-                    let content_hash = decls
-                        .hash_for_blob_in_namespace(tx, &blob.namespace, &blob.id)
+                    let intent =
+                        crate::blob::local_cleanup::LocalBlobCleanupIntent::for_live_blob_on(
+                            tx, &decls, blob,
+                        )
                         .map_err(|error| CovenError::Blob(error.to_string()))?
                         .ok_or_else(|| {
                             CovenError::Blob(format!(
-                                "deleted blob {}/{} has no signed content hash",
+                                "deleted blob {}/{} has no live content row",
                                 blob.namespace, blob.id
                             ))
                         })?;
-                    let _ = store_dir.local_blob_path(&blob.namespace, &blob.id, &content_hash)?;
-                    let _ = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-                    let _ = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
-                    Ok(crate::blob::local_cleanup::LocalBlobCleanupIntent::new(
-                        &blob.namespace,
-                        &blob.id,
-                        content_hash,
-                    ))
+                    let _ = store_dir.local_blob_path(
+                        intent.namespace(),
+                        intent.blob_id(),
+                        intent.content_hash(),
+                    )?;
+                    let _ = store_dir.pinned_blob_path(
+                        intent.namespace(),
+                        intent.blob_id(),
+                        intent.content_hash(),
+                    )?;
+                    let _ = store_dir.cache_blob_path(
+                        intent.namespace(),
+                        intent.blob_id(),
+                        intent.content_hash(),
+                    )?;
+                    Ok(intent)
                 })
                 .collect::<CovenResult<Vec<_>>>()?;
             for blob in &staged {
@@ -1659,7 +1669,7 @@ mod tests {
 
         let (offset, len) = (12u64, 19u64);
         let range = handle
-            .open_blob_stream(&blob, expected.len() as u64, offset, len)
+            .open_blob_stream(&blob, offset, len)
             .await
             .expect("open_blob_stream serves upload staging before sync upload");
         assert_eq!(
@@ -1780,11 +1790,11 @@ mod tests {
             .expect("store old");
         let pinned = handle
             .store_dir()
-            .pinned_blob_path("media-files", "oldcccc")
+            .pinned_blob_path("media-files", "oldcccc", &crate::blob::content_hash(b"old"))
             .expect("pinned path");
         let cached = handle
             .store_dir()
-            .cache_blob_path("media-files", "oldcccc")
+            .cache_blob_path("media-files", "oldcccc", &crate::blob::content_hash(b"old"))
             .expect("cache path");
         write_raw_file(&pinned, b"pinned").await;
         write_raw_file(&cached, b"cached").await;
@@ -1844,7 +1854,11 @@ mod tests {
             .expect("store old");
         let pinned = handle
             .store_dir()
-            .pinned_blob_path("media-files", "oldddddd")
+            .pinned_blob_path(
+                "media-files",
+                "oldddddd",
+                &crate::blob::content_hash(b"old"),
+            )
             .expect("pinned path");
         std::fs::create_dir_all(&pinned).expect("create pinned blocker");
         handle
@@ -1946,11 +1960,11 @@ mod tests {
         let local = local_blob_path(&handle.store_dir(), blob_id, b"live");
         let pinned = handle
             .store_dir()
-            .pinned_blob_path("media-files", blob_id)
+            .pinned_blob_path("media-files", blob_id, &crate::blob::content_hash(b"live"))
             .expect("pinned path");
         let cached = handle
             .store_dir()
-            .cache_blob_path("media-files", blob_id)
+            .cache_blob_path("media-files", blob_id, &crate::blob::content_hash(b"live"))
             .expect("cache path");
         write_raw_file(&local, b"live").await;
         write_raw_file(&pinned, b"live").await;
@@ -2709,7 +2723,7 @@ mod tests {
         // A ranged read through the same handle serves the requested slice.
         let (offset, len) = (5u64, 10u64);
         let range = reader
-            .open_blob_stream(&blob, bytes.len() as u64, offset, len)
+            .open_blob_stream(&blob, offset, len)
             .await
             .expect("ranged read via read handle");
         assert_eq!(range, &bytes[offset as usize..(offset + len) as usize]);
@@ -2724,10 +2738,7 @@ mod tests {
     async fn concurrent_same_blob_cache_writes_never_tear() {
         crate::install_platform();
         let tmp = tempfile::tempdir().expect("temp dir");
-        let dir = StoreDir::new(tmp.path());
-        let dest = dir
-            .cache_blob_path("media-files", "raceblob")
-            .expect("cache path");
+        let dest = tmp.path().join("raceblob");
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).expect("create cache shard dir");
         }
