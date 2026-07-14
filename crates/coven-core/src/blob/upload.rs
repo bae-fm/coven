@@ -612,6 +612,7 @@ async fn commit_after_upload(
     now_rfc: String,
 ) -> Result<PostUpload, DbError> {
     let tables = db.synced_tables().to_vec();
+    let write_id = db.new_write_id();
     db.call(move |conn| {
         // Map the uploaded blob to its row, then up to its gated root. The blob's
         // namespace is the first component of its durable cloud key, so the row is
@@ -689,6 +690,7 @@ async fn commit_after_upload(
         crate::blob::transition::commit_make_remote_flip(
             conn,
             &tables,
+            write_id,
             &root_table,
             gate_col,
             &root_id,

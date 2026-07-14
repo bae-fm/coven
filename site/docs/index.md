@@ -108,14 +108,19 @@ across devices.
 
 ```rust
 let id = uuid::Uuid::new_v4().to_string();
-handle.sql(move |sql| {
-    sql.tx().execute(
+let receipt = handle.sql(move |sql| {
+    sql.execute(
         "INSERT INTO todos (id, title, _updated_at) VALUES (?1, ?2, ?3)",
         coven::rusqlite::params![id, title, sql.stamp()],
     )?;
     Ok(())
 }).await?;
 ```
+
+The returned `WriteReceipt` names this transaction in coven's durable write
+ledger. Its initial status is `LocalOnly` when the transaction changed no shared
+rows, otherwise `Pending`. Separate calls produce separate write ids and Store
+commits.
 
 **Read on the read connection.** Pure reads go through `handle.sql_read`,
 which runs on a read-only companion connection: no change capture, and reads
@@ -131,9 +136,10 @@ let titles: Vec<String> = handle.sql_read(|conn| {
 }).await?;
 ```
 
-Everything else is more of the same shape: `handle.write` commits a row and
-its file bytes in one transaction, `handle.connect_sync` starts the background
-loop, `handle.subscribe_sync_status` streams what each cycle applied, and
+Everything else follows the same ownership boundary: `handle.write` commits a
+row and its file bytes in one transaction, `handle.pending_writes` reconstructs
+unpublished writes after restart, `handle.connect_sync` starts the background
+loop, `handle.subscribe_sync_status` exposes its current state, and
 `handle.invite_member` adds a teammate.
 
 ## Who owns what

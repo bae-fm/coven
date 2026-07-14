@@ -1,313 +1,123 @@
 # Bootstrap
 
-A device that joins a store, or restores one on new hardware, needs the whole
-current state of every synced table. Replaying the full changeset history would
-work but grows without bound: a store that has run for a year holds a year of
-changesets. Instead, coven keeps a full snapshot of the database in the cloud and
-lets a fresh device download that, then pull only the changesets created after it.
+A device that joins or restores a store needs the current shared database without
+replaying every retained Store commit. Coven publishes signed database snapshots
+with exact commit coverage. The new device installs one snapshot, then pulls the
+commits beyond that coverage.
 
-<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+## Snapshot contents
 
-Examples use the todos app; a `list` has a boolean `shared` column gating it.
+[`create_snapshot`](rustdoc:fn:coven::sync::snapshot::create_snapshot) uses
+SQLite `VACUUM INTO` to copy the live database. It then removes:
 
-## What a snapshot is
+- rows from tables the host did not declare as synced;
+- coven's device-local bookkeeping rows;
+- gated-false roots and every descendant whose sharing follows that gate.
 
-A snapshot is a full copy of the database, made with SQLite's `VACUUM INTO`, then
-scoped down to exactly the rows eligible to cross devices, then sealed for storage.
-[`create_snapshot`](rustdoc:fn:coven::sync::snapshot::create_snapshot) does this in
-one pass:
+The copy retains the application schema and `user_version`. Its metadata names
+the schema version, SHA-256 image hash, author, Store protocol root, creation
+time, and an exact map from every covered device id to its sequence and commit
+hash. A snapshot therefore claims only rows that are present in the image and
+only Store history the image has fully materialized.
 
-1. `VACUUM INTO` writes a clean, defragmented copy of the live database to a temp
-   file. This copy still holds every table, including ones that never sync.
-2. Local-only tables (any table the host did not pass to
-   `Coven::builder(config).synced_tables(...)` as a
-   [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable), plus coven's
-   own `sync_cursors`, `sync_state`, and `cloud_outbox`) have their rows deleted.
-   Their schema stays, so the restored database opens against the same schema it
-   was snapshotted at, but a device-local row (say a `device_settings` table
-   holding a filesystem path) never rides along to a peer. The snapshot's
-   metadata records the publisher's [schema version](/docs/schema-evolution)
-   (the top of its migration ladder), so a reader knows what schema the bytes
-   carry before downloading them.
-3. Row-level gating is applied: gated-false roots and their foreign-key
-   descendants are deleted. A private list (`shared = 0`) and the todos under it
-   are removed from the copy. This reuses the same
-   [`Gates`](rustdoc:struct:coven::sync::gate::Gates) model the outbound changeset
-   filter uses, so the snapshot carries the exact same set of rows the changeset
-   path would have sent. See [Local data](/docs/local-data) for the gate.
-4. The bytes are read and sealed by the home's cipher: encrypted with the store
-   key on an opaque home, stored verbatim on a
-   [browsable home](/docs/encryption#opaque-and-browsable-homes).
+The database image contains catalog rows, not their blob files. Bootstrap
+downloads every referenced `CacheEager` blob before accepting the store;
+`CacheLazy` blobs remain fetch-on-read.
 
-Because the snapshot and the changeset path share one gate, a device that
-bootstraps from a snapshot and a device that applied live changesets converge on
-the same rows. A private subtree cannot leak through the snapshot channel.
+## Publication
 
-If the synced set is empty,
-[`create_snapshot`](rustdoc:fn:coven::sync::snapshot::create_snapshot) returns
-[`SnapshotError::NoSyncedTables`](rustdoc:enum:coven::sync::snapshot::SnapshotError)
-rather than emit a snapshot. With no synced tables it could not tell which tables
-are shareable: it would either clear the whole database or leak every local-only
-table.
-
-## Generations and the pointer
-
-A publish takes minutes and a reader can arrive at any moment; with no server
-to coordinate them, the layout itself has to make a torn read impossible. So
-a snapshot is not a single object that gets overwritten. Each publish is a
-**generation**, keyed under the publishing device's own `{author}` (its hex public
-key) and the seq it was taken at:
+Snapshot images and signed metadata use content-addressed append-only Store
+paths:
 
 ```text
-snapshot/{author}/{seq}.db.enc         the database image
-snapshot/{author}/{seq}_meta.json.enc  per-device cursors, signed
-snapshot/current.json.enc              the pointer naming the live {author, seq}, signed
+store-v1/snapshot-images/{author}/{image_hash}/copies/{copy_id}.db
+store-v1/snapshots/{author}/{snapshot_hash}/copies/{copy_id}.json
 ```
 
-[`push_snapshot`](rustdoc:fn:coven::sync::snapshot::push_snapshot) writes the
-database image first, then the metadata, then the single `current.json` pointer
-**last**. The pointer is the commit: a reader resolves the pointer, then reads the
-generation it names, so it always sees a whole, self-consistent generation. There
-is no window where a new database image is paired with a stale or missing meta.
+Before storage I/O, coven commits the exact image bytes, metadata bytes, image
+hash, and snapshot hash to its durable snapshot publication record. It appends
+and reads back an image copy, then appends and reads back the metadata copy.
+Only after both verify does local completion clear that publication record and
+record the snapshot hash and coverage.
 
-Keying each device's generations under its own `{author}` makes them globally
-unique. `seq` is the publisher's own `local_seq`, not a global id, so two devices
-can publish at the same seq, but their objects are distinct keys and a publish can
-never overwrite a peer's generation. Reclaiming a superseded generation is
-therefore owned by its author: a device lists and deletes only objects under its
-own `{author}` prefix.
+A failed or lost storage response leaves the exact publication record intact.
+Retry appends another physical copy of the same semantic image and metadata;
+different valid bytes at the same semantic identity are rejected.
 
-The publish is atomic by construction. Until the pointer flips, every reader still
-resolves the previous generation (itself complete) or none. A crash after the
-image and meta but before the pointer leaves orphan objects that nothing
-references and the old pointer still valid; a later sweep by that device reclaims
-them. No half-published state is ever observable, and nothing relies on a later
-pass to repair a wrong state.
+Only a current Owner can publish snapshot metadata. The signature binds the
+metadata to the signed Store protocol root, image hash, coverage, schema version,
+author, and creation time.
 
+## Selecting a snapshot
 
-<svg class="flow" viewBox="0 0 660 118" role="img" aria-label="A snapshot publish writes the image, then the signed metadata, then flips the pointer last; the pointer is the commit">
-<text class="sub" x="105" y="30" text-anchor="middle">1</text>
-<rect class="chipo" x="15" y="40" width="180" height="30" rx="8"/>
-<text class="lbl s11" x="105" y="59" text-anchor="middle">{seq}.db.enc · image</text>
-<line class="arr" x1="199" y1="55" x2="216" y2="55" marker-end="url(#fa)"/>
-<text class="sub" x="310" y="30" text-anchor="middle">2</text>
-<rect class="chipo" x="220" y="40" width="180" height="30" rx="8"/>
-<text class="lbl s11" x="310" y="59" text-anchor="middle">{seq}_meta · signed</text>
-<line class="arr" x1="404" y1="55" x2="421" y2="55" marker-end="url(#fa)"/>
-<text class="sub" x="515" y="30" text-anchor="middle">3 · last</text>
-<rect class="chipa" x="425" y="40" width="180" height="30" rx="8"/>
-<text class="lbl s11" x="515" y="59" text-anchor="middle">current.json · pointer</text>
-<text class="sub" x="330" y="100" text-anchor="middle">until the pointer flips, every reader still resolves the previous complete generation</text>
-</svg>
+[`bootstrap_from_snapshot`](rustdoc:fn:coven::sync::snapshot::bootstrap_from_snapshot)
+starts from the expected Store protocol root hash, founder key, and membership
+floor carried by the invite or restore code. It:
 
-## Signing and authorization
+1. Loads and verifies the exact Store protocol root.
+2. Loads the founder-anchored membership chain at the supplied floor.
+3. Lists snapshot metadata and keeps only valid metadata signed by a current
+   Owner under that root.
+4. Selects a snapshot whose exact coverage is not dominated by another
+   authorized snapshot; equal maximal candidates resolve by semantic hash.
+5. Refuses metadata whose schema version is newer than the binary supports.
+6. Loads the content-addressed image and verifies its bytes against the signed
+   image hash.
 
-The bucket is untrusted: the at-rest cipher proves only confidentiality (the
-store key is shared by every member), not authorship. So the metadata and the
-pointer are each **signed** by the publishing device and bound to the store id.
-The metadata signs the per-device cursors and a hash of the database image; the
-pointer signs the generation seq and the same database hash.
+No mutable current-snapshot pointer chooses authority. Snapshot selection comes
+from signed coverage and verified append-only objects.
 
-A reader (bootstrap or GC) authenticates a generation before trusting it:
+## Installing coverage
 
-- the pointer's signature must verify (under this store id, which also refuses a
-  different store's pointer replayed here) and its author must be a current
-  write-capable member, so a non-member cannot repoint the live snapshot;
-- the named generation's metadata signature must verify and its author must be a
-  current write-capable member, so a forged or cursor-poisoned meta is refused;
-- the pointer and the meta must agree on the database hash, and the downloaded
-  database's hash must match what the meta commits to, so a substituted image is
-  refused.
+The downloaded image and its signed coverage stay bound together through a
+single-use [`BootstrapResult`](rustdoc:struct:coven::sync::snapshot::BootstrapResult).
+The result binds the store id, destination path, image hash, Store protocol root,
+snapshot hash, and exact coverage. Its fields are private and it cannot be
+cloned.
 
-Membership is anchored to the store's owner when the owner is pinned (on join,
-the invite pins the founder), so a wiped-and-refounded chain under an attacker's
-key fails authorization. On restore there is no pinned owner yet, so the chain is
-anchored to its own founder and the owner is adopted trust-on-first-use after the
-pull.
+Consuming it through `BootstrapResult::open_database` rechecks the destination
+and image bytes, opens the database with the application's normal migration
+ladder and synced-table declarations, then installs the protocol root, snapshot
+hash, and every exact covered position in one SQLite transaction. An invalid row
+identity, migration failure, changed image, wrong store, or wrong destination
+removes the incomplete database and returns the error.
 
-## Snapshot policy
+The installed `snapshot_coverage` is a signed base, not fabricated
+`materialized_commits` rows. Pull accepts a dependency at or below that base only
+when retained signed commit ancestry proves its exact sequence and hash is
+covered. Commits accepted after bootstrap create factual materialized ledger
+rows.
 
-Snapshots cost an upload of the whole database, so they should be rare; stale
-snapshots make every join replay a long changeset tail, so they should not be
-too rare.
-[`should_create_snapshot`](rustdoc:fn:coven::sync::snapshot::should_create_snapshot)
-holds that balance. The defaults:
+Join and restore then pin the owner and membership watermark, download required
+eager blobs, publish this device's registration, and pull every commit beyond
+the installed coverage. The store is returned only after that work succeeds.
 
-- 100 changesets since the last snapshot, or
-- 24 hours since the last snapshot, but only if at least one changeset was pushed
-  in that window, or
-- no snapshot has ever been made and the device has pushed at least one changeset.
+## Schema versions
 
-```rust
-pub fn should_create_snapshot(
-    local_seq: u64,
-    last_snapshot_seq: Option<u64>,
-    hours_since_snapshot: Option<u64>,
-) -> bool
-```
+The snapshot image carries its SQLite schema and the signed metadata repeats its
+schema version before download:
 
-The cycle adds one trigger the policy function does not cover: the *initial sync*
-of an existing store. When a host connects a cloud provider to a database that
-already holds rows, the session produces no changeset (the data was written before
-sync started). The cycle detects `local_seq == 0`, no prior snapshot, and no
-outgoing changeset, and pushes a snapshot so that existing data reaches the cloud
-at all.
+- A binary at or above the snapshot version opens the image and runs the same
+  migration ladder used by an existing device.
+- A binary below the snapshot version refuses it with
+  [`SnapshotError::SchemaTooNew`](rustdoc:enum:coven::sync::snapshot::SnapshotError)
+  before installing the database.
 
-After a snapshot uploads, the cycle records the seq it was taken at and the time
-in `sync_state`, which feed the next policy check.
+See [Schema evolution](/docs/schema-evolution) for live-commit version handling.
 
-## Join and restore
+## Reclamation
 
-<svg class="flow" viewBox="0 0 660 128" role="img" aria-label="Bootstrap: authenticate the pointer, download and hash-check the image, open running the ladder, then pull past the cursors">
-<rect class="chip" x="8" y="40" width="150" height="42" rx="8"/>
-<text class="lbl s11" x="83" y="57" text-anchor="middle">authenticate pointer</text>
-<text class="sub" x="83" y="72" text-anchor="middle">signatures · membership</text>
-<line class="arr" x1="162" y1="61" x2="176" y2="61" marker-end="url(#fa)"/>
-<rect class="chip" x="180" y="40" width="150" height="42" rx="8"/>
-<text class="lbl s11" x="255" y="57" text-anchor="middle">download image</text>
-<text class="sub" x="255" y="72" text-anchor="middle">hash must match meta</text>
-<line class="arr" x1="334" y1="61" x2="348" y2="61" marker-end="url(#fa)"/>
-<rect class="chip" x="352" y="40" width="150" height="42" rx="8"/>
-<text class="lbl s11" x="427" y="57" text-anchor="middle">open with the ladder</text>
-<text class="sub" x="427" y="72" text-anchor="middle">runs rungs above the image</text>
-<line class="arr" x1="506" y1="61" x2="520" y2="61" marker-end="url(#fa)"/>
-<rect class="chip" x="524" y="40" width="130" height="42" rx="8"/>
-<text class="lbl s11" x="589" y="57" text-anchor="middle">pull past cursors</text>
-<text class="sub" x="589" y="72" text-anchor="middle">then reconcile blobs</text>
-</svg>
+A snapshot does not authorize package deletion by itself. Reclamation requires:
 
-Bootstrapping happens inside the join flow (a new member added by an owner) and
-the restore flow (the owner recovering the store on new hardware). Both take
-the store's [`KeyCustody`](rustdoc:enum:coven::KeyCustody) selection as a
-parameter and persist the bootstrapped master key under it before returning
-(see [Keys](/docs/keys)), and both call
-[`bootstrap_from_snapshot`](rustdoc:fn:coven::sync::snapshot::bootstrap_from_snapshot):
+- a verified snapshot image and signed coverage;
+- a complete membership and device-registration view;
+- a valid signed acknowledgement chain for every device still obligated to
+  cover the package;
+- exact commit ancestry proving each acknowledgement covers the snapshot
+  position; and
+- complete package listing and deletion results.
 
-1. Resolve the `current.json` pointer to the live generation, authenticating the
-   whole generation (the signatures, the authors' membership, the database-hash
-   agreement) before touching disk. Because the reader resolves the pointer first,
-   it always sees a complete generation, so there is no torn-read window and no
-   half-written database is left on disk on a failure.
-2. Download that generation's database image, confirm its hash matches the signed
-   metadata, open it through the home's cipher (decrypt on an opaque home, pass
-   through on a browsable one), and write the resulting bytes directly to
-   `target_path`. There is no migration replay: the snapshot bytes *are* the
-   database file.
-3. Return a
-   [`BootstrapResult`](rustdoc:struct:coven::sync::snapshot::BootstrapResult)
-   carrying the per-device cursors from the metadata.
-
-Before downloading anything, the reader compares the generation's recorded
-schema version against its own migration ladder's top. A snapshot *newer* than
-the app understands is refused with
-[`SnapshotError::SchemaTooNew`](rustdoc:enum:coven::sync::snapshot::SnapshotError),
-writing nothing: the user updates the app and retries. A snapshot at or below
-the app's version is downloaded, and the device then opens it through
-`Coven::builder(config).synced_tables(...).migrations(...).open()`, which runs
-coven's bookkeeping migration (its `IF NOT EXISTS` tables are already present)
-and then any rungs of the host's ladder above the snapshot's version, exactly
-as an upgrade on an existing device would. Join and restore run the ladder;
-there is no separate migration path. The device then pulls every changeset
-newer than the bootstrap cursors, so it catches up on anything written between
-the snapshot and now.
-
-That writer open also validates the final rows against every table's declared
-`RowIdentity`. An `IndependentUuid` table containing anything other than a
-canonical UUIDv4 or UUIDv7 fails open before the snapshot can become a running
-store. The declaration preserves the same `(table, id)` identity meaning on the
-publisher and the bootstrapped device.
-
-Capture stays enabled through the bootstrap pull. A just-bootstrapped store has
-no local writer, so there is no whole-cycle suspend to manage; the pull disables
-capture only around each apply, exactly as a steady-state cycle does.
-
-```rust
-let _bootstrap = bootstrap_from_snapshot(
-    storage,
-    store_id,
-    owner_pubkey,
-    binary_schema_version,
-    &db_path,
-)
-.await?;
-// join_from_invite_code / restore_from_code persist the bootstrapped master
-// key and this store's signing identity under custody here, before
-// returning — see Keys.
-let handle = Coven::builder(config)
-    .synced_tables(synced_tables.to_vec())
-    .migrations(migrations)   // the same ladder every open passes
-    .open()?;                 // runs any rungs above the snapshot's version
-handle.connect_sync().await?;
-handle.sync_now();
-```
-
-The snapshot's row-clearing step empties `sync_cursors`, so a bootstrapped database
-starts with no cursor rows. The metadata cursors are the only seed for where to
-resume pulling.
-
-### Reconciling blobs
-
-The snapshot carries the catalog rows but not the per-row blob files. The
-incremental pull that follows starts past the snapshot's cursors, so the original
-changesets that carried each row's image never re-walk, and the per-changeset blob
-download never fires for them. A bootstrapped device would otherwise have the rows
-but none of the files they point at (a synced album shows a placeholder cover).
-
-[`reconcile_snapshot_blobs`](rustdoc:fn:coven::sync::snapshot::reconcile_snapshot_blobs)
-closes that gap. It derives the blobs the
-[declarations](/docs/blobs#declaring-which-rows-carry-blobs) find in the
-bootstrapped database and downloads the `CacheEager` ones into the [cache](/docs/cache)
-(`storage/cache/<namespace>/<id>`), skipping any already present. `CacheLazy` blobs are
-left for first read, the same as in a steady-state pull. The bootstrap records a pending
-flag in `sync_state`; each later cycle re-runs the reconciliation until every
-referenced `CacheEager` blob is on disk, so a blob whose object was not yet in the
-cloud at bootstrap is fetched on a later cycle rather than lost. A caught-up store
-clears the flag and pays nothing.
-
-## Cursors
-
-The `sync_cursors` table maps each remote `device_id` to the highest seq this
-device has applied from it. Device sequence numbers start at 1, so a cursor of 0
-means "no changesets applied from this device yet" and selects every changeset it
-has ever produced. A device with no row in `sync_cursors` is treated as cursor 0:
-a missing entry and an explicit 0 are the same thing.
-
-Each cycle, the pull lists device heads, compares each head's seq to the local
-cursor, fetches the changesets in between, applies them, and advances the cursor
-past each applied seq. The cursor is the device's idea of how far it has caught up
-with each peer.
-
-## Garbage collection
-
-Once a snapshot covers a range of changesets, those changesets are redundant: any
-device joining now bootstraps from the snapshot instead of replaying them. But
-a deletion here affects every peer, so GC trusts nothing it has not
-authenticated and touches nothing outside what the signed cursors prove
-redundant.
-[`garbage_collect`](rustdoc:fn:coven::sync::snapshot::garbage_collect) reclaims
-them, returning a [`GcResult`](rustdoc:struct:coven::sync::snapshot::GcResult) with
-counts of deleted changesets and non-fatal errors. It reclaims two kinds of
-superseded object:
-
-- **Old changesets.** It resolves the live generation (authenticating the pointer
-  and meta first, since their cursors decide what is deleted fleet-wide) and, per
-  device, deletes only that device's changesets with seq at or below that device's
-  cursor in the snapshot. Changesets pushed *after* the snapshot are preserved even
-  if their seq is below another device's snapshot cursor.
-- **Old generations.** It lists only this device's own `snapshot/{own_author}/`
-  prefix and deletes the generations it published that are neither live (the
-  pointer still names them) nor the one it just published. Because the prefix is
-  the author, it never touches a peer's generations.
-
-The metadata cursors must be honest about *applied* state. Two devices:
-
-- Device A snapshots having applied device B through seq 30. B then pushes 31
-  through 35.
-- The metadata records B at 30, so GC deletes B's 1 through 30 and leaves 31
-  through 35 alone: they are not in the snapshot, and a future restore needs
-  them.
-- Had the metadata recorded B's published head (35) instead of the applied 30,
-  GC would delete 31 through 35, and no restore could recover them.
-
-This is why the cursors are the snapshotting device's *applied* cursors, never
-another device's published head.
+An incomplete listing, unreadable candidate, fork, missing predecessor,
+hash-mismatched acknowledgement, or partial physical-copy deletion refuses the
+reclamation and reports no package reclaimed. Packages beyond the proven
+coverage remain.

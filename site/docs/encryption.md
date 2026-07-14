@@ -93,20 +93,20 @@ opaque byte store. It sees:
 - Flat key paths, which describe structure, not content:
 
   ```text
-  changes/{device_id}/{seq}.enc               encrypted changeset envelopes
-  heads/{device_id}.json.enc                  encrypted head pointers
-  images/{ab}/{cd}/{id}                       encrypted blobs
-  snapshot/{author}/{seq}.db.enc              a generation's encrypted database image
-  snapshot/{author}/{seq}_meta.json.enc       that generation's signed per-device cursors
-  snapshot/current.json.enc                   signed pointer to the live generation
-  membership/{author_pubkey}/{seq}.enc        encrypted membership entries
-  membership/{author_pubkey}/head.enc         that author's signed membership head
-  keys/{owner_pubkey}/{recipient_pubkey}.enc  store keyring, wrapped by an owner to a member
+  store-v1/packages/{device}/{seq}/{hash}/copies/{copy_id}.pkg
+  store-v1/commits/{device}/{seq}/{hash}/copies/{copy_id}.json
+  store-v1/heads/{device}/{seq}/{hash}/copies/{copy_id}.json
+  store-v1/snapshot-images/{author}/{hash}/copies/{copy_id}.db
+  store-v1/snapshots/{author}/{hash}/copies/{copy_id}.json
+  store-v1/membership/entries/{author}/{grant}/{seq}/{hash}/copies/{copy_id}.json
+  store-v1/membership/heads/{author}/{grant}/{seq}/{hash}/copies/{copy_id}.json
+  images/{ab}/{cd}/{id}                       encrypted application blobs
+  keys/{owner_pubkey}/{recipient_pubkey}.enc  store keyring wrapped to a member
   ```
 
-  (These are the paths of an opaque home. A browsable home, see below, drops
-  the `.enc` suffix, so the same objects are at `changes/{device_id}/{seq}`,
-  `snapshot/{author}/{seq}.db`, and so on.)
+  Storage encryption adds its suffix beneath this logical-key API. A browsable
+  home writes the same signed Store objects without the opaque ciphertext suffix
+  and uses declared readable paths for application blobs.
 
 - The existence and count of key files under each owner's `keys/{owner_pubkey}/`
   prefix, and the hex Ed25519 public keys in those paths. A pubkey is a
@@ -178,8 +178,8 @@ bucket sees the actual files instead of ciphertext.
   content-addressed shard `{namespace}/{ab}/{cd}/{id}`. Anyone with bucket access
   sees only ciphertext under opaque keys.
 - A **browsable home** (`storage: browsable`) stores every object verbatim with
-  no `.enc` suffix (bare names like `snapshot/{author}/{seq}.db`,
-  `heads/{device}.json`, `changes/{device}/{seq}`) and stores each blob at the
+  no `.enc` suffix (bare Store package, commit, head, and snapshot-copy names
+  under `store-v1/`) and stores each blob at the
   consumer's own readable path `{namespace}/{cloud_path}`. Anyone with bucket
   access can open the snapshot or a blob directly without any key, which is the
   point: it is for a store whose contents are not secret and whose owner wants

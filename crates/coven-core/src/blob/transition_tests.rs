@@ -802,9 +802,9 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
         .await
         .expect("store host-provided cover");
 
-    // The cycle fails while appending the exact staged Store package. Payload
+    // The cycle fails while appending the exact prepared Store package. Payload
     // preparation has already uploaded the cover, while completion remains
-    // durable in the staged batch until its head is published.
+    // durable in the prepared write until its head is published.
     storage.fail_next_changeset_puts(1);
     let failed = try_run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib).await;
     assert!(failed.is_err(), "the cycle fails at the pull");
@@ -825,7 +825,7 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
         "the pin disposition was not recorded, so nothing pinned the cover yet",
     );
 
-    // Retry publishes the exact staged batch, records the pin disposition in
+    // Retry publishes the exact prepared write, records the pin disposition in
     // the same transaction it consumes the intent, and applies it.
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
@@ -1326,7 +1326,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
 /// disposition must not strand the blob. The flip commits the disposition as a
 /// durable intent, so a cycle whose push fails (the flip is committed, the drain
 /// that applies the disposition never runs) leaves the disposition pending — the
-/// local copy untouched — and the recovery cycle's staged retry drains it: the
+/// local copy untouched — and the recovery cycle's prepared-write retry drains it: the
 /// pinned blob reaches `pinned/` and the dropped blob's local copy is gone.
 #[tokio::test]
 async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
@@ -1409,8 +1409,8 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     assert!(
         row_exists(
             &db,
-            "SELECT 1 FROM outbound_store_batches \
-             WHERE local_cleanup_metadata LIKE '%cover-pin%'",
+            "SELECT 1 FROM published_blob_drop_intents \
+             WHERE blob_id = 'cover-pin' AND disposition = 'pin'",
         )
         .await,
         "the pin disposition is committed durably with the flip, not applied in memory",
@@ -1428,7 +1428,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
         "the dropped cover's local copy is still present until the drain runs",
     );
 
-    // Recovery: the staged changeset re-pushes and the drain applies both dispositions.
+    // Recovery republishes the prepared write and applies both dispositions.
     run_cycle(&storage, "A", &hlc, &db, &enc, &kp, &lib, None).await;
 
     assert!(

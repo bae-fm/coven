@@ -210,15 +210,17 @@ async fn make_remote_intent_present(db: &Database, root_table: &str, root_id: &s
         .expect("make_remote intent lookup")
 }
 
-async fn pending_changeset_count(db: &Database) -> i64 {
+async fn pending_write_count(db: &Database) -> i64 {
     db.call(|conn| {
-        conn.query_row("SELECT COUNT(*) FROM pending_changesets", [], |row| {
-            row.get(0)
-        })
+        conn.query_row(
+            "SELECT COUNT(*) FROM store_writes WHERE status = '\"pending\"'",
+            [],
+            |row| row.get(0),
+        )
         .map_err(crate::database::DbError::from)
     })
     .await
-    .expect("pending changeset count")
+    .expect("pending write count")
 }
 
 /// Queue a pending upload whose source file doesn't exist, so the cycle's drain
@@ -408,9 +410,8 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
         .await
         .expect("store host-provided blob");
-    // Drain the seed rows out of the pending journal so the cycle sees no outgoing
-    // changeset and takes the initial-snapshot path; the rows still reach the cloud
-    // via the snapshot, which reads them straight from the db.
+    // Remove the seed writes so the cycle takes the initial-snapshot path; the rows
+    // still reach the cloud through the snapshot, which reads them from the db.
     let _ = capture_bytes(&db, &[]).await;
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
@@ -463,8 +464,8 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
         .await
         .expect("store host-provided blob");
-    // Drain the seed rows out of the pending journal so the cycle takes the
-    // initial-snapshot path (the rows reach the cloud via the snapshot).
+    // Remove the seed writes so the cycle takes the initial-snapshot path; the rows
+    // reach the cloud through the snapshot.
     let _ = capture_bytes(&db, &[]).await;
     storage.fail_next_blob_puts(1);
     bind_mock_store_protocol(&db, &storage, "M").await;
@@ -1377,9 +1378,8 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
         "the mid-cycle host write committed to M's local db",
     );
 
-    // (b) The injected row is in M's NEXT outgoing changeset. Cycle 2 drains the
-    // pending journal row written during cycle 1 and pushes it. A fresh peer C
-    // pulls M's output and must receive 'm_mid'.
+    // (b) The injected row has its own pending write. Cycle 2 publishes it. A fresh
+    // peer C pulls M's output and must receive 'm_mid'.
     run_cycle_m_storage(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
 
     let db_c = open_test_db();
@@ -1391,15 +1391,13 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     );
 }
 
-/// The other half of the journal invariant: an APPLIED row must NOT echo. After
-/// M applies a peer's changeset, M's own next outgoing changeset must not carry the
-/// applied rows — an apply is a plain connection write, never journaled, so the
-/// applied rows are never recorded as M's own outgoing changes.
+/// The other half of the write-ledger invariant: an applied row must not echo.
+/// After M applies a peer's changeset, M's own next Store commit must not carry the
+/// applied rows because remote apply does not use the host transaction path.
 ///
-/// Mutation proof: route the apply through the pending journal (wrap it in a
-/// `run_pending_journaled_transaction_on`). The applied rows then enter the journal
-/// and re-ship on M's next changeset, so device C receives note 'a1' attributed to
-/// M and the assertion fails.
+/// Mutation proof: route the apply through `run_internal_store_write_transaction_on`.
+/// The applied rows then enter M's write ledger and republish, so device C receives
+/// note 'a1' attributed to M and the assertion fails.
 #[tokio::test]
 async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     let keypair = UserKeypair::generate();
@@ -1430,8 +1428,8 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         "M applied A's changeset",
     );
 
-    // Cycle 2 has no host write to stage. The applied row must not create an M
-    // commit because apply bypasses the pending journal.
+    // Cycle 2 has no host write. The applied row must not create an M commit because
+    // apply bypasses the host write ledger.
     run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
     assert!(
         crate::sync::store_objects::load_commit_slot(&storage, storage.store_root_hash(), "M", 1,)
@@ -1499,8 +1497,8 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         "cycle surfaces the blob upload failure: {failed}"
     );
     assert!(
-        pending_changeset_count(&db).await > 0,
-        "the pending changesets remain queued for retry"
+        pending_write_count(&db).await > 0,
+        "the pending writes remain queued for retry"
     );
     assert!(
         !storage.exists("photos/hponly").await.expect("exists check"),
@@ -1509,23 +1507,102 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert_eq!(
-        pending_changeset_count(&db).await,
+        pending_write_count(&db).await,
         0,
-        "the pending changesets clear once the retry publishes"
+        "the pending writes clear once the retry publishes"
     );
     assert!(
         storage.exists("photos/hponly").await.expect("exists check"),
-        "the retried pending changeset uploads the host-provided blob"
+        "the retried pending write uploads the host-provided blob"
+    );
+}
+
+#[tokio::test]
+async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_store_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [24u8; 32],
+    )));
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_with_blob(
+        BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy)
+            .with_id_column("blob_id"),
+    );
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Remote', NULL, 1, '0000000001000-0000-M', '2026-01-01'); \
+         INSERT INTO note_photos \
+         (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
+         VALUES ('photo', 'n1', 'cover', 5, NULL, 'blob-a', \
+                 '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    host_exec(
+        &db,
+        "UPDATE note_photos \
+         SET blob_id = 'blob-b', size = 6, _updated_at = '0000000002000-0000-M' \
+         WHERE id = 'photo'",
+    )
+    .await;
+    crate::blob::local_files::store(&ld, "photos", "blob-a", b"first")
+        .await
+        .expect("store first write's blob");
+    crate::blob::local_files::store(&ld, "photos", "blob-b", b"second")
+        .await
+        .expect("store second write's blob");
+
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+
+    assert!(storage
+        .exists("photos/blob-a")
+        .await
+        .expect("first blob exists"));
+    assert!(storage
+        .exists("photos/blob-b")
+        .await
+        .expect("second blob exists"));
+    let mut published_blob_ids = Vec::new();
+    for seq in [1, 2] {
+        let commit = crate::sync::store_objects::load_commit_slot(
+            &storage,
+            storage.store_root_hash(),
+            "M",
+            seq,
+        )
+        .await
+        .expect("load commit")
+        .expect("write has a commit");
+        let package = crate::sync::store_objects::load_package(&storage, &commit.value)
+            .await
+            .expect("load package")
+            .expect("commit has a package");
+        let changes = crate::changeset::walk(&package.value).expect("walk package changeset");
+        let declarations = db.blob_decls();
+        published_blob_ids.push(
+            changes
+                .iter()
+                .filter_map(|change| match declarations.ref_from_change(change) {
+                    Ok(Some(blob)) => Some(Ok(blob.id)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read package blob ids"),
+        );
+    }
+    assert_eq!(
+        published_blob_ids,
+        vec![vec!["blob-a".to_string()], vec!["blob-b".to_string()]],
     );
 }
 
 /// A committed store-key rotation this device has not adopted pauses sealing
-/// without taking down the cycle: a pending changeset that references a
-/// host-provided blob stays queued (the inline host-blob upload in
-/// `service::sync` step 3 is gated on `rotation_pending`), the cycle completes,
-/// and the first cycle after adoption publishes the changeset and uploads its
-/// blob. Without the gate this cycle would abort at `cipher_for_seal` before the
-/// pull.
+/// without taking down the cycle: a pending write that references a
+/// host-provided blob stays queued while `rotation_pending` is set. A cycle after
+/// adoption publishes the write and uploads its blob under the adopted key.
 #[tokio::test]
 async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     let keypair = UserKeypair::generate();
@@ -1580,7 +1657,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     .expect("the cycle completes; a pending rotation pauses sealing, it does not abort");
 
     assert!(
-        pending_changeset_count(&db).await > 0,
+        pending_write_count(&db).await > 0,
         "the host-blob changeset stays queued while sealing is paused",
     );
     assert!(
@@ -1592,7 +1669,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     // after publishes the queued changeset and uploads its blob.
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert_eq!(
-        pending_changeset_count(&db).await,
+        pending_write_count(&db).await,
         0,
         "the queued changeset publishes on the first cycle after adoption",
     );
@@ -1882,11 +1959,11 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "the first push attempt does not publish the Store package"
     );
     assert!(
-        db.oldest_outbound_store_batch()
+        db.oldest_prepared_store_write()
             .await
             .expect("read outbound Store queue")
             .is_some(),
-        "the exact outbound Store batch remains durable",
+        "the exact prepared Store write remains durable",
     );
     assert!(
         crate::blob::local_files::read(&ld, "photos", "lazyblob", 4)
@@ -1899,14 +1976,14 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
         store_package_exists(&storage, "M", 1).await,
-        "the staged retry publishes the Store package"
+        "the prepared write retry publishes the Store package"
     );
     assert!(
         crate::blob::local_files::read(&ld, "photos", "lazyblob", 4)
             .await
             .expect("read lazy local after publish")
             .is_none(),
-        "the local copy drops after the staged retry commits"
+        "the local copy drops after the prepared write retry commits"
     );
 }
 
@@ -1988,9 +2065,9 @@ async fn snapshot_cycle_writes_rfc3339_metadata_timestamp() {
     );
 }
 
-/// The staged-retry head writer stamps the head with an RFC 3339 `last_sync`.
+/// The prepared-write retry stamps the head with an RFC 3339 `last_sync`.
 #[tokio::test]
-async fn staged_retry_writes_rfc3339_head_timestamp() {
+async fn prepared_write_retry_writes_rfc3339_head_timestamp() {
     let storage = MockSyncStorage::new();
     let db = open_test_db();
     let (_tmp, ld) = temp_store_dir();
@@ -2007,31 +2084,31 @@ async fn staged_retry_writes_rfc3339_head_timestamp() {
     )
     .await;
 
-    // The first push fails at the changeset put, so the changeset stages for retry
-    // and no head is written for it yet.
+    // The first push fails at the package append, so the prepared write remains
+    // owned by its durable record and no head is written for it yet.
     storage.fail_next_changeset_puts(1);
     run_cycle_m_result(&storage, &db, &enc, &keypair, &hlc, &ld)
         .await
         .expect_err("the first Store package append fails");
     assert!(
-        db.oldest_outbound_store_batch()
+        db.oldest_prepared_store_write()
             .await
             .expect("read outbound Store queue")
             .is_some(),
         "the exact Store batch remains durable after append failure",
     );
 
-    // The next cycle retries the staged push, exercising the staged-retry writer.
+    // The next cycle retries the prepared write.
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
         store_package_exists(&storage, "M", 1).await,
-        "the staged retry publishes the Store package",
+        "the prepared write retry publishes the Store package",
     );
     assert_own_head_timestamps_are_rfc3339(&storage, "M").await;
 }
 
 #[tokio::test]
-async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
+async fn missing_user_blob_blocks_prepared_write_before_publish() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
     let (_tmp, ld) = temp_store_dir();
@@ -2071,13 +2148,14 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
     run_cycle_m_result(&storage, &db, &enc, &keypair, &hlc, &ld)
         .await
         .expect_err("the first Store package append fails");
-    assert!(
-        db.oldest_outbound_store_batch()
-            .await
-            .expect("read outbound Store queue")
-            .is_some(),
-        "the exact Store batch remains queued after append failure"
-    );
+    let first_write_id = db
+        .oldest_prepared_store_write()
+        .await
+        .expect("read prepared Store write")
+        .expect("the exact Store write remains after append failure")
+        .commit
+        .value
+        .write_id;
     assert!(!store_package_exists(&storage, "M", 1).await);
 
     storage.delete_blob_object("audio", "audio1").await;
@@ -2099,25 +2177,57 @@ async fn staged_changeset_retry_rechecks_user_provided_blob_before_publish() {
     .await;
     let err = match retry {
         Err(err) => err,
-        Ok(_) => panic!("staged retry must recheck the remote user-provided blob"),
+        Ok(_) => panic!("prepared write must recheck the remote user-provided blob"),
     };
 
     assert!(
-        err.contains("outbound blob audio/audio1 is absent from storage"),
-        "staged retry surfaces the missing blob: {err}",
+        err.contains(
+            "outbound Store preparation failed: blob audio/audio1 is absent from its publication location"
+        ),
+        "prepared write surfaces the missing blob: {err}",
     );
-    assert!(!store_package_exists(&storage, "M", 1).await);
-    assert!(
-        store_heads(&storage)
+    assert!(matches!(
+        db.write_status(&first_write_id)
             .await
-            .into_iter()
-            .all(|head| head.device_id != "M"),
-        "the retry aborts before publishing an M head"
+            .expect("read first write status"),
+        crate::WriteStatus::Published(position) if position.position.seq == 1
+    ));
+    let pending = db.pending_writes().await.expect("read pending writes");
+    assert_eq!(pending.len(), 1);
+    let blocked_write_id = pending[0].write_id.clone();
+    let blocked = crate::WriteStatus::Blocked(crate::WriteBlock::MissingBlob {
+        namespace: "audio".to_string(),
+        id: "audio1".to_string(),
+    });
+    assert_eq!(pending[0].status, blocked);
+    assert!(
+        !store_package_exists(&storage, "M", 2).await,
+        "the blocked write has no package or head",
     );
+
+    storage
+        .put_blob(
+            "audio",
+            "audio1",
+            crate::blob::BlobScope::Master,
+            None,
+            b"AUDIO".to_vec(),
+        )
+        .await
+        .expect("restore remote user-provided blob");
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+    assert_eq!(
+        db.write_status(&blocked_write_id)
+            .await
+            .expect("read blocked write status"),
+        blocked,
+        "a semantic block is not retried by reconnect",
+    );
+    assert!(!store_package_exists(&storage, "M", 2).await);
 }
 
 #[tokio::test]
-async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
+async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
     let (_tmp, ld) = temp_store_dir();
@@ -2129,20 +2239,21 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
-         VALUES ('stage-fail', 'Stage Fail', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+         VALUES ('prepare-fail', 'Prepare Fail', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
 
     db.call(|conn| {
         conn.execute_batch(
-            "CREATE TEMP TRIGGER fail_outbound_stage \
-             BEFORE INSERT ON outbound_store_batches \
-             BEGIN SELECT RAISE(ABORT, 'injected Store staging failure'); END;",
+            "CREATE TEMP TRIGGER fail_outbound_preparation \
+             BEFORE UPDATE OF prepared ON store_writes \
+             WHEN OLD.prepared IS NULL AND NEW.prepared IS NOT NULL \
+             BEGIN SELECT RAISE(ABORT, 'injected Store preparation failure'); END;",
         )
         .map_err(crate::database::DbError::from)
     })
     .await
-    .expect("install Store staging fault");
+    .expect("install Store preparation fault");
     bind_mock_store_protocol(&db, &storage, "M").await;
     let failed = match run_single_sync_cycle(
         &storage,
@@ -2161,35 +2272,35 @@ async fn outgoing_stage_failure_keeps_pending_batch_for_retry() {
     )
     .await
     {
-        Ok(_) => panic!("outgoing staging should fail"),
+        Ok(_) => panic!("outgoing preparation should fail"),
         Err(error) => error,
     };
     assert!(
-        failed.contains("injected Store staging failure"),
-        "cycle surfaces the outgoing staging failure: {failed}"
+        failed.contains("injected Store preparation failure"),
+        "cycle surfaces the outgoing preparation failure: {failed}"
     );
     assert_eq!(
-        pending_changeset_count(&db).await,
+        pending_write_count(&db).await,
         1,
-        "the pending batch remains queued when outgoing staging fails"
+        "the pending write remains queued when outgoing preparation fails"
     );
     assert!(!store_package_exists(&storage, "M", 1).await);
 
     db.call(|conn| {
-        conn.execute_batch("DROP TRIGGER fail_outbound_stage")
+        conn.execute_batch("DROP TRIGGER fail_outbound_preparation")
             .map_err(crate::database::DbError::from)
     })
     .await
-    .expect("remove Store staging fault");
+    .expect("remove Store preparation fault");
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
         store_package_exists(&storage, "M", 1).await,
-        "the same pending batch publishes after staging succeeds"
+        "the same pending write publishes after preparation succeeds"
     );
     assert_eq!(
-        pending_changeset_count(&db).await,
+        pending_write_count(&db).await,
         0,
-        "the pending batch clears after the retry publishes"
+        "the pending write leaves the pending set after publication"
     );
 }
 

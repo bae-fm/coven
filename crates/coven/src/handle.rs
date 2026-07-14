@@ -103,13 +103,13 @@ pub(crate) fn app_data_cipher(
 /// # async fn use_store(handle: &CovenHandle, cover: &BlobRef)
 /// #     -> Result<(), Box<dyn std::error::Error>> {
 /// // Rows: run app SQL on the connection coven owns.
-/// let note_count: i64 = handle
+/// let note_count = handle
 ///     .sql(|sql| {
-///         sql.tx()
-///             .query_row("SELECT count(*) FROM notes", [], |row| row.get(0))
+///         sql.query_row("SELECT count(*) FROM notes", [], |row| row.get(0))
 ///             .map_err(coven::CovenError::from)
 ///     })
 ///     .await?;
+/// let note_count: i64 = note_count.value;
 ///
 /// // Blobs: read by descriptor. coven resolves locality — the user's own file,
 /// // its local store, the cache, or a cloud fetch — and hands back plaintext.
@@ -181,14 +181,14 @@ pub struct CovenHandle {
     /// cannot each start a loop and race to install the survivor.
     sync_lifecycle: Arc<tokio::sync::Mutex<()>>,
 
-    /// The sync-status broadcast this handle owns. Every [`SyncManager`] it builds
+    /// The current sync-status value this handle owns. Every [`SyncManager`] it builds
     /// clones this sender into its sync loop, so a
     /// [`subscribe_sync_status`](Self::subscribe_sync_status) receiver keeps
     /// receiving across a reconnect — which drops the old manager and loop and
     /// builds new ones, but reuses this same channel. A subscription created
     /// before any provider is connected is valid and starts receiving once a loop
     /// runs.
-    sync_status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
+    sync_status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
 }
 
 impl CovenHandle {
@@ -231,11 +231,7 @@ impl CovenHandle {
             open_guard,
             sync: Arc::new(RwLock::new(None)),
             sync_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
-            // Capacity 16: a subscriber more than 16 statuses behind observes a
-            // lag error and misses the gap. Documented on `SyncLoopStatus` — its
-            // `row_changes` is a refresh hint, so a lagged subscriber re-reads by
-            // primary key rather than relying on a complete stream.
-            sync_status_tx: tokio::sync::broadcast::channel(16).0,
+            sync_status_tx: tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
         }
     }
 
@@ -286,13 +282,42 @@ impl CovenHandle {
     /// receiving once a loop runs). Infallible for that reason — there is no loop
     /// state to check.
     ///
-    /// Delivery is a bounded broadcast (capacity 16): a receiver that falls more
-    /// than 16 statuses behind observes a lag error and misses the gap. Since a
-    /// `Succeeded` status's `row_changes` is a refresh hint, a lagged subscriber
-    /// re-reads the affected rows by primary key rather than treating the stream as
-    /// complete.
-    pub fn subscribe_sync_status(&self) -> tokio::sync::broadcast::Receiver<SyncLoopStatus> {
+    /// The receiver immediately contains the current value. Intermediate values
+    /// may be coalesced; `Succeeded.row_changes` is a refresh hint rather than a
+    /// complete change stream.
+    pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncLoopStatus> {
         self.sync_status_tx.subscribe()
+    }
+
+    /// Writes that have shared rows and have not reached a published position.
+    pub async fn pending_writes(&self) -> Result<Vec<coven_core::PendingWrite>, crate::CovenError> {
+        self.db
+            .pending_writes()
+            .await
+            .map_err(crate::CovenError::from)
+    }
+
+    /// Read the current durable status of one write.
+    pub async fn write_status(
+        &self,
+        write_id: &coven_core::WriteId,
+    ) -> Result<coven_core::WriteStatus, crate::CovenError> {
+        self.db
+            .write_status(write_id)
+            .await
+            .map_err(crate::CovenError::from)
+    }
+
+    /// Subscribe to one write's current durable status. The initial value is
+    /// reconstructed from SQLite before the receiver is returned.
+    pub async fn subscribe_write_status(
+        &self,
+        write_id: &coven_core::WriteId,
+    ) -> Result<tokio::sync::watch::Receiver<coven_core::WriteStatus>, crate::CovenError> {
+        self.db
+            .subscribe_write_status(write_id)
+            .await
+            .map_err(crate::CovenError::from)
     }
 
     /// Build the [`SyncManager`] for a connected cloud provider, start its sync
@@ -790,19 +815,13 @@ impl CovenHandle {
         Ok(true)
     }
 
-    /// Drop a blob's every on-device copy: its cache copies (the kept
-    /// `storage/pinned/` and the evictable `storage/cache/` folders) and its
-    /// local-store copy (`storage/local/`). The host calls this when a blob is
-    /// genuinely being deleted, so coven leaves nothing on disk regardless of the
-    /// blob's locality — a Remote blob's cache copy, a host-provided Local blob's
-    /// local-store copy, or both across a transition. An absent file in any folder
-    /// is the expected case, not an error (the blob lived in at most one of them).
-    ///
-    /// This removes the only on-device bytes of a Local blob, so it is for the
-    /// delete path only — a Remote blob's cloud copy is tombstoned separately via
-    /// [`blob_cloud_key`](Self::blob_cloud_key).
+    /// Remove one Remote blob's re-fetchable on-device cache copies from both
+    /// `storage/pinned/` and `storage/cache/`. This never touches the local store,
+    /// whose bytes may be the only usable copy owned by an unpublished write.
+    /// It does not delete the cloud blob or its carrying row; a later read can
+    /// fetch the bytes again.
     pub async fn evict_blob(&self, blob: &BlobRef) -> Result<(), BlobCacheError> {
-        crate::blob::cache::drop_all_local_copies(&self.store_dir, &blob.namespace, &blob.id).await
+        crate::blob::cache::drop_cached_blob(&self.store_dir, &blob.namespace, &blob.id).await
     }
 
     /// Make `(root_table, root_id)` Remote (Local → Remote): enqueue an upload per
@@ -2256,25 +2275,28 @@ mod tests {
 
         let (_tmp, handle) = status_test_handle("lib-status-syncing");
         let mut rx = handle.subscribe_sync_status();
+        assert!(matches!(*rx.borrow(), SyncLoopStatus::Idle));
 
         handle
             .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
             .await
             .expect("connect over injected home");
 
-        let start = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        tokio::time::timeout(Duration::from_secs(20), rx.changed())
             .await
             .expect("a start status arrives within the timeout")
             .expect("the status channel is open");
+        let start = rx.borrow().clone();
         assert!(
             matches!(start, SyncLoopStatus::Started),
             "the first status of a cycle marks it in progress",
         );
 
-        let done = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        tokio::time::timeout(Duration::from_secs(20), rx.changed())
             .await
             .expect("a completion status arrives within the timeout")
             .expect("the status channel is open");
+        let done = rx.borrow().clone();
         // The cycle over an empty plaintext home succeeds — a terminal Succeeded,
         // never a Failed.
         assert!(
@@ -2309,10 +2331,11 @@ mod tests {
             .await
             .expect("reconnect");
 
-        let status = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        tokio::time::timeout(Duration::from_secs(20), rx.changed())
             .await
             .expect("a status arrives from the post-reconnect loop")
             .expect("a reconnect does not close the handle-owned status channel");
+        let status = rx.borrow().clone();
         assert!(
             matches!(status, SyncLoopStatus::Started),
             "the received status is a cycle start marker, got {status:?}",

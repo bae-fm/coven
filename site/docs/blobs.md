@@ -264,13 +264,12 @@ natural cycle.
 
 ## The pull side
 
-The pull has no inbox table. It is inline:
-[`pull_changes`](rustdoc:fn:coven::sync::pull::pull_changes) downloads the blobs an
-incoming changeset references (derived from the declarations) *before* applying it,
-so a row is never applied before its blobs are durable. A downloaded blob lands in
+Pull derives the blobs an incoming Store package references from the declarations
+and downloads required eager bytes before materializing the commit, so a row is
+never accepted before its required blobs are durable. A downloaded blob lands in
 the [cache](/docs/cache), at `storage/cache/<namespace>/<id>` under the store
-directory, decrypted under its scope. A download is skipped when the file is already
-present, which makes the step idempotent.
+directory, decrypted under its scope. A download is skipped when the exact file is
+already present.
 
 Only `CacheEager` blobs download here. A `CacheLazy` blob is skipped on pull and
 fetched on its first [`read_blob`](/docs/cache#reading-a-blob).
@@ -281,13 +280,10 @@ both cache folders on this device. A peer only drops its own local cache here; i
 never writes a cloud tombstone; that belongs to the deleting owner (see
 [Deleting a blob](#deleting-a-blob)).
 
-The cursor is what makes this durable without a queue. A changeset's cursor
-advances only once all of that changeset's blobs have arrived. If a download
-fails, coven holds the cursor where it was and reports it through
-[`PullResult::asset_downloads_failed`](rustdoc:struct:coven::sync::pull::PullResult),
-so the next cycle re-pulls that changeset and retries the blob. The changeset plus
-the held cursor are the record of what still needs fetching; a separate inbox would
-duplicate it.
+The exact materialized position is the durable boundary. It advances in the same
+SQLite transaction as the package rows only after required blob work succeeds. If
+a download fails, coven leaves that device sequence and commit hash unmaterialized
+and reports `asset_downloads_failed`, so the commit and its blobs retry together.
 
 ## Deleting a blob
 
@@ -386,10 +382,10 @@ The two schemes at a glance:
 
 ### A cloud object is never rewritten
 
-A cloud object is never rewritten with different bytes. That is not a nicety — the pull
-verifies an object against its row's content hash, and a cursor only advances over a
-changeset whose blobs all arrived, so a device that pulls a changeset written *before* the
-bytes at its key changed can never satisfy it. It is stuck there for good.
+A cloud object is never rewritten with different bytes. Pull verifies an object
+against its row's content hash, and a Store position materializes only after every
+required blob arrives. Replacing bytes at one blob key would make an earlier valid
+commit impossible to materialize.
 
 A hashed key gets this for free: it carries the blob id, and a blob id names one immutable
 byte-string, minted fresh for every stored blob. A readable path is the consumer's own, so

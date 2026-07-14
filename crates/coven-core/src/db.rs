@@ -1,10 +1,10 @@
 //! coven's bookkeeping schema and the cloud-outbox row types.
 //!
 //! coven owns its device-local bookkeeping tables — `protocol_state`,
-//! `materialized_commits`, `snapshot_coverage`, `outbound_store_batches`,
+//! `materialized_commits`, `snapshot_coverage`, `store_writes`,
 //! `outbound_membership_mutation`, `outbound_store_snapshot`,
 //! `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents`,
-//! `local_cleanup_intents`, `pending_changesets`, and `blob_uploaders` — all
+//! `local_cleanup_intents`, `store_write_blob_leases`, and `blob_uploaders` — all
 //! created STRICT by [`apply_coven_schema`], which coven
 //! runs against the connection it owns during open. The host does not implement
 //! any of this; app SQL goes through [`crate::CovenHandle::sql`] or
@@ -103,29 +103,26 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
-            pending_changesets,
+            store_writes,
             "
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+    write_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (json_valid(status)),
+    affected_rows TEXT NOT NULL CHECK (json_valid(affected_rows)),
     changeset BLOB NOT NULL,
-    dependencies TEXT NOT NULL
+    dependencies TEXT NOT NULL CHECK (json_valid(dependencies)),
+    blob_facts TEXT NOT NULL CHECK (json_valid(blob_facts)),
+    prepared TEXT CHECK (prepared IS NULL OR json_valid(prepared))
 "
         );
         $visit!(
-            outbound_store_batches,
+            store_write_blob_leases,
             "
-    seq INTEGER PRIMARY KEY CHECK (seq > 0),
-    commit_hash TEXT NOT NULL UNIQUE CHECK (length(commit_hash) = 64),
-    previous_commit_hash TEXT,
-    dependencies TEXT NOT NULL,
-    package_bytes BLOB NOT NULL,
-    package_hash TEXT NOT NULL CHECK (length(package_hash) = 64),
-    commit_bytes BLOB NOT NULL,
-    head_hash TEXT NOT NULL CHECK (length(head_hash) = 64),
-    head_bytes BLOB NOT NULL,
-    max_pending_id INTEGER NOT NULL,
-    blob_manifest TEXT NOT NULL,
-    local_cleanup_metadata TEXT NOT NULL,
-    completion_metadata TEXT NOT NULL
+    write_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    blob_id TEXT NOT NULL,
+    PRIMARY KEY (write_id, namespace, blob_id),
+    FOREIGN KEY (write_id) REFERENCES store_writes(write_id)
 "
         );
         $visit!(

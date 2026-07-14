@@ -33,20 +33,6 @@ pub fn gate_outbound(
     unsafe { gate_outbound_raw(conn, changeset, gates) }
 }
 
-pub(crate) fn combine_changesets(
-    conn: &Connection,
-    changesets: &[Vec<u8>],
-) -> Result<Vec<u8>, GateError> {
-    let group = Changegroup::new()?;
-    unsafe {
-        group.set_schema(conn.handle())?;
-    }
-    for changeset in changesets {
-        group.add_changeset(changeset)?;
-    }
-    group.output()
-}
-
 /// # Safety
 /// `conn` must be the valid, open connection the changeset was captured on, with
 /// no live session attached (gating reads current row state from it).
@@ -433,32 +419,80 @@ pub(super) fn with_empty_clone<R>(
     f: impl FnOnce(&str, &[String]) -> Result<R, GateError>,
 ) -> Result<R, GateError> {
     let alias = "coven_gate_empty";
-    let attach = format!("ATTACH DATABASE ':memory:' AS {alias}");
-    execute_batch(conn, &attach)?;
+    let owns_clone = !empty_clone_attached(conn)?;
+    let tables = if owns_clone {
+        attach_empty_clone(conn, gates)?
+    } else {
+        gates.gated_tables_parent_first(conn)?
+    };
+    let result = f(alias, &tables);
 
-    let tables = gates.gated_tables_parent_first(conn)?;
-    let result = (|| {
-        for tbl in &tables {
-            let create = create_table_sql(conn, tbl)?;
-            // The CREATE statement names the bare table; run it in the attached
-            // db by qualifying via the schema-aware exec on the alias.
-            let in_alias = rewrite_create_into_schema(&create, tbl, alias)?;
-            execute_batch(conn, &in_alias)?;
+    // A clone created by this call is detached before returning. A borrowed clone
+    // remains owned by the surrounding host transaction.
+    if owns_clone {
+        if let Err(detach_err) = detach_empty_clone(conn) {
+            if result.is_ok() {
+                return Err(detach_err);
+            }
+            warn!("gate: failed to detach the temporary clone db ({alias}): {detach_err}");
         }
-        f(alias, &tables)
-    })();
-
-    // Always detach, even on error. A failed detach leaves the clone attached
-    // under `alias`, which would make next cycle's ATTACH collide — surface it.
-    let detach = format!("DETACH DATABASE {alias}");
-    if let Err(detach_err) = execute_batch(conn, &detach) {
-        if result.is_ok() {
-            return Err(detach_err);
-        }
-        warn!("gate: failed to detach the temporary clone db ({alias}): {detach_err}");
     }
 
     result
+}
+
+pub(crate) fn attach_empty_clone(
+    conn: &Connection,
+    gates: &Gates,
+) -> Result<Vec<String>, GateError> {
+    let alias = "coven_gate_empty";
+    if empty_clone_attached(conn)? {
+        return Err(GateError::Sql(
+            "attach transaction gate clone".to_string(),
+            rusqlite::Error::InvalidQuery,
+        ));
+    }
+    execute_batch(conn, &format!("ATTACH DATABASE ':memory:' AS {alias}"))?;
+    let prepared = (|| {
+        let tables = gates.gated_tables_parent_first(conn)?;
+        for table in &tables {
+            let create = create_table_sql(conn, table)?;
+            let in_alias = rewrite_create_into_schema(&create, table, alias)?;
+            execute_batch(conn, &in_alias)?;
+        }
+        Ok(tables)
+    })();
+    match prepared {
+        Ok(tables) => Ok(tables),
+        Err(operation) => match detach_empty_clone(conn) {
+            Ok(()) => Err(operation),
+            Err(cleanup) => Err(GateError::Cleanup {
+                operation: Box::new(operation),
+                cleanup: Box::new(cleanup),
+            }),
+        },
+    }
+}
+
+pub(crate) fn detach_empty_clone(conn: &Connection) -> Result<(), GateError> {
+    execute_batch(conn, "DETACH DATABASE coven_gate_empty")
+}
+
+fn empty_clone_attached(conn: &Connection) -> Result<bool, GateError> {
+    let mut statement = conn
+        .prepare("PRAGMA database_list")
+        .map_err(|source| GateError::Sql("prepare database list".to_string(), source))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|source| GateError::Sql("read database list".to_string(), source))?;
+    for row in rows {
+        if row.map_err(|source| GateError::Sql("read database name".to_string(), source))?
+            == "coven_gate_empty"
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Which direction a full-state diff against the empty clone runs. The two

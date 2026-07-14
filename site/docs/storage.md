@@ -254,8 +254,8 @@ only in raw bytes. The at-rest protection and the key layout
 live one level up, in
 [`CloudSyncStorage`](rustdoc:struct:coven::sync::cloud_storage::CloudSyncStorage),
 which wraps any `dyn CloudHome`: it seals on the way down, opens on the way up,
-and owns the mapping from sync concepts (a device's changeset seq, a blob id, a
-member's wrapped key) to the flat keys the trait stores. Both how it seals (the
+and owns the mapping from Store protocol objects, blob ids, and wrapped member
+keys to the flat keys the trait stores. Both how it seals (the
 [`CloudCipher`](rustdoc:enum:coven::sync::cloud_storage::CloudCipher)) and how it
 keys blobs (the
 [`BlobPathScheme`](rustdoc:enum:coven::sync::cloud_storage::BlobPathScheme)) come
@@ -263,15 +263,13 @@ from the home's [storage mode](/docs/encryption#opaque-and-browsable-homes), one
 choice set when the home is created:
 
 - An **opaque** home (the default) encrypts every object under the store key
-  and stores it with the `.enc` suffix (`changes/{device}/{seq}.enc`,
-  `heads/{device}.json.enc`, `snapshot/{author}/{seq}.db.enc`,
-  `snapshot/current.json.enc`, ...), and keys each blob by its content-addressed
-  shard `{namespace}/{ab}/{cd}/{id}`. A provider sees `changes/dev1/42.enc` and a
-  blob of ciphertext under an opaque key; it never sees a todo title or an
-  attachment's bytes.
+  and adds the `.enc` suffix beneath logical Store paths such as
+  `store-v1/packages/{device}/{seq}/{hash}/copies/{copy_id}.pkg` and
+  `store-v1/snapshots/{author}/{hash}/copies/{copy_id}.json`. It keys each blob
+  by its content-addressed shard `{namespace}/{ab}/{cd}/{id}`. The provider sees
+  ciphertext under protocol coordinates and opaque blob keys.
 - A **browsable** home stores every object verbatim and drops the suffix, so the
-  same objects are at bare names (`changes/{device}/{seq}`,
-  `snapshot/{author}/{seq}.db`, ...), and stores each blob at the consumer's
+  same Store objects are at their bare logical names and stores each blob at the consumer's
   readable [`{namespace}/{cloud_path}`](/docs/blobs#browsable-home-blob-paths).
   Anyone with bucket access reads the actual bytes by name.
 

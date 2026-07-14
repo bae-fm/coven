@@ -120,6 +120,11 @@ async fn load_published_blob_drop_intents(
                 "SELECT seq, namespace, blob_id, size, disposition \
                  FROM published_blob_drop_intents \
                  WHERE seq <= ?1 \
+                   AND NOT EXISTS (\
+                       SELECT 1 FROM store_write_blob_leases lease \
+                       WHERE lease.namespace = published_blob_drop_intents.namespace \
+                         AND lease.blob_id = published_blob_drop_intents.blob_id\
+                   ) \
                  ORDER BY seq, namespace, blob_id",
             )
             .map_err(DbError::from)?;
@@ -233,19 +238,11 @@ pub(crate) fn insert_published_blob_drop_intent(
             drop.namespace,
             drop.id,
             drop.size as i64,
-            disposition_to_db(drop.disposition),
+            drop.disposition.as_db(),
         ],
     )
     .map(|_| ())
     .map_err(DbError::from)
-}
-
-fn disposition_to_db(disposition: DeferredLocalBlobDisposition) -> &'static str {
-    match disposition {
-        DeferredLocalBlobDisposition::Drop => "drop",
-        DeferredLocalBlobDisposition::Cache => "cache",
-        DeferredLocalBlobDisposition::Pin => "pin",
-    }
 }
 
 fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String> {
@@ -272,21 +269,18 @@ async fn capture_snapshot_cut(
     db.call(move |conn| {
         let pending: i64 = conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pending_changesets)",
+                "SELECT EXISTS(
+                    SELECT 1 FROM store_writes
+                    WHERE status != '\"local_only\"'
+                      AND json_extract(status, '$.published') IS NULL
+                )",
                 [],
                 |row| row.get(0),
             )
             .map_err(DbError::from)?;
-        let outbound: i64 = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM outbound_store_batches)",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)?;
-        if pending != 0 || outbound != 0 {
+        if pending != 0 {
             return Err(DbError(
-                "snapshot cut refused while pending or outbound Store batches exist".to_string(),
+                "snapshot cut refused while unpublished Store writes exist".to_string(),
             ));
         }
         let snapshot = super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
@@ -410,7 +404,7 @@ pub(crate) async fn run_single_sync_cycle(
     drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
 
     // One wall-clock reading for this whole cycle. Store acknowledgements and
-    // the status built at the end record the same instant. Store batch commits
+    // the status built at the end record the same instant. Store write commits
     // carry a separate HLC stamp (`timestamp` below) for causal ordering.
     let sync_time = clock.now().to_rfc3339();
 
@@ -471,11 +465,11 @@ pub(crate) async fn run_single_sync_cycle(
     }
 
     if rotation_pending.is_none() {
-        let published = super::store_outbound::drain_outbound_store_batches(db, storage)
+        let published = super::store_outbound::drain_store_writes(db, storage)
             .await
-            .map_err(|error| format!("publish queued Store batches: {error}"))?;
+            .map_err(|error| format!("publish queued Store writes: {error}"))?;
         if published > 0 {
-            info!(published, "Published queued Store batches");
+            info!(published, "Published queued Store writes");
         }
     }
 
@@ -530,25 +524,32 @@ pub(crate) async fn run_single_sync_cycle(
     .map_err(|error| format!("pull Store commits: {error}"))?;
 
     let staged_store_batch = if rotation_pending.is_none() {
-        let staged = super::store_outbound::stage_pending_store_batch(
-            db,
-            storage,
-            device_id,
-            &sync_time,
-            user_keypair,
-            store_dir,
-            membership.chain.as_ref(),
-            host_upload_cancel.as_ref(),
-        )
-        .await
-        .map_err(|error| format!("stage Store batch: {error}"))?;
-        let published = super::store_outbound::drain_outbound_store_batches(db, storage)
+        let mut staged_any = false;
+        loop {
+            let staged = super::store_outbound::prepare_pending_store_write(
+                db,
+                storage,
+                device_id,
+                &sync_time,
+                user_keypair,
+                store_dir,
+                membership.chain.as_ref(),
+                host_upload_cancel.as_ref(),
+            )
             .await
-            .map_err(|error| format!("publish Store batches: {error}"))?;
-        if published > 0 {
-            info!(published, "Published Store batches");
+            .map_err(|error| format!("prepare Store write: {error}"))?;
+            if !staged {
+                break;
+            }
+            staged_any = true;
+            let published = super::store_outbound::drain_store_writes(db, storage)
+                .await
+                .map_err(|error| format!("publish Store write: {error}"))?;
+            if published > 0 {
+                info!(published, "Published Store writes");
+            }
         }
-        staged
+        staged_any
     } else {
         false
     };
@@ -643,9 +644,9 @@ pub(crate) async fn run_single_sync_cycle(
         elapsed.num_hours().max(0) as u64
     });
 
-    // Initial sync: store has data but the pending journal produced no changeset
-    // (data was inserted before the cycle ran — e.g. user connected a provider to
-    // an existing store). Push a snapshot so the existing data reaches the cloud.
+    // Initial sync: the store has data but no Store write published it (for example,
+    // a provider was connected to an existing store). Publish a snapshot so the
+    // existing data reaches the cloud.
     let is_initial_sync = local_seq == 0 && !has_snapshot && !staged_store_batch;
 
     // The snapshot is the second channel that propagates rows to peers. It

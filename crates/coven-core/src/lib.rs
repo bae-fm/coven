@@ -89,6 +89,7 @@ pub mod blob;
 pub mod changeset;
 #[doc(hidden)]
 pub mod clock;
+mod write;
 // Shared wire format for pasted codes (invite, restore): prefix + base64url(json).
 mod code_envelope;
 #[doc(hidden)]
@@ -184,6 +185,9 @@ pub use clock::{FixedClock, SteppingClock};
 #[cfg(any(test, feature = "test-utils"))]
 pub use id_provider::SequentialIdProvider;
 pub use id_provider::{IdProvider, IdRef, UuidProvider};
+pub use write::{
+    AffectedRow, PendingWrite, PublishedPosition, WriteBlock, WriteId, WriteReceipt, WriteStatus,
+};
 
 // Managed local blob store: the host constructs it; coven never does.
 pub use storage::cloud::{
@@ -200,6 +204,7 @@ pub use sync::store_pull::{HeldStoreCoordinate, HeldStorePosition, HeldStorePosi
 // synced, and when" from.
 pub use sync::loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use sync::status::DeviceActivity;
+pub use sync::store_commit::{CommitPosition, ObjectHash};
 
 // In-memory cloud home for host integration tests.
 #[cfg(any(test, feature = "test-utils"))]

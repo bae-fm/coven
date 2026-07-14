@@ -94,10 +94,10 @@ pub(crate) struct SyncManager {
     /// handle — is gone, never while a detached loop thread is still writing.
     open_guard: Arc<StoreOpenGuard>,
 
-    /// The status broadcast the [`CovenHandle`](crate::CovenHandle) owns, cloned
+    /// The current status value the [`CovenHandle`](crate::CovenHandle) owns, cloned
     /// into every sync loop this manager starts so a subscription outlives the
     /// loop restarts a reconnect performs.
-    status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
+    status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
 
     // Mutable sync state — updated when providers are connected/disconnected
     sync_loop_handle: RwLock<Option<Arc<SyncLoopHandle>>>,
@@ -133,7 +133,7 @@ impl SyncManager {
         cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,
-        status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
+        status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
     ) -> Self {
         Self {
             config_provider,
@@ -844,7 +844,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            tokio::sync::broadcast::channel(16).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
         );
 
         let error = manager
@@ -890,7 +890,7 @@ mod tests {
             None,
             None,
             open_guard,
-            tokio::sync::broadcast::channel(16).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
         );
 
         let error = manager
@@ -925,7 +925,7 @@ mod tests {
             None,
             None,
             open_guard,
-            tokio::sync::broadcast::channel(16).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
         );
 
         let home = Arc::new(InMemoryCloudHome::new());
@@ -987,7 +987,7 @@ mod tests {
             None,
             None,
             open_guard,
-            tokio::sync::broadcast::channel(16).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
         );
 
         manager
@@ -1057,7 +1057,7 @@ mod tests {
             None,
             None,
             open_guard,
-            tokio::sync::broadcast::channel(16).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
         );
 
         let error = manager
@@ -1124,7 +1124,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            tokio::sync::broadcast::channel(16).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
         );
 
         let error = manager
@@ -1188,7 +1188,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            tokio::sync::broadcast::channel(16).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
         );
 
         let fingerprint_a = match manager

@@ -8,7 +8,7 @@
 //! endpoint/auth resolution recurses deeply enough to overflow the default
 //! secondary-thread stack in debug builds. The thread is given a main-thread-
 //! sized stack so S3 sync doesn't `SIGBUS` in `resolve_endpoint`.
-//! Emits [`SyncLoopStatus`] events through a broadcast channel the
+//! Publishes the current [`SyncLoopStatus`] through a watch channel the
 //! [`CovenHandle`](crate::CovenHandle) owns — so a subscription survives a loop
 //! restart, and the loop only ever sends.
 
@@ -52,18 +52,20 @@ pub enum SyncLoopError {
 /// variant itself, so there is no separate "syncing" flag and no outcome fields
 /// to leave unset on a start.
 ///
-/// A completed cycle is [`Succeeded`] or [`Failed`], never both: a whole-cycle
+/// A completed cycle is [`Succeeded`](Self::Succeeded) or [`Failed`](Self::Failed), never both: a whole-cycle
 /// failure is `Failed`; an otherwise-successful cycle that surfaced warnings
 /// (skipped-schema, unauthorized, held changesets, …) is `Succeeded`, and the
 /// warnings ride in its [`SyncLoopSuccess::alerts`]. So a host tells "failed" from
 /// "succeeded with warnings" by which variant it got, not by sniffing a field.
 ///
-/// Delivery is a bounded broadcast (capacity 16). A subscriber that falls more
-/// than 16 statuses behind observes a lag error and misses the intervening
-/// statuses — including a `Succeeded`'s [`SyncLoopSuccess::row_changes`], which is
-/// a refresh *hint* (see its own doc), not a complete change stream.
+/// A subscription immediately exposes the current value. Intermediate values may
+/// be coalesced when the producer changes state faster than a receiver observes
+/// it. A `Succeeded` value's [`SyncLoopSuccess::row_changes`] therefore remains a
+/// refresh hint, not a complete change stream.
 #[derive(Debug, Clone)]
 pub enum SyncLoopStatus {
+    /// No cycle has started since the handle opened.
+    Idle,
     /// A cycle has begun; the paired terminal status carries its outcome.
     Started,
     /// The cycle completed. Warnings, if any, ride in the success's `alerts`;
@@ -83,10 +85,10 @@ pub(crate) struct SyncLoopHandle {
     trigger_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
     stop_rx: std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
-    /// The status broadcast, owned by the [`CovenHandle`] and cloned into each
+    /// The current status value, owned by the [`CovenHandle`] and cloned into each
     /// loop it starts, so a subscription survives a loop restart (a reconnect
     /// builds a fresh loop but keeps this same sender). The loop only sends here.
-    status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
+    status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
     thread_handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     running: Arc<AtomicBool>,
 }
@@ -112,7 +114,7 @@ impl SyncLoopHandle {
         config: Config,
         observer: Option<Arc<dyn BlobTransitionObserver>>,
         open_guard: Arc<StoreOpenGuard>,
-        status_tx: tokio::sync::broadcast::Sender<SyncLoopStatus>,
+        status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
     ) -> Self {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -194,9 +196,7 @@ impl SyncLoopHandle {
                     Err(e) => {
                         let error = format!("failed to create sync loop runtime: {e}");
                         error!("{error}");
-                        if status_tx.send(SyncLoopStatus::Failed { error }).is_err() {
-                            debug!("sync loop runtime failure had no status subscribers");
-                        }
+                        status_tx.send_replace(SyncLoopStatus::Failed { error });
                         return;
                     }
                 };
@@ -217,9 +217,7 @@ impl SyncLoopHandle {
                     while running.load(Ordering::Acquire) && !*stop_rx.borrow() {
                         // A cycle is starting — mark it in progress before the work,
                         // so a host can show that a sync is running.
-                        if status_tx.send(SyncLoopStatus::Started).is_err() {
-                            debug!("sync loop cycle-start status had no subscribers");
-                        }
+                        status_tx.send_replace(SyncLoopStatus::Started);
 
                         let decision = match run_single_cycle(&inner, clock.as_ref(), &store_dir).await {
                             Ok(result) => loop_policy::after_success(result),
@@ -231,9 +229,7 @@ impl SyncLoopHandle {
                             SyncLoopReport::Success(success) => SyncLoopStatus::Succeeded(success),
                             SyncLoopReport::Failure(error) => SyncLoopStatus::Failed { error },
                         };
-                        if status_tx.send(status).is_err() {
-                            debug!("sync loop cycle-complete status had no subscribers");
-                        }
+                        status_tx.send_replace(status);
 
                         let wait = match decision.wait {
                             LoopWait::Immediate => Duration::ZERO,

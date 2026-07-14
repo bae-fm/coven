@@ -191,26 +191,22 @@ invite never leaves a member half-added or an existing member locked out.
 
 ## Pull verification
 
-For each incoming changeset envelope,
-[`pull_changes`](rustdoc:fn:coven::sync::pull::pull_changes):
+Each signed Store commit names the exact
+[`MembershipCoord`](rustdoc:struct:coven::sync::membership::MembershipCoord)
+that grants its author write access. Pull verifies the commit and device head
+signatures, requires their authors to agree, and checks that coordinate against
+the founder-anchored membership chain.
 
-1. Verifies the envelope's signature against its embedded `author_pubkey`. A
-   bad signature holds that device's cursor and stops that stream for the
-   cycle (see [Sync](/docs/sync-model#one-bad-object-stops-one-stream)).
-2. Checks the author against the exact membership entry the changeset names.
-   Every accepted changeset carries the
-   [`MembershipCoord`](rustdoc:struct:coven::sync::membership::MembershipCoord)
-   of the entry that grants its author write access; a puller whose chain
-   listing has not caught up fetches exactly that one object by key (a keyed
-   read is strongly consistent where a listing may lag) instead of dropping
-   the changeset as non-member.
-3. A changeset whose author is not write-capable under that entry (revoked, a
-   Follower, or forged) is skipped and the cursor advances past it, surfaced
-   in `PullResult::rejected_unauthorized`.
+When a provider listing lags behind the named grant, coven reads that exact
+membership object by key and verifies its hash instead of searching alternate
+entries. A bad signature, relocated grant, missing grant, or signer mismatch
+holds the exact Store position without applying rows. A valid commit whose
+author is no longer write-capable is rejected according to the membership state
+and cannot grant itself access.
 
-An initialized store never accepts an unsigned envelope or a changeset without
-a valid write grant. A missing, wiped, malformed, or differently founded chain
-prevents the sync runtime from starting instead of opening authorization.
+An initialized store never accepts an unsigned commit or one without a valid
+write grant. A missing, wiped, malformed, or differently founded membership
+chain prevents sync from opening authorization.
 
 ## Revocation is key rotation
 

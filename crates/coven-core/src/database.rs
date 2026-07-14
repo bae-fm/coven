@@ -17,6 +17,7 @@ use tracing::error;
 use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
+use crate::blob::{BlobRef, Provenance};
 use crate::db::{
     apply_coven_schema, is_reserved_table_name, ExternalBlob, OutboxEntry, OutboxOperation,
 };
@@ -28,11 +29,38 @@ use crate::sync::store_commit::{
     CommitPosition, ObjectHash, SnapshotMeta, StoreAck, StoreBatchCommit, StoreDeviceHead,
     StoreDeviceRegistration, StoreDeviceRegistrationState, StoreProtocolRoot,
 };
+use crate::write::{
+    AffectedRow, PendingWrite, PublishedPosition, WriteId, WriteReceipt, WriteStatus,
+};
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
 pub const STORE_ROOT_HASH_STATE_KEY: &str = "store_root_hash";
 pub const LAST_SNAPSHOT_HASH_STATE_KEY: &str = "last_snapshot_hash";
 pub const LAST_SNAPSHOT_FRONTIER_STATE_KEY: &str = "last_snapshot_frontier";
+const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
+
+fn authorize_host_sql(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization {
+    use rusqlite::hooks::{AuthAction, Authorization};
+
+    if context
+        .database_name
+        .is_some_and(|name| name.eq_ignore_ascii_case(GATE_BASELINE_SCHEMA))
+        || matches!(
+            context.action,
+            AuthAction::Detach { database_name }
+                if database_name.eq_ignore_ascii_case(GATE_BASELINE_SCHEMA)
+        )
+        || matches!(
+            context.action,
+            AuthAction::Pragma { pragma_name, .. }
+                if pragma_name.eq_ignore_ascii_case("database_list")
+        )
+    {
+        Authorization::Deny
+    } else {
+        Authorization::Allow
+    }
+}
 
 /// An error from the owned database.
 #[derive(Debug, thiserror::Error)]
@@ -86,6 +114,9 @@ struct DatabaseState {
     /// Serializes the full durable-intent to filesystem-deletion to intent-removal
     /// operation across every clone of this database.
     local_blob_cleanup: Arc<tokio::sync::Mutex<()>>,
+    write_ids: crate::id_provider::IdRef,
+    write_statuses:
+        Arc<std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>>,
     #[cfg(any(test, feature = "test-utils"))]
     test_pause_points: Arc<TestPausePoints<DatabaseTestPoint>>,
 }
@@ -190,8 +221,8 @@ impl<K: Clone + PartialEq> TestPausePoints<K> {
 /// The owned SQLite connection and the sync bookkeeping resolved beside it at
 /// open. One connection thread owns this for the connection's whole life; every
 /// database access runs against it, so access is serialized. Changeset capture is
-/// per-transaction — [`Database::run_pending_journaled_transaction_on`] attaches a
-/// session for the span of one host write and drains it into the pending journal —
+/// per-transaction — [`Database::run_store_write_transaction_on`] attaches a
+/// session for the span of one host write and drains it into the existing write records —
 /// so no capture state lives on the core between calls.
 ///
 /// `DatabaseCore` holds only `Send` fields (a `rusqlite::Connection`, which is
@@ -272,6 +303,8 @@ impl DatabaseCore {
         blob_decls
             .install_cleanup_guards(&conn)
             .map_err(|e| DbError(e.to_string()))?;
+        gate::attach_empty_clone(&conn, &gates)
+            .map_err(|error| DbError(format!("install host transaction gate: {error}")))?;
         let core = DatabaseCore {
             conn,
             hlc,
@@ -356,6 +389,8 @@ impl DatabaseCore {
             membership_mutation: Arc::new(tokio::sync::Mutex::new(())),
             snapshot_publication: Arc::new(tokio::sync::Mutex::new(())),
             local_blob_cleanup: Arc::new(tokio::sync::Mutex::new(())),
+            write_ids: Arc::new(crate::id_provider::UuidProvider),
+            write_statuses: Arc::new(std::sync::Mutex::new(HashMap::new())),
             #[cfg(any(test, feature = "test-utils"))]
             test_pause_points: Arc::new(TestPausePoints::default()),
         }
@@ -444,26 +479,70 @@ pub struct Database {
     state: DatabaseState,
 }
 
-pub(crate) enum PreparedStoreBatch {
-    Empty,
-    Prepared {
-        max_pending_id: i64,
-        changeset: Vec<u8>,
-        dependencies: BTreeMap<String, CommitPosition>,
+pub(crate) struct PreparedStoreWrite {
+    pub write_id: WriteId,
+    pub changeset: Vec<u8>,
+    pub dependencies: BTreeMap<String, CommitPosition>,
+    pub blob_facts: StoreWriteBlobFacts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreWriteBlobFacts {
+    pub blobs: Vec<StoreWriteBlobFact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "provenance", rename_all = "snake_case")]
+pub(crate) enum StoreWriteBlobFact {
+    UserProvided {
+        blob: BlobRef,
+        state: StoreWriteUserBlobState,
+    },
+    HostProvided {
+        blob: BlobRef,
+        size: u64,
+        state: StoreWriteHostBlobState,
+    },
+}
+
+impl StoreWriteBlobFact {
+    pub(crate) fn blob(&self) -> &BlobRef {
+        match self {
+            Self::UserProvided { blob, .. } | Self::HostProvided { blob, .. } => blob,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StoreWriteUserBlobState {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum StoreWriteHostBlobState {
+    Ordinary,
+    MakeRemote {
+        root_table: String,
+        root_id: String,
+        retain_pinned: bool,
     },
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct OutboundStoreBatch {
-    pub seq: u64,
-    pub commit_hash: ObjectHash,
-    pub previous_commit_hash: Option<ObjectHash>,
-    pub dependencies: BTreeMap<String, CommitPosition>,
+pub(crate) struct ExactProtocolObject<T> {
+    pub value: T,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedStoreWriteCommit {
     pub package_bytes: Vec<u8>,
-    pub package_hash: ObjectHash,
-    pub commit_bytes: Vec<u8>,
-    pub head_hash: ObjectHash,
-    pub head_bytes: Vec<u8>,
+    pub commit: ExactProtocolObject<StoreBatchCommit>,
+    pub head: ExactProtocolObject<StoreDeviceHead>,
     pub blob_manifest: StoreBlobManifest,
 }
 
@@ -507,8 +586,8 @@ pub(crate) struct DurableSnapshotPublication {
     pub meta_bytes: Vec<u8>,
 }
 
-pub(crate) struct StoreBatchStage {
-    pub max_pending_id: i64,
+pub(crate) struct StoreWritePreparation {
+    pub write_id: WriteId,
     pub package_bytes: Vec<u8>,
     pub commit: StoreBatchCommit,
     pub head: StoreDeviceHead,
@@ -519,52 +598,24 @@ pub(crate) struct StoreBatchStage {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoreBlobManifest {
-    pub blobs: Vec<StoreBlobManifestEntry>,
+struct PreparedStoreWriteState {
+    commit_bytes: Vec<u8>,
+    head_bytes: Vec<u8>,
+    blob_manifest: StoreBlobManifest,
+    local_cleanup: StoreBatchLocalCleanup,
+    completion: StoreBatchCompletion,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoreBlobManifestEntry {
-    pub namespace: String,
-    pub id: String,
-    pub scope: String,
-    pub cloud_path: Option<String>,
-    pub provenance: String,
-    pub fill: String,
+pub(crate) struct StoreBlobManifest {
+    pub blobs: Vec<BlobRef>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoreBatchLocalCleanup {
-    pub drops: Vec<StoreBatchBlobDrop>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct StoreBatchBlobDrop {
-    pub namespace: String,
-    pub id: String,
-    pub size: u64,
-    pub disposition: StoreBatchBlobDisposition,
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum StoreBatchBlobDisposition {
-    Drop,
-    Cache,
-    Pin,
-}
-
-impl StoreBatchBlobDisposition {
-    fn as_db(self) -> &'static str {
-        match self {
-            Self::Drop => "drop",
-            Self::Cache => "cache",
-            Self::Pin => "pin",
-        }
-    }
+    pub drops: Vec<crate::sync::service::DeferredLocalBlobDrop>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -821,6 +872,133 @@ fn table_is_strict(conn: &Connection, table: &str) -> Result<Option<bool>, DbErr
 }
 
 impl Database {
+    #[doc(hidden)]
+    pub fn new_write_id(&self) -> WriteId {
+        WriteId::from_generated(self.state.write_ids.new_id())
+    }
+
+    fn notify_write_status_in(
+        statuses: &Arc<std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>>,
+        write_id: &WriteId,
+        status: WriteStatus,
+    ) {
+        let senders = statuses.lock().expect("write status mutex poisoned");
+        if let Some(sender) = senders.get(write_id) {
+            sender.send_replace(status);
+        }
+    }
+
+    fn set_write_status_on(
+        conn: &Connection,
+        write_id: &WriteId,
+        status: &WriteStatus,
+    ) -> Result<(), DbError> {
+        let status = serde_json::to_string(status)
+            .map_err(|error| DbError(format!("serialize write status: {error}")))?;
+        let updated = conn
+            .execute(
+                "UPDATE store_writes SET status = ?2 WHERE write_id = ?1",
+                rusqlite::params![write_id.as_str(), status],
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError(format!("write {write_id} does not exist")));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn set_write_status(
+        &self,
+        write_id: &WriteId,
+        status: WriteStatus,
+    ) -> Result<(), DbError> {
+        let stored_id = write_id.clone();
+        let stored_status = status.clone();
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            Self::set_write_status_on(conn, &stored_id, &stored_status)?;
+            Self::notify_write_status_in(&statuses, &stored_id, stored_status);
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn write_status(&self, write_id: &WriteId) -> Result<WriteStatus, DbError> {
+        let write_id = write_id.clone();
+        self.call(move |conn| {
+            let raw: String = conn
+                .query_row(
+                    "SELECT status FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            serde_json::from_str(&raw)
+                .map_err(|error| DbError(format!("write {write_id} status: {error}")))
+        })
+        .await
+    }
+
+    pub async fn pending_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
+        self.call(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT write_id, status, affected_rows FROM store_writes
+                     WHERE status != '\"local_only\"'
+                       AND json_extract(status, '$.published') IS NULL
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            rows.map(|row| {
+                let (write_id, status, affected_rows) = row.map_err(DbError::from)?;
+                Ok(PendingWrite {
+                    write_id: WriteId::from_generated(write_id),
+                    status: serde_json::from_str(&status)
+                        .map_err(|error| DbError(format!("pending write status: {error}")))?,
+                    affected_rows: serde_json::from_str(&affected_rows)
+                        .map_err(|error| DbError(format!("pending affected rows: {error}")))?,
+                })
+            })
+            .collect()
+        })
+        .await
+    }
+
+    pub async fn subscribe_write_status(
+        &self,
+        write_id: &WriteId,
+    ) -> Result<tokio::sync::watch::Receiver<WriteStatus>, DbError> {
+        let write_id = write_id.clone();
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let raw: String = conn
+                .query_row(
+                    "SELECT status FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let current: WriteStatus = serde_json::from_str(&raw)
+                .map_err(|error| DbError(format!("write {write_id} status: {error}")))?;
+            let mut senders = statuses.lock().expect("write status mutex poisoned");
+            let sender = senders
+                .entry(write_id)
+                .or_insert_with(|| tokio::sync::watch::channel(current.clone()).0);
+            sender.send_replace(current);
+            Ok(sender.subscribe())
+        })
+        .await
+    }
+
     /// Lock the complete membership load transaction for this database handle
     /// and every clone that shares its state.
     pub(crate) async fn lock_membership_load(&self) -> tokio::sync::OwnedMutexGuard<()> {
@@ -997,13 +1175,15 @@ impl Database {
 
     /// The gate model resolved from the final synced table set and live schema at
     /// open. Fixed for this handle's life.
-    pub(crate) fn gates(&self) -> Arc<Gates> {
+    #[doc(hidden)]
+    pub fn gates(&self) -> Arc<Gates> {
         self.state.gates.clone()
     }
 
     /// Blob declarations resolved from the final synced table set and live schema at
     /// open. Fixed for this handle's life.
-    pub(crate) fn blob_decls(&self) -> Arc<BlobDecls> {
+    #[doc(hidden)]
+    pub fn blob_decls(&self) -> Arc<BlobDecls> {
         self.state.blob_decls.clone()
     }
 
@@ -1041,7 +1221,7 @@ impl Database {
     /// This is how coven runs bookkeeping, gating reads, raw test writes, and
     /// apply — anything that needs `&Connection`. Public host writes and coven
     /// transitions that mutate synced rows wrap their write in a
-    /// [`Self::run_pending_journaled_transaction_on`] transaction (still through
+    /// [`Self::run_internal_store_write_transaction_on`] transaction (still through
     /// `call`) so it lands in the pending-changeset journal.
     ///
     /// Hands `f` to the connection thread and awaits its reply, so the SQL runs
@@ -1107,13 +1287,117 @@ impl Database {
         capture_changeset(session)
     }
 
-    fn insert_pending_changeset_on(
+    fn run_host_sql_on<R, E>(conn: &Connection, f: impl FnOnce() -> Result<R, E>) -> Result<R, E>
+    where
+        E: From<DbError>,
+    {
+        conn.authorizer(Some(authorize_host_sql))
+            .map_err(DbError::from)
+            .map_err(E::from)?;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        if let Err(error) = conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        ) {
+            panic!("failed to remove host SQL gate-baseline guard: {error}");
+        }
+        match outcome {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    fn capture_store_write_blob_facts_on(
         tx: &rusqlite::Transaction<'_>,
         changeset: &[u8],
+        gates: &Gates,
+        blob_decls: &BlobDecls,
+    ) -> Result<StoreWriteBlobFacts, DbError> {
+        let changes = crate::changeset::walk(changeset)
+            .map_err(|error| DbError(format!("read Store write blobs: {error}")))?;
+        let mut facts = BTreeMap::new();
+        for change in changes {
+            let Some((blob, size)) = blob_decls
+                .publication_blob_from_change(tx, &change)
+                .map_err(|error| DbError(format!("capture Store write blob: {error}")))?
+            else {
+                continue;
+            };
+            let pk = change.pk().ok_or_else(|| {
+                DbError(format!(
+                    "blob-bearing Store write row in {:?} has no primary key",
+                    change.table
+                ))
+            })?;
+            let fact = match blob.provenance {
+                Provenance::UserProvided => {
+                    let local = tx
+                        .query_row(
+                            "SELECT 1 FROM local_blob_refs WHERE blob_id = ?1",
+                            [&blob.id],
+                            |_| Ok(()),
+                        )
+                        .optional()
+                        .map_err(DbError::from)?
+                        .is_some();
+                    StoreWriteBlobFact::UserProvided {
+                        blob,
+                        state: if local {
+                            StoreWriteUserBlobState::Local
+                        } else {
+                            StoreWriteUserBlobState::Remote
+                        },
+                    }
+                }
+                Provenance::HostProvided => {
+                    let state =
+                        match gates
+                            .resolve_root_of(tx, &change.table, pk)
+                            .map_err(|error| {
+                                DbError(format!("resolve Store write blob root: {error}"))
+                            })? {
+                            Some((root_table, root_id)) => {
+                                match Self::make_remote_intent_retain_pinned(
+                                    tx,
+                                    &root_table,
+                                    &root_id,
+                                )? {
+                                    Some(retain_pinned) => StoreWriteHostBlobState::MakeRemote {
+                                        root_table,
+                                        root_id,
+                                        retain_pinned,
+                                    },
+                                    None => StoreWriteHostBlobState::Ordinary,
+                                }
+                            }
+                            None => StoreWriteHostBlobState::Ordinary,
+                        };
+                    StoreWriteBlobFact::HostProvided { blob, size, state }
+                }
+            };
+            let key = (fact.blob().namespace.clone(), fact.blob().id.clone());
+            if let Some(prior) = facts.insert(key.clone(), fact.clone()) {
+                if prior != fact {
+                    return Err(DbError(format!(
+                        "Store write gives blob {}/{} conflicting publication facts",
+                        key.0, key.1
+                    )));
+                }
+            }
+        }
+        Ok(StoreWriteBlobFacts {
+            blobs: facts.into_values().collect(),
+        })
+    }
+
+    fn insert_store_write_on(
+        tx: &rusqlite::Transaction<'_>,
+        write_id: &WriteId,
+        changeset: &[u8],
         dependencies: &BTreeMap<String, CommitPosition>,
+        blob_facts: &StoreWriteBlobFacts,
         rows_changed: u64,
-    ) -> Result<(), DbError> {
-        if changeset.is_empty() {
+    ) -> Result<WriteStatus, DbError> {
+        let affected_rows = if changeset.is_empty() {
             // A tripwire, not a routine event. An empty capture from a transaction
             // that also CHANGED NO ROWS is a pure read left on the write path —
             // warn so it gets moved to the journal-free read path
@@ -1135,104 +1419,186 @@ impl Database {
                     std::backtrace::Backtrace::force_capture()
                 );
             }
-            return Ok(());
-        }
+            Vec::new()
+        } else {
+            let mut affected = crate::changeset::walk(changeset)
+                .map_err(|error| DbError(format!("read affected write rows: {error}")))?
+                .into_iter()
+                .map(|row| {
+                    let primary_key = row.pk().map(str::to_owned).ok_or_else(|| {
+                        DbError(format!(
+                            "shared write row in {:?} has no primary key",
+                            row.table
+                        ))
+                    })?;
+                    Ok(AffectedRow {
+                        table: row.table,
+                        primary_key,
+                    })
+                })
+                .collect::<Result<Vec<_>, DbError>>()?;
+            affected.sort();
+            affected.dedup();
+            affected
+        };
+        let status = if changeset.is_empty() {
+            WriteStatus::LocalOnly
+        } else {
+            WriteStatus::Pending
+        };
         let dependencies = serde_json::to_string(dependencies)
             .map_err(|error| DbError(format!("serialize pending dependency frontier: {error}")))?;
+        let status_json = serde_json::to_string(&status)
+            .map_err(|error| DbError(format!("serialize write status: {error}")))?;
+        let affected_rows = serde_json::to_string(&affected_rows)
+            .map_err(|error| DbError(format!("serialize affected rows: {error}")))?;
+        let blob_facts_json = serde_json::to_string(blob_facts)
+            .map_err(|error| DbError(format!("serialize Store write blob facts: {error}")))?;
         tx.execute(
-            "INSERT INTO pending_changesets (changeset, dependencies) VALUES (?1, ?2)",
-            rusqlite::params![changeset, dependencies],
+            "INSERT INTO store_writes
+             (write_id, status, affected_rows, changeset, dependencies, blob_facts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                write_id.as_str(),
+                status_json,
+                affected_rows,
+                changeset,
+                dependencies,
+                blob_facts_json,
+            ],
         )
-        .map(|_| ())
-        .map_err(DbError::from)
+        .map_err(DbError::from)?;
+        if status == WriteStatus::Pending {
+            for fact in &blob_facts.blobs {
+                let StoreWriteBlobFact::HostProvided { blob, .. } = fact else {
+                    continue;
+                };
+                tx.execute(
+                    "INSERT INTO store_write_blob_leases (write_id, namespace, blob_id) \
+                     VALUES (?1, ?2, ?3)",
+                    (write_id.as_str(), &blob.namespace, &blob.id),
+                )
+                .map_err(DbError::from)?;
+            }
+        }
+        Ok(status)
     }
 
-    pub fn run_pending_journaled_transaction_on<R, E>(
+    pub fn run_store_write_transaction_on<R, E>(
         conn: &Connection,
         synced_tables: &[SyncedTable],
+        gates: &Gates,
+        blob_decls: &BlobDecls,
+        write_id: WriteId,
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
+    ) -> Result<WriteReceipt<R>, E>
+    where
+        E: From<DbError>,
+    {
+        (|| {
+            let mut journal =
+                Self::start_host_change_journal_on(conn, synced_tables).map_err(E::from)?;
+            let changes_before = conn.total_changes();
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(DbError::from)
+                .map_err(E::from)?;
+            let value = Self::run_host_sql_on(&tx, || f(&tx))?;
+            let captured = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
+            crate::sync::session::validate_changeset_row_identities(&captured, synced_tables)
+                .map_err(|error| DbError(error.to_string()))
+                .map_err(E::from)?;
+            let changeset = gate::gate_outbound(&tx, &captured, gates)
+                .map_err(|error| DbError(format!("gate host transaction: {error}")))
+                .map_err(E::from)?;
+            let blob_facts =
+                Self::capture_store_write_blob_facts_on(&tx, &changeset, gates, blob_decls)
+                    .map_err(E::from)?;
+            let rows_changed = conn.total_changes().saturating_sub(changes_before);
+            let local_device_id: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)
+                .map_err(E::from)?;
+            let dependencies =
+                Self::materialized_frontier_on(&tx, Some(&local_device_id)).map_err(E::from)?;
+            let status = Self::insert_store_write_on(
+                &tx,
+                &write_id,
+                &changeset,
+                &dependencies,
+                &blob_facts,
+                rows_changed,
+            )
+            .map_err(E::from)?;
+            tx.commit().map_err(DbError::from).map_err(E::from)?;
+            Ok(WriteReceipt {
+                value,
+                write_id,
+                status,
+            })
+        })()
+    }
+
+    pub fn run_internal_store_write_transaction_on<R, E>(
+        conn: &Connection,
+        synced_tables: &[SyncedTable],
+        write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<R, E>
     where
         E: From<DbError>,
     {
-        let mut journal =
-            Self::start_host_change_journal_on(conn, synced_tables).map_err(E::from)?;
-        let changes_before = conn.total_changes();
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(DbError::from)
-            .map_err(E::from)?;
-        let value = f(&tx)?;
-        let changeset = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
-        crate::sync::session::validate_changeset_row_identities(&changeset, synced_tables)
+        let gates = Gates::from_tables(conn, synced_tables)
             .map_err(|error| DbError(error.to_string()))
             .map_err(E::from)?;
-        let rows_changed = conn.total_changes().saturating_sub(changes_before);
-        let local_device_id: String = tx
-            .query_row(
-                "SELECT value FROM protocol_state WHERE key = ?1",
-                [LOCAL_DEVICE_ID_STATE_KEY],
-                |row| row.get(0),
-            )
-            .map_err(DbError::from)
+        let blob_decls = BlobDecls::from_tables(conn, synced_tables)
+            .map_err(|error| DbError(error.to_string()))
             .map_err(E::from)?;
-        let dependencies =
-            Self::materialized_frontier_on(&tx, Some(&local_device_id)).map_err(E::from)?;
-        Self::insert_pending_changeset_on(&tx, &changeset, &dependencies, rows_changed)
-            .map_err(E::from)?;
-        tx.commit().map_err(DbError::from).map_err(E::from)?;
-        Ok(value)
+        Self::run_store_write_transaction_on(conn, synced_tables, &gates, &blob_decls, write_id, f)
+            .map(|receipt| receipt.value)
     }
 
-    pub(crate) async fn prepare_store_batch(&self) -> Result<PreparedStoreBatch, DbError> {
-        let gates = self.gates();
-        self.call(move |conn| {
-            let mut stmt = conn
-                .prepare("SELECT id, changeset, dependencies FROM pending_changesets ORDER BY id")
-                .map_err(DbError::from)?;
-            let rows = stmt
-                .query_map([], |row| {
+    pub(crate) async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
+        self.call(|conn| {
+            conn.query_row(
+                "SELECT write_id, changeset, dependencies, blob_facts FROM store_writes
+                 WHERE status = '\"pending\"'
+                   AND ordinal = (
+                       SELECT MIN(ordinal) FROM store_writes
+                       WHERE status != '\"local_only\"'
+                         AND json_extract(status, '$.published') IS NULL
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM store_writes WHERE prepared IS NOT NULL
+                   )
+                 ORDER BY ordinal LIMIT 1",
+                [],
+                |row| {
                     Ok((
-                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(0)?,
                         row.get::<_, Vec<u8>>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|(write_id, changeset, dependencies, blob_facts)| {
+                Ok(PreparedStoreWrite {
+                    write_id: WriteId::from_generated(write_id),
+                    changeset,
+                    dependencies: serde_json::from_str(&dependencies)
+                        .map_err(|error| DbError(format!("pending write dependencies: {error}")))?,
+                    blob_facts: serde_json::from_str(&blob_facts)
+                        .map_err(|error| DbError(format!("pending write blob facts: {error}")))?,
                 })
-                .map_err(DbError::from)?;
-            let mut max_id = None;
-            let mut changesets = Vec::new();
-            let mut dependencies = BTreeMap::new();
-            for row in rows {
-                let (id, changeset, raw_dependencies) = row.map_err(DbError::from)?;
-                max_id = Some(id);
-                changesets.push(changeset);
-                let row_dependencies: BTreeMap<String, CommitPosition> =
-                    serde_json::from_str(&raw_dependencies).map_err(|error| {
-                        DbError(format!(
-                            "pending_changesets row {id} has invalid dependency frontier: {error}"
-                        ))
-                    })?;
-                Self::combine_frontier(&mut dependencies, row_dependencies)?;
-            }
-            if changesets.iter().any(Vec::is_empty) {
-                return Err(DbError(
-                    "pending_changesets contains an empty changeset".to_string(),
-                ));
-            }
-            let changeset = match changesets.as_slice() {
-                [] => return Ok(PreparedStoreBatch::Empty),
-                [single] => single.clone(),
-                _ => gate::combine_changesets(conn, &changesets)
-                    .map_err(|e| DbError(format!("combine pending changesets: {e}")))?,
-            };
-            let changeset = gate::gate_outbound(conn, &changeset, &gates)
-                .map_err(|error| DbError(format!("gate outbound Store batch: {error}")))?;
-            let max_id = max_id.expect("non-empty pending changeset batch has a max id");
-            Ok(PreparedStoreBatch::Prepared {
-                max_pending_id: max_id,
-                changeset,
-                dependencies,
             })
+            .transpose()
         })
         .await
     }
@@ -1242,6 +1608,9 @@ impl Database {
         &self,
         changeset: Vec<u8>,
     ) -> Result<(), DbError> {
+        let write_id = self.new_write_id();
+        let gates = self.gates();
+        let blob_decls = self.blob_decls();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let local_device_id: String = tx
@@ -1252,13 +1621,20 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             let dependencies = Self::materialized_frontier_on(&tx, Some(&local_device_id))?;
-            Self::insert_pending_changeset_on(&tx, &changeset, &dependencies, 1)?;
+            let blob_facts =
+                Self::capture_store_write_blob_facts_on(&tx, &changeset, &gates, &blob_decls)?;
+            Self::insert_store_write_on(&tx, &write_id, &changeset, &dependencies, &blob_facts, 1)?;
             tx.commit().map_err(DbError::from)
         })
         .await
     }
 
-    pub(crate) async fn stage_store_batch(&self, stage: StoreBatchStage) -> Result<(), DbError> {
+    pub(crate) async fn prepare_store_write_commit(
+        &self,
+        stage: StoreWritePreparation,
+    ) -> Result<(), DbError> {
+        let write_id = stage.write_id.clone();
+        let statuses = self.state.write_statuses.clone();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let local_device_id: String = tx
@@ -1271,7 +1647,7 @@ impl Database {
             if stage.commit.device_id != local_device_id || stage.head.device_id != local_device_id
             {
                 return Err(DbError(format!(
-                    "outbound Store batch belongs to {:?}/{:?}, local device is {:?}",
+                    "prepared Store write belongs to {:?}/{:?}, local device is {:?}",
                     stage.commit.device_id, stage.head.device_id, local_device_id
                 )));
             }
@@ -1287,11 +1663,69 @@ impl Database {
             stage
                 .commit
                 .verify_at(store_root_hash, &local_device_id, stage.commit.seq)
-                .map_err(|error| DbError(format!("verify staged Store commit: {error}")))?;
+                .map_err(|error| DbError(format!("verify prepared Store commit: {error}")))?;
             stage
                 .commit
                 .verify_package(&stage.package_bytes)
-                .map_err(|error| DbError(format!("verify staged Store package: {error}")))?;
+                .map_err(|error| DbError(format!("verify prepared Store package: {error}")))?;
+            if stage.commit.write_id != stage.write_id {
+                return Err(DbError(
+                    "prepared write id differs from signed commit".to_string(),
+                ));
+            }
+            let (stored_changeset, stored_dependencies, stored_status, stored_preparation): (
+                Vec<u8>,
+                String,
+                String,
+                Option<String>,
+            ) = tx
+                .query_row(
+                    "SELECT changeset, dependencies, status, prepared
+                     FROM store_writes WHERE write_id = ?1",
+                    [stage.write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(DbError::from)?;
+            if stored_status != "\"pending\"" || stored_preparation.is_some() {
+                return Err(DbError(format!(
+                    "write {} is not an unprepared pending write",
+                    stage.write_id
+                )));
+            }
+            if stored_changeset != stage.package_bytes {
+                return Err(DbError(format!(
+                    "prepared package differs from write {} changeset",
+                    stage.write_id
+                )));
+            }
+            let stored_dependencies: BTreeMap<String, CommitPosition> =
+                serde_json::from_str(&stored_dependencies).map_err(|error| {
+                    DbError(format!(
+                        "write {} dependency frontier: {error}",
+                        stage.write_id
+                    ))
+                })?;
+            if stored_dependencies != stage.commit.dependencies {
+                return Err(DbError(format!(
+                    "prepared commit dependencies differ from write {}",
+                    stage.write_id
+                )));
+            }
+            let another_prepared: Option<String> = tx
+                .query_row(
+                    "SELECT write_id FROM store_writes
+                     WHERE prepared IS NOT NULL AND write_id != ?1
+                     ORDER BY ordinal LIMIT 1",
+                    [stage.write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if let Some(other_write_id) = another_prepared {
+                return Err(DbError(format!(
+                    "write {other_write_id} already owns Store publication"
+                )));
+            }
             let expected_position = stage.commit.position();
             if stage.head.position.as_ref() != Some(&expected_position) {
                 return Err(DbError(
@@ -1305,34 +1739,14 @@ impl Database {
                 &local_device_id,
                 stage.commit.seq,
             )
-            .map_err(|error| DbError(format!("verify staged Store head: {error}")))?;
+            .map_err(|error| DbError(format!("verify prepared Store head: {error}")))?;
             if parsed_head != stage.head {
                 return Err(DbError(
-                    "staged Store head changed during encoding".to_string(),
+                    "prepared Store head changed during encoding".to_string(),
                 ));
             }
 
-            let queued_predecessor = tx
-                .query_row(
-                    "SELECT seq, commit_hash FROM outbound_store_batches ORDER BY seq DESC LIMIT 1",
-                    [],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()
-                .map_err(DbError::from)?
-                .map(|(seq, hash)| {
-                    Ok::<_, DbError>(CommitPosition {
-                        seq: Self::sequence_from_sqlite(&local_device_id, seq)?,
-                        commit_hash: hash.parse().map_err(|error| {
-                            DbError(format!("outbound predecessor hash: {error}"))
-                        })?,
-                    })
-                })
-                .transpose()?;
-            let durable_predecessor = match queued_predecessor {
-                Some(position) => Some(position),
-                None => Self::latest_position_for_device_on(&tx, &local_device_id)?,
-            };
+            let durable_predecessor = Self::latest_position_for_device_on(&tx, &local_device_id)?;
             let expected_seq = durable_predecessor
                 .as_ref()
                 .map_or(1, |position| position.seq.saturating_add(1));
@@ -1346,142 +1760,93 @@ impl Database {
                 )));
             }
 
-            let dependencies = serde_json::to_string(&stage.commit.dependencies)
-                .map_err(|error| DbError(format!("serialize outbound dependencies: {error}")))?;
-            let commit_hash = stage.commit.commit_hash();
-            let package_hash = stage.commit.package.content_hash;
-            let commit_bytes = stage.commit.to_bytes();
-            let head_hash = stage.head.head_hash();
-            let blob_manifest = serde_json::to_string(&stage.blob_manifest)
-                .map_err(|error| DbError(format!("serialize outbound blob manifest: {error}")))?;
-            let local_cleanup_metadata = serde_json::to_string(&stage.local_cleanup)
-                .map_err(|error| DbError(format!("serialize outbound local cleanup: {error}")))?;
-            let completion_metadata = serde_json::to_string(&stage.completion)
-                .map_err(|error| DbError(format!("serialize outbound completion: {error}")))?;
-            tx.execute(
-                "INSERT INTO outbound_store_batches (
-                    seq, commit_hash, previous_commit_hash, dependencies,
-                    package_bytes, package_hash, commit_bytes, head_hash, head_bytes,
-                    max_pending_id, blob_manifest, local_cleanup_metadata,
-                    completion_metadata
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                rusqlite::params![
-                    Self::sequence_to_sqlite(&local_device_id, stage.commit.seq)?,
-                    commit_hash.to_string(),
-                    stage
-                        .commit
-                        .previous_commit_hash
-                        .map(|hash| hash.to_string()),
-                    dependencies,
-                    stage.package_bytes,
-                    package_hash.to_string(),
-                    commit_bytes,
-                    head_hash.to_string(),
-                    head_bytes,
-                    stage.max_pending_id,
-                    blob_manifest,
-                    local_cleanup_metadata,
-                    completion_metadata,
-                ],
-            )
-            .map_err(DbError::from)?;
-            tx.execute(
-                "DELETE FROM pending_changesets WHERE id <= ?1",
-                [stage.max_pending_id],
-            )
-            .map_err(DbError::from)?;
-            tx.commit().map_err(DbError::from)
+            let prepared = PreparedStoreWriteState {
+                commit_bytes: stage.commit.to_bytes(),
+                head_bytes,
+                blob_manifest: stage.blob_manifest,
+                local_cleanup: stage.local_cleanup,
+                completion: stage.completion,
+            };
+            let prepared = serde_json::to_string(&prepared)
+                .map_err(|error| DbError(format!("serialize prepared Store write: {error}")))?;
+            let status = serde_json::to_string(&WriteStatus::Publishing)
+                .map_err(|error| DbError(format!("serialize write status: {error}")))?;
+            let updated = tx
+                .execute(
+                    "UPDATE store_writes SET prepared = ?2, status = ?3
+                     WHERE write_id = ?1 AND prepared IS NULL AND status = '\"pending\"'",
+                    rusqlite::params![stage.write_id.as_str(), prepared, status],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError(format!(
+                    "write {} lost pending preparation ownership",
+                    stage.write_id
+                )));
+            }
+            tx.commit().map_err(DbError::from)?;
+            Self::notify_write_status_in(&statuses, &write_id, WriteStatus::Publishing);
+            Ok(())
         })
         .await
     }
 
-    pub(crate) async fn oldest_outbound_store_batch(
+    pub(crate) async fn oldest_prepared_store_write(
         &self,
-    ) -> Result<Option<OutboundStoreBatch>, DbError> {
+    ) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
         self.call(|conn| {
             conn.query_row(
-                "SELECT seq, commit_hash, previous_commit_hash, dependencies,
-                        package_bytes, package_hash, commit_bytes, head_hash, head_bytes,
-                        max_pending_id, blob_manifest, local_cleanup_metadata,
-                        completion_metadata
-                 FROM outbound_store_batches ORDER BY seq LIMIT 1",
+                "SELECT write_id, changeset, dependencies, prepared FROM store_writes
+                 WHERE prepared IS NOT NULL
+                   AND status IN ('\"pending\"', '\"publishing\"')
+                 ORDER BY ordinal LIMIT 1",
                 [],
                 |row| {
                     Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, Vec<u8>>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, Vec<u8>>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, Vec<u8>>(8)?,
-                        row.get::<_, i64>(9)?,
-                        row.get::<_, String>(10)?,
-                        row.get::<_, String>(11)?,
-                        row.get::<_, String>(12)?,
                     ))
                 },
             )
             .optional()
             .map_err(DbError::from)?
-            .map(
-                |(
-                    seq,
-                    commit_hash,
-                    previous_commit_hash,
-                    dependencies,
+            .map(|(write_id, package_bytes, dependencies, prepared)| {
+                let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
+                    .map_err(|error| DbError(format!("prepared Store write: {error}")))?;
+                let commit: StoreBatchCommit = serde_json::from_slice(&prepared.commit_bytes)
+                    .map_err(|error| DbError(format!("prepared Store commit: {error}")))?;
+                let head: StoreDeviceHead = serde_json::from_slice(&prepared.head_bytes)
+                    .map_err(|error| DbError(format!("prepared Store head: {error}")))?;
+                let write_id = WriteId::from_generated(write_id);
+                if commit.write_id != write_id {
+                    return Err(DbError(
+                        "prepared write id differs from signed commit".to_string(),
+                    ));
+                }
+                let dependencies: BTreeMap<String, CommitPosition> =
+                    serde_json::from_str(&dependencies).map_err(|error| {
+                        DbError(format!("prepared write dependency frontier: {error}"))
+                    })?;
+                if commit.dependencies != dependencies {
+                    return Err(DbError(
+                        "prepared commit differs from its write dependency frontier".to_string(),
+                    ));
+                }
+                Ok(PreparedStoreWriteCommit {
                     package_bytes,
-                    package_hash,
-                    commit_bytes,
-                    head_hash,
-                    head_bytes,
-                    _max_pending_id,
-                    blob_manifest,
-                    local_cleanup_metadata,
-                    completion_metadata,
-                )| {
-                    let _: StoreBatchLocalCleanup =
-                        serde_json::from_str(&local_cleanup_metadata)
-                            .map_err(|error| DbError(format!("outbound local cleanup: {error}")))?;
-                    let _: StoreBatchCompletion = serde_json::from_str(&completion_metadata)
-                        .map_err(|error| DbError(format!("outbound completion: {error}")))?;
-                    let device_id: String = conn
-                        .query_row(
-                            "SELECT value FROM protocol_state WHERE key = ?1",
-                            [LOCAL_DEVICE_ID_STATE_KEY],
-                            |row| row.get(0),
-                        )
-                        .map_err(DbError::from)?;
-                    Ok(OutboundStoreBatch {
-                        seq: Self::sequence_from_sqlite(&device_id, seq)?,
-                        commit_hash: commit_hash
-                            .parse()
-                            .map_err(|error| DbError(format!("outbound commit hash: {error}")))?,
-                        previous_commit_hash: previous_commit_hash
-                            .map(|hash| {
-                                hash.parse().map_err(|error| {
-                                    DbError(format!("outbound predecessor hash: {error}"))
-                                })
-                            })
-                            .transpose()?,
-                        dependencies: serde_json::from_str(&dependencies)
-                            .map_err(|error| DbError(format!("outbound dependencies: {error}")))?,
-                        package_bytes,
-                        package_hash: package_hash
-                            .parse()
-                            .map_err(|error| DbError(format!("outbound package hash: {error}")))?,
-                        commit_bytes,
-                        head_hash: head_hash
-                            .parse()
-                            .map_err(|error| DbError(format!("outbound head hash: {error}")))?,
-                        head_bytes,
-                        blob_manifest: serde_json::from_str(&blob_manifest)
-                            .map_err(|error| DbError(format!("outbound blob manifest: {error}")))?,
-                    })
-                },
-            )
+                    commit: ExactProtocolObject {
+                        value: commit,
+                        bytes: prepared.commit_bytes,
+                    },
+                    head: ExactProtocolObject {
+                        value: head,
+                        bytes: prepared.head_bytes,
+                    },
+                    blob_manifest: prepared.blob_manifest,
+                })
+            })
             .transpose()
         })
         .await
@@ -1498,37 +1863,16 @@ impl Database {
                     |row| row.get(0),
                 )
                 .map_err(DbError::from)?;
-            let queued = conn
-                .query_row(
-                    "SELECT seq, commit_hash FROM outbound_store_batches
-                     ORDER BY seq DESC LIMIT 1",
-                    [],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()
-                .map_err(DbError::from)?
-                .map(|(seq, hash)| {
-                    Ok::<_, DbError>(CommitPosition {
-                        seq: Self::sequence_from_sqlite(&device_id, seq)?,
-                        commit_hash: hash.parse().map_err(|error| {
-                            DbError(format!("outbound Store position hash: {error}"))
-                        })?,
-                    })
-                })
-                .transpose()?;
-            match queued {
-                Some(position) => Ok(Some(position)),
-                None => Self::latest_position_for_device_on(conn, &device_id),
-            }
+            Self::latest_position_for_device_on(conn, &device_id)
         })
         .await
     }
 
-    pub(crate) async fn complete_outbound_store_batch(
+    pub(crate) async fn complete_prepared_store_write(
         &self,
-        seq: u64,
-        commit_hash: ObjectHash,
+        position: CommitPosition,
     ) -> Result<(), DbError> {
+        let statuses = self.state.write_statuses.clone();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let local_device_id: String = tx
@@ -1538,18 +1882,28 @@ impl Database {
                     |row| row.get(0),
                 )
                 .map_err(DbError::from)?;
-            let (stored, local_cleanup, completion): (Vec<u8>, String, String) = tx
+            let prepared_count: i64 = tx
                 .query_row(
-                    "SELECT commit_bytes, local_cleanup_metadata, completion_metadata
-                     FROM outbound_store_batches
-                     WHERE seq = ?1 AND commit_hash = ?2",
-                    (
-                        Self::sequence_to_sqlite(&local_device_id, seq)?,
-                        commit_hash.to_string(),
-                    ),
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    "SELECT COUNT(*) FROM store_writes WHERE prepared IS NOT NULL",
+                    [],
+                    |row| row.get(0),
                 )
                 .map_err(DbError::from)?;
+            if prepared_count != 1 {
+                return Err(DbError(format!(
+                    "Store publication expected one prepared write, found {prepared_count}"
+                )));
+            }
+            let (stored_write_id, prepared): (String, String) = tx
+                .query_row(
+                    "SELECT write_id, prepared FROM store_writes
+                     WHERE prepared IS NOT NULL ORDER BY ordinal LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
+                .map_err(|error| DbError(format!("prepared Store write: {error}")))?;
             let store_root_hash: ObjectHash = tx
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
@@ -1559,25 +1913,34 @@ impl Database {
                 .map_err(DbError::from)?
                 .parse()
                 .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
-            let commit =
-                StoreBatchCommit::parse_at(&stored, store_root_hash, &local_device_id, seq)
-                    .map_err(|error| DbError(format!("outbound commit: {error}")))?;
-            if commit.commit_hash() != commit_hash {
-                return Err(DbError("outbound commit hash changed".to_string()));
+            let commit = StoreBatchCommit::parse_at(
+                &prepared.commit_bytes,
+                store_root_hash,
+                &local_device_id,
+                position.seq,
+            )
+            .map_err(|error| DbError(format!("outbound commit: {error}")))?;
+            if commit.position() != position {
+                return Err(DbError(format!(
+                    "prepared Store write is {:?}, completion named {:?}",
+                    commit.position(),
+                    position
+                )));
             }
-            let local_cleanup: StoreBatchLocalCleanup = serde_json::from_str(&local_cleanup)
-                .map_err(|error| DbError(format!("outbound local cleanup: {error}")))?;
-            let completion: StoreBatchCompletion = serde_json::from_str(&completion)
-                .map_err(|error| DbError(format!("outbound completion: {error}")))?;
+            if commit.write_id.as_str() != stored_write_id {
+                return Err(DbError(
+                    "prepared write id differs from signed commit".to_string(),
+                ));
+            }
             Self::record_materialized_commit_on(&tx, &commit)?;
-            for drop in local_cleanup.drops {
+            for drop in prepared.local_cleanup.drops {
                 tx.execute(
                     "INSERT INTO published_blob_drop_intents
                      (seq, namespace, blob_id, size, disposition)
                      VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT(seq, namespace, blob_id) DO NOTHING",
                     rusqlite::params![
-                        Self::sequence_to_sqlite(&local_device_id, seq)?,
+                        Self::sequence_to_sqlite(&local_device_id, position.seq)?,
                         drop.namespace,
                         drop.id,
                         i64::try_from(drop.size).map_err(|_| DbError(
@@ -1588,22 +1951,33 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             }
-            for intent in completion.consumed_make_remote_intents {
+            for intent in prepared.completion.consumed_make_remote_intents {
                 Self::delete_make_remote_intent_on(&tx, &intent.root_table, &intent.root_id)?;
             }
-            let deleted = tx
+            tx.execute(
+                "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
+                [stored_write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            let cleared = tx
                 .execute(
-                    "DELETE FROM outbound_store_batches WHERE seq = ?1 AND commit_hash = ?2",
-                    (
-                        Self::sequence_to_sqlite(&local_device_id, seq)?,
-                        commit_hash.to_string(),
-                    ),
+                    "UPDATE store_writes SET prepared = NULL
+                     WHERE write_id = ?1 AND prepared IS NOT NULL",
+                    [stored_write_id.as_str()],
                 )
                 .map_err(DbError::from)?;
-            if deleted != 1 {
-                return Err(DbError("outbound Store row disappeared".to_string()));
+            if cleared != 1 {
+                return Err(DbError("prepared Store write disappeared".to_string()));
             }
-            tx.commit().map_err(DbError::from)
+            let write_id = commit.write_id;
+            let status = WriteStatus::Published(PublishedPosition {
+                device_id: local_device_id,
+                position,
+            });
+            Self::set_write_status_on(&tx, &write_id, &status)?;
+            tx.commit().map_err(DbError::from)?;
+            Self::notify_write_status_in(&statuses, &write_id, status);
+            Ok(())
         })
         .await
     }
@@ -2712,32 +3086,6 @@ impl Database {
         Ok(frontier)
     }
 
-    fn combine_frontier(
-        combined: &mut BTreeMap<String, CommitPosition>,
-        incoming: BTreeMap<String, CommitPosition>,
-    ) -> Result<(), DbError> {
-        for (device_id, position) in incoming {
-            if position.seq == 0 {
-                return Err(DbError(format!(
-                    "dependency for {device_id:?} names sequence zero"
-                )));
-            }
-            match combined.get(&device_id) {
-                Some(current) if current.seq == position.seq && current != &position => {
-                    return Err(DbError(format!(
-                        "dependency frontier forks {device_id:?} at sequence {}",
-                        position.seq
-                    )))
-                }
-                Some(current) if current.seq >= position.seq => {}
-                _ => {
-                    combined.insert(device_id, position);
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn materialized_position_on(
         conn: &Connection,
         device_id: &str,
@@ -3709,7 +4057,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_host_identity_rolls_back_rows_and_preserves_pending_journal() {
+    async fn invalid_host_identity_rolls_back_rows_and_preserves_existing_write() {
         let tables = vec![things_table(
             crate::sync::session::RowIdentity::IndependentUuid,
         )];
@@ -3726,18 +4074,21 @@ mod tests {
         let existing_for_insert = existing_changeset.clone();
         db.call(move |conn| {
             conn.execute(
-                "INSERT INTO pending_changesets (changeset, dependencies) VALUES (?1, '{}')",
+                "INSERT INTO store_writes
+                 (write_id, status, affected_rows, changeset, dependencies, blob_facts)
+                 VALUES ('existing-write', '\"pending\"', '[]', ?1, '{}', '{\"blobs\":[]}')",
                 [existing_for_insert],
             )
             .map(|_| ())
             .map_err(DbError::from)
         })
         .await
-        .expect("seed pending journal");
+        .expect("seed existing write records");
 
+        let write_id = db.new_write_id();
         let result = db
             .call(move |conn| {
-                Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                Database::run_internal_store_write_transaction_on(conn, &tables, write_id, |tx| {
                     tx.execute(
                         "INSERT INTO things VALUES (?1, 'valid', '0000000002000-0000-writer')",
                         ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
@@ -3758,7 +4109,7 @@ mod tests {
                 .query_row("SELECT COUNT(*) FROM things", [], |row| row.get(0))
                 .map_err(DbError::from)?;
             let pending = conn
-                .prepare("SELECT changeset FROM pending_changesets ORDER BY id")
+                .prepare("SELECT changeset FROM store_writes ORDER BY ordinal")
                 .and_then(|mut statement| {
                     statement
                         .query_map([], |row| row.get::<_, Vec<u8>>(0))?
@@ -3801,36 +4152,53 @@ mod tests {
 
         let update_tables = tables.clone();
         let renamed = "01890a5d-ac96-774b-bcce-b302099c3f74";
+        let update_write_id = db.new_write_id();
         db.call(move |conn| {
-            Database::run_pending_journaled_transaction_on(conn, &update_tables, |tx| {
+            Database::run_internal_store_write_transaction_on(
+                conn,
+                &update_tables,
+                update_write_id,
+                |tx| {
                 tx.execute(
                     "UPDATE things SET id = ?1, _updated_at = '0000000002000-0000-writer' WHERE id = ?2",
                     [renamed, original],
                 )?;
                 Ok::<_, DbError>(())
-            })
+                },
+            )
         })
         .await
         .expect("valid primary-key change succeeds");
 
         let replace_tables = tables.clone();
         let replaced = "8b1a9953-c461-4e20-8c66-826115d53552";
+        let replace_write_id = db.new_write_id();
         db.call(move |conn| {
-            Database::run_pending_journaled_transaction_on(conn, &replace_tables, |tx| {
-                tx.execute("DELETE FROM things WHERE id = ?1", [renamed])?;
-                tx.execute(
-                    "INSERT INTO things VALUES (?1, 'replaced', '0000000003000-0000-writer')",
-                    [replaced],
-                )?;
-                Ok::<_, DbError>(())
-            })
+            Database::run_internal_store_write_transaction_on(
+                conn,
+                &replace_tables,
+                replace_write_id,
+                |tx| {
+                    tx.execute("DELETE FROM things WHERE id = ?1", [renamed])?;
+                    tx.execute(
+                        "INSERT INTO things VALUES (?1, 'replaced', '0000000003000-0000-writer')",
+                        [replaced],
+                    )?;
+                    Ok::<_, DbError>(())
+                },
+            )
         })
         .await
         .expect("explicit delete and insert succeeds");
 
         let ordinary_tables = tables.clone();
+        let ordinary_write_id = db.new_write_id();
         db.call(move |conn| {
-            Database::run_pending_journaled_transaction_on(conn, &ordinary_tables, |tx| {
+            Database::run_internal_store_write_transaction_on(
+                conn,
+                &ordinary_tables,
+                ordinary_write_id,
+                |tx| {
                 tx.execute(
                     "UPDATE things SET body = 'ordinary', _updated_at = '0000000004000-0000-writer' WHERE id = ?1",
                     [replaced],
@@ -3841,14 +4209,15 @@ mod tests {
                     [replaced],
                 )?;
                 Ok::<_, DbError>(())
-            })
+                },
+            )
         })
         .await
         .expect("ordinary update and same-id upsert succeed");
 
         let pending_before = db
             .call(|conn| {
-                conn.prepare("SELECT changeset FROM pending_changesets ORDER BY id")
+                conn.prepare("SELECT changeset FROM store_writes ORDER BY ordinal")
                     .and_then(|mut statement| {
                         statement
                             .query_map([], |row| row.get::<_, Vec<u8>>(0))?
@@ -3857,19 +4226,25 @@ mod tests {
                     .map_err(DbError::from)
             })
             .await
-            .expect("read pending journal");
+            .expect("read existing write records");
         assert_eq!(pending_before.len(), 3);
 
         let invalid_tables = tables;
+        let invalid_write_id = db.new_write_id();
         let invalid = db
             .call(move |conn| {
-                Database::run_pending_journaled_transaction_on(conn, &invalid_tables, |tx| {
-                    tx.execute(
-                        "UPDATE things SET id = 'not-a-uuid', _updated_at = '0000000006000-0000-writer' WHERE id = ?1",
-                        [replaced],
-                    )?;
-                    Ok::<_, DbError>(())
-                })
+                Database::run_internal_store_write_transaction_on(
+                    conn,
+                    &invalid_tables,
+                    invalid_write_id,
+                    |tx| {
+                        tx.execute(
+                            "UPDATE things SET id = 'not-a-uuid', _updated_at = '0000000006000-0000-writer' WHERE id = ?1",
+                            [replaced],
+                        )?;
+                        Ok::<_, DbError>(())
+                    },
+                )
             })
             .await;
         let error = invalid.expect_err("invalid new UUID rejects the primary-key change");
@@ -3882,7 +4257,7 @@ mod tests {
                 })
                 .map_err(DbError::from)?;
             let pending_after = conn
-                .prepare("SELECT changeset FROM pending_changesets ORDER BY id")
+                .prepare("SELECT changeset FROM store_writes ORDER BY ordinal")
                 .and_then(|mut statement| {
                     statement
                         .query_map([], |row| row.get::<_, Vec<u8>>(0))?
@@ -3894,7 +4269,7 @@ mod tests {
             Ok(())
         })
         .await
-        .expect("invalid identity change rolls back row and journal");
+        .expect("invalid identity change rolls back row and write records");
     }
 
     /// A SQL closure that blocks for a while must not stall other tasks on the
@@ -4027,6 +4402,39 @@ mod tests {
             error.contains("device_id") && error.contains("empty"),
             "error names the empty device id: {error}",
         );
+    }
+
+    #[test]
+    fn host_sql_authorizer_is_removed_after_success_error_and_panic() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "ATTACH ':memory:' AS coven_gate_empty; \
+             CREATE TABLE coven_gate_empty.baseline (id TEXT PRIMARY KEY) STRICT; \
+             INSERT INTO coven_gate_empty.baseline VALUES ('guarded');",
+        )
+        .expect("attach guarded schema");
+        let assert_guard_removed = || {
+            let id: String = conn
+                .query_row("SELECT id FROM coven_gate_empty.baseline", [], |row| {
+                    row.get(0)
+                })
+                .expect("internal SQL can address the baseline after host SQL");
+            assert_eq!(id, "guarded");
+        };
+
+        Database::run_host_sql_on(&conn, || Ok::<_, DbError>(())).expect("successful host SQL");
+        assert_guard_removed();
+
+        let error = Database::run_host_sql_on(&conn, || Err::<(), _>(DbError("host".into())));
+        assert!(error.is_err());
+        assert_guard_removed();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Database::run_host_sql_on(&conn, || -> Result<(), DbError> { panic!("host panic") })
+                .expect("panicking host SQL closure never returns");
+        }));
+        assert!(panic.is_err());
+        assert_guard_removed();
     }
 
     #[tokio::test]

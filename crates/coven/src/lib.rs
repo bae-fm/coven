@@ -620,8 +620,9 @@ pub use coven_core::{
 // the status enum, its completed-cycle success payload, the per-cycle alert
 // bundle, the per-device activity, and the held-changeset detail the alerts carry.
 pub use coven_core::{
-    DeviceActivity, HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason,
-    SyncLoopAlerts, SyncLoopSuccess,
+    AffectedRow, CommitPosition, DeviceActivity, HeldStoreCoordinate, HeldStorePosition,
+    HeldStorePositionReason, ObjectHash, PendingWrite, PublishedPosition, SyncLoopAlerts,
+    SyncLoopSuccess, WriteBlock, WriteId, WriteReceipt, WriteStatus,
 };
 pub use sync::sync_loop::SyncLoopStatus;
 

@@ -7,7 +7,7 @@ use super::membership::MembershipChain;
 use super::storage::SyncStorage;
 use crate::blob::decl::BlobDecls;
 use crate::blob::local_cleanup::LocalBlobCleanupIntent;
-use crate::blob::{CacheFill, Provenance};
+use crate::blob::CacheFill;
 use crate::changeset::RowChange;
 use crate::database::Database;
 use crate::store_dir::StoreDir;
@@ -470,32 +470,6 @@ pub(super) fn introduced_blob_uploads(
         }
     }
     Ok(out)
-}
-
-/// The **host-provided** blobs the `changes` reference, derived per row from the
-/// declarations. The inline push uploads these before publishing the changeset:
-/// coven owns a host-provided blob's bytes (in its local store or cache), so it can
-/// upload it inline as its row reaches a changeset — provenance-based, regardless of
-/// cache fill. A user-provided blob is the user's own file, uploaded only via
-/// `make_remote` (which reads the user's path), so it is never on this inline path.
-pub(crate) fn host_provided_blobs(
-    blob_decls: &BlobDecls,
-    changes: &[RowChange],
-) -> Result<Vec<crate::blob::BlobRef>, crate::blob::decl::BlobDeclError> {
-    changes
-        .iter()
-        .filter(|change| {
-            matches!(
-                change.op,
-                crate::changeset::ChangeOp::Insert | crate::changeset::ChangeOp::Update
-            )
-        })
-        .filter_map(|change| match blob_decls.ref_from_change(change) {
-            Ok(Some(blob)) if blob.provenance == Provenance::HostProvided => Some(Ok(blob)),
-            Ok(_) => None,
-            Err(e) => Some(Err(e)),
-        })
-        .collect()
 }
 
 /// Derive every local-blob cleanup obligation from a changeset before its rows

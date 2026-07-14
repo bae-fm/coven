@@ -44,14 +44,19 @@ minted with `sql.stamp()`, the register concurrent edits are ordered by.
 
 ```rust
 let id = uuid::Uuid::new_v4().to_string();
-handle.sql(move |sql| {
-    sql.tx().execute(
+let receipt = handle.sql(move |sql| {
+    sql.execute(
         "INSERT INTO notes (id, body, _updated_at) VALUES (?1, ?2, ?3)",
         coven::rusqlite::params![id, body, sql.stamp()],
     )?;
     Ok(())
 }).await?;
 ```
+
+The receipt identifies this transaction in coven's durable write ledger.
+`LocalOnly` will never publish; `Pending` means the shared changes are committed
+locally and waiting for their Store commit. Separate `sql` calls always receive
+separate write ids and Store commits.
 
 Pure reads go through `handle.sql_read`, which runs on a read-only companion
 connection: no change capture, and reads run concurrently with the writer
@@ -69,7 +74,8 @@ handle.sync_now();
 ```
 
 `handle.write` commits a row and its file bytes in one transaction,
-`handle.subscribe_sync_status` streams what each cycle applied, and
+`handle.pending_writes` reconstructs unpublished write state after restart,
+`handle.subscribe_sync_status` exposes the current loop state, and
 `handle.invite_member` adds a member. The whole tour is the
 [example](https://coven.bae.fm/docs/example).
 

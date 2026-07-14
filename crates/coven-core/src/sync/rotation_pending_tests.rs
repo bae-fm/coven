@@ -269,7 +269,7 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
     assert_eq!(
         db.get_protocol_state("local_seq").await.unwrap(),
         None,
-        "local_seq does not advance — the pending changeset stays queued, not lost",
+        "the pending Store write stays queued while key adoption is incomplete",
     );
 }
 
@@ -367,7 +367,7 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     assert!(result.rotation_pending.is_none());
 
     let keys = changeset_keys(&home);
-    assert_eq!(keys.len(), 1, "the pending changeset drains now: {keys:?}");
+    assert_eq!(keys.len(), 1, "the pending Store write publishes: {keys:?}");
     assert_generation_two_opens_but_generation_one_does_not(&home, &keys[0], &cipher_lock, old_key);
 }
 
@@ -443,7 +443,7 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     assert_eq!(pending_rotation.pending_generation(), None);
 
     let keys = changeset_keys(&home);
-    assert_eq!(keys.len(), 1, "the pending changeset drains now: {keys:?}");
+    assert_eq!(keys.len(), 1, "the pending Store write publishes: {keys:?}");
     assert_generation_two_opens_but_generation_one_does_not(&home, &keys[0], &cipher_lock, old_key);
 }
 

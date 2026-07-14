@@ -439,9 +439,9 @@ pub async fn drop_cached_blob(
 
 /// Drop every on-device copy of a blob: its cache copies (pinned + evictable) via
 /// [`drop_cached_blob`] and its host-provided local-store copy via
-/// [`local_files::drop_blob`](crate::blob::local_files::drop_blob). The single
-/// "delete the bytes wherever they live" step shared by the apply-side delete
-/// cleanup and the host's `CovenHandle::evict_blob`.
+/// [`local_files::drop_blob`](crate::blob::local_files::drop_blob). Used only by
+/// the durable unreferenced-blob cleanup path; cache eviction calls
+/// [`drop_cached_blob`] and cannot remove unpublished local-store bytes.
 pub async fn drop_all_local_copies(
     store_dir: &StoreDir,
     namespace: &str,

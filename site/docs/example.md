@@ -86,15 +86,15 @@ async method that takes a closure over a SQL context. coven re-exports the exact
 rusqlite it owns, so use `coven::rusqlite` rather than depending on rusqlite
 directly. Bind `sql.stamp()` into the `_updated_at` column of every synced-row
 write; that value is coven's register for ordering writes across devices. The
-session attached inside the connection captures the write for the next sync
-cycle.
+transaction's rows, captured changeset, dependency frontier, write id, and
+initial publication status commit together.
 
 ```rust
 use coven::rusqlite::params;
 
-handle.sql(move |sql| {
+let receipt = handle.sql(move |sql| {
     let todo_id = uuid::Uuid::new_v4().to_string();
-    sql.tx().execute(
+    sql.execute(
         "INSERT INTO todos (id, list_id, title, done, _updated_at)
          VALUES (?1, ?2, ?3, 0, ?4)",
         params![todo_id, list_id, title, sql.stamp()],
@@ -103,6 +103,11 @@ handle.sql(move |sql| {
 })
 .await?;
 ```
+
+`receipt.value` is the closure's result. `receipt.write_id` remains stable across
+restart, and `receipt.status` is `LocalOnly` when no shared rows changed or
+`Pending` when this transaction awaits publication. One successful `sql` or
+`write` call creates one write id and one Store commit.
 
 Don't read the stamp as a wall-clock time or compare two of them as dates. It is
 an opaque clock value coven advances past pulled rows so a later local write
@@ -188,30 +193,38 @@ every write without checking.
 
 ## React to remote changes
 
-The loop emits a `SyncLoopStatus` after each cycle. The host reads it through
-`handle.subscribe_sync_status()`, a broadcast receiver. When a pull applied rows,
-`data_changed` is true and `row_changes` carries the rows so the host can refresh
-the affected views.
+The host reads the current `SyncLoopStatus` through
+`handle.subscribe_sync_status()`. The watch receiver immediately contains the
+current value and may coalesce intermediate values. A successful cycle's
+`row_changes` is therefore a refresh hint: re-read the named rows instead of
+treating it as a complete event history.
 
 ```rust
-let mut status = handle.subscribe_sync_status()?;
+let mut status = handle.subscribe_sync_status();
 tokio::spawn(async move {
-    while let Ok(s) = status.recv().await {
-        if s.data_changed {
-            if let Some(changes) = s.row_changes {
-                // changes lists the tables and rows a pull touched;
-                // map them to UI updates.
+    while status.changed().await.is_ok() {
+        match status.borrow_and_update().clone() {
+            coven::SyncLoopStatus::Succeeded(cycle) => {
+                if let Some(changes) = cycle.row_changes {
+                    // Re-read the tables and rows named by this refresh hint.
+                }
+                if let Some(message) = cycle.alerts.primary_message() {
+                    // Show the warning for this successful cycle.
+                }
             }
-        }
-        if let Some(msg) = s.error {
-            // show msg as worded; None clears it.
+            coven::SyncLoopStatus::Failed { error } => {
+                // Show the whole-cycle failure.
+            }
+            coven::SyncLoopStatus::Idle | coven::SyncLoopStatus::Started => {}
         }
     }
 });
 ```
 
-`error` holds a message coven already worded (a changeset from a newer app
-version, a file that failed to download); show it as is.
+For write-specific UI, `handle.pending_writes()` lists every unpublished write
+with affected table/primary-key identities. `handle.write_status(&write_id)` and
+`handle.subscribe_write_status(&write_id)` expose its current durable state,
+including its exact published device position or a typed semantic block.
 
 ## Attachments
 

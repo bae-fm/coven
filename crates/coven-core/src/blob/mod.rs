@@ -215,7 +215,7 @@ mod delete_tests;
 /// The host names *what* a blob is scoped to — the whole store or a derived
 /// per-scope key — never the raw key bytes. Storage and encryption consume this
 /// same type; there is no key material in it to leak.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlobScope {
     /// The store master key — every member reads it.
     Master,
@@ -255,7 +255,7 @@ impl BlobScope {
 /// The cache never enters into this: a Local blob is not a cache copy. Provenance
 /// decides which of the two Local homes holds it, and what `make_local` does to
 /// restore it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Provenance {
     /// The user's own file at a path; coven references it but does not own it
     /// (tracked as an external ref — see `local_blob_refs`). `make_local` writes
@@ -278,7 +278,7 @@ pub enum Provenance {
 /// per-device choice: device B, deciding during its own pull whether to fetch a
 /// blob, can only read the blob's declared class — it cannot see what device A
 /// chose locally.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CacheFill {
     /// Fetched into the cache on pull, right away, on every device — part of
     /// "having the store" (e.g. cover art, so the grid renders from local bytes
@@ -343,7 +343,7 @@ pub enum BlobReplacement {
 /// (`storage/local/<namespace>/<id>`); a Remote blob's device-local copy is a cache
 /// copy (`storage/pinned/<namespace>/<id>` / `storage/cache/<namespace>/<id>`, built
 /// from the validated namespace + id — see [`cache`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BlobRef {
     /// Cloud namespace, e.g. `"images"`. Becomes `{namespace}/{ab}/{cd}/{id}`
     /// under the hashed scheme, or `{namespace}/{cloud_path}` under the plain one.

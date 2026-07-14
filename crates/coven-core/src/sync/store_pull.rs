@@ -922,7 +922,7 @@ mod tests {
     use crate::sync::membership::founder_entry;
     use crate::sync::store_commit::{store_protocol_root_semantic_prefix, StoreProtocolRoot};
     use crate::sync::store_objects::append_and_verify;
-    use crate::sync::store_outbound::{drain_outbound_store_batches, stage_pending_store_batch};
+    use crate::sync::store_outbound::{drain_store_writes, prepare_pending_store_write};
     use crate::sync::test_helpers::{
         host_exec, open_test_db, open_test_db_schema, query_text, row_exists, temp_store_dir,
         test_synced_tables,
@@ -962,7 +962,7 @@ mod tests {
         keypair: &UserKeypair,
         store_dir: &StoreDir,
     ) -> CommitPosition {
-        assert!(stage_pending_store_batch(
+        assert!(prepare_pending_store_write(
             db,
             storage,
             device_id,
@@ -975,7 +975,7 @@ mod tests {
         .await
         .expect("stage causal Store commit"));
         assert_eq!(
-            drain_outbound_store_batches(db, storage)
+            drain_store_writes(db, storage)
                 .await
                 .expect("publish causal Store commit"),
             1
@@ -995,6 +995,7 @@ mod tests {
     ) -> CommitPosition {
         let commit = StoreBatchCommit::signed(
             store_root_hash,
+            crate::WriteId::from_generated(format!("test-{device_id}-1")),
             device_id.to_string(),
             1,
             None,
@@ -1525,7 +1526,7 @@ mod tests {
         let dependencies: BTreeMap<String, CommitPosition> = serde_json::from_str(
             &query_text(
                 &writer,
-                "SELECT dependencies FROM pending_changesets ORDER BY id DESC LIMIT 1",
+                "SELECT dependencies FROM store_writes ORDER BY ordinal DESC LIMIT 1",
             )
             .await,
         )
@@ -1783,6 +1784,7 @@ mod tests {
         dependencies.insert("dev-source".to_string(), fake_dependency.clone());
         let commit = StoreBatchCommit::signed(
             store_root_hash,
+            crate::WriteId::from_generated("test-dependent-1".to_string()),
             "dev-dependent".to_string(),
             1,
             None,

@@ -72,8 +72,9 @@ pub(crate) use model::write_gate;
 pub use model::Gates;
 #[cfg(test)]
 pub(crate) use model::{from_tables_call_count, reset_from_tables_call_count};
+pub(crate) use outbound::attach_empty_clone;
 pub use outbound::gate_outbound;
-pub(crate) use outbound::{combine_changesets, query_truth};
+pub(crate) use outbound::query_truth;
 
 /// [`crate::sync::session::table_columns`] with its `rusqlite::Error` adapted
 /// into the gate's error at the boundary.
@@ -154,6 +155,10 @@ pub enum GateError {
         sql: String,
     },
     Sql(String, rusqlite::Error),
+    Cleanup {
+        operation: Box<GateError>,
+        cleanup: Box<GateError>,
+    },
 }
 
 impl std::fmt::Display for GateError {
@@ -184,6 +189,12 @@ impl std::fmt::Display for GateError {
                 write!(f, "bad CREATE TABLE SQL for {table}: {sql}")
             }
             GateError::Sql(op, err) => write!(f, "{op} failed: {err}"),
+            GateError::Cleanup { operation, cleanup } => {
+                write!(
+                    f,
+                    "{operation}; temporary gate cleanup also failed: {cleanup}"
+                )
+            }
         }
     }
 }

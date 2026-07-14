@@ -112,41 +112,38 @@ an atomic deletion of the old identity and insertion of a new identity, which
 must satisfy the declared mode.
 
 Both are valid *local* migrations. The difference is only whether a device on the
-other version can still read the changesets, which is what the two version
+other version can still apply the Store packages, which is what the two version
 numbers below gate.
 
 ## `schema_version`: skip changes from a newer schema
 
-Every outgoing changeset is stamped with the producer's ladder top. On
-pull, a reader applies a changeset only when its `schema_version` is **at or below**
-the reader's own. When it sees a higher one
-([`pull_changes`](rustdoc:fn:coven::sync::pull::pull_changes)), it skips that
-changeset, **leaves its cursor where it is**, and stops pulling that device for
-this cycle; every later sequence from that device is at least as new, so nothing
-past it could apply either. Counted in `PullResult::skipped_schema`.
+Every outgoing Store commit is stamped with the producer's ladder top. Pull
+applies its package only when `schema_version` is **at or below** the reader's
+own. A higher version is counted as skipped schema, leaves the exact device
+position unmaterialized, and holds later commits in that predecessor chain.
 
-Leaving the cursor put is the point: the changeset is genuine and becomes
+Leaving the position unmaterialized is the point: the commit is genuine and becomes
 applicable the moment the app updates. The device does **not** advance past it
 (that would strand those rows; a running device does not re-bootstrap from a
 snapshot mid-life) and does **not** reconcile them from a snapshot. It re-fetches
-from the parked sequence on the next cycle after it upgrades.
+from the held sequence on the next cycle after it upgrades.
 
 Worked example. The app ships v5, which adds a `due_date` column to `todos`
 (additive) as ladder rung 5. Bob updates; Alice has not.
 
-- **Bob (v5) → Alice (v4):** Bob's changesets carry `schema_version = 5`. Alice
-  sees `5 > 4`, skips them, parks her cursor for Bob, and keeps working on her v4
+- **Bob (v5) → Alice (v4):** Bob's commits carry `schema_version = 5`. Alice
+  sees `5 > 4`, holds Bob's exact position, and keeps working on her v4
   schema. She does not see Bob's new-schema rows yet.
-- **Alice (v4) → Bob (v5):** Alice's changesets carry `schema_version = 4`. Bob
-  applies them; a newer reader understands an older changeset (v4's columns are a
+- **Alice (v4) → Bob (v5):** Alice's commits carry `schema_version = 4`. Bob
+  applies them; a newer reader understands an older package (v4's columns are a
   prefix of v5's).
 - **Alice updates to v5:** her open runs rung 5, and her next cycle re-pulls
-  Bob's changesets from the parked cursor and applies them. She converges fully.
+  Bob's commits from the held position and applies them. She converges fully.
 
 So the two versions coexist on one store. Sync stays live; the only effect is
 that the older client lags on the newer schema's rows until it upgrades, then
 catches up. No positional mismatch ever happens, because a device never applies a
-changeset stamped newer than itself.
+package stamped newer than itself.
 
 ## `min_schema_version`: the hard floor
 
@@ -154,7 +151,7 @@ The skip above keeps an old client *safe but behind*. That is the right behavior
 for an additive change. A **structural** change is different: an old client must
 not keep going at all, because (a) it could not read the new state even after
 bootstrapping, and (b) the v4 changesets it keeps *writing* would now misalign
-against the v5 shape when a v5 device applies them. The skip only protects reads
+against the v5 shape when a v5 device applies them. The hold only protects reads
 in one direction; it does nothing about the old client's writes.
 
 For that case, the release also raises the floor, the `min_schema_version` value
@@ -179,7 +176,7 @@ So the rule for a post-release schema change:
 A [snapshot](/docs/bootstrap) is a physical `VACUUM INTO` image of the
 snapshotting device's database, so its bytes hold that device's full schema
 *including* its `user_version`, and the generation's signed metadata records
-that `schema_version` alongside the cursors. A snapshot sidesteps the
+that `schema_version` alongside its exact commit coverage. A snapshot sidesteps the
 positional-changeset problem entirely: it is a SQLite file, not a positional
 row encoding, so it can faithfully represent any schema.
 

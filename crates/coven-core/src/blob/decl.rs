@@ -49,6 +49,19 @@ pub enum BlobDeclError {
     InvalidSize { table: String, value: i64 },
     /// New and old changeset walks produced different row counts.
     ChangesetWalkMismatch { old_count: usize, new_count: usize },
+    /// A blob-bearing INSERT or UPDATE has no primary key.
+    MissingPublicationPrimaryKey { table: String },
+    /// The transaction row named by a blob-bearing change is absent.
+    MissingPublicationRow { table: String, primary_key: String },
+    /// The transaction row named by a blob-bearing change no longer carries a blob.
+    MissingPublicationBlob { table: String, primary_key: String },
+    /// The transaction row carries a different blob than its change introduced.
+    PublicationBlobMismatch {
+        table: String,
+        primary_key: String,
+        changed_blob_id: String,
+        row_blob_id: String,
+    },
     /// A [`Replaceable`](BlobReplacement::Replaceable) blob's readable cloud path does not
     /// name the blob it carries, so the row's next blob would be keyed at this blob's
     /// cloud object and overwrite it. See [`cloud_path_names_blob`].
@@ -90,6 +103,27 @@ impl std::fmt::Display for BlobDeclError {
             } => write!(
                 f,
                 "blob declaration changeset walk mismatch: old={old_count}, new={new_count}"
+            ),
+            BlobDeclError::MissingPublicationPrimaryKey { table } => {
+                write!(f, "blob-bearing Store write row in {table:?} has no primary key")
+            }
+            BlobDeclError::MissingPublicationRow { table, primary_key } => write!(
+                f,
+                "blob-bearing Store write row {table:?}/{primary_key:?} is absent before commit"
+            ),
+            BlobDeclError::MissingPublicationBlob { table, primary_key } => write!(
+                f,
+                "blob-bearing Store write row {table:?}/{primary_key:?} no longer carries a blob"
+            ),
+            BlobDeclError::PublicationBlobMismatch {
+                table,
+                primary_key,
+                changed_blob_id,
+                row_blob_id,
+            } => write!(
+                f,
+                "blob-bearing Store write row {table:?}/{primary_key:?} changed from introduced blob \
+                 {changed_blob_id:?} to {row_blob_id:?} before commit"
             ),
             BlobDeclError::CloudPathNotKeyedByBlob {
                 table,
@@ -283,6 +317,14 @@ impl TableBlob {
         self.blob_ref(table, id, self.scope.clone(), cloud_path)
             .map(Some)
     }
+
+    fn size_from_row(&self, table: &str, row: &rusqlite::Row<'_>) -> Result<u64, BlobDeclError> {
+        let value = row.get::<_, i64>(self.size_col)?;
+        u64::try_from(value).map_err(|_| BlobDeclError::InvalidSize {
+            table: table.to_string(),
+            value,
+        })
+    }
 }
 
 /// Whether the readable `cloud_path` a consumer supplied names the blob `blob_id` — what
@@ -396,10 +438,11 @@ impl BlobDecls {
 
     /// Install connection-local guards that keep a blob cleanup intent exclusive
     /// until its filesystem deletion finishes. A cleanup intent is committed
-    /// before the database releases the row; while it exists, no INSERT or UPDATE
-    /// may make the same `(namespace, blob id)` live again. TEMP triggers keep this
-    /// runtime guard out of snapshots and use each declaration's resolved blob-id
-    /// column rather than assuming the row primary key carries the blob id.
+    /// before the database releases the row; while either cleanup queue holds it,
+    /// no INSERT or UPDATE may make the same `(namespace, blob id)` live again.
+    /// TEMP triggers keep this runtime guard out of snapshots and use each
+    /// declaration's resolved blob-id column rather than assuming the row primary
+    /// key carries the blob id.
     pub(crate) fn install_cleanup_guards(&self, conn: &Connection) -> Result<(), BlobDeclError> {
         for (table, blob) in &self.tables {
             let table_ident = quote_ident(table);
@@ -414,10 +457,16 @@ impl BlobDecls {
                 conn.execute_batch(&format!(
                     "CREATE TEMP TRIGGER {trigger} \
                      {event_clause} ON main.{table_ident} \
-                     WHEN NEW.{id_ident} IS NOT NULL AND EXISTS (\
-                         SELECT 1 FROM local_cleanup_intents \
-                         WHERE namespace = {namespace_literal} \
-                           AND blob_id = NEW.{id_ident}\
+                     WHEN NEW.{id_ident} IS NOT NULL AND (\
+                         EXISTS (\
+                             SELECT 1 FROM local_cleanup_intents \
+                             WHERE namespace = {namespace_literal} \
+                               AND blob_id = NEW.{id_ident}\
+                         ) OR EXISTS (\
+                             SELECT 1 FROM published_blob_drop_intents \
+                             WHERE namespace = {namespace_literal} \
+                               AND blob_id = NEW.{id_ident}\
+                         )\
                      ) \
                      BEGIN \
                          SELECT RAISE(ABORT, 'blob local cleanup in progress'); \
@@ -457,6 +506,57 @@ impl BlobDecls {
         let size = tb.size_from_change(&change.table, change)?;
         let hash = tb.hash_from_change(change);
         Ok(Some((blob, size, hash)))
+    }
+
+    /// The exact blob reference and declared size owned by an INSERT or UPDATE,
+    /// completed from that row inside the transaction that produced the change.
+    /// Changesets omit unchanged columns, so the change identifies whether this
+    /// write introduced a blob while the live transaction row supplies its full
+    /// cloud path and size before a later write can repoint or delete it.
+    pub(crate) fn publication_blob_from_change(
+        &self,
+        conn: &Connection,
+        change: &RowChange,
+    ) -> Result<Option<(BlobRef, u64)>, BlobDeclError> {
+        if !matches!(change.op, ChangeOp::Insert | ChangeOp::Update) {
+            return Ok(None);
+        }
+        let Some(tb) = self.tables.get(&change.table) else {
+            return Ok(None);
+        };
+        let Some(changed_blob) = tb.ref_from_change(&change.table, change)? else {
+            return Ok(None);
+        };
+        let pk = change
+            .pk()
+            .ok_or_else(|| BlobDeclError::MissingPublicationPrimaryKey {
+                table: change.table.clone(),
+            })?;
+        let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(&change.table));
+        let mut statement = conn.prepare(&sql)?;
+        let mut rows = statement.query([pk])?;
+        let row = rows
+            .next()?
+            .ok_or_else(|| BlobDeclError::MissingPublicationRow {
+                table: change.table.clone(),
+                primary_key: pk.to_string(),
+            })?;
+        let blob = tb.ref_from_row(&change.table, row)?.ok_or_else(|| {
+            BlobDeclError::MissingPublicationBlob {
+                table: change.table.clone(),
+                primary_key: pk.to_string(),
+            }
+        })?;
+        if blob.id != changed_blob.id {
+            return Err(BlobDeclError::PublicationBlobMismatch {
+                table: change.table.clone(),
+                primary_key: pk.to_string(),
+                changed_blob_id: changed_blob.id,
+                row_blob_id: blob.id,
+            });
+        }
+        let size = tb.size_from_row(&change.table, row)?;
+        Ok(Some((blob, size)))
     }
 
     /// Every blob the rows currently in `conn` reference — the snapshot-bootstrap

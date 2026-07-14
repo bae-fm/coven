@@ -96,7 +96,7 @@ The phone inserts a row. It commits on-device; nothing waits on a network.
 
 ```rust
 handle.sql(|sql| {
-    sql.tx().execute("INSERT …", params)?;
+    sql.execute("INSERT …", params)?;
     Ok(())
 }).await?;
 ```

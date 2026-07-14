@@ -220,18 +220,24 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
     commit_reached.notified().await;
     let tables = target.synced_tables().to_vec();
     let stamper = target.stamper();
+    let write_id = target.new_write_id();
     let host_stamp = target
         .call(move |conn| {
-            crate::database::Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
-                let stamp = stamper.stamp();
-                tx.execute(
-                    "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+            crate::database::Database::run_internal_store_write_transaction_on(
+                conn,
+                &tables,
+                write_id,
+                |tx| {
+                    let stamp = stamper.stamp();
+                    tx.execute(
+                        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
                          VALUES ('local-boundary', 'Local', NULL, ?1, '2026-01-01')",
-                    [stamp.as_str()],
-                )
-                .map_err(crate::database::DbError::from)?;
-                Ok::<String, crate::database::DbError>(stamp)
-            })
+                        [stamp.as_str()],
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                    Ok::<String, crate::database::DbError>(stamp)
+                },
+            )
         })
         .await
         .expect("queued host write commits");
@@ -685,10 +691,9 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     )
     .expect("open db with protocol_state-blocking trigger");
 
-    // A journaled local insert so the cycle has an outgoing changeset to stage —
-    // the `set_protocol_state("staged_seq", ...)` that stages it is what the trigger
-    // aborts. (Even with no outgoing, the unconditional HLC high-water persist would
-    // abort; either way the cycle fails after the write has journaled.)
+    // A local insert gives the cycle a pending Store write. The trigger also blocks
+    // the unconditional HLC high-water persist, so the cycle fails after the write
+    // commits to the ledger.
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \

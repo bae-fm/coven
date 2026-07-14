@@ -388,8 +388,9 @@ pub async fn exec(db: &Database, sql: &str) {
 pub async fn host_exec(db: &Database, sql: &str) {
     let sql = sql.to_string();
     let tables = db.synced_tables().to_vec();
+    let write_id = db.new_write_id();
     db.call(move |conn| {
-        Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+        Database::run_internal_store_write_transaction_on(conn, &tables, write_id, |tx| {
             tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from)
         })
     })
@@ -1218,6 +1219,7 @@ impl MockSyncStorage {
         };
         let commit = crate::sync::store_commit::StoreBatchCommit::signed(
             self.store_root_hash(),
+            crate::WriteId::from_generated(format!("test-{device_id}-{seq}")),
             device_id.to_string(),
             seq,
             previous,

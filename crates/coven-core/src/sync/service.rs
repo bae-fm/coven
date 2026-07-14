@@ -15,34 +15,43 @@
 //! wrapped in a journaled transaction is ever captured, so applies need no special
 //! handling.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use tracing::{debug, error, info, warn};
 
 use crate::blob::{BlobRef, CacheFill, Provenance};
 use crate::database::{
-    Database, StoreBatchBlobDisposition, StoreBatchBlobDrop, StoreBatchCompletion,
-    StoreBatchLocalCleanup, StoreBlobManifest, StoreBlobManifestEntry,
-    StoreConsumedMakeRemoteIntent,
+    Database, StoreBatchCompletion, StoreBatchLocalCleanup, StoreBlobManifest,
+    StoreConsumedMakeRemoteIntent, StoreWriteBlobFact, StoreWriteBlobFacts,
+    StoreWriteHostBlobState, StoreWriteUserBlobState,
 };
 use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
 use crate::sync::session::SyncedTable;
 
 use super::membership::{MembershipChain, MembershipCoord};
-use super::publish_blobs::{
-    ensure_publishable_blobs, publish_blobs_from_changes, PublishBlobError,
-};
 use super::storage::SyncStorage;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeferredLocalBlobDisposition {
     Drop,
     Cache,
     Pin,
 }
 
-#[derive(Clone)]
+impl DeferredLocalBlobDisposition {
+    pub(crate) fn as_db(self) -> &'static str {
+        match self {
+            Self::Drop => "drop",
+            Self::Cache => "cache",
+            Self::Pin => "pin",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeferredLocalBlobDrop {
     pub namespace: String,
     pub id: String,
@@ -62,41 +71,59 @@ pub(crate) struct PreparedStorePayload {
 pub(crate) async fn prepare_store_payload(
     db: &Database,
     storage: &dyn SyncStorage,
-    changeset: &[u8],
+    blob_facts: &StoreWriteBlobFacts,
     keypair: &UserKeypair,
     store_dir: &StoreDir,
     membership_chain: Option<&MembershipChain>,
     cancel: Option<&HostUploadCloud<'_>>,
 ) -> Result<PreparedStorePayload, SyncCycleError> {
-    let changes = crate::changeset::walk(changeset).map_err(SyncCycleError::AssetScan)?;
-    let blob_decls = db.blob_decls();
-    let publish_blobs = publish_blobs_from_changes(&blob_decls, &changes)?;
-    let host_blobs = crate::sync::pull::host_provided_blobs(&blob_decls, &changes)
-        .map_err(|error| SyncCycleError::AssetScan(error.to_string()))?;
-    let make_remote_intents = make_remote_intents_for_blobs(db, &host_blobs).await?;
     let mut drops = Vec::new();
     let mut consumed = HashSet::new();
-    for blob in host_blobs {
-        let intent = make_remote_intents.get(&(blob.namespace.clone(), blob.id.clone()));
-        let retain_pinned = intent.is_some_and(|intent| intent.retain_pinned);
-        let uploaded = upload_host_provided_blob(db, storage, store_dir, &blob, cancel).await?;
-        if let Some(intent) = intent {
-            consumed.insert((intent.root_table.clone(), intent.root_id.clone()));
+    let mut manifest = Vec::with_capacity(blob_facts.blobs.len());
+    for fact in &blob_facts.blobs {
+        let blob = fact.blob();
+        match fact {
+            StoreWriteBlobFact::UserProvided { state, .. } => {
+                if *state == StoreWriteUserBlobState::Local {
+                    return Err(SyncCycleError::LocalUserBlob {
+                        namespace: blob.namespace.clone(),
+                        id: blob.id.clone(),
+                    });
+                }
+                let exists = storage
+                    .blob_exists(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
+                    .await
+                    .map_err(|error| SyncCycleError::AssetUpload(error.to_string()))?;
+                if !exists {
+                    return Err(SyncCycleError::MissingBlob {
+                        namespace: blob.namespace.clone(),
+                        id: blob.id.clone(),
+                    });
+                }
+            }
+            StoreWriteBlobFact::HostProvided { size, state, .. } => {
+                let retain_pinned = match state {
+                    StoreWriteHostBlobState::Ordinary => false,
+                    StoreWriteHostBlobState::MakeRemote {
+                        root_table,
+                        root_id,
+                        retain_pinned,
+                    } => {
+                        consumed.insert((root_table.clone(), root_id.clone()));
+                        *retain_pinned
+                    }
+                };
+                let uploaded =
+                    upload_host_provided_blob_exact(db, storage, store_dir, blob, *size, cancel)
+                        .await?;
+                if let Some(drop) =
+                    uploaded.deferred_local_blob_drop(local_blob_disposition(blob, retain_pinned))
+                {
+                    drops.push(drop);
+                }
+            }
         }
-        if let Some(drop) =
-            uploaded.deferred_local_blob_drop(local_blob_disposition(&blob, retain_pinned))
-        {
-            drops.push(store_blob_drop(drop));
-        }
-    }
-    ensure_publishable_blobs(db, storage, &publish_blobs)
-        .await
-        .map_err(SyncCycleError::from)?;
-
-    let mut manifest = Vec::with_capacity(publish_blobs.len());
-    for blob in publish_blobs {
-        let blob = with_row_cloud_path(db, &blob).await?;
-        manifest.push(store_blob_manifest_entry(blob));
+        manifest.push(blob.clone());
     }
     manifest.sort_by(|left, right| (&left.namespace, &left.id).cmp(&(&right.namespace, &right.id)));
     let mut consumed: Vec<_> = consumed
@@ -118,38 +145,6 @@ pub(crate) async fn prepare_store_payload(
         },
         membership_grant: resolve_write_grant(membership_chain, keypair),
     })
-}
-
-fn store_blob_manifest_entry(blob: BlobRef) -> StoreBlobManifestEntry {
-    StoreBlobManifestEntry {
-        namespace: blob.namespace,
-        id: blob.id,
-        scope: blob.scope.to_outbox_str(),
-        cloud_path: blob.cloud_path,
-        provenance: match blob.provenance {
-            Provenance::UserProvided => "user_provided",
-            Provenance::HostProvided => "host_provided",
-        }
-        .to_string(),
-        fill: match blob.fill {
-            CacheFill::CacheEager => "cache_eager",
-            CacheFill::CacheLazy => "cache_lazy",
-        }
-        .to_string(),
-    }
-}
-
-fn store_blob_drop(drop: DeferredLocalBlobDrop) -> StoreBatchBlobDrop {
-    StoreBatchBlobDrop {
-        namespace: drop.namespace,
-        id: drop.id,
-        size: drop.size,
-        disposition: match drop.disposition {
-            DeferredLocalBlobDisposition::Drop => StoreBatchBlobDisposition::Drop,
-            DeferredLocalBlobDisposition::Cache => StoreBatchBlobDisposition::Cache,
-            DeferredLocalBlobDisposition::Pin => StoreBatchBlobDisposition::Pin,
-        },
-    }
 }
 
 pub async fn complete_host_provided_make_remotes(
@@ -385,9 +380,18 @@ async fn upload_host_provided_blob(
     blob: &BlobRef,
     cancel: Option<&HostUploadCloud<'_>>,
 ) -> Result<UploadedHostBlob, SyncCycleError> {
-    let blob = &with_row_cloud_path(db, blob).await?;
     let expected_size = expected_blob_size(db, blob).await?;
+    upload_host_provided_blob_exact(db, storage, store_dir, blob, expected_size, cancel).await
+}
 
+async fn upload_host_provided_blob_exact(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    store_dir: &StoreDir,
+    blob: &BlobRef,
+    expected_size: u64,
+    cancel: Option<&HostUploadCloud<'_>>,
+) -> Result<UploadedHostBlob, SyncCycleError> {
     let local = local_host_blob(store_dir, blob, expected_size).await?;
     // Every cloud key names the blob standing at it — the hashed scheme carries the id in
     // the key, and a browsable home's readable path is required to name it
@@ -430,10 +434,10 @@ async fn upload_host_provided_blob(
                 "host-provided blob is in neither the local store nor the cache; \
                  aborting push so the changeset is not published without its blob"
             );
-            return Err(SyncCycleError::BlobMissing(format!(
-                "host-provided blob {} is in neither the local store nor the cache",
-                blob.id
-            )));
+            return Err(SyncCycleError::MissingBlob {
+                namespace: blob.namespace.clone(),
+                id: blob.id.clone(),
+            });
         }
     }
 
@@ -484,25 +488,6 @@ async fn expected_blob_size(db: &Database, blob: &BlobRef) -> Result<u64, SyncCy
             "cannot read expected size for blob {}/{}: no carrying row",
             blob.namespace, blob.id
         ))
-    })
-}
-
-/// `blob` with its readable cloud path — the key a browsable home stores it at — read
-/// off its carrying row, the same source its size and content hash come from. A ref
-/// derived from a changeset row can be missing one the row has: a changeset UPDATE
-/// reports only the columns whose values changed, so a row repointed at a new blob
-/// carries the new blob id and not the (unchanged) cloud path. The row is the one
-/// source that always holds it.
-pub(super) async fn with_row_cloud_path(
-    db: &Database,
-    blob: &BlobRef,
-) -> Result<BlobRef, SyncCycleError> {
-    let cloud_path = crate::blob::cache::row_cloud_path(db, blob)
-        .await
-        .map_err(|e| SyncCycleError::AssetScan(e.to_string()))?;
-    Ok(BlobRef {
-        cloud_path,
-        ..blob.clone()
     })
 }
 
@@ -691,10 +676,12 @@ async fn finish_host_provided_make_remote(
     // disposition (keyed by that sequence) is applied only after the row that
     // shares the blob is durable — matching the inline-push path.
     let intent_seq = local_seq + 1;
+    let write_id = db.new_write_id();
     db.call(move |conn| {
         crate::blob::transition::commit_make_remote_flip(
             conn,
             &tables,
+            write_id,
             &root.intent.root_table,
             &root.gate_column,
             &root.intent.root_id,
@@ -707,59 +694,22 @@ async fn finish_host_provided_make_remote(
     .map_err(|e| SyncCycleError::AssetUpload(e.0))
 }
 
-async fn make_remote_intents_for_blobs(
-    db: &Database,
-    blobs: &[BlobRef],
-) -> Result<HashMap<(String, String), InlineMakeRemoteIntent>, SyncCycleError> {
-    if blobs.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let gates = db.gates();
-    let decls = db.blob_decls();
-    let blobs = blobs.to_vec();
-    db.call(move |conn| {
-        let mut out = HashMap::new();
-        for blob in blobs {
-            let Some((table, pk)) = decls
-                .row_for_blob_in_namespace(conn, &blob.namespace, &blob.id)
-                .map_err(|e| crate::database::DbError(e.to_string()))?
-            else {
-                continue;
-            };
-            let Some((root_table, root_id)) = gates
-                .resolve_root_of(conn, &table, &pk)
-                .map_err(|e| crate::database::DbError(e.to_string()))?
-            else {
-                continue;
-            };
-            let Some(retain_pinned) =
-                Database::make_remote_intent_retain_pinned(conn, &root_table, &root_id)?
-            else {
-                continue;
-            };
-            out.insert(
-                (blob.namespace, blob.id),
-                InlineMakeRemoteIntent {
-                    root_table,
-                    root_id,
-                    retain_pinned,
-                },
-            );
-        }
-        Ok(out)
-    })
-    .await
-    .map_err(|e| SyncCycleError::AssetScan(e.0))
-}
-
 #[derive(Debug)]
 pub enum SyncCycleError {
     Gate(String),
     AssetScan(String),
     AssetUpload(String),
-    /// An outgoing changeset references a blob whose local file is missing, so the
-    /// changeset cannot be published without stranding pullers on a 404.
-    BlobMissing(String),
+    /// An outgoing changeset still names a user-owned local file.
+    LocalUserBlob {
+        namespace: String,
+        id: String,
+    },
+    /// An outgoing changeset references bytes that are absent from their required
+    /// publication location.
+    MissingBlob {
+        namespace: String,
+        id: String,
+    },
 }
 
 impl std::fmt::Display for SyncCycleError {
@@ -768,23 +718,20 @@ impl std::fmt::Display for SyncCycleError {
             SyncCycleError::Gate(e) => write!(f, "gate error: {e}"),
             SyncCycleError::AssetScan(e) => write!(f, "asset scan error: {e}"),
             SyncCycleError::AssetUpload(e) => write!(f, "asset upload error: {e}"),
-            SyncCycleError::BlobMissing(e) => write!(f, "blob missing: {e}"),
+            SyncCycleError::LocalUserBlob { namespace, id } => {
+                write!(
+                    f,
+                    "user-provided blob {namespace}/{id} still has a local external ref"
+                )
+            }
+            SyncCycleError::MissingBlob { namespace, id } => {
+                write!(
+                    f,
+                    "blob {namespace}/{id} is absent from its publication location"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for SyncCycleError {}
-
-impl From<PublishBlobError> for SyncCycleError {
-    fn from(e: PublishBlobError) -> Self {
-        match e {
-            PublishBlobError::LocalUserProvided { .. } | PublishBlobError::MissingRemote { .. } => {
-                SyncCycleError::BlobMissing(e.to_string())
-            }
-            PublishBlobError::ChangesetScan(_) => SyncCycleError::AssetScan(e.to_string()),
-            PublishBlobError::ExternalLookup { .. } | PublishBlobError::RemoteCheck { .. } => {
-                SyncCycleError::AssetUpload(e.to_string())
-            }
-        }
-    }
-}

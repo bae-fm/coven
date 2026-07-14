@@ -522,6 +522,7 @@ pub(crate) enum MakeRemoteCompletion {
 pub(crate) fn commit_make_remote_flip(
     conn: &Connection,
     tables: &[SyncedTable],
+    write_id: crate::WriteId,
     root_table: &str,
     gate_column: &str,
     root_id: &str,
@@ -529,7 +530,7 @@ pub(crate) fn commit_make_remote_flip(
     user_blob_ids: &[String],
     completion: MakeRemoteCompletion,
 ) -> Result<(), DbError> {
-    Database::run_pending_journaled_transaction_on(conn, tables, |tx| {
+    Database::run_internal_store_write_transaction_on(conn, tables, write_id, |tx| {
         crate::sync::gate::write_gate(tx, root_table, gate_column, true, stamp, root_id)
             .map_err(DbError::from)?;
         for id in user_blob_ids {
@@ -736,8 +737,9 @@ pub async fn make_local(
     // durable inside this commit, so a crash right after can never leave the root
     // Local with the cloud blobs un-tombstoned.
     let tables = db.synced_tables().to_vec();
+    let write_id = db.new_write_id();
     db.call(move |conn| {
-        Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+        Database::run_internal_store_write_transaction_on(conn, &tables, write_id, |tx| {
             crate::sync::gate::write_gate(
                 tx,
                 &root_table_owned,

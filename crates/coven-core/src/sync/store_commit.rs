@@ -13,6 +13,7 @@ use super::membership::{
 };
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::CopyId;
+use crate::WriteId;
 
 pub const STORE_PROTOCOL_VERSION: u32 = 1;
 
@@ -111,6 +112,7 @@ pub struct StoreBatchCommit {
     pub store_root_hash: ObjectHash,
     pub device_id: String,
     pub author_pubkey: String,
+    pub write_id: WriteId,
     pub seq: u64,
     pub previous_commit_hash: Option<ObjectHash>,
     pub dependencies: BTreeMap<String, CommitPosition>,
@@ -125,6 +127,7 @@ struct CommitSignedFields<'a> {
     store_root_hash: ObjectHash,
     device_id: &'a str,
     author_pubkey: &'a str,
+    write_id: &'a WriteId,
     seq: u64,
     previous_commit_hash: Option<ObjectHash>,
     dependencies: &'a BTreeMap<String, CommitPosition>,
@@ -136,6 +139,7 @@ impl StoreBatchCommit {
     #[allow(clippy::too_many_arguments)]
     pub fn signed(
         store_root_hash: ObjectHash,
+        write_id: WriteId,
         device_id: String,
         seq: u64,
         previous_commit_hash: Option<ObjectHash>,
@@ -177,6 +181,7 @@ impl StoreBatchCommit {
             store_root_hash,
             device_id,
             author_pubkey,
+            write_id,
             seq,
             previous_commit_hash,
             dependencies,
@@ -195,6 +200,7 @@ impl StoreBatchCommit {
             store_root_hash: self.store_root_hash,
             device_id: &self.device_id,
             author_pubkey: &self.author_pubkey,
+            write_id: &self.write_id,
             seq: self.seq,
             previous_commit_hash: self.previous_commit_hash,
             dependencies: &self.dependencies,
@@ -1409,6 +1415,7 @@ mod tests {
         let package = b"package".to_vec();
         let commit = StoreBatchCommit::signed(
             store_protocol_root.object_hash(),
+            WriteId::from_generated("canonical-write".to_string()),
             "device-a".to_string(),
             1,
             None,

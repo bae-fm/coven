@@ -77,15 +77,23 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
         .call(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT namespace, blob_id FROM local_cleanup_intents \
+                    "SELECT intent.namespace, intent.blob_id, EXISTS (\
+                         SELECT 1 FROM store_write_blob_leases lease \
+                         WHERE lease.namespace = intent.namespace \
+                           AND lease.blob_id = intent.blob_id\
+                     ) \
+                     FROM local_cleanup_intents intent \
                      ORDER BY namespace, blob_id",
                 )
                 .map_err(DbError::from)?;
             let rows = stmt
                 .query_map([], |row| {
-                    Ok(LocalBlobCleanupIntent::new(
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
+                    Ok((
+                        LocalBlobCleanupIntent::new(
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                        ),
+                        row.get::<_, bool>(2)?,
                     ))
                 })
                 .map_err(DbError::from)?;
@@ -94,7 +102,11 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
         .await?;
 
     let mut pending = false;
-    for intent in intents {
+    for (intent, leased) in intents {
+        if leased {
+            pending = true;
+            continue;
+        }
         #[cfg(any(test, feature = "test-utils"))]
         db.reach_test_point(
             crate::database::DatabaseTestPoint::LocalBlobCleanupBeforeFilesystem {

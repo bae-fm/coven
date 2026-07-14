@@ -54,6 +54,7 @@ pub struct InMemoryCloudHome {
     append_count: Arc<AtomicUsize>,
     fail_append_before: Arc<AtomicUsize>,
     fail_append_after: Arc<AtomicUsize>,
+    corrupt_append_readback: Arc<AtomicUsize>,
     append_pause: Arc<Mutex<Option<AppendPause>>>,
     listing_coverage: Arc<Mutex<ListingCoverage>>,
     appended_delete_count: Arc<AtomicUsize>,
@@ -73,6 +74,7 @@ impl InMemoryCloudHome {
             append_count: Arc::new(AtomicUsize::new(0)),
             fail_append_before: Arc::new(AtomicUsize::new(0)),
             fail_append_after: Arc::new(AtomicUsize::new(0)),
+            corrupt_append_readback: Arc::new(AtomicUsize::new(0)),
             append_pause: Arc::new(Mutex::new(None)),
             listing_coverage: Arc::new(Mutex::new(ListingCoverage::CompleteAtScan)),
             appended_delete_count: Arc::new(AtomicUsize::new(0)),
@@ -119,6 +121,14 @@ impl InMemoryCloudHome {
         assert!(call > 0, "append call numbers are 1-based");
         self.append_count.store(0, Ordering::SeqCst);
         self.fail_append_after.store(call, Ordering::SeqCst);
+    }
+
+    /// Reset the immutable-append counter and replace the selected physical
+    /// copy before its immediate verification read.
+    pub fn corrupt_append_readback_on_call(&self, call: usize) {
+        assert!(call > 0, "append call numbers are 1-based");
+        self.append_count.store(0, Ordering::SeqCst);
+        self.corrupt_append_readback.store(call, Ordering::SeqCst);
     }
 
     /// Pause after the selected immutable append is physically visible. The
@@ -339,6 +349,10 @@ impl CloudHome for InMemoryCloudHome {
         let bytes = body.collect().await?;
         progress(bytes.len() as u64);
         let appended = self.insert_appended_candidate(full_logical_key, bytes);
+        if self.corrupt_append_readback.load(Ordering::SeqCst) == call {
+            self.corrupt_append_readback.store(0, Ordering::SeqCst);
+            self.replace_appended_candidate(&appended, b"corrupt readback".to_vec());
+        }
         let pause = self
             .append_pause
             .lock()

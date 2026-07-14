@@ -60,8 +60,8 @@ unsafe fn extract_value(
     value_to_string(val)
 }
 
-/// A changegroup: accumulates changes (by iterator position or whole changeset)
-/// and concatenates/dedups them into one output changeset.
+/// A changegroup: accumulates changes by iterator position and deduplicates them
+/// into one output changeset.
 pub(super) struct Changegroup {
     raw: *mut ffi::sqlite3_changegroup,
 }
@@ -101,21 +101,6 @@ impl Changegroup {
         let rc = ffi::sqlite3changegroup_add_change(self.raw, iter);
         if rc != ffi::SQLITE_OK as c_int {
             return Err(GateError::Ffi("sqlite3changegroup_add_change", rc));
-        }
-        Ok(())
-    }
-
-    /// Append a complete changeset.
-    pub(super) fn add_changeset(&self, changeset: &[u8]) -> Result<(), GateError> {
-        let rc = unsafe {
-            ffi::sqlite3changegroup_add(
-                self.raw,
-                changeset.len() as c_int,
-                changeset.as_ptr() as *mut c_void,
-            )
-        };
-        if rc != ffi::SQLITE_OK as c_int {
-            return Err(GateError::Ffi("sqlite3changegroup_add", rc));
         }
         Ok(())
     }

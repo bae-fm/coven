@@ -104,7 +104,7 @@ fn cloud_test_storage(
     )
 }
 
-/// Stage and publish exact package bytes through the durable Store outbox.
+/// Publish exact package bytes through the durable Store write ledger.
 async fn sync_for_test<S: TestStoreStorage>(
     device_id: &str,
     db: &crate::database::Database,
@@ -141,7 +141,7 @@ async fn sync_for_test<S: TestStoreStorage>(
     let membership = crate::sync::pull::load_cycle_membership(storage, db)
         .await
         .map_err(|error| error.to_string())?;
-    let staged = crate::sync::store_outbound::stage_pending_store_batch(
+    let prepared = crate::sync::store_outbound::prepare_pending_store_write(
         db,
         storage,
         device_id,
@@ -153,10 +153,10 @@ async fn sync_for_test<S: TestStoreStorage>(
     )
     .await
     .map_err(|error| error.to_string())?;
-    if !staged {
+    if !prepared {
         return Ok(None);
     }
-    crate::sync::store_outbound::drain_outbound_store_batches(db, storage)
+    crate::sync::store_outbound::drain_store_writes(db, storage)
         .await
         .map_err(|error| error.to_string())?;
     db.latest_local_store_position()
@@ -567,40 +567,46 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
     pull_into(&target, &storage, "dev2", &store_dir).await;
 
     let tables = target.synced_tables().to_vec();
+    let write_id = target.new_write_id();
     target
         .call(move |conn| {
-            crate::database::Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
-                let remote_row: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM notes WHERE id = 'remote')",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .map_err(crate::database::DbError::from)?;
-                let materialized: Option<u64> = tx
-                    .query_row(
-                        "SELECT seq FROM materialized_commits WHERE device_id = 'dev1'",
-                        [],
-                        |row| row.get::<_, i64>(0).map(|seq| seq as u64),
-                    )
-                    .optional()
-                    .map_err(crate::database::DbError::from)?;
-                assert!(remote_row, "the host transaction observes the remote row");
-                assert_eq!(
-                    materialized,
-                    Some(1),
-                    "the same database cut observes the row's materialized position",
-                );
-                tx.execute(
-                    "INSERT INTO notes \
+            crate::database::Database::run_internal_store_write_transaction_on(
+                conn,
+                &tables,
+                write_id,
+                |tx| {
+                    let remote_row: bool = tx
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM notes WHERE id = 'remote')",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .map_err(crate::database::DbError::from)?;
+                    let materialized: Option<u64> = tx
+                        .query_row(
+                            "SELECT seq FROM materialized_commits WHERE device_id = 'dev1'",
+                            [],
+                            |row| row.get::<_, i64>(0).map(|seq| seq as u64),
+                        )
+                        .optional()
+                        .map_err(crate::database::DbError::from)?;
+                    assert!(remote_row, "the host transaction observes the remote row");
+                    assert_eq!(
+                        materialized,
+                        Some(1),
+                        "the same database cut observes the row's materialized position",
+                    );
+                    tx.execute(
+                        "INSERT INTO notes \
                          (id, title, body, _updated_at, created_at) \
                          VALUES ('local', 'Local', NULL, \
                                  '0000000002000-0000-dev2', '2026-01-01')",
-                    [],
-                )
-                .map(|_| ())
-                .map_err(crate::database::DbError::from)
-            })
+                        [],
+                    )
+                    .map(|_| ())
+                    .map_err(crate::database::DbError::from)
+                },
+            )
         })
         .await
         .expect("host write after remote apply");
@@ -2154,11 +2160,8 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
     );
 }
 
-/// A changeset that references a blob whose local file is missing must abort the
-/// cycle, not skip the upload and publish the row anyway. `sync` returns the
-/// outgoing changeset for the caller to push; aborting here (Err) is what keeps
-/// the caller from publishing a row whose blob was never uploaded — every puller
-/// would 404 on that blob forever.
+/// A changeset that references absent blob bytes becomes durably blocked instead
+/// of publishing a row that every puller would fail to materialize.
 #[tokio::test]
 async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
     let storage = MockSyncStorage::new();
@@ -2193,11 +2196,21 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
         &ld1,
     )
     .await;
-    let err = result.err();
+    let err = result.expect_err("missing blob blocks Store publication");
     assert!(
-        err.as_deref()
-            .is_some_and(|error| error.contains("p1ab") && error.contains("blob missing")),
-        "an unstaged blob must abort Store publication, got {err:?}",
+        err.contains(
+            "outbound Store preparation failed: blob photos/p1ab is absent from its publication location"
+        ),
+        "an absent blob must abort Store publication, got {err:?}",
+    );
+    let pending = db1.pending_writes().await.expect("read blocked write");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].status,
+        crate::WriteStatus::Blocked(crate::WriteBlock::MissingBlob {
+            namespace: "photos".to_string(),
+            id: "p1ab".to_string(),
+        }),
     );
 }
 
@@ -3663,26 +3676,34 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     reached_filesystem.notified().await;
     let tables = target.synced_tables().to_vec();
     let update_tables = tables.clone();
+    let insert_write_id = target.new_write_id();
+    let update_write_id = target.new_write_id();
     let host_write = target
         .call(move |conn| {
-            crate::database::Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
-                tx.execute(
-                    "INSERT INTO note_photos \
+            crate::database::Database::run_internal_store_write_transaction_on(
+                conn,
+                &tables,
+                insert_write_id,
+                |tx| {
+                    tx.execute(
+                        "INSERT INTO note_photos \
                          (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
                          VALUES ('new-row', 'n1', 'cover', 9, NULL, 'cleanup-race', \
                                  '0000000002000-0000-dev2', '2026-01-01')",
-                    [],
-                )
-                .map(|_| ())
-                .map_err(crate::database::DbError::from)
-            })
+                        [],
+                    )
+                    .map(|_| ())
+                    .map_err(crate::database::DbError::from)
+                },
+            )
         })
         .await;
     let host_update = target
         .call(move |conn| {
-            crate::database::Database::run_pending_journaled_transaction_on(
+            crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &update_tables,
+                update_write_id,
                 |tx| {
                     tx.execute(
                         "UPDATE note_photos SET blob_id = 'cleanup-race', \
@@ -3778,19 +3799,25 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
     assert_eq!(points.recv().await, Some(before_filesystem));
 
     let tables = target.synced_tables().to_vec();
+    let write_id = target.new_write_id();
     let host_re_reference = target
         .call(move |conn| {
-            crate::database::Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
-                tx.execute(
-                    "INSERT INTO note_photos \
+            crate::database::Database::run_internal_store_write_transaction_on(
+                conn,
+                &tables,
+                write_id,
+                |tx| {
+                    tx.execute(
+                        "INSERT INTO note_photos \
                      (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
                      VALUES ('blocked-row', 'n1', 'cover', 9, NULL, 'shared-intent', \
                              '0000000002000-0000-dev2', '2026-01-01')",
-                    [],
-                )
-                .map(|_| ())
-                .map_err(crate::database::DbError::from)
-            })
+                        [],
+                    )
+                    .map(|_| ())
+                    .map_err(crate::database::DbError::from)
+                },
+            )
         })
         .await;
     assert!(

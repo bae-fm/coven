@@ -338,7 +338,7 @@ mod tests {
         StoreDeviceRegistration, StoreDeviceRegistrationState,
     };
     use crate::sync::store_objects::{append_and_verify, load_commit_slot, load_package};
-    use crate::sync::store_outbound::{drain_outbound_store_batches, stage_pending_store_batch};
+    use crate::sync::store_outbound::{drain_store_writes, prepare_pending_store_write};
     use crate::sync::test_helpers::{
         bootstrap_chain, host_exec, open_test_db, pubkey_hex, publish_test_store_protocol_root,
         temp_store_dir,
@@ -403,7 +403,7 @@ mod tests {
         )
         .await;
         let (_temp, store_dir) = temp_store_dir();
-        assert!(stage_pending_store_batch(
+        assert!(prepare_pending_store_write(
             &db,
             &storage,
             "dev-owner",
@@ -415,10 +415,7 @@ mod tests {
         )
         .await
         .unwrap());
-        assert_eq!(
-            drain_outbound_store_batches(&db, &storage).await.unwrap(),
-            1
-        );
+        assert_eq!(drain_store_writes(&db, &storage).await.unwrap(), 1);
         let coverage = db.materialized_frontier().await.unwrap();
         super::super::store_snapshot::push_store_snapshot(
             &storage,
