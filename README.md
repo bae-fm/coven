@@ -20,22 +20,30 @@ Open a store, declaring the tables that sync and the migration ladder that
 builds your schema. Tables you don't declare stay local to the device.
 
 ```rust
-use coven::{Coven, Migration, SyncedTable};
+use coven::{Coven, Migration, RowIdentity, SyncedTable};
 
 let handle = Coven::builder(config)
     .synced_tables(vec![
-        SyncedTable::new("notes"),
-        SyncedTable::new("photos").carries_blob(photo_blob_decl),
+        SyncedTable::new("notes", RowIdentity::IndependentUuid),
+        SyncedTable::new("photos", RowIdentity::IndependentUuid)
+            .carries_blob(photo_blob_decl),
     ])
     .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
     .open()?;
 ```
+
+`(table, id)` identifies one logical row across every device. Independently
+created rows use canonical UUIDv4 or UUIDv7 ids; `RowIdentity::SharedKey` is for
+application keys whose equal values intentionally merge as one row. Changing a
+primary key removes the old identity and inserts the new validated identity in
+the same transaction.
 
 Write ordinary SQL through the handle. Your closure gets a transaction; coven
 captures what changed when it commits. Synced rows carry an `_updated_at`
 minted with `sql.stamp()`, the register concurrent edits are ordered by.
 
 ```rust
+let id = uuid::Uuid::new_v4().to_string();
 handle.sql(move |sql| {
     sql.tx().execute(
         "INSERT INTO notes (id, body, _updated_at) VALUES (?1, ?2, ?3)",

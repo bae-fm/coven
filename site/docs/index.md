@@ -84,16 +84,22 @@ your ladder, and returns one handle. Tables you don't list stay local to the
 device.
 
 ```rust
-use coven::{Coven, Migration, SyncedTable};
+use coven::{Coven, Migration, RowIdentity, SyncedTable};
 
 let handle = Coven::builder(config)
     .synced_tables(vec![
-        SyncedTable::new("todos"),
-        SyncedTable::new("todo_attachments"),
+        SyncedTable::new("todos", RowIdentity::IndependentUuid),
+        SyncedTable::new("todo_attachments", RowIdentity::IndependentUuid),
     ])
     .migrations(vec![Migration::sql(1, "initial", MY_SCHEMA)])
     .open()?;
 ```
+
+The identity argument states what equal ids mean across devices. Use
+`IndependentUuid` with canonical UUIDv4 or UUIDv7 ids for independently created
+rows. Use `SharedKey` only when equal application keys intentionally name and
+merge as one logical row. Changing a primary key removes the old identity and
+inserts the new validated identity atomically.
 
 **Write normally, through the handle.** Your closure gets a transaction;
 coven captures what changed when it commits. Synced rows carry an
@@ -101,6 +107,7 @@ coven captures what changed when it commits. Synced rows carry an
 across devices.
 
 ```rust
+let id = uuid::Uuid::new_v4().to_string();
 handle.sql(move |sql| {
     sql.tx().execute(
         "INSERT INTO todos (id, title, _updated_at) VALUES (?1, ?2, ?3)",

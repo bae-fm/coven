@@ -103,7 +103,13 @@ reader would map a changeset's values onto the wrong columns.
 
 A table added in a later migration is still a synced table, so it is still
 checked at open: declare it `STRICT` along with the rest of the [synced-table
-contract](/docs/local-data).
+contract](/docs/local-data), and declare its `RowIdentity`. Independently
+created rows require canonical UUIDv4 or UUIDv7 ids; `SharedKey` is for equal
+application keys that intentionally name one logical row. Open scans existing
+rows under that declaration, so changing a table to `IndependentUuid` requires
+every existing id already to satisfy the UUID contract. A primary-key change is
+an atomic deletion of the old identity and insertion of a new identity, which
+must satisfy the declared mode.
 
 Both are valid *local* migrations. The difference is only whether a device on the
 other version can still read the changesets, which is what the two version

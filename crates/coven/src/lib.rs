@@ -560,7 +560,7 @@ pub use read_handle::CovenReadHandle;
 pub use coven_core::rusqlite;
 
 // Host schema declaration: the synced-table set and the synced-schema migration ladder.
-pub use coven_core::{BlobDecl, Migration, MigrationStep, SyncedTable};
+pub use coven_core::{BlobDecl, Migration, MigrationStep, RowIdentity, SyncedTable};
 
 // Config.
 pub use coven_core::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorage};

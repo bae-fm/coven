@@ -20,7 +20,11 @@
 //!   journaled transaction.
 //! - Every synced table has an `id` text primary key at column 0 and an
 //!   `_updated_at TEXT NOT NULL` column, and is declared as a
-//!   [`SyncedTable`] in the builder's `synced_tables` set. A plain
+//!   [`SyncedTable`] in the builder's `synced_tables` set with a required
+//!   [`RowIdentity`]. `(table, id)` is one logical row across every device.
+//!   Independently created rows use canonical UUIDv4 or UUIDv7 ids; shared-key
+//!   tables intentionally merge equal application keys. A primary-key change
+//!   removes the old identity and inserts the new validated identity. A plain
 //!   [`sync::session::SyncedTable::new`] table syncs unconditionally;
 //!   [`sync::session::SyncedTable::remote_root`] also syncs the whole table and
 //!   makes blobs on the row or its FK-descendants always Remote;
@@ -144,7 +148,7 @@ pub use changeset::{ChangeOp, RowChange};
 // Host schema declaration: the synced-table set plus the synced-schema migration
 // ladder the host registers with the builder.
 pub use migration::{Migration, MigrationStep};
-pub use sync::session::{BlobDecl, SyncedTable};
+pub use sync::session::{BlobDecl, RowIdentity, SyncedTable};
 
 // Config.
 pub use config::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorage};

@@ -620,6 +620,7 @@ fn validate_host_synced_tables(
     // address; two tables sharing one makes `row_for_blob_in_namespace` resolve to
     // whichever the hash map iterates first.
     let mut namespace_owner: HashMap<&str, &str> = HashMap::new();
+    let mut table_by_sqlite_name: HashMap<String, &str> = HashMap::new();
     for table in synced_tables {
         let name = table.name();
         if name.is_empty() {
@@ -630,7 +631,21 @@ fn validate_host_synced_tables(
                 "synced table {name:?} is reserved by coven"
             )));
         }
+        let sqlite_name = name.to_ascii_lowercase();
+        if let Some(prior) = table_by_sqlite_name.insert(sqlite_name, name) {
+            return Err(DbError(format!(
+                "synced tables {prior:?} and {name:?} are declared as the same SQLite table more than once"
+            )));
+        }
+        if let Some(live_name) = canonical_table_name(conn, name)? {
+            if live_name != name {
+                return Err(DbError(format!(
+                    "synced table {name:?} does not use the live schema's exact spelling {live_name:?}"
+                )));
+            }
+        }
         validate_synced_table_contract(conn, name)?;
+        validate_existing_row_identities(conn, table)?;
         if let Some(decl) = table.blob() {
             let namespace = decl.namespace.as_str();
             if let Some(prior) = namespace_owner.insert(namespace, name) {
@@ -640,6 +655,41 @@ fn validate_host_synced_tables(
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Return the live `main`-schema spelling SQLite resolves for `table`.
+/// SQLite table identifiers compare case-insensitively, while coven dispatches
+/// changesets by their exact table name, so open requires declarations to use
+/// this canonical spelling.
+fn canonical_table_name(conn: &Connection, table: &str) -> Result<Option<String>, DbError> {
+    conn.query_row(
+        "SELECT name FROM main.sqlite_schema \
+         WHERE type = 'table' AND name = ?1 COLLATE NOCASE",
+        [table],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DbError::from)
+}
+
+fn validate_existing_row_identities(conn: &Connection, table: &SyncedTable) -> Result<(), DbError> {
+    if table.row_identity() == crate::sync::session::RowIdentity::SharedKey {
+        return Ok(());
+    }
+    let sql = format!(
+        "SELECT id FROM {}",
+        crate::sync::session::quote_ident(table.name())
+    );
+    let mut statement = conn.prepare(&sql).map_err(DbError::from)?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(DbError::from)?;
+    for id in ids {
+        let id = id.map_err(DbError::from)?;
+        crate::sync::session::validate_row_identity(table.name(), table.row_identity(), &id)
+            .map_err(|error| DbError(error.to_string()))?;
     }
     Ok(())
 }
@@ -1169,6 +1219,9 @@ impl Database {
             .map_err(E::from)?;
         let value = f(&tx)?;
         let changeset = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
+        crate::sync::session::validate_changeset_row_identities(&changeset, synced_tables)
+            .map_err(|error| DbError(error.to_string()))
+            .map_err(E::from)?;
         let rows_changed = conn.total_changes().saturating_sub(changes_before);
         let local_device_id: String = tx
             .query_row(
@@ -3624,6 +3677,361 @@ mod tests {
         )
     }
 
+    fn things_migration() -> Migration {
+        Migration::sql(
+            1,
+            "things",
+            "CREATE TABLE things (
+                id TEXT PRIMARY KEY,
+                body TEXT NOT NULL,
+                _updated_at TEXT NOT NULL
+            ) STRICT;",
+        )
+    }
+
+    fn things_table(identity: crate::sync::session::RowIdentity) -> SyncedTable {
+        SyncedTable::new("things", identity)
+    }
+
+    #[test]
+    fn sqlite_session_representation_preserves_upsert_but_loses_primary_key_update_intent() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE things (
+                id TEXT PRIMARY KEY,
+                body TEXT NOT NULL,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             INSERT INTO things VALUES ('old', 'base', '0000000001000-0000-writer');",
+        )
+        .expect("schema and seed");
+        let tables = vec![things_table(crate::sync::session::RowIdentity::SharedKey)];
+
+        let mut primary_key_session = attach_session(&conn, &tables).expect("attach session");
+        let primary_key_tx = conn.unchecked_transaction().expect("transaction");
+        primary_key_tx
+            .execute(
+                "UPDATE things SET id = 'new', _updated_at = '0000000002000-0000-writer' WHERE id = 'old'",
+                [],
+            )
+            .expect("update primary key");
+        let primary_key_changes =
+            capture_changeset(&mut primary_key_session).expect("capture primary-key update");
+        drop(primary_key_tx);
+        drop(primary_key_session);
+        let primary_key_changes =
+            crate::changeset::walk(&primary_key_changes).expect("walk primary-key update");
+        assert_eq!(
+            primary_key_changes
+                .iter()
+                .map(|change| (change.op, change.pk()))
+                .collect::<Vec<_>>(),
+            vec![
+                (crate::changeset::ChangeOp::Insert, Some("new")),
+                (crate::changeset::ChangeOp::Delete, Some("old")),
+            ]
+        );
+
+        let mut upsert_session = attach_session(&conn, &tables).expect("attach session");
+        let upsert_tx = conn.unchecked_transaction().expect("transaction");
+        upsert_tx
+            .execute(
+                "INSERT INTO things VALUES ('old', 'upserted', '0000000003000-0000-writer')
+                 ON CONFLICT(id) DO UPDATE SET
+                    body = excluded.body,
+                    _updated_at = excluded._updated_at",
+                [],
+            )
+            .expect("same-id upsert");
+        let upsert_changes = capture_changeset(&mut upsert_session).expect("capture upsert");
+        drop(upsert_tx);
+        let upsert_changes = crate::changeset::walk(&upsert_changes).expect("walk upsert");
+        assert_eq!(upsert_changes.len(), 1);
+        assert_eq!(upsert_changes[0].op, crate::changeset::ChangeOp::Update);
+        assert_eq!(upsert_changes[0].pk(), Some("old"));
+    }
+
+    #[test]
+    fn writer_and_read_only_open_reject_existing_invalid_independent_uuid() {
+        let writer_error = match Database::open(
+            Path::new(":memory:"),
+            vec![things_table(
+                crate::sync::session::RowIdentity::IndependentUuid,
+            )],
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "invalid-uuid-writer".to_string(),
+            &[Migration::sql(
+                1,
+                "things",
+                "CREATE TABLE things (
+                    id TEXT PRIMARY KEY,
+                    body TEXT NOT NULL,
+                    _updated_at TEXT NOT NULL
+                 ) STRICT;
+                 INSERT INTO things VALUES ('2', 'invalid', '0000000001000-0000-seed');",
+            )],
+        ) {
+            Ok(_) => panic!("writer open must reject an existing non-UUID id"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            writer_error.contains("things") && writer_error.contains("\"2\""),
+            "writer error identifies the table and value: {writer_error}",
+        );
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("read-only-invalid.sqlite");
+        let (writer, _) = Database::open(
+            &path,
+            vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "invalid-uuid-seed".to_string(),
+            &[Migration::sql(
+                1,
+                "things",
+                "CREATE TABLE things (
+                    id TEXT PRIMARY KEY,
+                    body TEXT NOT NULL,
+                    _updated_at TEXT NOT NULL
+                 ) STRICT;
+                 INSERT INTO things VALUES ('2', 'invalid', '0000000001000-0000-seed');",
+            )],
+        )
+        .expect("seed database under its declared SharedKey contract");
+        drop(writer);
+
+        let reader_error = match Database::open_read_only(
+            &path,
+            vec![things_table(
+                crate::sync::session::RowIdentity::IndependentUuid,
+            )],
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "invalid-uuid-reader".to_string(),
+            &[things_migration()],
+        ) {
+            Ok(_) => panic!("read-only open must reject an existing non-UUID id"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            reader_error.contains("things") && reader_error.contains("\"2\""),
+            "reader error identifies the table and value: {reader_error}",
+        );
+    }
+
+    #[test]
+    fn database_open_rejects_duplicate_synced_table_declarations() {
+        let error = match Database::open(
+            Path::new(":memory:"),
+            vec![
+                things_table(crate::sync::session::RowIdentity::SharedKey),
+                things_table(crate::sync::session::RowIdentity::IndependentUuid),
+            ],
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "duplicate-things".to_string(),
+            &[things_migration()],
+        ) {
+            Ok(_) => panic!("one table cannot have two identity declarations"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("things") && error.contains("declared"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_host_identity_rolls_back_rows_and_preserves_pending_journal() {
+        let tables = vec![things_table(
+            crate::sync::session::RowIdentity::IndependentUuid,
+        )];
+        let (db, _) = Database::open(
+            Path::new(":memory:"),
+            tables.clone(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "invalid-host-identity".to_string(),
+            &[things_migration()],
+        )
+        .expect("open");
+        let existing_changeset = vec![0x45, 0x58, 0x41, 0x43, 0x54];
+        let existing_for_insert = existing_changeset.clone();
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO pending_changesets (changeset, dependencies) VALUES (?1, '{}')",
+                [existing_for_insert],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("seed pending journal");
+
+        let result = db
+            .call(move |conn| {
+                Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                    tx.execute(
+                        "INSERT INTO things VALUES (?1, 'valid', '0000000002000-0000-writer')",
+                        ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO things VALUES ('2', 'invalid', '0000000002001-0000-writer')",
+                        [],
+                    )?;
+                    Ok::<_, DbError>(())
+                })
+            })
+            .await;
+        let error = result.expect_err("invalid UUID must reject the host transaction");
+        assert!(error.to_string().contains("things") && error.to_string().contains("2"));
+
+        db.call(move |conn| {
+            let row_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM things", [], |row| row.get(0))
+                .map_err(DbError::from)?;
+            let pending = conn
+                .prepare("SELECT changeset FROM pending_changesets ORDER BY id")
+                .and_then(|mut statement| {
+                    statement
+                        .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .map_err(DbError::from)?;
+            assert_eq!(row_count, 0);
+            assert_eq!(pending, vec![existing_changeset]);
+            Ok(())
+        })
+        .await
+        .expect("inspect rollback");
+    }
+
+    #[tokio::test]
+    async fn valid_identity_changes_updates_and_upserts_succeed_but_invalid_new_uuid_rolls_back() {
+        let tables = vec![things_table(
+            crate::sync::session::RowIdentity::IndependentUuid,
+        )];
+        let (db, _) = Database::open(
+            Path::new(":memory:"),
+            tables.clone(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "host-identity-changes".to_string(),
+            &[things_migration()],
+        )
+        .expect("open");
+        let original = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO things VALUES (?1, 'base', '0000000001000-0000-writer')",
+                [original],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("seed row");
+
+        let update_tables = tables.clone();
+        let renamed = "01890a5d-ac96-774b-bcce-b302099c3f74";
+        db.call(move |conn| {
+            Database::run_pending_journaled_transaction_on(conn, &update_tables, |tx| {
+                tx.execute(
+                    "UPDATE things SET id = ?1, _updated_at = '0000000002000-0000-writer' WHERE id = ?2",
+                    [renamed, original],
+                )?;
+                Ok::<_, DbError>(())
+            })
+        })
+        .await
+        .expect("valid primary-key change succeeds");
+
+        let replace_tables = tables.clone();
+        let replaced = "8b1a9953-c461-4e20-8c66-826115d53552";
+        db.call(move |conn| {
+            Database::run_pending_journaled_transaction_on(conn, &replace_tables, |tx| {
+                tx.execute("DELETE FROM things WHERE id = ?1", [renamed])?;
+                tx.execute(
+                    "INSERT INTO things VALUES (?1, 'replaced', '0000000003000-0000-writer')",
+                    [replaced],
+                )?;
+                Ok::<_, DbError>(())
+            })
+        })
+        .await
+        .expect("explicit delete and insert succeeds");
+
+        let ordinary_tables = tables.clone();
+        db.call(move |conn| {
+            Database::run_pending_journaled_transaction_on(conn, &ordinary_tables, |tx| {
+                tx.execute(
+                    "UPDATE things SET body = 'ordinary', _updated_at = '0000000004000-0000-writer' WHERE id = ?1",
+                    [replaced],
+                )?;
+                tx.execute(
+                    "INSERT INTO things VALUES (?1, 'upserted', '0000000005000-0000-writer')
+                     ON CONFLICT(id) DO UPDATE SET body = excluded.body, _updated_at = excluded._updated_at",
+                    [replaced],
+                )?;
+                Ok::<_, DbError>(())
+            })
+        })
+        .await
+        .expect("ordinary update and same-id upsert succeed");
+
+        let pending_before = db
+            .call(|conn| {
+                conn.prepare("SELECT changeset FROM pending_changesets ORDER BY id")
+                    .and_then(|mut statement| {
+                        statement
+                            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .map_err(DbError::from)
+            })
+            .await
+            .expect("read pending journal");
+        assert_eq!(pending_before.len(), 3);
+
+        let invalid_tables = tables;
+        let invalid = db
+            .call(move |conn| {
+                Database::run_pending_journaled_transaction_on(conn, &invalid_tables, |tx| {
+                    tx.execute(
+                        "UPDATE things SET id = 'not-a-uuid', _updated_at = '0000000006000-0000-writer' WHERE id = ?1",
+                        [replaced],
+                    )?;
+                    Ok::<_, DbError>(())
+                })
+            })
+            .await;
+        let error = invalid.expect_err("invalid new UUID rejects the primary-key change");
+        assert!(error.to_string().contains("not-a-uuid"));
+
+        db.call(move |conn| {
+            let row = conn
+                .query_row("SELECT id, body FROM things", [], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(DbError::from)?;
+            let pending_after = conn
+                .prepare("SELECT changeset FROM pending_changesets ORDER BY id")
+                .and_then(|mut statement| {
+                    statement
+                        .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .map_err(DbError::from)?;
+            assert_eq!(row, (replaced.to_string(), "upserted".to_string()));
+            assert_eq!(pending_after, pending_before);
+            Ok(())
+        })
+        .await
+        .expect("invalid identity change rolls back row and journal");
+    }
+
     /// A SQL closure that blocks for a while must not stall other tasks on the
     /// same runtime, because jobs run on the dedicated connection thread rather
     /// than the async executor. On a current-thread runtime the scheduler has to
@@ -3761,7 +4169,10 @@ mod tests {
         for table_name in ["cloud_outbox", "protocol_state"] {
             let result = Database::open(
                 Path::new(":memory:"),
-                vec![SyncedTable::new(table_name)],
+                vec![SyncedTable::new(
+                    table_name,
+                    crate::sync::session::RowIdentity::SharedKey,
+                )],
                 BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::serial(),
                 format!("reserved-{table_name}"),
@@ -3783,7 +4194,10 @@ mod tests {
     async fn database_open_rejects_empty_synced_table_name() {
         let result = Database::open(
             Path::new(":memory:"),
-            vec![SyncedTable::new("")],
+            vec![SyncedTable::new(
+                "",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
             "empty-synced-table".to_string(),
@@ -3804,7 +4218,10 @@ mod tests {
     async fn database_open_accepts_normal_host_synced_table() {
         Database::open(
             Path::new(":memory:"),
-            vec![SyncedTable::new("notes")],
+            vec![SyncedTable::new(
+                "notes",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
             "normal-synced-table".to_string(),
@@ -3839,7 +4256,10 @@ mod tests {
     async fn database_open_rejects_integer_primary_key() {
         let error = open_contract_error(
             "CREATE TABLE things (id INTEGER PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
-            vec![SyncedTable::new("things")],
+            vec![SyncedTable::new(
+                "things",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             "integer-pk",
         );
         assert!(
@@ -3853,7 +4273,10 @@ mod tests {
         let error = open_contract_error(
             "CREATE TABLE things (body TEXT NOT NULL, id TEXT PRIMARY KEY, \
              _updated_at TEXT NOT NULL) STRICT;",
-            vec![SyncedTable::new("things")],
+            vec![SyncedTable::new(
+                "things",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             "pk-not-first",
         );
         assert!(
@@ -3866,7 +4289,10 @@ mod tests {
     async fn database_open_rejects_primary_key_named_other_than_id() {
         let error = open_contract_error(
             "CREATE TABLE things (thing_id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
-            vec![SyncedTable::new("things")],
+            vec![SyncedTable::new(
+                "things",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             "pk-misnamed",
         );
         assert!(
@@ -3880,7 +4306,10 @@ mod tests {
         let error = open_contract_error(
             "CREATE TABLE things (id TEXT NOT NULL, part TEXT NOT NULL, \
              _updated_at TEXT NOT NULL, PRIMARY KEY (id, part)) STRICT;",
-            vec![SyncedTable::new("things")],
+            vec![SyncedTable::new(
+                "things",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             "composite-pk",
         );
         assert!(
@@ -3893,7 +4322,10 @@ mod tests {
     async fn database_open_rejects_nullable_updated_at() {
         let error = open_contract_error(
             "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT) STRICT;",
-            vec![SyncedTable::new("things")],
+            vec![SyncedTable::new(
+                "things",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             "nullable-updated-at",
         );
         assert!(
@@ -3906,7 +4338,10 @@ mod tests {
     async fn database_open_rejects_non_strict_synced_table() {
         let error = open_contract_error(
             "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL);",
-            vec![SyncedTable::new("things")],
+            vec![SyncedTable::new(
+                "things",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             "non-strict",
         );
         assert!(
@@ -3919,7 +4354,10 @@ mod tests {
     async fn database_open_rejects_declared_table_no_migration_creates() {
         let error = open_contract_error(
             "CREATE TABLE other (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
-            vec![SyncedTable::new("things")],
+            vec![SyncedTable::new(
+                "things",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             "declared-never-created",
         );
         assert!(
@@ -3929,10 +4367,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn database_open_rejects_synced_table_spelling_that_differs_from_live_schema() {
+        let error = open_contract_error(
+            "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
+            vec![SyncedTable::new(
+                "Things",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
+            "case-variant-table-name",
+        );
+        assert!(
+            error.contains("Things") && error.contains("things") && error.contains("exact"),
+            "error names both spellings and requires the live spelling: {error}",
+        );
+    }
+
+    #[tokio::test]
+    async fn database_open_rejects_case_variant_duplicate_synced_tables() {
+        let error = open_contract_error(
+            "CREATE TABLE things (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
+            vec![
+                SyncedTable::new("things", crate::sync::session::RowIdentity::SharedKey),
+                SyncedTable::new("THINGS", crate::sync::session::RowIdentity::IndependentUuid),
+            ],
+            "case-variant-duplicate-table",
+        );
+        assert!(
+            error.contains("things")
+                && error.contains("THINGS")
+                && error.contains("more than once"),
+            "error names both duplicate declarations: {error}",
+        );
+    }
+
+    #[tokio::test]
     async fn database_open_accepts_strict_synced_table() {
         Database::open(
             Path::new(":memory:"),
-            vec![SyncedTable::new("things")],
+            vec![SyncedTable::new(
+                "things",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
             "strict-synced-table".to_string(),
@@ -3952,7 +4427,10 @@ mod tests {
         // non-strict with no open error.
         Database::open(
             Path::new(":memory:"),
-            vec![SyncedTable::new("things")],
+            vec![SyncedTable::new(
+                "things",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
             "undeclared-local-table".to_string(),
@@ -3981,8 +4459,10 @@ mod tests {
              CREATE TABLE thumbs (id TEXT PRIMARY KEY, size INTEGER NOT NULL, \
              hash TEXT, _updated_at TEXT NOT NULL) STRICT;",
             vec![
-                SyncedTable::new("covers").carries_blob(blob("images")),
-                SyncedTable::new("thumbs").carries_blob(blob("images")),
+                SyncedTable::new("covers", crate::sync::session::RowIdentity::SharedKey)
+                    .carries_blob(blob("images")),
+                SyncedTable::new("thumbs", crate::sync::session::RowIdentity::SharedKey)
+                    .carries_blob(blob("images")),
             ],
             "dup-namespace",
         );

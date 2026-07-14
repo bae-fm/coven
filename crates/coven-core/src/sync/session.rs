@@ -1,12 +1,194 @@
 //! Synced-table declarations and the shared identifier-quoting helper.
 //!
 //! [`SyncedTable`] is how a host declares which tables participate in changeset
-//! sync. The set is no longer a process-global: the host passes it to
+//! sync and what `(table, id)` means for each one. The set is no longer a
+//! process-global: the host passes it to
 //! [`crate::CovenBuilder::synced_tables`], and coven owns it for the lifetime of
 //! the connection and hands it to each journaled write's capture session, the
 //! gate, and apply.
 
+use fallible_streaming_iterator::FallibleStreamingIterator;
+use rusqlite::hooks::Action;
+use rusqlite::session::{ChangesetItem, ChangesetIter};
+use rusqlite::types::ValueRef;
 use rusqlite::Connection;
+
+/// How `(table, id)` names one logical row across every device.
+///
+/// Equality always means one row, including equality between two valid UUIDs.
+/// The mode controls which ids may be introduced; it does not change merge
+/// equality. Changing a primary key removes the old identity and introduces the
+/// new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowIdentity {
+    /// Rows created independently use canonical lowercase hyphenated RFC UUID
+    /// version 4 or 7 ids.
+    IndependentUuid,
+    /// Application-assigned keys intentionally name the same logical row on
+    /// every device.
+    SharedKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum RowIdentityError {
+    #[error(
+        "synced table {table:?} id {value:?} is invalid for IndependentUuid; expected a canonical lowercase hyphenated RFC UUID version 4 or 7"
+    )]
+    InvalidIndependentUuid { table: String, value: String },
+    #[error("synced table {table:?} changeset has no {side} primary-key value")]
+    MissingPrimaryKey { table: String, side: &'static str },
+    #[error("synced table {table:?} changeset has a non-TEXT {side} primary-key value")]
+    NonTextPrimaryKey { table: String, side: &'static str },
+    #[error("synced table {table:?} changeset primary key is not UTF-8: {reason}")]
+    NonUtf8PrimaryKey { table: String, reason: String },
+}
+
+impl RowIdentityError {
+    pub(crate) fn table(&self) -> &str {
+        match self {
+            Self::InvalidIndependentUuid { table, .. }
+            | Self::MissingPrimaryKey { table, .. }
+            | Self::NonTextPrimaryKey { table, .. }
+            | Self::NonUtf8PrimaryKey { table, .. } => table,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ChangesetIdentityError {
+    #[error("changeset row identity validation failed: {0}")]
+    Parse(String),
+    #[error("changeset contains undeclared table {0:?}")]
+    UndeclaredTable(String),
+    #[error(transparent)]
+    Row(#[from] RowIdentityError),
+}
+
+pub(crate) fn validate_row_identity(
+    table: &str,
+    identity: RowIdentity,
+    value: &str,
+) -> Result<(), RowIdentityError> {
+    if identity == RowIdentity::SharedKey {
+        return Ok(());
+    }
+
+    let valid = uuid::Uuid::parse_str(value).is_ok_and(|parsed| {
+        parsed.get_variant() == uuid::Variant::RFC4122
+            && matches!(
+                parsed.get_version(),
+                Some(uuid::Version::Random | uuid::Version::SortRand)
+            )
+            && parsed.hyphenated().to_string() == value
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(RowIdentityError::InvalidIndependentUuid {
+            table: table.to_string(),
+            value: value.to_string(),
+        })
+    }
+}
+
+pub(crate) fn validate_changeset_row_identities(
+    bytes: &[u8],
+    tables: &[SyncedTable],
+) -> Result<(), ChangesetIdentityError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    let input: &mut dyn std::io::Read = &mut &bytes[..];
+    let mut iter = ChangesetIter::start_strm(&input)
+        .map_err(|error| ChangesetIdentityError::Parse(error.to_string()))?;
+    while let Some(item) = iter
+        .next()
+        .map_err(|error| ChangesetIdentityError::Parse(error.to_string()))?
+    {
+        let op = item
+            .op()
+            .map_err(|error| ChangesetIdentityError::Parse(error.to_string()))?;
+        let table_name = op.table_name();
+        let table = tables
+            .iter()
+            .find(|table| table.name() == table_name)
+            .ok_or_else(|| ChangesetIdentityError::UndeclaredTable(table_name.to_string()))?;
+        match op.code() {
+            Action::SQLITE_INSERT => {
+                let id = required_changeset_id(item, table_name, "new", ChangesetSide::New)?;
+                validate_row_identity(table_name, table.row_identity(), &id)?;
+            }
+            Action::SQLITE_DELETE => {
+                let id = required_changeset_id(item, table_name, "old", ChangesetSide::Old)?;
+                validate_row_identity(table_name, table.row_identity(), &id)?;
+            }
+            Action::SQLITE_UPDATE => {
+                let old = required_changeset_id(item, table_name, "old", ChangesetSide::Old)?;
+                let id = optional_changeset_id(item, table_name, "new", ChangesetSide::New)?
+                    .unwrap_or(old);
+                validate_row_identity(table_name, table.row_identity(), &id)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ChangesetSide {
+    Old,
+    New,
+}
+
+fn required_changeset_id(
+    item: &ChangesetItem,
+    table: &str,
+    side_name: &'static str,
+    side: ChangesetSide,
+) -> Result<String, RowIdentityError> {
+    optional_changeset_id(item, table, side_name, side)?.ok_or_else(|| {
+        RowIdentityError::MissingPrimaryKey {
+            table: table.to_string(),
+            side: side_name,
+        }
+    })
+}
+
+fn optional_changeset_id(
+    item: &ChangesetItem,
+    table: &str,
+    side_name: &'static str,
+    side: ChangesetSide,
+) -> Result<Option<String>, RowIdentityError> {
+    let value = match side {
+        ChangesetSide::Old => item.old_value(0),
+        ChangesetSide::New => item.new_value(0),
+    };
+    let value = match value {
+        Ok(value) => value,
+        Err(rusqlite::Error::InvalidColumnIndex(_)) => return Ok(None),
+        Err(error) => {
+            return Err(RowIdentityError::NonUtf8PrimaryKey {
+                table: table.to_string(),
+                reason: error.to_string(),
+            })
+        }
+    };
+    let ValueRef::Text(bytes) = value else {
+        return Err(RowIdentityError::NonTextPrimaryKey {
+            table: table.to_string(),
+            side: side_name,
+        });
+    };
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map(Some)
+        .map_err(|error| RowIdentityError::NonUtf8PrimaryKey {
+            table: table.to_string(),
+            reason: error.to_string(),
+        })
+}
 
 /// A table that participates in changeset sync, declared at startup by the host
 /// and passed to [`crate::CovenBuilder::synced_tables`].
@@ -47,9 +229,15 @@ use rusqlite::Connection;
 /// also the mechanism for keeping device-local state (per-device pin/cache
 /// columns, local paths) out of sync: put it in a table you don't declare. An
 /// empty set is rejected by [`super::cycle::init_sync`].
+///
+/// The required [`RowIdentity`] defines which ids may name rows. Use
+/// [`RowIdentity::IndependentUuid`] for independently created rows and
+/// [`RowIdentity::SharedKey`] only when equal application keys intentionally
+/// name and merge as the same row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncedTable {
     name: String,
+    row_identity: RowIdentity,
     role: GateRole,
     blob: Option<BlobDecl>,
     /// Whether this table is an asset of its FK subject: it rides the subject's
@@ -79,10 +267,12 @@ enum GateRole {
 }
 
 impl SyncedTable {
-    /// An ungated synced table: every row syncs.
-    pub fn new(name: impl Into<String>) -> Self {
+    /// An ungated synced table: every row syncs under the required identity
+    /// mode.
+    pub fn new(name: impl Into<String>, row_identity: RowIdentity) -> Self {
         SyncedTable {
             name: name.into(),
+            row_identity,
             role: GateRole::Plain,
             blob: None,
             asset: false,
@@ -140,6 +330,11 @@ impl SyncedTable {
     /// The table name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// How this table's ids name logical rows across devices.
+    pub fn row_identity(&self) -> RowIdentity {
+        self.row_identity
     }
 
     /// The gate column name, if this table is a gated root.
@@ -300,4 +495,44 @@ pub(crate) fn table_columns(conn: &Connection, table: &str) -> rusqlite::Result<
 /// passed as bound parameters; this is the safe interpolation path for them.
 pub(crate) fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod row_identity_tests {
+    use super::*;
+
+    #[test]
+    fn independent_uuid_accepts_only_canonical_rfc_uuid_v4_or_v7() {
+        for valid in [
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            "01890a5d-ac96-774b-bcce-b302099c3f74",
+        ] {
+            validate_row_identity("things", RowIdentity::IndependentUuid, valid)
+                .unwrap_or_else(|error| panic!("{valid} must be accepted: {error}"));
+        }
+
+        for invalid in [
+            "F47AC10B-58CC-4372-A567-0E02B2C3D479",
+            "f47ac10b58cc4372a5670e02b2c3d479",
+            "{f47ac10b-58cc-4372-a567-0e02b2c3d479}",
+            "urn:uuid:f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            "00000000-0000-0000-0000-000000000000",
+            "f47ac10b-58cc-1372-a567-0e02b2c3d479",
+            "f47ac10b-58cc-2372-a567-0e02b2c3d479",
+            "f47ac10b-58cc-3372-a567-0e02b2c3d479",
+            "f47ac10b-58cc-5372-a567-0e02b2c3d479",
+            "f47ac10b-58cc-6372-a567-0e02b2c3d479",
+            "f47ac10b-58cc-8372-a567-0e02b2c3d479",
+            "f47ac10b-58cc-4372-0567-0e02b2c3d479",
+            "not-a-uuid",
+        ] {
+            assert!(
+                validate_row_identity("things", RowIdentity::IndependentUuid, invalid).is_err(),
+                "{invalid} must be rejected",
+            );
+        }
+
+        validate_row_identity("settings", RowIdentity::SharedKey, "preferences")
+            .expect("shared keys accept application-assigned ids");
+    }
 }

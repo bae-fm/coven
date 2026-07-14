@@ -34,7 +34,7 @@ use crate::sync::cycle::StoreInitialization;
 use crate::sync::hlc::Timestamp;
 use crate::sync::session::SyncedTable;
 use crate::sync::wasm_runtime::WasmSyncSchedule;
-use crate::wasm_facade::CovenStore;
+use crate::wasm_facade::{parse_synced_tables, CovenStore};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -128,7 +128,10 @@ fn demo_migrations() -> Vec<Migration> {
 }
 
 fn demo_synced_tables() -> Vec<SyncedTable> {
-    vec![SyncedTable::new(DEMO_TABLE_NAME)]
+    vec![SyncedTable::new(
+        DEMO_TABLE_NAME,
+        coven_core::RowIdentity::SharedKey,
+    )]
 }
 
 const DEMO_MIGRATION_NAME: &str = "demo-schema";
@@ -181,8 +184,112 @@ fn public_open_migrations() -> JsValue {
 
 fn public_open_synced_tables() -> JsValue {
     to_js_value(serde_json::json!([
-        { "name": DEMO_TABLE_NAME }
+        { "name": DEMO_TABLE_NAME, "row_identity": "shared_key" }
     ]))
+}
+
+#[wasm_bindgen_test]
+fn synced_table_parser_requires_and_preserves_row_identity() {
+    let missing = parse_synced_tables(to_js_value(serde_json::json!([
+        { "name": "missing" }
+    ])))
+    .expect_err("omitted row_identity must be rejected");
+    assert!(missing.contains("row_identity"), "{missing}");
+
+    let unknown = parse_synced_tables(to_js_value(serde_json::json!([
+        { "name": "unknown", "row_identity": "device_local" }
+    ])))
+    .expect_err("unknown row_identity must be rejected");
+    assert!(unknown.contains("device_local"), "{unknown}");
+
+    let tables = parse_synced_tables(to_js_value(serde_json::json!([
+        { "name": "independent", "row_identity": "independent_uuid" },
+        { "name": "shared", "row_identity": "shared_key" }
+    ])))
+    .expect("known row identities parse");
+    assert_eq!(
+        tables
+            .iter()
+            .map(SyncedTable::row_identity)
+            .collect::<Vec<_>>(),
+        vec![
+            coven_core::RowIdentity::IndependentUuid,
+            coven_core::RowIdentity::SharedKey,
+        ]
+    );
+}
+
+#[wasm_bindgen_test]
+async fn public_open_requires_and_enforces_row_identity() {
+    console_error_panic_hook::set_once();
+
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    for (label, store_suffix, tables, expected) in [
+        (
+            "omitted row identity",
+            "missing",
+            serde_json::json!([{ "name": DEMO_TABLE_NAME }]),
+            "row_identity",
+        ),
+        (
+            "unknown row identity",
+            "unknown",
+            serde_json::json!([{
+                "name": DEMO_TABLE_NAME,
+                "row_identity": "device_local"
+            }]),
+            "device_local",
+        ),
+    ] {
+        let result = CovenStore::open(
+            public_open_config(&format!("public-identity-{store_suffix}-{run}"), "device-a"),
+            public_open_migrations(),
+            to_js_value(tables),
+        )
+        .await;
+        let error = match result {
+            Ok(store) => {
+                drop(store);
+                panic!("public open must reject {label}");
+            }
+            Err(error) => js_error_string(&error),
+        };
+        assert!(
+            error.contains(expected),
+            "error {error:?} contains {expected:?}"
+        );
+    }
+
+    let invalid_id = "preferences";
+    let invalid_migrations = to_js_value(serde_json::json!([{
+        "version": 1,
+        "name": "independent-identity-schema",
+        "sql": format!(
+            "{DEMO_NOTES_SQL} INSERT INTO notes VALUES \
+             ('{invalid_id}', 'invalid', '0000000001000-0000-device', '2026-01-01');"
+        ),
+    }]));
+    let independent_tables = to_js_value(serde_json::json!([{
+        "name": DEMO_TABLE_NAME,
+        "row_identity": "independent_uuid"
+    }]));
+    let result = CovenStore::open(
+        public_open_config(&format!("public-independent-{run}"), "device-a"),
+        invalid_migrations,
+        independent_tables,
+    )
+    .await;
+    let error = match result {
+        Ok(store) => {
+            drop(store);
+            panic!("public open must enforce IndependentUuid against existing rows");
+        }
+        Err(error) => js_error_string(&error),
+    };
+    assert!(
+        error.contains(invalid_id) && error.contains("IndependentUuid"),
+        "public open preserves the declared identity through database open: {error}",
+    );
 }
 
 async fn public_open(store_id: &str, device_id: &str) -> Result<CovenStore, JsValue> {

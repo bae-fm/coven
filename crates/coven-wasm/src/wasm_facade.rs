@@ -114,12 +114,29 @@ struct JsMigration {
 #[derive(Deserialize)]
 struct JsSyncedTable {
     name: String,
+    row_identity: JsRowIdentity,
     #[serde(default)]
     gated_by: Option<String>,
     #[serde(default)]
     gated_by_descendants: bool,
     #[serde(default)]
     asset: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum JsRowIdentity {
+    IndependentUuid,
+    SharedKey,
+}
+
+impl From<JsRowIdentity> for coven_core::RowIdentity {
+    fn from(identity: JsRowIdentity) -> Self {
+        match identity {
+            JsRowIdentity::IndependentUuid => Self::IndependentUuid,
+            JsRowIdentity::SharedKey => Self::SharedKey,
+        }
+    }
 }
 
 /// The browser-facing coven handle: an open database plus the sync runtime that
@@ -490,7 +507,7 @@ fn parse_migrations(value: JsValue) -> Result<Vec<Migration>, String> {
         .collect()
 }
 
-fn parse_synced_tables(value: JsValue) -> Result<Vec<SyncedTable>, String> {
+pub(crate) fn parse_synced_tables(value: JsValue) -> Result<Vec<SyncedTable>, String> {
     let defs: Vec<JsSyncedTable> =
         serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())?;
     defs.into_iter()
@@ -501,7 +518,7 @@ fn parse_synced_tables(value: JsValue) -> Result<Vec<SyncedTable>, String> {
                     t.name
                 ));
             }
-            let mut table = SyncedTable::new(t.name);
+            let mut table = SyncedTable::new(t.name, t.row_identity.into());
             if let Some(column) = t.gated_by {
                 table = table.gated_by(column);
             }

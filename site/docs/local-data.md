@@ -18,8 +18,8 @@ themselves. These are the conventions a synced table carries, checked at open:
 - declared `STRICT`: SQLite refuses an insert or update whose value doesn't
   match a column's declared type, so a synced table can never hold a value off
   the type every peer's apply and coven's own conflict-resolution code expect
-- a `TEXT` primary key named `id`, at column position 0: how devices address
-  the row
+- a `TEXT` primary key named `id`, at column position 0: together with the table
+  name, this is the logical row identity on every device
 - an `_updated_at TEXT NOT NULL` column, stamped through
   [`SqlContext::stamp`](rustdoc:method:coven::SqlContext::stamp): the register
   concurrent edits are ordered by
@@ -29,6 +29,21 @@ Everything else about the schema is yours. Tables you do *not* pass to
 leave the device: that is also the mechanism for per-device state (window
 positions, per-device pin bookkeeping, local paths). Put it in a table you
 don't declare.
+
+### Row identity
+
+Every `SyncedTable` declares what its ids mean. Use
+`RowIdentity::IndependentUuid` for rows created independently on offline
+devices; every id must be a canonical lowercase hyphenated UUIDv4 or UUIDv7.
+Use `RowIdentity::SharedKey` only when an application key intentionally names
+the same logical row everywhere, such as `settings(id = 'preferences')`. Equal
+shared keys merge as one row under the normal `_updated_at` policy.
+
+Changing a primary key removes the old identity and inserts the new identity in
+one transaction; SQLite records that the same way as an explicit delete plus
+insert. The introduced id must satisfy the table's mode. Even an equal, valid
+UUID means one logical row: identity mode prevents predictable key reuse, but
+equal `(table, id)` values always denote the same row.
 
 <svg class="flow" viewBox="0 0 660 168" role="img" aria-label="Declared tables sync to the cloud; undeclared tables never leave the device">
 <text class="hdr" x="155" y="22" text-anchor="middle">THIS DEVICE</text>
@@ -70,13 +85,13 @@ on the device that made it.
 gate forms:
 
 ```rust
-SyncedTable::new("todos")                              // no gate of its own
-SyncedTable::new("attachments").remote_root()          // always-Remote blob root
-SyncedTable::new("lists").gated_by("shared")           // gated root
-SyncedTable::new("workspaces").gated_by_descendants()  // ancestor
+SyncedTable::new("todos", RowIdentity::IndependentUuid) // no gate of its own
+SyncedTable::new("attachments", RowIdentity::IndependentUuid).remote_root()
+SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared")
+SyncedTable::new("workspaces", RowIdentity::IndependentUuid).gated_by_descendants()
 ```
 
-- `new(name)` declares the table synced with no gate of its own. With a foreign
+- `new(name, row_identity)` declares the table synced with no gate of its own. With a foreign
   key into a gated root it inherits that gate; without one it syncs
   unconditionally.
 - `remote_root()` keeps whole-table row sync and makes blobs on those rows and
@@ -132,7 +147,8 @@ children need no declaration of their own.
 
 ## Remote roots
 
-A remote root has no gate column. Every row syncs, like `new(name)`, but the row
+A remote root has no gate column. Every row syncs, like
+`new(name, row_identity)`, but the row
 also anchors blob locality: blobs carried by that row or by descendants are
 Remote. Host-provided blobs upload before the row changeset is pushed, and a peer
 reads them from the cache or cloud. `make_remote`, `make_local`, and

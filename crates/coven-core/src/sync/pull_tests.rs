@@ -172,7 +172,10 @@ fn photo_decl_with_blob_id_column() -> BlobDecl {
 
 fn unique_note_db() -> crate::database::Database {
     open_test_db_schema(
-        vec![SyncedTable::new("unique_notes")],
+        vec![SyncedTable::new(
+            "unique_notes",
+            crate::sync::session::RowIdentity::SharedKey,
+        )],
         vec![Migration::run(1, "unique-note-schema", |conn| {
             conn.execute_batch(
                 "CREATE TABLE unique_notes (
@@ -191,8 +194,14 @@ fn unique_note_db() -> crate::database::Database {
 fn mixed_constraint_db() -> crate::database::Database {
     open_test_db_schema(
         vec![
-            SyncedTable::new("constraint_parents"),
-            SyncedTable::new("constraint_items"),
+            SyncedTable::new(
+                "constraint_parents",
+                crate::sync::session::RowIdentity::SharedKey,
+            ),
+            SyncedTable::new(
+                "constraint_items",
+                crate::sync::session::RowIdentity::SharedKey,
+            ),
         ],
         vec![Migration::run(1, "mixed-constraint-schema", |conn| {
             conn.execute_batch(

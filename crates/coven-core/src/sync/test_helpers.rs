@@ -91,9 +91,9 @@ impl MasterKeyCustody for TestCustody {
 /// [`test_synced_tables_with_blob`].
 pub fn test_synced_tables() -> Vec<SyncedTable> {
     vec![
-        SyncedTable::new("notes").gated_by("shared"),
-        SyncedTable::new("note_tags"),
-        SyncedTable::new("note_photos"),
+        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).gated_by("shared"),
+        SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
+        SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey),
     ]
 }
 
@@ -105,9 +105,10 @@ pub fn test_synced_tables() -> Vec<SyncedTable> {
 /// the row keeps its primary key.
 pub fn test_synced_tables_with_blob(decl: BlobDecl) -> Vec<SyncedTable> {
     vec![
-        SyncedTable::new("notes").gated_by("shared"),
-        SyncedTable::new("note_tags"),
-        SyncedTable::new("note_photos").carries_blob(decl),
+        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).gated_by("shared"),
+        SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
+        SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
+            .carries_blob(decl),
     ]
 }
 
@@ -122,10 +123,12 @@ pub fn test_synced_tables_with_user_and_host_blobs(
     cover_decl: BlobDecl,
 ) -> Vec<SyncedTable> {
     vec![
-        SyncedTable::new("notes").gated_by("shared"),
-        SyncedTable::new("note_tags"),
-        SyncedTable::new("note_photos").carries_blob(photo_decl),
-        SyncedTable::new("note_covers").carries_blob(cover_decl),
+        SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).gated_by("shared"),
+        SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
+        SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
+            .carries_blob(photo_decl),
+        SyncedTable::new("note_covers", crate::sync::session::RowIdentity::SharedKey)
+            .carries_blob(cover_decl),
     ]
 }
 

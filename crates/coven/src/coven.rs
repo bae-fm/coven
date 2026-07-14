@@ -893,11 +893,12 @@ mod tests {
     }
 
     fn files_table() -> SyncedTable {
-        SyncedTable::new("files").carries_blob(media_files_decl())
+        SyncedTable::new("files", coven_core::RowIdentity::SharedKey)
+            .carries_blob(media_files_decl())
     }
 
     fn remote_root_files_table() -> SyncedTable {
-        SyncedTable::new("files")
+        SyncedTable::new("files", coven_core::RowIdentity::SharedKey)
             .remote_root()
             .carries_blob(media_files_decl())
     }

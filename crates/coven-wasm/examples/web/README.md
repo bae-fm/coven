@@ -90,5 +90,7 @@ runtime; nothing here stores or ships them.
 
 This harness exercises the full live path: real S3 over `fetch`, the OPFS
 database, and the sync runtime driving cycles on the event loop. It uses one
-unconditionally-synced `notes` table — coven's demo schema. It does **not** cover
+unconditionally-synced `STRICT` `notes` table. Notes are independently created,
+so the table declares `row_identity: "independent_uuid"` and `app.js` generates
+canonical UUIDv4 ids with `crypto.randomUUID()`. It does **not** cover
 blobs, the encrypted-home key exchange between members, or snapshot bootstrap.

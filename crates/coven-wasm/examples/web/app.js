@@ -65,6 +65,7 @@ els.form.addEventListener("submit", (event) => {
     storage: "browsable",
     encryption_key_hex: null,
     device_id: deviceId,
+    initialization: { mode: "create_store" },
   };
   worker.postMessage({ type: "open", config });
 });

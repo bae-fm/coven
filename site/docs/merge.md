@@ -63,6 +63,21 @@ seeded past hers, so it is lexicographically greater. His changeset reaches
 Alice, her pull applies it, and his edit wins. Both devices converge on Bob's
 version: pull-then-edit wins, whatever the wall clocks say.
 
+## Which rows merge
+
+`(table, id)` is the logical row identity across every device. Equal ids in one
+table therefore select one row and enter the merge below. Tables whose rows are
+created independently declare `RowIdentity::IndependentUuid` and accept only
+canonical UUIDv4 or UUIDv7 ids. Tables with application keys that intentionally
+name shared state declare `RowIdentity::SharedKey`; equal keys then merge as one
+row under `_updated_at`.
+
+A primary-key change removes the old identity and inserts the new identity;
+SQLite records it the same way as an explicit delete plus insert. The introduced
+id must satisfy the table's mode. A valid UUID collision still means one logical
+row, because equality of the identifier is the identity rule; UUID mode prevents
+predictable key reuse rather than changing equality semantics.
+
 ## The merge
 
 Two devices edit while apart; both changesets eventually apply everywhere.
@@ -138,4 +153,3 @@ Non-foreign-key constraint conflicts (a uniqueness violation, a CHECK failure)
 are different: retrying cannot make them valid, so the conflicting rows are
 omitted, the affected tables are surfaced in
 `ApplyResult::constraint_conflict_tables`, and the changeset is not retried.
-

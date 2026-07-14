@@ -75,6 +75,13 @@ synced table is recorded into an in-memory changeset. The host writes as
 usual. Capture is passive, and there is no host-lent pointer to a connection
 coven does not own.
 
+Each declaration also states its row identity. `(table, id)` names one logical
+row across every device: independently created rows use canonical UUIDv4 or
+UUIDv7 ids, while `SharedKey` tables intentionally merge equal application
+keys. Before the host transaction commits, coven validates introduced ids and
+records a primary-key change as deletion of the old identity plus insertion of
+the new one. The rows and pending journal commit together or both roll back.
+
 The set is not a tuning knob. With no tables declared the session attaches
 nothing and produces empty changesets forever, so
 [`init_sync_over_storage`](rustdoc:fn:coven::sync::cycle::init_sync_over_storage)
@@ -189,6 +196,9 @@ order. For each one it:
   ([`verify_changeset_signature`](rustdoc:fn:coven::sync::envelope::verify_changeset_signature));
 - checks the author could write under the exact membership entry the changeset
   is signed against;
+- validates every row id under the table's declared identity mode; an invalid id
+  holds that exact Store commit without changing rows or its materialized
+  position, while other device chains continue;
 - applies the changeset (the [merge](/docs/merge), with capture disabled only
   around this one apply), advancing the clock past its stamps;
 - downloads any `CacheEager` blobs it references into the [cache](/docs/cache).

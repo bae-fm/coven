@@ -29,11 +29,11 @@ const migrations = [
       body TEXT NOT NULL,
       _updated_at TEXT NOT NULL,
       created_at TEXT NOT NULL
-    );`,
+    ) STRICT;`,
   },
 ];
 
-const syncedTables = [{ name: "notes" }];
+const syncedTables = [{ name: "notes", row_identity: "independent_uuid" }];
 
 async function handle(message) {
   const data = message.data;

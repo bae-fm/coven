@@ -37,7 +37,7 @@ use rusqlite::Connection;
 use tracing::warn;
 
 use super::hlc::Timestamp;
-use super::session::table_columns;
+use super::session::{table_columns, SyncedTable};
 use crate::changeset::value_ref_to_string;
 use crate::database::DbError;
 
@@ -47,6 +47,7 @@ use crate::database::DbError;
 pub struct TableSchema {
     updated_at_by_table: HashMap<String, usize>,
     columns_by_table: HashMap<String, Vec<String>>,
+    synced_tables: Vec<SyncedTable>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,11 +61,12 @@ impl TableSchema {
     /// Build schema info by querying `PRAGMA table_info` for each synced table.
     /// A registered table that has no `_updated_at` column is a host integration
     /// error and surfaces as `Err`.
-    pub fn from_db(conn: &Connection, synced_tables: &[&str]) -> Result<Self, DbError> {
+    pub fn from_db(conn: &Connection, synced_tables: &[SyncedTable]) -> Result<Self, DbError> {
         let mut updated_at_by_table = HashMap::new();
         let mut columns_by_table = HashMap::new();
 
-        for &table in synced_tables {
+        for synced_table in synced_tables {
+            let table = synced_table.name();
             let columns = table_columns(conn, table).map_err(DbError::from)?;
             let updated_at = columns.iter().position(|name| name == "_updated_at");
             let updated_at = updated_at.ok_or_else(|| {
@@ -77,6 +79,7 @@ impl TableSchema {
         Ok(TableSchema {
             updated_at_by_table,
             columns_by_table,
+            synced_tables: synced_tables.to_vec(),
         })
     }
 
@@ -89,6 +92,10 @@ impl TableSchema {
 
     pub fn columns(&self, table: &str) -> Option<&[String]> {
         self.columns_by_table.get(table).map(Vec::as_slice)
+    }
+
+    pub fn synced_tables(&self) -> &[SyncedTable] {
+        &self.synced_tables
     }
 }
 

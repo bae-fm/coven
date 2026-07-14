@@ -18,7 +18,10 @@ wasm_bindgen_test_configure!(run_in_dedicated_worker);
 /// Two synced tables — a plain one and a foreign-key child — so a journaled
 /// write's capture session attaches more than one table, as a real store does.
 fn synced_tables() -> Vec<SyncedTable> {
-    vec![SyncedTable::new("items"), SyncedTable::new("item_tags")]
+    vec![
+        SyncedTable::new("items", coven_core::RowIdentity::SharedKey),
+        SyncedTable::new("item_tags", coven_core::RowIdentity::SharedKey),
+    ]
 }
 
 /// The host migration step: both tables carry the required `id` text primary key

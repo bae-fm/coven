@@ -375,13 +375,14 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     let storage = MockSyncStorage::new();
     let db = open_test_db_schema(
         vec![
-            SyncedTable::new("notes").remote_root(),
-            SyncedTable::new("note_tags"),
-            SyncedTable::new("note_photos").carries_blob(BlobDecl::new(
-                "photos",
-                Provenance::HostProvided,
-                CacheFill::CacheEager,
-            )),
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
+            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
+            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
+                .carries_blob(BlobDecl::new(
+                    "photos",
+                    Provenance::HostProvided,
+                    CacheFill::CacheEager,
+                )),
         ],
         test_migrations(),
     );
@@ -429,13 +430,14 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let storage = MockSyncStorage::new();
     let db = open_test_db_schema(
         vec![
-            SyncedTable::new("notes").remote_root(),
-            SyncedTable::new("note_tags"),
-            SyncedTable::new("note_photos").carries_blob(BlobDecl::new(
-                "photos",
-                Provenance::HostProvided,
-                CacheFill::CacheEager,
-            )),
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
+            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
+            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
+                .carries_blob(BlobDecl::new(
+                    "photos",
+                    Provenance::HostProvided,
+                    CacheFill::CacheEager,
+                )),
         ],
         test_migrations(),
     );

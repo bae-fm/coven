@@ -257,9 +257,10 @@ mod tests {
 
     fn test_synced_tables() -> Vec<SyncedTable> {
         vec![
-            SyncedTable::new("notes").gated_by("shared"),
-            SyncedTable::new("note_tags"),
-            SyncedTable::new("note_photos"),
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("shared"),
+            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
+            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey),
         ]
     }
 
@@ -418,8 +419,9 @@ mod tests {
             "CREATE TABLE settings (id TEXT PRIMARY KEY, val TEXT, _updated_at TEXT NOT NULL) STRICT",
         );
         let tables = vec![
-            SyncedTable::new("notes").gated_by("shared"),
-            SyncedTable::new("settings"),
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("shared"),
+            SyncedTable::new("settings", crate::sync::session::RowIdentity::SharedKey),
         ];
         let out = capture_and_gate(
             &c,
@@ -441,7 +443,9 @@ mod tests {
     fn remote_root_table_passes_rows_without_gate_column() {
         let c = conn();
         create_remote_root_schema(&c);
-        let tables = vec![SyncedTable::new("notes").remote_root()];
+        let tables = vec![
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
+        ];
         let out = capture_and_gate(
             &c,
             &tables,
@@ -470,8 +474,8 @@ mod tests {
              VALUES ('p1', 'n1', '0000000001000-0000-dev1')",
         );
         let tables = vec![
-            SyncedTable::new("notes").remote_root(),
-            SyncedTable::new("note_photos"),
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
+            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey),
         ];
         let gates = Gates::from_tables(&c, &tables).expect("gates");
 
@@ -519,8 +523,10 @@ mod tests {
             VALUES ('r1', 'a1', 1, '0000000001000-0000-dev1');",
         );
         let tables = vec![
-            SyncedTable::new("releases").gated_by("managed"),
-            SyncedTable::new("albums").gated_by_descendants(),
+            SyncedTable::new("releases", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("managed"),
+            SyncedTable::new("albums", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by_descendants(),
         ];
         let gates = Gates::from_tables(&c, &tables).expect("gates");
 
@@ -550,8 +556,14 @@ mod tests {
                 _updated_at TEXT NOT NULL
             ) STRICT;",
         );
-        let gates =
-            Gates::from_tables(&c, &[SyncedTable::new("notes").remote_root()]).expect("gates");
+        let gates = Gates::from_tables(
+            &c,
+            &[
+                SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey)
+                    .remote_root(),
+            ],
+        )
+        .expect("gates");
 
         let err = with_empty_clone(&c, &gates, |alias, _tables| {
             c.execute_batch(&format!(
@@ -649,7 +661,10 @@ mod tests {
                 FOREIGN KEY (parent_id) REFERENCES \"nodes\" (id)
             ) STRICT;",
         );
-        let tables = vec![SyncedTable::new("nodes").gated_by("shared")];
+        let tables = vec![
+            SyncedTable::new("nodes", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("shared"),
+        ];
 
         let _ = capture_and_gate(
             &c,
@@ -727,9 +742,10 @@ mod tests {
              FOREIGN KEY (photo_id) REFERENCES photos (id) ON DELETE CASCADE) STRICT",
         );
         let tables = vec![
-            SyncedTable::new("albums").gated_by("shared"),
-            SyncedTable::new("photos"),
-            SyncedTable::new("comments"),
+            SyncedTable::new("albums", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("shared"),
+            SyncedTable::new("photos", crate::sync::session::RowIdentity::SharedKey),
+            SyncedTable::new("comments", crate::sync::session::RowIdentity::SharedKey),
         ];
 
         // Private album with a 2-level subtree: all cut.
@@ -790,10 +806,11 @@ mod tests {
             "CREATE TABLE settings (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT",
         );
         let tables = vec![
-            SyncedTable::new("albums").gated_by("shared"),
-            SyncedTable::new("photos"),
-            SyncedTable::new("comments"),
-            SyncedTable::new("settings"),
+            SyncedTable::new("albums", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("shared"),
+            SyncedTable::new("photos", crate::sync::session::RowIdentity::SharedKey),
+            SyncedTable::new("comments", crate::sync::session::RowIdentity::SharedKey),
+            SyncedTable::new("settings", crate::sync::session::RowIdentity::SharedKey),
         ];
 
         exec(&c, "INSERT INTO albums (id, shared, _updated_at) VALUES ('priv', 0, '0000000001000-0000-dev1')");
@@ -826,11 +843,17 @@ mod tests {
 
     fn album_tables() -> Vec<SyncedTable> {
         vec![
-            SyncedTable::new("releases").gated_by("managed"),
-            SyncedTable::new("albums").gated_by_descendants(),
-            SyncedTable::new("artists").gated_by_descendants(),
-            SyncedTable::new("album_artists"),
-            SyncedTable::new("tracks"),
+            SyncedTable::new("releases", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("managed"),
+            SyncedTable::new("albums", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by_descendants(),
+            SyncedTable::new("artists", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by_descendants(),
+            SyncedTable::new(
+                "album_artists",
+                crate::sync::session::RowIdentity::SharedKey,
+            ),
+            SyncedTable::new("tracks", crate::sync::session::RowIdentity::SharedKey),
         ]
     }
 
@@ -952,10 +975,13 @@ mod tests {
              FOREIGN KEY (zinner_id) REFERENCES zinner (id)) STRICT",
         );
         let tables = vec![
-            SyncedTable::new("aouter").gated_by_descendants(),
-            SyncedTable::new("zinner").gated_by_descendants(),
-            SyncedTable::new("zgated").gated_by("shared"),
-            SyncedTable::new("joiner"),
+            SyncedTable::new("aouter", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by_descendants(),
+            SyncedTable::new("zinner", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by_descendants(),
+            SyncedTable::new("zgated", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("shared"),
+            SyncedTable::new("joiner", crate::sync::session::RowIdentity::SharedKey),
         ];
         let gates = Gates::from_tables(&c, &tables).expect("gates");
         assert_eq!(
@@ -1989,13 +2015,23 @@ mod tests {
     /// decoration that rides its subject's gate but never keeps the subject alive.
     fn album_asset_tables() -> Vec<SyncedTable> {
         vec![
-            SyncedTable::new("releases").gated_by("managed"),
-            SyncedTable::new("albums").gated_by_descendants(),
-            SyncedTable::new("artists").gated_by_descendants(),
-            SyncedTable::new("album_artists"),
-            SyncedTable::new("tracks"),
-            SyncedTable::new("covers").asset(),
-            SyncedTable::new("artist_images").asset(),
+            SyncedTable::new("releases", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("managed"),
+            SyncedTable::new("albums", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by_descendants(),
+            SyncedTable::new("artists", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by_descendants(),
+            SyncedTable::new(
+                "album_artists",
+                crate::sync::session::RowIdentity::SharedKey,
+            ),
+            SyncedTable::new("tracks", crate::sync::session::RowIdentity::SharedKey),
+            SyncedTable::new("covers", crate::sync::session::RowIdentity::SharedKey).asset(),
+            SyncedTable::new(
+                "artist_images",
+                crate::sync::session::RowIdentity::SharedKey,
+            )
+            .asset(),
         ]
     }
 
@@ -2278,12 +2314,18 @@ mod tests {
         );
 
         let base = |asset: bool| {
-            let image = SyncedTable::new("artist_images");
+            let image = SyncedTable::new(
+                "artist_images",
+                crate::sync::session::RowIdentity::SharedKey,
+            );
             let image = if asset { image.asset() } else { image };
             vec![
-                SyncedTable::new("releases").gated_by("managed"),
-                SyncedTable::new("albums").gated_by_descendants(),
-                SyncedTable::new("artists").gated_by_descendants(),
+                SyncedTable::new("releases", crate::sync::session::RowIdentity::SharedKey)
+                    .gated_by("managed"),
+                SyncedTable::new("albums", crate::sync::session::RowIdentity::SharedKey)
+                    .gated_by_descendants(),
+                SyncedTable::new("artists", crate::sync::session::RowIdentity::SharedKey)
+                    .gated_by_descendants(),
                 image,
             ]
         };

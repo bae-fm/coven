@@ -47,7 +47,8 @@ fn notes_migration() -> Migration {
     Migration::sql(
         1,
         "test-schema",
-        "CREATE TABLE notes (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;",
+        "CREATE TABLE notes (id TEXT PRIMARY KEY, _updated_at TEXT NOT NULL) STRICT;
+         INSERT INTO notes VALUES ('preferences', '0000000001000-0000-device');",
     )
 }
 
@@ -67,8 +68,34 @@ fn open_performs_no_keyring_interaction_for_either_custody() {
     // trait object over the panicking store above and must still succeed —
     // resolving a policy is not consulting it.
     Coven::builder(config)
-        .synced_tables(vec![SyncedTable::new("notes")])
+        .synced_tables(vec![SyncedTable::new(
+            "notes",
+            coven_core::RowIdentity::SharedKey,
+        )])
         .migrations(vec![notes_migration()])
         .open()
         .expect("open must succeed while performing no keyring credential build");
+
+    let invalid_tmp = tempfile::tempdir().expect("independent UUID temp dir");
+    let invalid_config = Config::with_defaults(
+        "open-independent-identity-test".to_string(),
+        "device".to_string(),
+        StoreDir::new(invalid_tmp.path()),
+        "Test".to_string(),
+    );
+    let invalid = Coven::builder(invalid_config)
+        .synced_tables(vec![SyncedTable::new(
+            "notes",
+            coven_core::RowIdentity::IndependentUuid,
+        )])
+        .migrations(vec![notes_migration()])
+        .open();
+    let error = match invalid {
+        Ok(_) => panic!("public builder/open must enforce IndependentUuid"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("preferences") && error.contains("IndependentUuid"),
+        "public open preserves the declared row identity: {error}",
+    );
 }

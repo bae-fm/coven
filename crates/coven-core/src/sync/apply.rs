@@ -33,9 +33,9 @@ use tracing::warn;
 
 use super::conflict::{arbitrate_row_conflict, compare_lww_stamps, LwwComparison, TableSchema};
 use super::hlc::Timestamp;
-use super::session::quote_ident;
 #[cfg(any(test, feature = "test-utils"))]
 use super::session::SyncedTable;
+use super::session::{quote_ident, ChangesetIdentityError};
 use crate::changeset::{value_ref_to_string, UpdateValue};
 use crate::database::DbError;
 
@@ -48,6 +48,30 @@ pub struct ApplyResult {
     /// Tables that hit non-retryable SQLite constraint conflicts. The caller must
     /// roll back the transaction when this is non-empty.
     pub constraint_conflict_tables: Vec<String>,
+}
+
+/// Changeset bytes paired with the exact synced schema that validated their row
+/// identities. Construction is the one identity-validation boundary; apply only
+/// accepts this type, so callers cannot parse once for classification and then
+/// parse the same bytes again during mutation.
+pub(crate) struct ValidatedChangeset<B> {
+    bytes: B,
+    schema: Arc<TableSchema>,
+}
+
+impl<B: AsRef<[u8]>> ValidatedChangeset<B> {
+    pub(crate) fn new(bytes: B, schema: Arc<TableSchema>) -> Result<Self, ChangesetIdentityError> {
+        super::session::validate_changeset_row_identities(bytes.as_ref(), schema.synced_tables())?;
+        Ok(Self { bytes, schema })
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+
+    pub(crate) fn schema(&self) -> &TableSchema {
+        &self.schema
+    }
 }
 
 /// Apply `bytes` to `conn`, resolving conflicts (premerge + row arbitration),
@@ -64,8 +88,7 @@ pub fn resolve_and_apply_changeset(
     tables: &[SyncedTable],
     receiver_wall_ms: u64,
 ) -> Result<ApplyResult, DbError> {
-    let table_refs: Vec<&str> = tables.iter().map(|t| t.name()).collect();
-    let schema = Arc::new(TableSchema::from_db(conn, &table_refs)?);
+    let schema = Arc::new(TableSchema::from_db(conn, tables)?);
     resolve_and_apply_changeset_with_schema(conn, bytes, schema, receiver_wall_ms, &[])
 }
 
@@ -100,14 +123,11 @@ pub fn resolve_and_apply_changeset_with_schema(
     receiver_wall_ms: u64,
     blob_uploads: &[(String, String, String)],
 ) -> Result<ApplyResult, DbError> {
+    let changeset =
+        ValidatedChangeset::new(bytes, schema).map_err(|error| DbError(error.to_string()))?;
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-    let result = resolve_and_apply_changeset_with_schema_on(
-        &tx,
-        bytes,
-        schema,
-        receiver_wall_ms,
-        blob_uploads,
-    )?;
+    let result =
+        resolve_and_apply_changeset_with_schema_on(&tx, changeset, receiver_wall_ms, blob_uploads)?;
     if result.had_fk_violations || !result.constraint_conflict_tables.is_empty() {
         tx.rollback().map_err(DbError::from)?;
     } else {
@@ -120,14 +140,14 @@ pub fn resolve_and_apply_changeset_with_schema(
 /// caller. Rows, blob-uploader records, durable cleanup intents, and the receiver's
 /// position can therefore commit as one database operation. The caller must roll
 /// back when the returned result reports an FK or non-FK constraint conflict.
-pub(crate) fn resolve_and_apply_changeset_with_schema_on(
+pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
     conn: &Connection,
-    bytes: &[u8],
-    schema: Arc<TableSchema>,
+    changeset: ValidatedChangeset<B>,
     receiver_wall_ms: u64,
     blob_uploads: &[(String, String, String)],
 ) -> Result<ApplyResult, DbError> {
-    validate_changeset_tables(bytes, &schema)?;
+    let ValidatedChangeset { bytes, schema } = changeset;
+    let bytes = bytes.as_ref();
 
     let fk_flag = Arc::new(AtomicBool::new(false));
     let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
@@ -209,26 +229,6 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on(
         had_fk_violations,
         constraint_conflict_tables,
     })
-}
-
-fn validate_changeset_tables(bytes: &[u8], schema: &TableSchema) -> Result<(), DbError> {
-    if bytes.is_empty() {
-        return Ok(());
-    }
-
-    let input: &mut dyn std::io::Read = &mut &bytes[..];
-    let mut iter = ChangesetIter::start_strm(&input).map_err(DbError::from)?;
-    while let Some(item) = iter.next().map_err(DbError::from)? {
-        let op = item.op().map_err(DbError::from)?;
-        let table = op.table_name();
-        if schema.columns(table).is_none() {
-            return Err(DbError(format!(
-                "changeset contains undeclared table {table}"
-            )));
-        }
-    }
-
-    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

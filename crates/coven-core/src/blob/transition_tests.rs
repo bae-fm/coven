@@ -70,9 +70,10 @@ fn cover_lazy_decl() -> BlobDecl {
 fn remote_root_db(decl: BlobDecl) -> Database {
     open_test_db_schema(
         vec![
-            SyncedTable::new("notes").remote_root(),
-            SyncedTable::new("note_tags"),
-            SyncedTable::new("note_photos").carries_blob(decl),
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
+            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
+            SyncedTable::new("note_photos", crate::sync::session::RowIdentity::SharedKey)
+                .carries_blob(decl),
         ],
         test_migrations(),
     )

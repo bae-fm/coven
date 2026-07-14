@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use super::apply::resolve_and_apply_changeset_with_schema_on;
+use super::apply::{resolve_and_apply_changeset_with_schema_on, ValidatedChangeset};
 use super::conflict::TableSchema;
 use super::membership::MembershipChain;
 use super::pull::{
@@ -36,6 +36,10 @@ pub enum HeldStorePositionReason {
     },
     Unauthorized,
     InvalidChangeset(String),
+    InvalidRowIdentity {
+        table: String,
+        reason: String,
+    },
     BlobDownloadFailed,
     ForeignKeyDependency,
     ConstraintConflict(Vec<String>),
@@ -367,11 +371,8 @@ pub async fn pull_store_commits(
     let schema: Arc<TableSchema> = {
         let tables = tables.to_vec();
         Arc::new(
-            db.call(move |conn| {
-                let names: Vec<&str> = tables.iter().map(SyncedTable::name).collect();
-                TableSchema::from_db(conn, &names)
-            })
-            .await?,
+            db.call(move |conn| TableSchema::from_db(conn, &tables))
+                .await?,
         )
     };
     let mut frontier = db.materialized_frontier().await?;
@@ -727,7 +728,21 @@ async fn apply_candidate(
     schema: Arc<TableSchema>,
     candidate: &Candidate,
 ) -> Result<ApplyOutcome, StorePullError> {
-    let changes = match crate::changeset::walk(&candidate.package) {
+    let changeset = match ValidatedChangeset::new(candidate.package.clone(), schema) {
+        Ok(changeset) => changeset,
+        Err(error) => {
+            return Ok(ApplyOutcome::Held(match error {
+                super::session::ChangesetIdentityError::Row(error) => {
+                    HeldStorePositionReason::InvalidRowIdentity {
+                        table: error.table().to_string(),
+                        reason: error.to_string(),
+                    }
+                }
+                error => HeldStorePositionReason::InvalidChangeset(error.to_string()),
+            }))
+        }
+    };
+    let changes = match crate::changeset::walk(changeset.bytes()) {
         Ok(changes) => changes,
         Err(error) => {
             return Ok(ApplyOutcome::Held(
@@ -735,7 +750,7 @@ async fn apply_candidate(
             ))
         }
     };
-    let old_changes = match crate::changeset::walk_old(&candidate.package) {
+    let old_changes = match crate::changeset::walk_old(changeset.bytes()) {
         Ok(changes) => changes,
         Err(error) => {
             return Ok(ApplyOutcome::Held(
@@ -786,7 +801,7 @@ async fn apply_candidate(
             ))
         }
     };
-    let outcome = commit_candidate(db, candidate, changes, schema, uploads, cleanup).await?;
+    let outcome = commit_candidate(db, candidate, changes, changeset, uploads, cleanup).await?;
     #[cfg(any(test, feature = "test-utils"))]
     if matches!(outcome, ApplyOutcome::Applied(_)) {
         db.reach_test_point(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
@@ -802,25 +817,28 @@ async fn commit_candidate(
     db: &Database,
     candidate: &Candidate,
     changes: Vec<RowChange>,
-    schema: Arc<TableSchema>,
+    changeset: ValidatedChangeset<Vec<u8>>,
     uploads: Vec<(String, String, String)>,
     cleanup: Vec<LocalBlobCleanupIntent>,
 ) -> Result<ApplyOutcome, StorePullError> {
-    let package = candidate.package.clone();
     let commit = candidate.commit.clone();
     let returned_changes = changes.clone();
     let receiver_wall_ms = db.receive_wall_ms();
     let blob_decls = db.blob_decls();
     let mut changeset_max = None;
-    advance_max_updated_at(&mut changeset_max, &changes, &schema, receiver_wall_ms);
+    advance_max_updated_at(
+        &mut changeset_max,
+        &changes,
+        changeset.schema(),
+        receiver_wall_ms,
+    );
     let hlc = db.hlc();
     let outcome = db
         .call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let apply = resolve_and_apply_changeset_with_schema_on(
                 &tx,
-                &package,
-                schema,
+                changeset,
                 receiver_wall_ms,
                 &uploads,
             )?;
@@ -968,6 +986,70 @@ mod tests {
             .expect("published Store position exists")
     }
 
+    async fn publish_package(
+        storage: &CloudSyncStorage,
+        genesis_hash: ObjectHash,
+        device_id: &str,
+        package: &[u8],
+        keypair: &UserKeypair,
+    ) -> CommitPosition {
+        let commit = StoreBatchCommit::signed(
+            genesis_hash,
+            device_id.to_string(),
+            1,
+            None,
+            BTreeMap::new(),
+            None,
+            1,
+            package,
+            keypair,
+        )
+        .expect("sign Store commit");
+        let head = StoreDeviceHead::signed(
+            genesis_hash,
+            device_id.to_string(),
+            Some(commit.position()),
+            "2026-01-01T00:00:00Z".to_string(),
+            keypair,
+        )
+        .expect("sign Store head");
+        append_and_verify(storage, &commit.package.object_key, ".pkg", package)
+            .await
+            .expect("publish package");
+        append_and_verify(
+            storage,
+            &crate::sync::store_commit::commit_semantic_prefix(device_id, 1, commit.commit_hash()),
+            ".json",
+            &commit.to_bytes(),
+        )
+        .await
+        .expect("publish commit");
+        append_and_verify(
+            storage,
+            &crate::sync::store_commit::head_semantic_prefix(device_id, 1, head.head_hash()),
+            ".json",
+            &head.to_bytes(),
+        )
+        .await
+        .expect("publish head");
+        commit.position()
+    }
+
+    fn independent_test_tables() -> Vec<SyncedTable> {
+        vec![
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::IndependentUuid)
+                .gated_by("shared"),
+            SyncedTable::new(
+                "note_tags",
+                crate::sync::session::RowIdentity::IndependentUuid,
+            ),
+            SyncedTable::new(
+                "note_photos",
+                crate::sync::session::RowIdentity::IndependentUuid,
+            ),
+        ]
+    }
+
     async fn setup_store() -> (InMemoryCloudHome, UserKeypair, ObjectHash) {
         let home = InMemoryCloudHome::new();
         home.sort_listings();
@@ -990,6 +1072,101 @@ mod tests {
         .await
         .expect("publish protocol genesis");
         (home, identity, genesis_hash)
+    }
+
+    #[tokio::test]
+    async fn invalid_remote_uuid_holds_exact_commit_while_another_device_applies() {
+        let (home, identity, genesis_hash) = setup_store().await;
+        let source = open_test_db();
+        let invalid_package = crate::sync::test_helpers::capture_bytes(
+            &source,
+            &[
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+               VALUES ('not-a-uuid', 'invalid', NULL, 1, '0000000001000-0000-bad', '2026-01-01')",
+            ],
+        )
+        .await;
+        let valid_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+        let valid_package = crate::sync::test_helpers::capture_bytes(
+            &source,
+            &[&format!(
+                "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('{valid_id}', 'valid', NULL, 1, '0000000001001-0000-good', '2026-01-01')"
+            )],
+        )
+        .await;
+        let shared_storage = storage(&home, &identity, "identity-receipt");
+        let invalid_position = publish_package(
+            &shared_storage,
+            genesis_hash,
+            "dev-a-invalid",
+            &invalid_package,
+            &identity,
+        )
+        .await;
+        let valid_position = publish_package(
+            &shared_storage,
+            genesis_hash,
+            "dev-z-valid",
+            &valid_package,
+            &identity,
+        )
+        .await;
+
+        let receiver = open_test_db_schema(
+            independent_test_tables(),
+            crate::sync::test_helpers::test_migrations(),
+        );
+        bind_database(&receiver, "dev-receiver", genesis_hash).await;
+        let (_receiver_tmp, receiver_dir) = temp_store_dir();
+        let pulled = pull_store_commits(
+            &receiver,
+            &independent_test_tables(),
+            &shared_storage,
+            genesis_hash,
+            "dev-receiver",
+            &receiver_dir,
+            None,
+        )
+        .await
+        .expect("invalid identity is a held commit");
+
+        assert_eq!(pulled.changesets_applied, 1);
+        assert_eq!(pulled.held_positions.len(), 1);
+        assert!(matches!(
+            &pulled.held_positions[0],
+            HeldStorePosition {
+                coordinate: HeldStoreCoordinate::Commit { device_id, position },
+                reason: HeldStorePositionReason::InvalidRowIdentity { table, reason },
+            } if device_id == "dev-a-invalid"
+                && position == &invalid_position
+                && table == "notes"
+                && reason.contains("not-a-uuid")
+        ));
+        assert_eq!(pulled.frontier.get("dev-z-valid"), Some(&valid_position));
+        assert!(!pulled.frontier.contains_key("dev-a-invalid"));
+        assert_eq!(
+            receiver
+                .exact_materialized_hash("dev-a-invalid", 1)
+                .await
+                .expect("read invalid position"),
+            None
+        );
+        assert_eq!(
+            receiver
+                .exact_materialized_hash("dev-z-valid", 1)
+                .await
+                .expect("read valid position"),
+            Some(valid_position.commit_hash)
+        );
+        assert!(!row_exists(&receiver, "SELECT 1 FROM notes WHERE id = 'not-a-uuid'").await);
+        assert!(
+            row_exists(
+                &receiver,
+                &format!("SELECT 1 FROM notes WHERE id = '{valid_id}'")
+            )
+            .await
+        );
     }
 
     async fn remove_appended_prefix(
@@ -1023,7 +1200,10 @@ mod tests {
 
     fn unique_note_db() -> Database {
         open_test_db_schema(
-            vec![SyncedTable::new("unique_notes")],
+            vec![SyncedTable::new(
+                "unique_notes",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             vec![crate::migration::Migration::run(
                 1,
                 "unique-note-schema",
@@ -1718,7 +1898,10 @@ mod tests {
         let receiver_storage = storage(&home, &identity, "receiver-unique");
         let held = pull_store_commits(
             &receiver,
-            &[SyncedTable::new("unique_notes")],
+            &[SyncedTable::new(
+                "unique_notes",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             &receiver_storage,
             genesis_hash,
             "dev-receiver",
@@ -1746,7 +1929,10 @@ mod tests {
         host_exec(&receiver, "DELETE FROM unique_notes WHERE id = 'local'").await;
         let retry = pull_store_commits(
             &receiver,
-            &[SyncedTable::new("unique_notes")],
+            &[SyncedTable::new(
+                "unique_notes",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
             &receiver_storage,
             genesis_hash,
             "dev-receiver",

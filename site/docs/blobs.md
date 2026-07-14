@@ -29,7 +29,7 @@ columns locating each blob plus its namespace, encryption scope, provenance, and
 cache fill:
 
 ```rust
-SyncedTable::new("todo_attachments").carries_blob(
+SyncedTable::new("todo_attachments", RowIdentity::IndependentUuid).carries_blob(
     BlobDecl::new("attachments", Provenance::UserProvided, CacheFill::CacheEager)
         // .with_id_column("file_id")              // defaults to the PK ("id")
         // .with_cloud_path_column("path")         // for a browsable home
@@ -37,6 +37,10 @@ SyncedTable::new("todo_attachments").carries_blob(
         // .write_once()                           // this row is never repointed
 )
 ```
+
+The attachment rows are independently created, so their row ids are canonical
+UUIDv4 or UUIDv7 values. The row id remains the global logical identity whether
+or not the table carries a blob.
 
 ```rust
 pub struct BlobDecl {
@@ -165,8 +169,9 @@ never the raw key bytes:
   [Chunked encryption](/docs/encryption#chunked-encryption) for the
   derivation). Deterministic: the same `scope_id` yields the same key on push
   and on pull, which is what lets a puller re-derive it and decrypt. The
-  corollary is that `scope_id` must be stable; a row id that later changes
-  would re-derive a different key and the stored blob would not decrypt.
+  corollary is that `scope_id` must be stable for the lifetime of the reference.
+  When the scope is the row id, a primary-key change deletes the old identity
+  and inserts a new row whose scope derives a different key.
 
 ## How a blob moves out
 
@@ -413,7 +418,7 @@ collected.
 #### Write-once
 
 ```rust
-SyncedTable::new("release_files").carries_blob(
+SyncedTable::new("release_files", RowIdentity::IndependentUuid).carries_blob(
     BlobDecl::new("audio", Provenance::UserProvided, CacheFill::CacheLazy)
         .with_cloud_path_column("cloud_path")
         .write_once()

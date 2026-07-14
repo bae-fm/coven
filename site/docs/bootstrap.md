@@ -211,6 +211,12 @@ there is no separate migration path. The device then pulls every changeset
 newer than the bootstrap cursors, so it catches up on anything written between
 the snapshot and now.
 
+That writer open also validates the final rows against every table's declared
+`RowIdentity`. An `IndependentUuid` table containing anything other than a
+canonical UUIDv4 or UUIDv7 fails open before the snapshot can become a running
+store. The declaration preserves the same `(table, id)` identity meaning on the
+publisher and the bootstrapped device.
+
 Capture stays enabled through the bootstrap pull. A just-bootstrapped store has
 no local writer, so there is no whole-cycle suspend to manage; the pull disables
 capture only around each apply, exactly as a steady-state cycle does.

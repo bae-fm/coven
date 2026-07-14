@@ -157,6 +157,50 @@ async fn session_captures_and_applies_inserts() {
 }
 
 #[tokio::test]
+async fn shared_key_inserts_with_equal_ids_converge_in_both_apply_orders() {
+    let older_source = open_test_db();
+    let older = capture_bytes(
+        &older_source,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+          VALUES ('preferences', 'older', NULL, 1, '0000000001000-0000-a', '2026-01-01')",
+        ],
+    )
+    .await;
+    let newer_source = open_test_db();
+    let newer = capture_bytes(
+        &newer_source,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+          VALUES ('preferences', 'newer', NULL, 1, '0000000002000-0000-b', '2026-01-01')",
+        ],
+    )
+    .await;
+
+    let older_then_newer = open_test_db();
+    apply_to_db(&older_then_newer, &older, &test_synced_tables()).await;
+    apply_to_db(&older_then_newer, &newer, &test_synced_tables()).await;
+    let newer_then_older = open_test_db();
+    apply_to_db(&newer_then_older, &newer, &test_synced_tables()).await;
+    apply_to_db(&newer_then_older, &older, &test_synced_tables()).await;
+
+    for target in [&older_then_newer, &newer_then_older] {
+        assert_eq!(
+            query_text(target, "SELECT title FROM notes WHERE id = 'preferences'").await,
+            "newer"
+        );
+        assert_eq!(
+            query_text(
+                target,
+                "SELECT _updated_at FROM notes WHERE id = 'preferences'"
+            )
+            .await,
+            "0000000002000-0000-b"
+        );
+    }
+}
+
+#[tokio::test]
 async fn lww_later_update_wins() {
     // Source builds an UPDATE changeset from base ts=1 to ts=9.
     let src = open_test_db();

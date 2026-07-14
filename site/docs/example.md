@@ -21,7 +21,7 @@ threads that own the connections — a writer, and a read-only companion that
 backs `handle.sql_read`.
 
 ```rust
-use coven::{Coven, Migration, SyncedTable};
+use coven::{Coven, Migration, RowIdentity, SyncedTable};
 
 const SCHEMA: &str = "
 CREATE TABLE workspaces (
@@ -47,16 +47,21 @@ CREATE TABLE todos (
 
 let handle = Coven::builder(config)
     .synced_tables(vec![
-        SyncedTable::new("workspaces"),
-        SyncedTable::new("lists").gated_by("shared"),
-        SyncedTable::new("todos"),
+        SyncedTable::new("workspaces", RowIdentity::IndependentUuid),
+        SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared"),
+        SyncedTable::new("todos", RowIdentity::IndependentUuid),
     ])
     .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
     .open()?;
 ```
 
 Every synced table is declared `STRICT`, carries an `id` text primary key at
-column 0, and has an `_updated_at TEXT NOT NULL` column. The
+column 0, and has an `_updated_at TEXT NOT NULL` column. `(table, id)` is the
+logical row identity on every device. These app rows are independently created,
+so their ids are canonical UUIDv4 or UUIDv7 values. A table instead uses
+`RowIdentity::SharedKey` only when equal application keys intentionally merge as
+one row. SQLite represents a primary-key change as deleting the old identity
+and inserting the new validated identity in the same transaction. The
 [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values declare how
 each table is gated:
 [`new`](rustdoc:method:coven::sync::session::SyncedTable::new) syncs every row,
@@ -88,6 +93,7 @@ cycle.
 use coven::rusqlite::params;
 
 handle.sql(move |sql| {
+    let todo_id = uuid::Uuid::new_v4().to_string();
     sql.tx().execute(
         "INSERT INTO todos (id, list_id, title, done, _updated_at)
          VALUES (?1, ?2, ?3, 0, ?4)",
@@ -228,7 +234,7 @@ use coven::{BlobDecl, CacheFill, Provenance};
 // In the set you pass to `Coven::builder(...).synced_tables(...)`, declare the blob on `todos`:
 //   blob id = the row's primary key; opaque home, so no cloud_path column;
 //   master-scoped; the user's own file, fetched into every device's cache on pull.
-SyncedTable::new("todos").carries_blob(
+SyncedTable::new("todos", RowIdentity::IndependentUuid).carries_blob(
     BlobDecl::new("todo-files", Provenance::UserProvided, CacheFill::CacheEager),
 )
 ```
