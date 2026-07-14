@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
-use super::apply::resolve_and_apply_changeset_with_schema;
+use super::apply::resolve_and_apply_changeset_with_schema_on;
 use super::conflict::TableSchema;
 use super::envelope::{self, verify_changeset_signature};
 use super::hlc::Timestamp;
@@ -158,16 +158,16 @@ pub struct PullResult {
     /// seq; other device streams continue.
     pub held_changesets: Vec<HeldChangeset>,
     /// Changesets that hit a non-retryable SQLite constraint conflict while
-    /// applying. The conflicting row is omitted and the cursor advances; surfaced
-    /// so the host can warn about the unresolved uniqueness/constraint clash.
+    /// applying. The whole changeset rolls back and its cursor stays put;
+    /// surfaced so the host can warn about the unresolved clash.
     pub constraint_conflicts: Vec<ConstraintConflict>,
     /// All device heads fetched during this pull (including our own).
     /// Used by the sync status UI to show other devices' activity.
     pub remote_heads: Vec<DeviceHead>,
     /// Row changes from applied changesets, for the host to map to domain events.
     /// A refresh *hint*, not an exhaustive log: it can overstate what a peer will
-    /// converge to, because a changeset whose apply is later held or hits a
-    /// constraint conflict still contributed its changes here. A host maps these
+    /// converge to, because a changeset whose apply is later held still
+    /// contributed its changes here. A host maps these
     /// to which rows to refresh, then re-reads each by primary key rather than
     /// trusting the list as the final row state. Empty if nothing was applied.
     pub row_changes: Vec<RowChange>,
@@ -178,19 +178,30 @@ struct DeferredChangeset {
     device_id: String,
     seq: u64,
     changeset: Vec<u8>,
-    old_changes: Vec<RowChange>,
     changes: Vec<RowChange>,
     /// The `(namespace, blob_id, uploader)` records the retry re-applies alongside
     /// the rows, so a deferred changeset records its blobs' uploaders on the pass
     /// that finally commits it.
     blob_uploads: Vec<(String, String, String)>,
+    cleanup_intents: Vec<LocalBlobCleanupIntent>,
 }
 
 struct CompletedChangeset<'a> {
     device_id: &'a str,
     seq: u64,
-    old_changes: &'a [RowChange],
     changes: &'a [RowChange],
+}
+
+#[derive(Clone, Debug)]
+struct LocalBlobCleanupIntent {
+    namespace: String,
+    blob_id: String,
+}
+
+enum RemoteApplyOutcome {
+    Applied,
+    DeferredForeignKey,
+    ConstraintConflict(Vec<String>),
 }
 
 /// The membership state one sync cycle judges every authorization against, loaded
@@ -402,6 +413,12 @@ pub async fn pull_changes(
         remote_heads: heads.clone(),
         row_changes: Vec::new(),
     };
+    if drain_local_blob_cleanup_intents(db, store_dir)
+        .await
+        .map_err(|e| PullError::Apply(e.0))?
+    {
+        result.asset_downloads_failed = true;
+    }
     let mut deferred: Vec<DeferredChangeset> = Vec::new();
     let mut applied_devices: HashSet<String> = HashSet::new();
 
@@ -552,6 +569,9 @@ pub async fn pull_changes(
                     seq,
                     author: env.author_pubkey.clone(),
                 });
+                db.set_sync_cursor(&head.device_id, seq)
+                    .await
+                    .map_err(|e| PullError::Apply(e.0))?;
                 updated_cursors.insert(head.device_id.clone(), seq);
                 continue;
             }
@@ -641,6 +661,9 @@ pub async fn pull_changes(
                             seq,
                             author: env.author_pubkey.clone(),
                         });
+                        db.set_sync_cursor(&head.device_id, seq)
+                            .await
+                            .map_err(|e| PullError::Apply(e.0))?;
                         updated_cursors.insert(head.device_id.clone(), seq);
                         continue;
                     }
@@ -661,6 +684,9 @@ pub async fn pull_changes(
             }
 
             if changeset_bytes.is_empty() {
+                db.set_sync_cursor(&head.device_id, seq)
+                    .await
+                    .map_err(|e| PullError::Apply(e.0))?;
                 updated_cursors.insert(head.device_id.clone(), seq);
                 continue;
             }
@@ -758,23 +784,39 @@ pub async fn pull_changes(
                     break;
                 }
             };
-            let apply_attempt = {
-                let schema = schema.clone();
-                let bytes = changeset_bytes.clone();
-                let blob_uploads = blob_uploads.clone();
-                db.call(move |conn| {
-                    resolve_and_apply_changeset_with_schema(
-                        conn,
-                        &bytes,
-                        schema,
-                        receiver_wall_ms,
-                        &blob_uploads,
-                    )
-                })
-                .await
-            };
-            let apply_result = match apply_attempt {
-                Ok(result) => result,
+            let cleanup_intents =
+                match local_blob_cleanup_intents(&blob_decls, &old_changes, &changes) {
+                    Ok(intents) => intents,
+                    Err(e) => {
+                        error!(
+                            device_id = %head.device_id,
+                            seq,
+                            error = %e,
+                            "failed to derive local blob cleanup intents; holding cursor"
+                        );
+                        result.held_changesets.push(HeldChangeset {
+                            device_id: head.device_id.clone(),
+                            seq,
+                            reason: HeldChangesetReason::ApplyFailed {
+                                error: e.to_string(),
+                            },
+                        });
+                        break;
+                    }
+                };
+            let apply_outcome = match commit_remote_changeset(
+                db,
+                &head.device_id,
+                seq,
+                &changeset_bytes,
+                schema.clone(),
+                receiver_wall_ms,
+                &blob_uploads,
+                &cleanup_intents,
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
                 Err(e) => {
                     error!(
                         device_id = %head.device_id,
@@ -791,44 +833,41 @@ pub async fn pull_changes(
                 }
             };
 
-            if apply_result.had_fk_violations {
-                deferred.push(DeferredChangeset {
-                    device_id: head.device_id.clone(),
-                    seq,
-                    changeset: changeset_bytes.clone(),
-                    old_changes,
-                    changes,
-                    blob_uploads,
-                });
-                break;
+            match apply_outcome {
+                RemoteApplyOutcome::Applied => {}
+                RemoteApplyOutcome::DeferredForeignKey => {
+                    deferred.push(DeferredChangeset {
+                        device_id: head.device_id.clone(),
+                        seq,
+                        changeset: changeset_bytes.clone(),
+                        changes,
+                        blob_uploads,
+                        cleanup_intents,
+                    });
+                    break;
+                }
+                RemoteApplyOutcome::ConstraintConflict(tables) => {
+                    record_constraint_conflicts(&mut result, &head.device_id, seq, tables);
+                    break;
+                }
             }
-            record_constraint_conflicts(
-                &mut result,
-                &head.device_id,
-                seq,
-                apply_result.constraint_conflict_tables,
-            );
 
-            if !finish_applied_changeset(
+            finish_applied_changeset(
                 &mut result,
                 &mut updated_cursors,
                 &mut applied_devices,
                 CompletedChangeset {
                     device_id: &head.device_id,
                     seq,
-                    old_changes: &old_changes,
                     changes: &changes,
                 },
-                &blob_decls,
                 db,
                 store_dir,
                 &schema,
                 receiver_wall_ms,
             )
             .await
-            {
-                break;
-            }
+            .map_err(|e| PullError::Apply(e.0))?;
         }
     }
 
@@ -841,23 +880,19 @@ pub async fn pull_changes(
         );
 
         for d in &deferred {
-            let retry_attempt = {
-                let schema = schema.clone();
-                let bytes = d.changeset.clone();
-                let blob_uploads = d.blob_uploads.clone();
-                db.call(move |conn| {
-                    resolve_and_apply_changeset_with_schema(
-                        conn,
-                        &bytes,
-                        schema,
-                        receiver_wall_ms,
-                        &blob_uploads,
-                    )
-                })
-                .await
-            };
-            let retry_result = match retry_attempt {
-                Ok(result) => result,
+            let retry_outcome = match commit_remote_changeset(
+                db,
+                &d.device_id,
+                d.seq,
+                &d.changeset,
+                schema.clone(),
+                receiver_wall_ms,
+                &d.blob_uploads,
+                &d.cleanup_intents,
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
                 Err(e) => {
                     error!(
                         device_id = %d.device_id,
@@ -874,40 +909,37 @@ pub async fn pull_changes(
                 }
             };
 
-            if retry_result.had_fk_violations {
-                warn!(
-                    device_id = %d.device_id,
-                    seq = d.seq,
-                    "changeset still has FK violations after retry; cursor not advanced"
-                );
-                continue;
+            match retry_outcome {
+                RemoteApplyOutcome::Applied => {}
+                RemoteApplyOutcome::DeferredForeignKey => {
+                    warn!(
+                        device_id = %d.device_id,
+                        seq = d.seq,
+                        "changeset still has FK violations after retry; cursor not advanced"
+                    );
+                    continue;
+                }
+                RemoteApplyOutcome::ConstraintConflict(tables) => {
+                    record_constraint_conflicts(&mut result, &d.device_id, d.seq, tables);
+                    continue;
+                }
             }
-            record_constraint_conflicts(
-                &mut result,
-                &d.device_id,
-                d.seq,
-                retry_result.constraint_conflict_tables,
-            );
-            if !finish_applied_changeset(
+            finish_applied_changeset(
                 &mut result,
                 &mut updated_cursors,
                 &mut applied_devices,
                 CompletedChangeset {
                     device_id: &d.device_id,
                     seq: d.seq,
-                    old_changes: &d.old_changes,
                     changes: &d.changes,
                 },
-                &blob_decls,
                 db,
                 store_dir,
                 &schema,
                 receiver_wall_ms,
             )
             .await
-            {
-                continue;
-            }
+            .map_err(|e| PullError::Apply(e.0))?;
         }
     }
 
@@ -916,39 +948,67 @@ pub async fn pull_changes(
     Ok((updated_cursors, result))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn commit_remote_changeset(
+    db: &Database,
+    device_id: &str,
+    seq: u64,
+    changeset: &[u8],
+    schema: Arc<TableSchema>,
+    receiver_wall_ms: u64,
+    blob_uploads: &[(String, String, String)],
+    cleanup_intents: &[LocalBlobCleanupIntent],
+) -> Result<RemoteApplyOutcome, crate::database::DbError> {
+    let device_id = device_id.to_string();
+    let changeset = changeset.to_vec();
+    let blob_uploads = blob_uploads.to_vec();
+    let cleanup_intents = cleanup_intents.to_vec();
+    db.call(move |conn| {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(crate::database::DbError::from)?;
+        let apply = resolve_and_apply_changeset_with_schema_on(
+            &tx,
+            &changeset,
+            schema,
+            receiver_wall_ms,
+            &blob_uploads,
+        )?;
+        if apply.had_fk_violations {
+            tx.rollback().map_err(crate::database::DbError::from)?;
+            return Ok(RemoteApplyOutcome::DeferredForeignKey);
+        }
+        if !apply.constraint_conflict_tables.is_empty() {
+            tx.rollback().map_err(crate::database::DbError::from)?;
+            return Ok(RemoteApplyOutcome::ConstraintConflict(
+                apply.constraint_conflict_tables,
+            ));
+        }
+        for intent in cleanup_intents {
+            tx.execute(
+                "INSERT OR IGNORE INTO local_cleanup_intents (namespace, blob_id) \
+                 VALUES (?1, ?2)",
+                (&intent.namespace, &intent.blob_id),
+            )
+            .map_err(crate::database::DbError::from)?;
+        }
+        Database::set_sync_cursor_on(&tx, &device_id, seq)?;
+        tx.commit().map_err(crate::database::DbError::from)?;
+        Ok(RemoteApplyOutcome::Applied)
+    })
+    .await
+}
+
 async fn finish_applied_changeset(
     result: &mut PullResult,
     updated_cursors: &mut HashMap<String, u64>,
     applied_devices: &mut HashSet<String>,
     applied: CompletedChangeset<'_>,
-    blob_decls: &BlobDecls,
     db: &Database,
     store_dir: &StoreDir,
     schema: &TableSchema,
     receiver_wall_ms: u64,
-) -> bool {
-    // A changeset that DELETEs a blob-bearing row (a gate retract or a genuine
-    // delete) leaves this peer holding the blob's local copy. Drop it wherever it
-    // is: cache, pinned cache, and local store. A peer never writes a cloud
-    // tombstone here; that belongs to the deleting / make-Local owner.
-    if let Err(e) = drop_deleted_blob_local(
-        applied.old_changes,
-        applied.changes,
-        blob_decls,
-        db,
-        store_dir,
-    )
-    .await
-    {
-        warn!(
-            "Dropping local copies for deleted blob rows failed for {}/{}: {e}; \
-             cursor not advanced, will retry next cycle",
-            applied.device_id, applied.seq
-        );
-        result.asset_downloads_failed = true;
-        return false;
-    }
-
+) -> Result<(), crate::database::DbError> {
     // Advance the shared register past this changeset's applied rows, now — while
     // the pull is still running (more changesets, per-changeset blob downloads, the
     // FK retry pass all follow). The host write path stamps `_updated_at` off this
@@ -971,7 +1031,16 @@ async fn finish_applied_changeset(
     result.row_changes.extend(applied.changes.to_vec());
     applied_devices.insert(applied.device_id.to_string());
     updated_cursors.insert(applied.device_id.to_string(), applied.seq);
-    true
+
+    // Cleanup obligations were committed beside the row and cursor. Draining them
+    // does not control whether the changeset is materialized; a failed filesystem
+    // operation leaves its durable intent for the next drain. Keep this after the
+    // register advance: no awaited work may expose the committed rows to a host
+    // write before the host clock has observed their timestamps.
+    if drain_local_blob_cleanup_intents(db, store_dir).await? {
+        result.asset_downloads_failed = true;
+    }
+    Ok(())
 }
 
 fn record_constraint_conflicts(
@@ -985,7 +1054,7 @@ fn record_constraint_conflicts(
             device_id = %device_id,
             seq,
             table = %table,
-            "changeset hit a non-retryable SQLite constraint conflict; row omitted"
+            "changeset hit a non-retryable SQLite constraint conflict; changeset rolled back"
         );
         result.constraint_conflicts.push(ConstraintConflict {
             device_id: device_id.to_string(),
@@ -1439,46 +1508,31 @@ pub(crate) fn host_provided_blobs(
         .collect()
 }
 
-/// Drop the local copy of every blob a deleted row in `changes` references —
-/// wherever it is: the cache (a Remote blob's `pinned/` + `cache/` copies) and the
-/// local store (a host-provided Local blob). Runs after a changeset applies: a
-/// DELETE of a blob-bearing row (a gate retract or a genuine delete) must not leave
-/// this peer's budget-exempt `pinned/` copy or its local-store copy behind. A failed
-/// drop is propagated, not swallowed: the caller leaves the cursor unadvanced and
-/// retries the whole changeset next cycle, so the cleanup is never silently lost.
-/// Retry is safe — re-applying the changeset is idempotent and both drops ignore an
-/// already-absent file. A peer normally holds a host-provided blob in its cache (it
-/// was pulled there), but the local-store drop covers the case where the bytes are
-/// there too; a deleted row needs neither.
-async fn drop_deleted_blob_local(
+/// Derive every local-blob cleanup obligation from a changeset before its rows
+/// apply. The caller stores these intents in the same transaction as the rows and
+/// cursor, so filesystem cleanup may happen afterward without leaving an
+/// unrecorded obligation. A DELETE removes its old blob; an UPDATE does so only
+/// when it repoints or clears the blob reference.
+fn local_blob_cleanup_intents(
+    blob_decls: &BlobDecls,
     old_changes: &[RowChange],
     new_changes: &[RowChange],
-    blob_decls: &BlobDecls,
-    db: &Database,
-    store_dir: &StoreDir,
-) -> Result<(), crate::blob::cache::BlobCacheError> {
+) -> Result<Vec<LocalBlobCleanupIntent>, crate::blob::decl::BlobDeclError> {
     if old_changes.len() != new_changes.len() {
-        return Err(crate::blob::cache::BlobCacheError::ChangesetWalkMismatch {
+        return Err(crate::blob::decl::BlobDeclError::ChangesetWalkMismatch {
             old_count: old_changes.len(),
             new_count: new_changes.len(),
         });
     }
+    let mut intents = Vec::new();
     for (old, new) in old_changes.iter().zip(new_changes) {
         let old_blob_to_drop = match old.op {
-            crate::changeset::ChangeOp::Delete => blob_decls
-                .ref_from_change(old)
-                .map_err(|e| crate::blob::cache::BlobCacheError::Io(e.to_string()))?,
+            crate::changeset::ChangeOp::Delete => blob_decls.ref_from_change(old)?,
             crate::changeset::ChangeOp::Update => {
-                let Some(old_blob) = blob_decls
-                    .ref_from_change(old)
-                    .map_err(|e| crate::blob::cache::BlobCacheError::Io(e.to_string()))?
-                else {
+                let Some(old_blob) = blob_decls.ref_from_change(old)? else {
                     continue;
                 };
-                let should_drop = match blob_decls
-                    .ref_from_change(new)
-                    .map_err(|e| crate::blob::cache::BlobCacheError::Io(e.to_string()))?
-                {
+                let should_drop = match blob_decls.ref_from_change(new)? {
                     Some(new_blob) => {
                         old_blob.namespace != new_blob.namespace || old_blob.id != new_blob.id
                     }
@@ -1493,24 +1547,88 @@ async fn drop_deleted_blob_local(
             crate::changeset::ChangeOp::Insert => None,
         };
         if let Some(blob) = old_blob_to_drop {
-            let decls = db.blob_decls();
-            let namespace = blob.namespace.clone();
-            let id = blob.id.clone();
-            let live_row = db
-                .call(move |conn| {
-                    decls
-                        .row_for_blob_in_namespace(conn, &namespace, &id)
-                        .map_err(|e| crate::database::DbError(e.to_string()))
-                })
-                .await
-                .map_err(|e| crate::blob::cache::BlobCacheError::Io(e.to_string()))?;
-            if live_row.is_some() {
-                continue;
-            }
-            crate::blob::cache::drop_all_local_copies(store_dir, &blob.namespace, &blob.id).await?;
+            intents.push(LocalBlobCleanupIntent {
+                namespace: blob.namespace,
+                blob_id: blob.id,
+            });
         }
     }
-    Ok(())
+    Ok(intents)
+}
+
+/// Drain durable cleanup intents. Returns whether any filesystem deletion
+/// remains pending. A blob another live row still references no longer needs the
+/// cleanup, so that intent is removed without touching its files.
+async fn drain_local_blob_cleanup_intents(
+    db: &Database,
+    store_dir: &StoreDir,
+) -> Result<bool, crate::database::DbError> {
+    let intents = db
+        .call(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT namespace, blob_id FROM local_cleanup_intents \
+                     ORDER BY namespace, blob_id",
+                )
+                .map_err(crate::database::DbError::from)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(LocalBlobCleanupIntent {
+                        namespace: row.get(0)?,
+                        blob_id: row.get(1)?,
+                    })
+                })
+                .map_err(crate::database::DbError::from)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(crate::database::DbError::from)
+        })
+        .await?;
+
+    let mut has_pending_filesystem_work = false;
+    for intent in intents {
+        let decls = db.blob_decls();
+        let namespace = intent.namespace.clone();
+        let blob_id = intent.blob_id.clone();
+        let live_row = db
+            .call(move |conn| {
+                decls
+                    .row_for_blob_in_namespace(conn, &namespace, &blob_id)
+                    .map_err(|e| crate::database::DbError(e.to_string()))
+            })
+            .await?;
+        if live_row.is_none() {
+            if let Err(error) = crate::blob::cache::drop_all_local_copies(
+                store_dir,
+                &intent.namespace,
+                &intent.blob_id,
+            )
+            .await
+            {
+                warn!(
+                    namespace = %intent.namespace,
+                    blob_id = %intent.blob_id,
+                    error = %error,
+                    "pulled blob local cleanup remains pending"
+                );
+                has_pending_filesystem_work = true;
+                continue;
+            }
+        }
+
+        let namespace = intent.namespace;
+        let blob_id = intent.blob_id;
+        db.call(move |conn| {
+            conn.execute(
+                "DELETE FROM local_cleanup_intents \
+                 WHERE namespace = ?1 AND blob_id = ?2",
+                (&namespace, &blob_id),
+            )
+            .map(|_| ())
+            .map_err(crate::database::DbError::from)
+        })
+        .await?;
+    }
+    Ok(has_pending_filesystem_work)
 }
 
 /// Download each blob in `blobs` into the evictable cache
@@ -1744,35 +1862,23 @@ impl std::error::Error for PullError {}
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn change_walk_pairing_rejects_mismatched_lengths() {
+    #[test]
+    fn cleanup_intent_derivation_rejects_mismatched_lengths() {
         let old_changes = vec![RowChange {
             table: "files".to_string(),
             op: crate::changeset::ChangeOp::Update,
             columns: vec![Some("file-1".to_string())],
         }];
         let new_changes = Vec::new();
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let store_dir = StoreDir::new(tmp.path());
-        let (db, _stamper) = Database::open(
-            std::path::Path::new(":memory:"),
-            Vec::new(),
-            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            "test-device".to_string(),
-            &[],
-        )
-        .expect("open database");
         let conn = rusqlite::Connection::open_in_memory().expect("db");
         let decls = BlobDecls::from_tables(&conn, &[]).expect("decls");
 
-        let err = drop_deleted_blob_local(&old_changes, &new_changes, &decls, &db, &store_dir)
-            .await
+        let err = local_blob_cleanup_intents(&decls, &old_changes, &new_changes)
             .expect_err("mismatched changeset walks fail");
 
         assert!(matches!(
             err,
-            crate::blob::cache::BlobCacheError::ChangesetWalkMismatch {
+            crate::blob::decl::BlobDeclError::ChangesetWalkMismatch {
                 old_count: 1,
                 new_count: 0
             }

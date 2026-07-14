@@ -1058,37 +1058,51 @@ impl Database {
     // ---- Bookkeeping: sync_cursors ----
 
     pub(crate) async fn get_all_sync_cursors(&self) -> Result<HashMap<String, u64>, DbError> {
-        self.call(move |conn| {
-            let mut stmt = conn
-                .prepare("SELECT device_id, last_seq FROM sync_cursors")
-                .map_err(DbError::from)?;
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
-                })
-                .map_err(DbError::from)?;
-            let mut out = HashMap::new();
-            for row in rows {
-                let (id, seq) = row.map_err(DbError::from)?;
-                out.insert(id, seq);
-            }
-            Ok(out)
-        })
-        .await
+        self.call(Self::get_all_sync_cursors_on).await
+    }
+
+    /// Read the complete cursor vector on a connection the caller already owns.
+    /// Snapshot capture uses this immediately beside `VACUUM INTO`, so no host
+    /// write or remote apply can land between the image and its coverage vector.
+    pub(crate) fn get_all_sync_cursors_on(
+        conn: &Connection,
+    ) -> Result<HashMap<String, u64>, DbError> {
+        let mut stmt = conn
+            .prepare("SELECT device_id, last_seq FROM sync_cursors")
+            .map_err(DbError::from)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+            })
+            .map_err(DbError::from)?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (id, seq) = row.map_err(DbError::from)?;
+            out.insert(id, seq);
+        }
+        Ok(out)
     }
 
     pub async fn set_sync_cursor(&self, device_id: &str, seq: u64) -> Result<(), DbError> {
         let device_id = device_id.to_string();
-        self.call(move |conn| {
-            conn.execute(
-                "INSERT INTO sync_cursors (device_id, last_seq) VALUES (?1, ?2) \
-                 ON CONFLICT(device_id) DO UPDATE SET last_seq = excluded.last_seq",
-                (device_id, seq as i64),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
+        self.call(move |conn| Self::set_sync_cursor_on(conn, &device_id, seq))
+            .await
+    }
+
+    /// Advance one cursor on a connection or transaction the caller already
+    /// owns. Incoming apply uses this in the same transaction as the remote rows.
+    pub(crate) fn set_sync_cursor_on(
+        conn: &Connection,
+        device_id: &str,
+        seq: u64,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "INSERT INTO sync_cursors (device_id, last_seq) VALUES (?1, ?2) \
+             ON CONFLICT(device_id) DO UPDATE SET last_seq = excluded.last_seq",
+            (device_id, seq as i64),
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
     }
 
     // ---- Cloud outbox ----

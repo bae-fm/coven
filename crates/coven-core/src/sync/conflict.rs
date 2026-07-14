@@ -125,7 +125,7 @@ pub fn compare_lww_stamps(
 /// FOREIGN_KEY conflicts never reach here — [`super::apply`] resolves them before
 /// calling this, because that conflict type's iterator does not expose the row.
 /// CONSTRAINT conflicts are also handled in [`super::apply`] so the caller can
-/// surface the table that hit a non-retryable uniqueness/constraint clash.
+/// surface the table and roll back the entire changeset.
 ///
 /// For DATA/CONFLICT, the incoming `_updated_at` is read from the side the op
 /// records — `item.new_value(uat)` for an INSERT/UPDATE, `item.old_value(uat)` for

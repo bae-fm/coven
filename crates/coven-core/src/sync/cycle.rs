@@ -52,9 +52,9 @@ pub struct SyncCycleResult {
     /// detail (device, seq, reason) so a host can say which changesets are
     /// stalled, not only how many.
     pub held_changesets: Vec<HeldChangeset>,
-    /// Changeset rows omitted because SQLite reported a non-retryable constraint
-    /// conflict. The cursor advanced past the changeset; the count is per-cycle
-    /// and surfaces as a warning.
+    /// Changesets rejected because SQLite reported a non-retryable constraint
+    /// conflict. Their rows and cursor rolled back; the count is per-cycle and
+    /// surfaces as a warning.
     pub constraint_conflicts: u64,
     /// Per-device activity of the other devices seen in the sync storage —
     /// device id, its member's author key, latest seq, and RFC 3339 last-sync
@@ -421,6 +421,28 @@ fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String
     }
 }
 
+struct SnapshotCut {
+    snapshot: super::snapshot::CreatedSnapshot,
+    applied_cursors: std::collections::HashMap<String, u64>,
+}
+
+async fn capture_snapshot_cut(
+    db: &Database,
+    temp_dir: PathBuf,
+    tables: Vec<super::session::SyncedTable>,
+) -> Result<SnapshotCut, DbError> {
+    db.call(move |conn| {
+        let snapshot = super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
+            .map_err(|e| DbError(e.to_string()))?;
+        let applied_cursors = Database::get_all_sync_cursors_on(conn)?;
+        Ok(SnapshotCut {
+            snapshot,
+            applied_cursors,
+        })
+    })
+    .await
+}
+
 /// Run a single sync cycle: drain pending local changes + gate + push, pull,
 /// bookkeeping, snapshot.
 ///
@@ -767,18 +789,9 @@ pub(crate) async fn run_single_sync_cycle(
             .map_err(|e| format!("Failed to clear gated-empty pending changesets: {e}"))?;
     }
 
-    // Persist updated cursors. A failure here aborts the cycle like the
-    // sibling bookkeeping persists (local_seq, staged_seq, HLC high-water):
-    // leaving a cursor behind the rows already applied this cycle would
-    // silently desync this device and mask a real DB error.
-    for (cursor_device_id, cursor_seq) in &sync_result.updated_cursors {
-        db.set_sync_cursor(cursor_device_id, *cursor_seq)
-            .await
-            .map_err(|e| format!("Failed to persist sync cursor for {cursor_device_id}: {e}"))?;
-    }
-
     // Publish this device's signed pull-ack: how far it has pulled every other
-    // device, the same cursor vector just persisted. Changeset reclamation reads it
+    // device, the cursor vector each accepted apply persisted with its rows.
+    // Changeset reclamation reads it
     // to compute a floor that strands no member; nothing else consumes it. A stale
     // or failed ack only narrows the next reclamation — it never blocks a pull or a
     // push — so a failure here is logged, not fatal. Runs every cycle so the acked
@@ -959,22 +972,15 @@ pub(crate) async fn run_single_sync_cycle(
         // stores syncing concurrently (or parallel tests) would otherwise race
         // on one `/tmp/snapshot.db`. A store's own cycles run serially.
         let temp_dir = store_dir.as_ref().to_path_buf();
-        let snapshot_result = {
-            let tables = tables.to_vec();
-            db.call(move |conn| {
-                super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
-                    .map_err(|e| crate::database::DbError(e.to_string()))
-            })
-            .await
-        };
+        let snapshot_result = capture_snapshot_cut(db, temp_dir, tables.to_vec()).await;
 
         match snapshot_result {
-            Ok(snapshot) => {
+            Ok(cut) => {
                 super::service::upload_snapshot_host_blobs(
                     db,
                     storage,
                     store_dir,
-                    &snapshot.host_blobs,
+                    &cut.snapshot.host_blobs,
                     host_upload_cancel.as_ref(),
                 )
                 .await
@@ -983,16 +989,16 @@ pub(crate) async fn run_single_sync_cycle(
                 match super::snapshot::push_snapshot(
                     storage,
                     store_id,
-                    snapshot.db_image,
+                    cut.snapshot.db_image,
                     device_id,
-                    sync_result.updated_cursors.clone(),
+                    cut.applied_cursors,
                     local_seq,
                     db.schema_version(),
                     user_keypair,
                     clock,
                     super::snapshot::SnapshotBlobPreflight {
                         db,
-                        blobs: &snapshot.publish_blobs,
+                        blobs: &cut.snapshot.publish_blobs,
                     },
                 )
                 .await
@@ -1589,5 +1595,70 @@ impl SyncComponents {
             observer,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn snapshot_image_and_cursor_vector_share_one_database_cut() {
+        let db = crate::sync::test_helpers::open_test_db();
+        db.call(|conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO notes \
+                 (id, title, body, shared, _updated_at, created_at) \
+                 VALUES ('n1', 'covered-at-one', NULL, 1, \
+                         '0000000001000-0000-dev1', '2026-01-01')",
+                [],
+            )
+            .map_err(DbError::from)?;
+            Database::set_sync_cursor_on(&tx, "dev1", 1)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+        .expect("seed covered state");
+
+        let temp = tempfile::tempdir().expect("snapshot temp dir");
+        let cut = capture_snapshot_cut(&db, temp.path().to_path_buf(), db.synced_tables().to_vec())
+            .await
+            .expect("capture snapshot cut");
+
+        db.call(|conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            tx.execute(
+                "UPDATE notes SET title = 'covered-at-two', \
+                 _updated_at = '0000000002000-0000-dev1' WHERE id = 'n1'",
+                [],
+            )
+            .map_err(DbError::from)?;
+            Database::set_sync_cursor_on(&tx, "dev1", 2)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+        .expect("advance live state after snapshot cut");
+
+        let image_path = temp.path().join("captured.db");
+        std::fs::write(&image_path, &cut.snapshot.db_image).expect("write captured image");
+        let image = rusqlite::Connection::open(&image_path).expect("open captured image");
+        let captured_title: String = image
+            .query_row("SELECT title FROM notes WHERE id = 'n1'", [], |row| {
+                row.get(0)
+            })
+            .expect("captured row");
+
+        assert_eq!(captured_title, "covered-at-one");
+        assert_eq!(cut.applied_cursors.get("dev1"), Some(&1));
+        assert_eq!(
+            crate::sync::test_helpers::query_text(&db, "SELECT title FROM notes WHERE id = 'n1'",)
+                .await,
+            "covered-at-two",
+        );
+        assert_eq!(
+            db.get_all_sync_cursors().await.unwrap().get("dev1"),
+            Some(&2)
+        );
     }
 }

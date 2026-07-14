@@ -16,8 +16,9 @@
 //!
 //! If a FK violation remains after applying a changeset, the conflict handler
 //! reports it via `FOREIGN_KEY` and the returned flag notes it for the caller,
-//! which retries the changeset once its parents have landed. Non-FK constraint
-//! conflicts are surfaced separately because retrying cannot make them valid.
+//! which retries the changeset once its parents have landed. A non-FK constraint
+//! conflict marks the whole changeset rejected; the caller rolls its transaction
+//! back instead of committing the rows that happened not to conflict.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,8 +45,8 @@ pub struct ApplyResult {
     /// changeset after applying other changesets that contain the missing parent
     /// rows.
     pub had_fk_violations: bool,
-    /// Tables that hit non-retryable SQLite constraint conflicts. The conflicting
-    /// rows were omitted.
+    /// Tables that hit non-retryable SQLite constraint conflicts. The caller must
+    /// roll back the transaction when this is non-empty.
     pub constraint_conflict_tables: Vec<String>,
 }
 
@@ -99,16 +100,42 @@ pub fn resolve_and_apply_changeset_with_schema(
     receiver_wall_ms: u64,
     blob_uploads: &[(String, String, String)],
 ) -> Result<ApplyResult, DbError> {
+    let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+    let result = resolve_and_apply_changeset_with_schema_on(
+        &tx,
+        bytes,
+        schema,
+        receiver_wall_ms,
+        blob_uploads,
+    )?;
+    if result.had_fk_violations || !result.constraint_conflict_tables.is_empty() {
+        tx.rollback().map_err(DbError::from)?;
+    } else {
+        tx.commit().map_err(DbError::from)?;
+    }
+    Ok(result)
+}
+
+/// Apply one changeset on a connection whose transaction boundary belongs to the
+/// caller. Rows, blob-uploader records, durable cleanup intents, and the receiver's
+/// cursor can therefore commit as one database operation. The caller must roll
+/// back when the returned result reports an FK or non-FK constraint conflict.
+pub(crate) fn resolve_and_apply_changeset_with_schema_on(
+    conn: &Connection,
+    bytes: &[u8],
+    schema: Arc<TableSchema>,
+    receiver_wall_ms: u64,
+    blob_uploads: &[(String, String, String)],
+) -> Result<ApplyResult, DbError> {
     validate_changeset_tables(bytes, &schema)?;
 
     let fk_flag = Arc::new(AtomicBool::new(false));
     let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
-    let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-    let premerged_updates = premerge_losing_update_columns(&tx, bytes, &schema, receiver_wall_ms)?;
+    let premerged_updates = premerge_losing_update_columns(conn, bytes, &schema, receiver_wall_ms)?;
 
     let closure_flag = fk_flag.clone();
     let closure_constraint_conflict_tables = constraint_conflict_tables.clone();
-    tx.apply_strm(
+    conn.apply_strm(
         &mut &bytes[..],
         None::<fn(&str) -> bool>,
         move |conflict_type, item| {
@@ -131,7 +158,7 @@ pub fn resolve_and_apply_changeset_with_schema(
             if conflict_type == ConflictType::SQLITE_CHANGESET_CONSTRAINT {
                 warn!(
                     table = %table,
-                    "changeset hit a non-retryable SQLite constraint conflict; omitting row"
+                    "changeset hit a non-retryable SQLite constraint conflict; rejecting changeset"
                 );
                 match closure_constraint_conflict_tables.lock() {
                     Ok(mut tables) => tables.push(table),
@@ -159,17 +186,14 @@ pub fn resolve_and_apply_changeset_with_schema(
     )
     .map_err(DbError::from)?;
     let had_fk_violations = fk_flag.load(Ordering::Relaxed);
-    if had_fk_violations {
-        tx.rollback().map_err(DbError::from)?;
-    } else {
-        // Record the uploader of each blob these rows introduce, in the same
+    if !had_fk_violations {
+        // Record the uploader of each blob these rows introduce on the caller's
         // transaction, so a committed blob-bearing row always carries its
-        // uploader. Rolled back with the rows above on an FK deferral, and
-        // idempotent, so the deferred retry re-records the same fact.
+        // uploader. The caller rolls these records back with the rows on any
+        // rejected apply; a deferred retry re-records the same fact idempotently.
         for (namespace, blob_id, uploader) in blob_uploads {
-            crate::database::Database::record_blob_uploader_on(&tx, namespace, blob_id, uploader)?;
+            crate::database::Database::record_blob_uploader_on(conn, namespace, blob_id, uploader)?;
         }
-        tx.commit().map_err(DbError::from)?;
     }
 
     let constraint_conflict_tables = constraint_conflict_tables

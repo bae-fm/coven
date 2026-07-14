@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+use rusqlite::OptionalExtension;
+
 use crate::blob::{local_files, CacheFill, Provenance};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
@@ -96,6 +98,19 @@ fn unique_note_db() -> crate::database::Database {
     )
 }
 
+fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> crate::database::Database {
+    crate::database::Database::open(
+        path,
+        test_synced_tables_with_blob(decl),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        "restart-test-device".to_string(),
+        &test_migrations(),
+    )
+    .expect("open file-backed blob test database")
+    .0
+}
+
 /// Store `bytes` into `ld`'s local store under blob id `id`, the way a host stores a
 /// host-provided cover (its Local home) before the inline push reads it to upload.
 async fn store_local(ld: &crate::store_dir::StoreDir, id: &str, bytes: &[u8]) {
@@ -128,6 +143,11 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(updated.get("dev1"), Some(&1));
     assert_eq!(
+        db2.get_all_sync_cursors().await.unwrap().get("dev1"),
+        Some(&1),
+        "the row and its durable cursor commit in the pull that applies it",
+    );
+    assert_eq!(
         query_text(&db2, "SELECT title FROM notes WHERE id = 'n1'").await,
         "First"
     );
@@ -135,6 +155,104 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
         .row_changes
         .iter()
         .any(|c| c.table == "notes" && c.pk() == Some("n1")));
+}
+
+#[tokio::test]
+async fn cursor_write_failure_rolls_back_the_remote_rows() {
+    let storage = MockSyncStorage::new();
+    let source = open_test_db();
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('n1', 'Remote', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &changeset, SCHEMA_VERSION);
+
+    let target = open_test_db();
+    exec(
+        &target,
+        "CREATE TRIGGER reject_cursor_insert BEFORE INSERT ON sync_cursors \
+         BEGIN SELECT RAISE(ABORT, 'injected cursor write failure'); END;",
+    )
+    .await;
+    let (_tmp, store_dir) = temp_store_dir();
+    let (updated, result) = pull_into(&target, &storage, "dev2", &HashMap::new(), &store_dir).await;
+
+    assert_eq!(updated.get("dev1"), None);
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.held_changesets.len(), 1);
+    assert!(matches!(
+        result.held_changesets[0].reason,
+        HeldChangesetReason::ApplyFailed { .. }
+    ));
+    assert!(
+        !row_exists(&target, "SELECT 1 FROM notes WHERE id = 'n1'").await,
+        "the row cannot commit when its cursor write fails",
+    );
+    assert!(target.get_all_sync_cursors().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_write_after_remote_apply_observes_the_matching_cursor() {
+    let storage = MockSyncStorage::new();
+    let source = open_test_db();
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('remote', 'Remote', NULL, '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &changeset, SCHEMA_VERSION);
+
+    let target = open_test_db();
+    let (_tmp, store_dir) = temp_store_dir();
+    pull_into(&target, &storage, "dev2", &HashMap::new(), &store_dir).await;
+
+    let tables = target.synced_tables().to_vec();
+    target
+        .call(move |conn| {
+            crate::database::Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                let remote_row: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM notes WHERE id = 'remote')",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                let cursor: Option<u64> = tx
+                    .query_row(
+                        "SELECT last_seq FROM sync_cursors WHERE device_id = 'dev1'",
+                        [],
+                        |row| row.get::<_, i64>(0).map(|seq| seq as u64),
+                    )
+                    .optional()
+                    .map_err(crate::database::DbError::from)?;
+                assert!(remote_row, "the host transaction observes the remote row");
+                assert_eq!(
+                    cursor,
+                    Some(1),
+                    "the same database cut observes the row's materialized cursor",
+                );
+                tx.execute(
+                    "INSERT INTO notes \
+                         (id, title, body, _updated_at, created_at) \
+                         VALUES ('local', 'Local', NULL, \
+                                 '0000000002000-0000-dev2', '2026-01-01')",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+            })
+        })
+        .await
+        .expect("host write after remote apply");
+
+    assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'local'").await);
 }
 
 /// A changeset whose object was reclaimed (deleted as superseded) past this
@@ -181,13 +299,16 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
 }
 
 #[tokio::test]
-async fn uniqueness_conflict_is_surfaced_not_retried() {
+async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_cursor() {
     let storage = MockSyncStorage::new();
 
     let db1 = unique_note_db();
     let cs = capture_bytes(
         &db1,
         &[
+            "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
+             VALUES ('would-partially-land', 'free-slug', 'First row', \
+                     '0000000000900-0000-dev1', '2026-01-01')",
             "INSERT INTO unique_notes (id, slug, title, _updated_at, created_at) \
              VALUES ('remote', 'same-slug', 'Remote', '0000000001000-0000-dev1', '2026-01-01')",
         ],
@@ -209,9 +330,22 @@ async fn uniqueness_conflict_is_surfaced_not_retried() {
     assert_eq!(result.constraint_conflicts[0].device_id, "dev1");
     assert_eq!(result.constraint_conflicts[0].seq, 1);
     assert_eq!(result.constraint_conflicts[0].table, "unique_notes");
-    assert_eq!(updated.get("dev1"), Some(&1));
+    assert_eq!(updated.get("dev1"), None);
+    assert_eq!(
+        db2.get_all_sync_cursors().await.unwrap().get("dev1"),
+        None,
+        "a rejected changeset has no durable cursor",
+    );
     assert!(row_exists(&db2, "SELECT 1 FROM unique_notes WHERE id = 'local'").await);
     assert!(!row_exists(&db2, "SELECT 1 FROM unique_notes WHERE id = 'remote'").await);
+    assert!(
+        !row_exists(
+            &db2,
+            "SELECT 1 FROM unique_notes WHERE id = 'would-partially-land'",
+        )
+        .await,
+        "rows before the constraint conflict roll back with the rejected changeset",
+    );
 }
 
 #[tokio::test]
@@ -2993,6 +3127,83 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
             && !ld.cache_blob_path("photos", "pdel1234").unwrap().exists(),
         "applying the blob-bearing DELETE drops the cache copies",
     );
+}
+
+#[tokio::test]
+async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
+    let storage = MockSyncStorage::new();
+    let cleanup_decl = || BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy);
+    let source = open_test_db_with_blob(cleanup_decl());
+    exec(
+        &source,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev1', '2026-01-01'); \
+         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('cleanup01', 'n1', 'cover', '0000000001000-0000-dev1', '2026-01-01');",
+    )
+    .await;
+    let deletion =
+        capture_bytes(&source, &["DELETE FROM note_photos WHERE id = 'cleanup01'"]).await;
+    storage.store_changeset("dev1", 1, &deletion, SCHEMA_VERSION);
+
+    let database_dir = tempfile::tempdir().expect("database temp dir");
+    let database_path = database_dir.path().join("store.db");
+    let target = open_blob_test_db_at(&database_path, cleanup_decl());
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'WithPhoto', NULL, '0000000001000-0000-dev2', '2026-01-01'); \
+         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('cleanup01', 'n1', 'cover', '0000000001000-0000-dev2', '2026-01-01');",
+    )
+    .await;
+
+    let (_store_tmp, store_dir) = temp_store_dir();
+    let obstructing_file = store_dir.as_ref().join("storage");
+    std::fs::write(&obstructing_file, b"not a directory").expect("obstruct cleanup paths");
+
+    let (updated, first) = pull_into(&target, &storage, "dev2", &HashMap::new(), &store_dir).await;
+    assert_eq!(first.changesets_applied, 1, "first pull: {first:?}");
+    assert!(first.asset_downloads_failed);
+    assert_eq!(updated.get("dev1"), Some(&1));
+    assert_eq!(
+        target.get_all_sync_cursors().await.unwrap().get("dev1"),
+        Some(&1),
+        "filesystem cleanup does not hold the materialized cursor",
+    );
+    assert!(!row_exists(&target, "SELECT 1 FROM note_photos WHERE id = 'cleanup01'").await);
+    let pending_before_restart: i64 = target
+        .call(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM local_cleanup_intents", [], |row| {
+                row.get(0)
+            })
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .unwrap();
+    assert_eq!(pending_before_restart, 1);
+
+    tokio::task::spawn_blocking(move || drop(target))
+        .await
+        .expect("close database before restart");
+    std::fs::remove_file(&obstructing_file).expect("restore cleanup paths");
+
+    let restarted = open_blob_test_db_at(&database_path, cleanup_decl());
+    let durable_cursors = restarted.get_all_sync_cursors().await.unwrap();
+    let (_updated, second) =
+        pull_into(&restarted, &storage, "dev2", &durable_cursors, &store_dir).await;
+    assert_eq!(second.changesets_applied, 0);
+    assert!(!second.asset_downloads_failed);
+    let pending_after_restart: i64 = restarted
+        .call(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM local_cleanup_intents", [], |row| {
+                row.get(0)
+            })
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .unwrap();
+    assert_eq!(pending_after_restart, 0);
 }
 
 #[tokio::test]
