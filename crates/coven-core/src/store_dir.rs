@@ -265,34 +265,37 @@ impl StoreDir {
     /// `{namespace}/{cloud_path}` key that happens to have five segments). The
     /// inverse of [`Self::uploader_hashed_key`], and the single place the layout is
     /// parsed, shared by the GC, the blob→row lookup, and share authorization.
-    pub fn parse_uploader_hashed_key(cloud_key: &str) -> Option<(String, String, String)> {
-        let mut parts = cloud_key.split('/');
-        let namespace = parts.next()?;
-        let uploader = parts.next()?;
-        let _ab = parts.next()?;
-        let _cd = parts.next()?;
-        let id = parts.next()?;
-        let suffix: Vec<_> = parts.collect();
-        if !suffix.is_empty()
-            && (suffix.len() != 2
-                || suffix[0] != "generations"
-                || suffix[1].is_empty()
-                || !suffix[1]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-        {
-            return None;
-        }
-        match Self::uploader_hashed_key(namespace, uploader, id) {
-            Ok(rebuilt)
-                if rebuilt == cloud_key
-                    || (!suffix.is_empty()
-                        && format!("{rebuilt}/generations/{}", suffix[1]) == cloud_key) =>
+    pub fn parse_uploader_hashed_key(
+        cloud_key: &str,
+    ) -> Option<(String, String, String, Option<String>)> {
+        let parts: Vec<_> = cloud_key.split('/').collect();
+        let (namespace, uploader, ab, cd, id, generation) = match parts.as_slice() {
+            [namespace, uploader, ab, cd, id] => (*namespace, *uploader, *ab, *cd, *id, None),
+            [namespace, uploader, ".coven-generations", ab, cd, id, generation]
+                if !generation.is_empty()
+                    && generation
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
             {
-                Some((namespace.to_string(), uploader.to_string(), id.to_string()))
+                (*namespace, *uploader, *ab, *cd, *id, Some(*generation))
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        let legacy = Self::uploader_hashed_key(namespace, uploader, id).ok()?;
+        let expected = match generation {
+            Some(generation) => {
+                format!("{namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation}")
+            }
+            None => legacy,
+        };
+        (expected == cloud_key).then(|| {
+            (
+                namespace.to_string(),
+                uploader.to_string(),
+                id.to_string(),
+                generation.map(str::to_string),
+            )
+        })
     }
 
     pub fn storage_dir(&self) -> PathBuf {
@@ -511,14 +514,24 @@ mod tests {
             "photos".to_string(),
             "aa11".to_string(),
             "aabbccdd".to_string(),
+            None,
         ));
         assert_eq!(StoreDir::parse_uploader_hashed_key(&legacy), expected);
         assert_eq!(
-            StoreDir::parse_uploader_hashed_key(&format!("{legacy}/generations/deadbeef")),
-            expected,
+            StoreDir::parse_uploader_hashed_key(
+                "photos/aa11/.coven-generations/aa/bb/aabbccdd/deadbeef"
+            ),
+            Some((
+                "photos".to_string(),
+                "aa11".to_string(),
+                "aabbccdd".to_string(),
+                Some("deadbeef".to_string()),
+            )),
         );
         assert_eq!(
-            StoreDir::parse_uploader_hashed_key(&format!("{legacy}/generations/not-hex")),
+            StoreDir::parse_uploader_hashed_key(
+                "photos/aa11/.coven-generations/aa/bb/aabbccdd/not-hex"
+            ),
             None,
         );
     }

@@ -547,8 +547,10 @@ async fn read_remote_whole(
     // pinned→cache probe [`read_staged`] runs. An existence-check failure there is
     // surfaced, not collapsed into a miss: re-downloading over a present file would be
     // wasteful and could mask a real fault.
-    if let Some(bytes) = read_staged(store_dir, &blob.namespace, &blob.id, expected_size).await? {
-        return Ok(bytes);
+    if let Some(hit) = verified_cached_blob_path(db, store_dir, blob, expected_size).await? {
+        return crate::local_blob::read(hit.path())
+            .await
+            .map_err(BlobCacheError::Io);
     }
 
     if blob.provenance == Provenance::HostProvided {
@@ -565,7 +567,11 @@ async fn read_remote_whole(
     // connected — there is no storage to fetch it from, so surface that fault.
     let cache = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
     let storage = storage.ok_or(BlobCacheError::NoCloudHome)?;
-    let expected_hash = expected_blob_hash(db, blob).await?;
+    let expected_hash = match expected_blob_hash(db, blob).await {
+        Ok(hash) => Some(hash),
+        Err(BlobCacheError::MissingContentHash { .. }) => None,
+        Err(error) => return Err(error),
+    };
     let bytes = fetch_from_cloud(db, storage, blob).await?;
     // Verify the fetched plaintext against the row before caching or returning it —
     // the cheap length check first (the same one the cache-hit
@@ -583,11 +589,14 @@ async fn read_remote_whole(
         });
     }
     let actual_hash = crate::blob::content_hash(&bytes);
-    if actual_hash != expected_hash {
+    if expected_hash
+        .as_deref()
+        .is_some_and(|expected_hash| actual_hash != expected_hash)
+    {
         return Err(BlobCacheError::CloudHashMismatch {
             namespace: blob.namespace.clone(),
             id: blob.id.clone(),
-            expected: expected_hash,
+            expected: expected_hash.unwrap_or_default(),
             actual: actual_hash,
         });
     }
@@ -729,9 +738,7 @@ async fn read_remote_range(
     // file must match the whole blob length, so the validated range is in bounds
     // and `read_range` reads exactly `len` bytes. An existence-check failure is
     // surfaced, not read as a miss.
-    if let Some(hit) =
-        cached_blob_path_with_size(store_dir, &blob.namespace, &blob.id, source_size).await?
-    {
+    if let Some(hit) = verified_cached_blob_path(db, store_dir, blob, source_size).await? {
         return crate::local_blob::read_range(hit.path(), offset, len)
             .await
             .map_err(BlobCacheError::Io);
@@ -772,9 +779,7 @@ pub(crate) async fn materialize_remote_blob_to_file(
     dest: &std::path::Path,
 ) -> Result<u64, BlobCacheError> {
     let expected_size = expected_blob_size(db, blob).await?;
-    if let Some(hit) =
-        cached_blob_path_with_size(store_dir, &blob.namespace, &blob.id, expected_size).await?
-    {
+    if let Some(hit) = verified_cached_blob_path(db, store_dir, blob, expected_size).await? {
         crate::local_blob::copy_atomic(hit.path(), dest)
             .await
             .map_err(BlobCacheError::Io)?;
@@ -855,23 +860,23 @@ async fn pin_one(
     blob: &BlobRef,
 ) -> Result<(), BlobCacheError> {
     let pinned = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-
-    // Already protected — idempotent no-op. A failure to even check existence
-    // (broken filesystem) is surfaced, not collapsed into "absent": fetching and
-    // overwriting a present pinned blob would be wasteful and could mask a real
-    // fault, the same posture `read_blob` takes on its hit check.
-    match crate::local_blob::exists(&pinned).await {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
-        Err(e) => return Err(BlobCacheError::Io(e)),
-    }
-
-    // Staged or read-populated in the evictable cache — promote it with a rename
-    // (no cloud fetch). `rename` within `storage/` is atomic on one filesystem,
-    // so the blob is never in both folders or neither mid-move. An `exists`
-    // failure here is surfaced too, never read as "not cached" (which would
-    // re-fetch over a present file).
-    match cached_blob_path(store_dir, &blob.namespace, &blob.id).await? {
+    let pinned_exists = crate::local_blob::exists(&pinned)
+        .await
+        .map_err(BlobCacheError::Io)?;
+    let expected_size = match expected_blob_size(db, blob).await {
+        Ok(size) => size,
+        Err(BlobCacheError::LocalityUnresolved { .. }) if pinned_exists => return Ok(()),
+        Err(error @ BlobCacheError::LocalityUnresolved { .. }) => {
+            let cache = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
+            return match crate::local_blob::exists(&cache).await {
+                Ok(true) => rename_within_storage(&cache, &pinned).await,
+                Ok(false) => Err(error),
+                Err(io_error) => Err(BlobCacheError::Io(io_error)),
+            };
+        }
+        Err(error) => return Err(error),
+    };
+    match verified_cached_blob_path(db, store_dir, blob, expected_size).await? {
         Some(CachedBlobPath::Pinned(_)) => return Ok(()),
         Some(CachedBlobPath::Cache(path)) => {
             return rename_within_storage(&path, &pinned).await;
@@ -1157,24 +1162,6 @@ impl CachedBlobPath {
     }
 }
 
-async fn cached_blob_path(
-    store_dir: &StoreDir,
-    namespace: &str,
-    id: &str,
-) -> Result<Option<CachedBlobPath>, BlobCacheError> {
-    for hit in [
-        CachedBlobPath::Pinned(store_dir.pinned_blob_path(namespace, id)?),
-        CachedBlobPath::Cache(store_dir.cache_blob_path(namespace, id)?),
-    ] {
-        match crate::local_blob::exists(hit.path()).await {
-            Ok(true) => return Ok(Some(hit)),
-            Ok(false) => {}
-            Err(e) => return Err(BlobCacheError::Io(e)),
-        }
-    }
-    Ok(None)
-}
-
 async fn cached_blob_path_with_size(
     store_dir: &StoreDir,
     namespace: &str,
@@ -1203,6 +1190,60 @@ async fn cached_blob_path_with_size(
             Ok(false) => {}
             Err(e) => return Err(BlobCacheError::Io(e)),
         }
+    }
+    Ok(None)
+}
+
+async fn verified_cached_blob_path(
+    db: &Database,
+    store_dir: &StoreDir,
+    blob: &BlobRef,
+    expected_size: u64,
+) -> Result<Option<CachedBlobPath>, BlobCacheError> {
+    let expected_hash = match expected_blob_hash(db, blob).await {
+        Ok(hash) => Some(hash),
+        Err(BlobCacheError::MissingContentHash { .. }) => None,
+        Err(error) => return Err(error),
+    };
+    for hit in [
+        CachedBlobPath::Pinned(store_dir.pinned_blob_path(&blob.namespace, &blob.id)?),
+        CachedBlobPath::Cache(store_dir.cache_blob_path(&blob.namespace, &blob.id)?),
+    ] {
+        match crate::local_blob::exists(hit.path()).await {
+            Ok(false) => continue,
+            Err(error) => return Err(BlobCacheError::Io(error)),
+            Ok(true) => {}
+        }
+        let size = crate::local_blob::file_len(hit.path())
+            .await
+            .map_err(BlobCacheError::Io)?;
+        let hash = if size == expected_size {
+            Some(
+                crate::blob::content_hash_file(hit.path())
+                    .await
+                    .map_err(BlobCacheError::Io)?,
+            )
+        } else {
+            None
+        };
+        if size == expected_size
+            && expected_hash
+                .as_deref()
+                .is_none_or(|expected_hash| hash.as_deref() == Some(expected_hash))
+        {
+            return Ok(Some(hit));
+        }
+        tracing::warn!(
+            path = %hit.path().display(),
+            actual_size = size,
+            expected_size,
+            actual_hash = ?hash,
+            expected_hash = ?expected_hash,
+            "cached blob does not match its live row; removing it before exact refetch"
+        );
+        crate::local_blob::remove_file(hit.path())
+            .await
+            .map_err(BlobCacheError::Io)?;
     }
     Ok(None)
 }
@@ -1297,11 +1338,10 @@ pub(crate) async fn fetch_from_cloud(
         .map_err(BlobCacheError::Storage)
 }
 
-/// Resolve which uploader's prefix holds `blob`, for a read. Dispatches on the
-/// local uploader index — the authoritative record written atomically at pull (the
-/// changeset author that introduced the blob), at our own enqueue (ourselves), and
-/// carried into a signed snapshot so a bootstrapped device inherits it. The
-/// uploader is authoritative state tied to the blob's row, never blind-searched:
+/// Resolve the exact immutable cloud location for `blob`. The record is written
+/// atomically at pull, recorded before our own upload, and carried into a signed
+/// snapshot so a restored device inherits it. The location is authoritative state
+/// tied to the blob's row, never blind-searched:
 /// a miss is a missing dispatch key surfaced loud, not a cue to scan an untrusted
 /// listing (which a member could seed with a same-size decoy under its own prefix).
 /// `None` means a legacy browsable/plain object whose key predates locations.

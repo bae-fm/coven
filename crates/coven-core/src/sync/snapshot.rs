@@ -404,17 +404,11 @@ fn clear_local_only_tables(path: &Path, synced: &[SyncedTable]) -> Result<(), Sn
         .map_err(|(_, e)| SnapshotError::ClearFailed(format!("failed to close snapshot copy: {e}")))
 }
 
-/// The one non-synced table whose rows ride a snapshot. A blob's uploader — which
-/// member's cloud prefix holds it — is a member-global fact identical on every
-/// device (unlike the per-device bookkeeping tables: cursors, outbox, cache
-/// budgets), and it is recorded only from authenticated sources (a signed
-/// changeset's author, or our own upload). A device that bootstraps from a
-/// snapshot never sees the changesets that introduced the store's blobs, so
-/// without this its uploader index would be empty and every blob read would have
-/// no dispatch key — and the fix for the removed listing scan is precisely that
-/// the uploader is authoritative, not searched. Carrying it in the Owner-signed
-/// snapshot gives the bootstrapped device authoritative uploaders. The uploader
-/// pubkeys are public, so nothing sensitive rides along.
+/// The non-synced location table whose rows ride a snapshot. Its uploader,
+/// immutable object generation, and ordering version are authoritative shared
+/// facts recorded from signed changesets or our own upload. A restored device did
+/// not see the changesets that introduced the blobs, so the Owner-signed snapshot
+/// carries their exact read locations instead of forcing a listing search.
 const SNAPSHOT_PRESERVED_NON_SYNCED_TABLE: &str = "blob_uploaders";
 
 /// On the snapshot-copy connection, scope it down to exactly what is eligible to
@@ -1231,7 +1225,7 @@ pub async fn bootstrap_from_snapshot(
 ///
 /// `refs_in_db` is a read-only enumeration run against a short-lived connection to
 /// the same on-disk DB the `db` actor owns; `db` is still needed because
-/// `download_blobs` resolves each blob's uploader through it. At bootstrap the
+/// `download_blobs` resolves each blob's exact cloud location through it. At bootstrap the
 /// pull has not started; in a cycle this runs after the pull. It is read-only
 /// either way (a SELECT, which journals nothing), so it does not re-record rows
 /// or race the connection thread.
@@ -1263,9 +1257,8 @@ pub async fn reconcile_snapshot_blobs(
     let total = blobs.len();
     // The blobs are `CacheEager`, so `download_blobs` writes each into the
     // evictable cache `storage/cache/<namespace>/<id>` under `store_dir`.
-    // A snapshot's restored rows carry no per-blob uploader, so each blob's prefix
-    // is resolved from the index (empty on a fresh restore) and then a listing
-    // scan that records what it finds.
+    // The preserved location table resolves each restored blob directly; a missing
+    // location fails the eager download instead of searching cloud listings.
     //
     // The loop lives here (rather than handing the whole batch to `download_blobs`)
     // so cancellation is checked between blobs — never mid-download — the same
@@ -2136,9 +2129,20 @@ mod tests {
             storage.own_uploader(),
             "the host-provided upload records this device as the blob's uploader",
         );
+        let cover_location = db
+            .blob_location("covers", "cover1")
+            .await
+            .expect("read host cover location")
+            .expect("host cover location recorded");
         assert_eq!(
             storage
-                .get_blob("covers", None, "cover1", BlobScope::Master, None)
+                .get_blob_at(
+                    "covers",
+                    Some(&cover_location),
+                    "cover1",
+                    BlobScope::Master,
+                    None,
+                )
                 .await
                 .expect("host cover uploaded"),
             b"COVER",

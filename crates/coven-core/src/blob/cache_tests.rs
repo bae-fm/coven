@@ -176,6 +176,41 @@ async fn short_cached_remote_blob_is_a_miss_and_refetches() {
     );
 }
 
+#[tokio::test]
+async fn same_length_stale_cache_bytes_are_rejected_for_whole_and_range_reads() {
+    let db = read_test_db("audio");
+    let storage = MockSyncStorage::new();
+    let (_tmp, ld) = temp_store_dir();
+    let blob = blob_ref("blob-hash", "audio", CacheFill::CacheLazy);
+    let current = b"CURRENT-CONTENT".to_vec();
+    let stale = b"STALE--CONTENT!".to_vec();
+    assert_eq!(stale.len(), current.len());
+    plant_blob_row(&db, &blob.id, true, &current).await;
+    put_cloud_blob(&db, &storage, &blob.id, &blob.namespace, &current).await;
+
+    let cache_path = ld.cache_blob_path(&blob.namespace, &blob.id).unwrap();
+    crate::local_blob::write_atomic(&cache_path, &stale)
+        .await
+        .expect("plant same-length stale cache");
+    let range = open_blob_stream(&db, &ld, Some(&storage), &blob, current.len() as u64, 2, 7)
+        .await
+        .expect("range refetches the active cloud location");
+    assert_eq!(range, current[2..9]);
+    assert!(
+        !cache_path.exists(),
+        "ranged miss does not preserve stale bytes"
+    );
+
+    crate::local_blob::write_atomic(&cache_path, &stale)
+        .await
+        .expect("replant same-length stale cache");
+    let whole = read_blob(&db, &ld, Some(&storage), &blob)
+        .await
+        .expect("whole read refetches the active cloud location");
+    assert_eq!(whole, current);
+    assert_eq!(crate::local_blob::read(&cache_path).await.unwrap(), current);
+}
+
 /// A cloud object whose plaintext length disagrees with the row's declared size is
 /// rejected on read: the whole-blob Remote fetch verifies `bytes.len()` against the
 /// declared size before it caches or returns anything. A mismatch is a typed error

@@ -667,11 +667,26 @@ impl BlobDecls {
             let Some(cloud_path_col_name) = &tb.cloud_path_col_name else {
                 continue;
             };
-            let Some(cloud_path) = cloud_key
+            let Some(stored_path) = cloud_key
                 .strip_prefix(&tb.namespace)
                 .and_then(|rest| rest.strip_prefix('/'))
             else {
                 continue;
+            };
+            let cloud_path = if let Some(rest) = stored_path.strip_prefix(".coven-generations/") {
+                let mut parts = rest.splitn(3, '/');
+                let Some(_uploader) = parts.next() else {
+                    continue;
+                };
+                let Some(_generation) = parts.next() else {
+                    continue;
+                };
+                let Some(path) = parts.next() else {
+                    continue;
+                };
+                path
+            } else {
+                stored_path
             };
             if let Some(pk) = pk_carrying_cloud_path(conn, table, cloud_path_col_name, cloud_path)?
             {
@@ -680,6 +695,30 @@ impl BlobDecls {
         }
 
         Ok(None)
+    }
+
+    pub fn ref_for_row(
+        &self,
+        conn: &Connection,
+        table: &str,
+        pk: &str,
+    ) -> Result<Option<BlobRef>, BlobDeclError> {
+        let Some(tb) = self.tables.get(table) else {
+            return Ok(None);
+        };
+        let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(table));
+        conn.query_row(&sql, [pk], |row| {
+            tb.ref_from_row(table, row).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .optional()
+        .map(Option::flatten)
+        .map_err(BlobDeclError::from)
     }
 }
 
@@ -803,7 +842,7 @@ fn hashed_blob_key_parts(cloud_key: &str) -> Option<(String, String)> {
     // Map a key back to its DB row, which is keyed by namespace + id, not by who
     // uploaded it — so the uploader segment is parsed and dropped.
     crate::store_dir::StoreDir::parse_uploader_hashed_key(cloud_key)
-        .map(|(namespace, _uploader, id)| (namespace, id))
+        .map(|(namespace, _uploader, id, _generation)| (namespace, id))
 }
 
 /// Column names of `table`, in declared (schema) order, via `PRAGMA table_info`.

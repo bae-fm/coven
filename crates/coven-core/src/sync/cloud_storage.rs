@@ -716,14 +716,28 @@ impl CloudSyncStorage {
                     ))
                 })?;
                 location.validate().map_err(StorageError::Parse)?;
-                let legacy = crate::store_dir::StoreDir::uploader_hashed_key(
-                    namespace,
-                    &location.uploader,
-                    id,
-                )?;
                 Ok(match &location.generation {
-                    Some(generation) => format!("{legacy}/generations/{generation}"),
-                    None => legacy,
+                    Some(generation) => {
+                        let legacy = crate::store_dir::StoreDir::uploader_hashed_key(
+                            namespace,
+                            &location.uploader,
+                            id,
+                        )?;
+                        let suffix = legacy
+                            .strip_prefix(&format!("{namespace}/{}/", location.uploader))
+                            .ok_or_else(|| {
+                                StorageError::Parse("hashed blob key lost its prefix".to_string())
+                            })?;
+                        format!(
+                            "{namespace}/{}/.coven-generations/{suffix}/{generation}",
+                            location.uploader
+                        )
+                    }
+                    None => crate::store_dir::StoreDir::uploader_hashed_key(
+                        namespace,
+                        &location.uploader,
+                        id,
+                    )?,
                 })
             }
             BlobPathScheme::Plain => {
@@ -734,6 +748,11 @@ impl CloudSyncStorage {
                 })?;
                 crate::store_dir::validate_path_token(namespace)?;
                 crate::store_dir::validate_cloud_path(path)?;
+                if path.split('/').next() == Some(".coven-generations") {
+                    return Err(StorageError::Parse(format!(
+                        "cloud_path {path:?} uses coven's reserved .coven-generations prefix"
+                    )));
+                }
                 let legacy = format!("{namespace}/{path}");
                 match location.and_then(|location| location.generation.as_deref()) {
                     Some(generation) => {
@@ -748,6 +767,24 @@ impl CloudSyncStorage {
                 }
             }
         }
+    }
+
+    pub(crate) fn is_generated_blob_key(cloud_key: &str) -> bool {
+        if crate::store_dir::StoreDir::parse_uploader_hashed_key(cloud_key)
+            .is_some_and(|(_, _, _, generation)| generation.is_some())
+        {
+            return true;
+        }
+        let parts: Vec<_> = cloud_key.split('/').collect();
+        matches!(
+            parts.as_slice(),
+            [namespace, ".coven-generations", uploader, generation, rest @ ..]
+                if !rest.is_empty()
+                    && crate::store_dir::validate_path_token(namespace).is_ok()
+                    && crate::store_dir::validate_path_token(uploader).is_ok()
+                    && !generation.is_empty()
+                    && generation.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        )
     }
 }
 
@@ -2753,6 +2790,7 @@ mod tests {
         let generated = crate::blob::CloudBlobLocation {
             uploader: "aa11".to_string(),
             generation: Some("deadbeef".to_string()),
+            version: Some("0000000001000-0000-test".to_string()),
         };
         assert_eq!(
             CloudSyncStorage::blob_key_at(
@@ -2774,7 +2812,7 @@ mod tests {
                 None,
             )
             .unwrap(),
-            "photos/aa11/aa/bb/aabbccdd/generations/deadbeef",
+            "photos/aa11/.coven-generations/aa/bb/aabbccdd/deadbeef",
         );
         assert_eq!(
             CloudSyncStorage::blob_key_at(
@@ -2797,6 +2835,17 @@ mod tests {
             )
             .unwrap(),
             "photos/.coven-generations/aa11/deadbeef/Artist/cover.jpg",
+        );
+        assert!(
+            CloudSyncStorage::blob_key_at(
+                BlobPathScheme::Plain,
+                "photos",
+                Some(&legacy),
+                "aabbccdd",
+                Some(".coven-generations/aa11/deadbeef/file.jpg"),
+            )
+            .is_err(),
+            "the plain layout reserves its generated-object namespace",
         );
     }
 

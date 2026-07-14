@@ -1906,6 +1906,45 @@ async fn make_remote_aborts_when_source_size_no_longer_matches() {
     );
 }
 
+#[tokio::test]
+async fn make_remote_aborts_when_source_bytes_change_without_changing_length() {
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, _lib) = temp_store_dir();
+    let bytes = b"registered-content".to_vec();
+    let src = seed_local_release(
+        &db,
+        &tmp.path().join("user"),
+        "n1",
+        "photoaaa",
+        "cv/photoaaa.jpg",
+        &bytes,
+    )
+    .await;
+    std::fs::write(&src, vec![b'x'; bytes.len()]).expect("replace source at equal length");
+
+    let error = make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n1",
+        true,
+    )
+    .await
+    .expect_err("same-length content drift must abort before enqueue");
+
+    assert!(matches!(
+        error,
+        crate::blob::transition::MakeRemoteError::Source { .. }
+    ));
+    assert_eq!(pending_uploads(&db).await, 0);
+    assert!(!has_intent(&db, "notes", "n1").await);
+    assert_eq!(shared_flag(&db, "n1").await, 0);
+    assert_eq!(std::fs::read(src).unwrap(), vec![b'x'; bytes.len()]);
+}
+
 /// make_local on a root already Local is refused at the API before any
 /// materialization: nothing is registered, no delete is queued, the gate row is
 /// untouched. Without the precondition, make_local would try to read the blob from
@@ -2232,6 +2271,77 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
             .is_ok(),
         "the cloud blob is untouched",
     );
+}
+
+#[tokio::test]
+async fn make_local_db_commit_failure_removes_materialized_files_before_retry() {
+    let storage = MockSyncStorage::new();
+    let hlc = Hlc::new("A".to_string());
+    let db = open_test_db_with_blob(photo_decl());
+    let (tmp, lib) = temp_store_dir();
+    let bytes = b"managed-bytes".to_vec();
+    seed_remote_release(&storage, &db, "n1", "photoaaa", "cv/photoaaa.jpg", &bytes).await;
+
+    db.call(|conn| {
+        conn.execute_batch(
+            "CREATE TRIGGER reject_make_local \
+             BEFORE UPDATE OF shared ON notes \
+             BEGIN SELECT RAISE(ABORT, 'forced make_local commit failure'); END;",
+        )
+        .map_err(crate::database::DbError::from)
+    })
+    .await
+    .expect("install commit failure trigger");
+
+    let dest_path = tmp.path().join("dest/photoaaa.jpg");
+    let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
+    let (_cancel_tx, cancel) = watch::channel(false);
+    let error = make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        "notes",
+        "n1",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect_err("database commit failure must abort make_local");
+
+    assert!(matches!(
+        error,
+        crate::blob::transition::MakeLocalError::Db(_)
+    ));
+    assert!(!dest_path.exists(), "materialized file was rolled back");
+    assert_eq!(shared_flag(&db, "n1").await, 1);
+    assert!(db.external_blob("photoaaa").await.unwrap().is_none());
+    assert!(pending_deletes(&db).await.is_empty());
+
+    db.call(|conn| {
+        conn.execute_batch("DROP TRIGGER reject_make_local")
+            .map_err(crate::database::DbError::from)
+    })
+    .await
+    .expect("remove commit failure trigger");
+    make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        "notes",
+        "n1",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect("retry after rollback");
+    assert_eq!(std::fs::read(dest_path).unwrap(), bytes);
+    assert_eq!(shared_flag(&db, "n1").await, 0);
 }
 
 #[tokio::test]

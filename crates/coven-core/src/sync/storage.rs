@@ -9,7 +9,8 @@
 /// ```text
 /// changes/{device_id}/{seq}{suffix}              -- changeset envelopes
 /// heads/{device_id}.json{suffix}                 -- head pointers
-/// {namespace}/{uploader}/{ab}/{cd}/{id}          -- blobs, hashed scheme (opaque home)
+/// {namespace}/{uploader}/.coven-generations/{ab}/{cd}/{id}/{generation} -- generated hashed blob
+/// {namespace}/{uploader}/{ab}/{cd}/{id}          -- legacy hashed blob
 /// {namespace}/{cloud_path}                       -- blobs, plain scheme (browsable home)
 /// snapshot/{author}/{publish_id}.db{suffix}      -- a generation's full DB snapshot
 /// snapshot/{author}/{publish_id}_meta.json{suffix} -- a generation's per-device cursors
@@ -33,12 +34,12 @@
 /// blind search: a member resolving its rotated store key reads
 /// `keys/{owner}/{self}` across the current owners and adopts the
 /// highest-generation wrap an owner's signature authenticates; a blob read keys
-/// under the uploader recorded in the device-local `blob_uploaders` index (written
-/// at pull from the changeset author, and at the device's own upload), falling
-/// back for an unrecorded blob to a one-time listing scan that records what it
-/// finds. The browsable plain scheme keeps human-readable `{namespace}/{cloud_path}`
-/// keys with no uploader segment. It still has an owner-anchored membership chain;
-/// plain object naming does not use the per-member encrypted-home path layout.
+/// at the exact immutable location recorded in the device-local `blob_uploaders`
+/// index from signed changeset metadata or the device's own upload. A missing
+/// location fails instead of searching untrusted listings. The browsable plain
+/// scheme keeps legacy human-readable `{namespace}/{cloud_path}`
+/// keys with no uploader segment — a browsable home has no membership chain to key
+/// one from and no rotation to defend, so the per-member ACL does not apply there.
 ///
 /// A snapshot is published as a generation under the publishing device's
 /// `{author}` (its hex public key): the `{author}/{publish_id}.db` and then the
@@ -56,11 +57,10 @@
 ///
 /// Blob keys follow the home's
 /// [`BlobPathScheme`](crate::sync::cloud_storage::BlobPathScheme): the default
-/// hashed scheme keys each blob under its uploader and shards by its id
-/// (`{namespace}/{uploader}/{ab}/{cd}/{id}`); the plain scheme keys it at the
-/// consumer-supplied readable path (`{namespace}/{cloud_path}`) so the bucket is
-/// browsable. A device only ever writes blobs it authored, so a write keys under
-/// itself; a read resolves the uploader (which may be a peer) and keys under it.
+/// hashed scheme keys each generated blob under its uploader, a reserved
+/// generation component, and its sharded id; the plain scheme places generated
+/// objects below `{namespace}/.coven-generations/{uploader}/{generation}/` while
+/// retaining legacy readable paths. Reads use the signed location record exactly.
 /// The blob-path scheme is independent of the at-rest cipher below.
 ///
 /// An encrypted home seals every object under the store key before upload and
@@ -213,7 +213,20 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         data: Vec<u8>,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        let uploader = self
+            .own_uploader()
+            .ok_or_else(|| StorageError::Parse("storage has no uploader identity".to_string()))?;
+        self.put_blob_at(
+            namespace,
+            &crate::blob::CloudBlobLocation::legacy(uploader),
+            id,
+            scope,
+            cloud_path,
+            data,
+        )
+        .await
+    }
 
     async fn put_blob_at(
         &self,
@@ -223,10 +236,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let _ = location;
-        self.put_blob(namespace, id, scope, cloud_path, data).await
-    }
+    ) -> Result<(), StorageError>;
 
     /// Upload a blob from a local plaintext file without reading the whole file
     /// into memory. Same keying, scope, and at-rest protection as [`Self::put_blob`].
@@ -237,7 +247,20 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_path: &Path,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        let uploader = self
+            .own_uploader()
+            .ok_or_else(|| StorageError::Parse("storage has no uploader identity".to_string()))?;
+        self.put_blob_from_file_at(
+            namespace,
+            &crate::blob::CloudBlobLocation::legacy(uploader),
+            id,
+            scope,
+            cloud_path,
+            source_path,
+        )
+        .await
+    }
 
     async fn put_blob_from_file_at(
         &self,
@@ -247,11 +270,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
         source_path: &Path,
-    ) -> Result<(), StorageError> {
-        let _ = location;
-        self.put_blob_from_file(namespace, id, scope, cloud_path, source_path)
-            .await
-    }
+    ) -> Result<(), StorageError>;
 
     /// Download and open a blob, keyed
     /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}` under the hashed scheme
@@ -269,7 +288,11 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
-    ) -> Result<Vec<u8>, StorageError>;
+    ) -> Result<Vec<u8>, StorageError> {
+        let location = uploader.map(crate::blob::CloudBlobLocation::legacy);
+        self.get_blob_at(namespace, location.as_ref(), id, scope, cloud_path)
+            .await
+    }
 
     async fn get_blob_at(
         &self,
@@ -278,16 +301,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         id: &str,
         scope: crate::blob::BlobScope,
         cloud_path: Option<&str>,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.get_blob(
-            namespace,
-            location.map(|value| value.uploader.as_str()),
-            id,
-            scope,
-            cloud_path,
-        )
-        .await
-    }
+    ) -> Result<Vec<u8>, StorageError>;
 
     /// Check whether a blob object exists at the same key [`Self::put_blob`] and
     /// [`Self::get_blob`] use. This does not read or open the blob; publish
@@ -298,7 +312,18 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         namespace: &str,
         id: &str,
         cloud_path: Option<&str>,
-    ) -> Result<bool, StorageError>;
+    ) -> Result<bool, StorageError> {
+        let uploader = self
+            .own_uploader()
+            .ok_or_else(|| StorageError::Parse("storage has no uploader identity".to_string()))?;
+        self.blob_exists_at(
+            namespace,
+            &crate::blob::CloudBlobLocation::legacy(uploader),
+            id,
+            cloud_path,
+        )
+        .await
+    }
 
     async fn blob_exists_at(
         &self,
@@ -306,10 +331,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         cloud_path: Option<&str>,
-    ) -> Result<bool, StorageError> {
-        let _ = location;
-        self.blob_exists(namespace, id, cloud_path).await
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Serve `len` plaintext bytes of a blob starting at `offset`, without
     /// downloading the whole object — the ranged sibling of [`Self::get_blob`].
@@ -336,7 +358,20 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         source_size: u64,
         offset: u64,
         len: u64,
-    ) -> Result<Vec<u8>, StorageError>;
+    ) -> Result<Vec<u8>, StorageError> {
+        let location = uploader.map(crate::blob::CloudBlobLocation::legacy);
+        self.read_blob_range_at(
+            namespace,
+            location.as_ref(),
+            id,
+            scope,
+            cloud_path,
+            source_size,
+            offset,
+            len,
+        )
+        .await
+    }
 
     async fn read_blob_range_at(
         &self,
@@ -348,19 +383,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         source_size: u64,
         offset: u64,
         len: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.read_blob_range(
-            namespace,
-            location.map(|value| value.uploader.as_str()),
-            id,
-            scope,
-            cloud_path,
-            source_size,
-            offset,
-            len,
-        )
-        .await
-    }
+    ) -> Result<Vec<u8>, StorageError>;
 
     /// Download and open a blob into `dest` without holding the whole plaintext in
     /// memory. Same keying, scope, and validation as [`Self::read_blob_range`],
@@ -382,7 +405,20 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         source_size: u64,
         expected_hash: &str,
         dest: &Path,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        let location = uploader.map(crate::blob::CloudBlobLocation::legacy);
+        self.read_blob_to_file_at(
+            namespace,
+            location.as_ref(),
+            id,
+            scope,
+            cloud_path,
+            source_size,
+            expected_hash,
+            dest,
+        )
+        .await
+    }
 
     #[allow(clippy::too_many_arguments)]
     async fn read_blob_to_file_at(
@@ -395,19 +431,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         source_size: u64,
         expected_hash: &str,
         dest: &Path,
-    ) -> Result<(), StorageError> {
-        self.read_blob_to_file(
-            namespace,
-            location.map(|value| value.uploader.as_str()),
-            id,
-            scope,
-            cloud_path,
-            source_size,
-            expected_hash,
-            dest,
-        )
-        .await
-    }
+    ) -> Result<(), StorageError>;
 
     /// The blob-path scheme this home uses. The read dispatch consults it to decide
     /// whether a blob key needs an uploader segment (hashed) or not (plain).
@@ -423,7 +447,17 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         namespace: &str,
         id: &str,
         cloud_path: Option<&str>,
-    ) -> Result<String, StorageError>;
+    ) -> Result<String, StorageError> {
+        let uploader = self
+            .own_uploader()
+            .ok_or_else(|| StorageError::Parse("storage has no uploader identity".to_string()))?;
+        self.blob_cloud_key_at(
+            namespace,
+            &crate::blob::CloudBlobLocation::legacy(uploader),
+            id,
+            cloud_path,
+        )
+    }
 
     fn blob_cloud_key_at(
         &self,
@@ -431,10 +465,7 @@ pub trait SyncStorage: crate::MaybeThreadSafe {
         location: &crate::blob::CloudBlobLocation,
         id: &str,
         cloud_path: Option<&str>,
-    ) -> Result<String, StorageError> {
-        let _ = location;
-        self.blob_cloud_key(namespace, id, cloud_path)
-    }
+    ) -> Result<String, StorageError>;
 
     /// This device's upload identity. Hashed homes use it as the `{uploader}` key
     /// segment; plain generated keys retain it as authenticated provenance even

@@ -1545,6 +1545,18 @@ impl SyncStorage for MockSyncStorage {
     ) -> Result<(), StorageError> {
         self.blob_read_to_file_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let barrier = self.read_to_file_barrier.lock().unwrap().clone();
+        if let Some(barrier) = barrier {
+            let inflight = self
+                .read_to_file_inflight
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.read_to_file_max_inflight
+                .fetch_max(inflight, std::sync::atomic::Ordering::SeqCst);
+            barrier.wait().await;
+            self.read_to_file_inflight
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let bytes = self
             .read_blob_range_at(
                 namespace,

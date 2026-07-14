@@ -13,7 +13,6 @@ use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::migration::Migration;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::CloudHome;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::cycle;
 use crate::sync::envelope;
@@ -63,6 +62,26 @@ async fn sync_for_test(
         false,
     )
     .await
+}
+
+async fn blob_exists_at_recorded_location(
+    db: &crate::database::Database,
+    storage: &dyn SyncStorage,
+    namespace: &str,
+    id: &str,
+    cloud_path: Option<&str>,
+) -> bool {
+    let Some(location) = db
+        .blob_location(namespace, id)
+        .await
+        .expect("read blob location")
+    else {
+        return false;
+    };
+    storage
+        .blob_exists_at(namespace, &location, id, cloud_path)
+        .await
+        .expect("exists check")
 }
 
 /// The common `note_photos` blob declaration: namespace `"photos"`, master scope,
@@ -1467,11 +1486,11 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     .expect("sync update");
     let outgoing = result.outgoing.expect("outgoing update");
     assert!(
-        storage.exists("photos/newaaaa").await.unwrap(),
+        blob_exists_at_recorded_location(&db1, &storage, "photos", "newaaaa", None).await,
         "push uploads the UPDATE's new blob id"
     );
     assert!(
-        !storage.exists("photos/oldaaaa").await.unwrap(),
+        !blob_exists_at_recorded_location(&db1, &storage, "photos", "oldaaaa", None).await,
         "push must not upload the UPDATE's old blob id"
     );
 
@@ -3339,29 +3358,11 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
 
     // Both blobs reached the cloud — the inline push uploads regardless of fill.
     assert!(
-        storage
-            .get_blob(
-                "photos",
-                None,
-                "peager01",
-                crate::blob::BlobScope::Master,
-                None
-            )
-            .await
-            .is_ok(),
+        blob_exists_at_recorded_location(&db1, &storage, "photos", "peager01", None).await,
         "the eager blob must be uploaded",
     );
     assert!(
-        storage
-            .get_blob(
-                "covers",
-                None,
-                "clazy001",
-                crate::blob::BlobScope::Master,
-                None
-            )
-            .await
-            .is_ok(),
+        blob_exists_at_recorded_location(&db1, &storage, "covers", "clazy001", None).await,
         "the lazy blob must be uploaded",
     );
 

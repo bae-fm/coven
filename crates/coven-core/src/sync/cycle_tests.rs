@@ -18,7 +18,7 @@ use crate::clock::SystemClock;
 use crate::database::{Database, PendingChangesetBatch};
 use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
-use crate::storage::cloud::{test_utils::InMemoryCloudHome, CloudHome};
+use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::cycle::{self, run_single_sync_cycle};
@@ -78,6 +78,25 @@ async fn pending_changeset_count(db: &Database) -> i64 {
     })
     .await
     .expect("pending changeset count")
+}
+
+async fn blob_exists_at_recorded_location(
+    db: &Database,
+    storage: &MockSyncStorage,
+    namespace: &str,
+    id: &str,
+) -> bool {
+    let Some(location) = db
+        .blob_location(namespace, id)
+        .await
+        .expect("read blob location")
+    else {
+        return false;
+    };
+    storage
+        .blob_exists_at(namespace, &location, id, None)
+        .await
+        .expect("exists check")
 }
 
 /// Queue a pending upload whose source file doesn't exist, so the cycle's drain
@@ -286,7 +305,7 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
 
     assert!(
-        storage.exists("photos/cover1").await.expect("exists check"),
+        blob_exists_at_recorded_location(&db, &storage, "photos", "cover1").await,
         "the blob referenced by the initial snapshot is uploaded before the pointer publishes",
     );
     assert!(
@@ -912,6 +931,19 @@ impl SyncStorage for HostWriteInjector {
             .put_blob(namespace, id, scope, cloud_path, data)
             .await
     }
+    async fn put_blob_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        data: Vec<u8>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .put_blob_at(namespace, location, id, scope, cloud_path, data)
+            .await
+    }
     async fn put_blob_from_file(
         &self,
         namespace: &str,
@@ -922,6 +954,19 @@ impl SyncStorage for HostWriteInjector {
     ) -> Result<(), StorageError> {
         self.inner
             .put_blob_from_file(namespace, id, scope, cloud_path, source_path)
+            .await
+    }
+    async fn put_blob_from_file_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        source_path: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .put_blob_from_file_at(namespace, location, id, scope, cloud_path, source_path)
             .await
     }
     async fn get_blob(
@@ -936,6 +981,18 @@ impl SyncStorage for HostWriteInjector {
             .get_blob(namespace, uploader, id, scope, cloud_path)
             .await
     }
+    async fn get_blob_at(
+        &self,
+        namespace: &str,
+        location: Option<&crate::blob::CloudBlobLocation>,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.inner
+            .get_blob_at(namespace, location, id, scope, cloud_path)
+            .await
+    }
     async fn blob_exists(
         &self,
         namespace: &str,
@@ -943,6 +1000,17 @@ impl SyncStorage for HostWriteInjector {
         cloud_path: Option<&str>,
     ) -> Result<bool, StorageError> {
         self.inner.blob_exists(namespace, id, cloud_path).await
+    }
+    async fn blob_exists_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .blob_exists_at(namespace, location, id, cloud_path)
+            .await
     }
     async fn read_blob_range(
         &self,
@@ -959,6 +1027,30 @@ impl SyncStorage for HostWriteInjector {
             .read_blob_range(
                 namespace,
                 uploader,
+                id,
+                scope,
+                cloud_path,
+                source_size,
+                offset,
+                len,
+            )
+            .await
+    }
+    async fn read_blob_range_at(
+        &self,
+        namespace: &str,
+        location: Option<&crate::blob::CloudBlobLocation>,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.inner
+            .read_blob_range_at(
+                namespace,
+                location,
                 id,
                 scope,
                 cloud_path,
@@ -992,6 +1084,30 @@ impl SyncStorage for HostWriteInjector {
             )
             .await
     }
+    async fn read_blob_to_file_at(
+        &self,
+        namespace: &str,
+        location: Option<&crate::blob::CloudBlobLocation>,
+        id: &str,
+        scope: crate::blob::BlobScope,
+        cloud_path: Option<&str>,
+        source_size: u64,
+        expected_hash: &str,
+        dest: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .read_blob_to_file_at(
+                namespace,
+                location,
+                id,
+                scope,
+                cloud_path,
+                source_size,
+                expected_hash,
+                dest,
+            )
+            .await
+    }
     fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme {
         self.inner.blob_path_scheme()
     }
@@ -1002,6 +1118,16 @@ impl SyncStorage for HostWriteInjector {
         cloud_path: Option<&str>,
     ) -> Result<String, crate::sync::storage::StorageError> {
         self.inner.blob_cloud_key(namespace, id, cloud_path)
+    }
+    fn blob_cloud_key_at(
+        &self,
+        namespace: &str,
+        location: &crate::blob::CloudBlobLocation,
+        id: &str,
+        cloud_path: Option<&str>,
+    ) -> Result<String, crate::sync::storage::StorageError> {
+        self.inner
+            .blob_cloud_key_at(namespace, location, id, cloud_path)
     }
     fn own_uploader(&self) -> Option<String> {
         self.inner.own_uploader()
@@ -1324,7 +1450,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         "the pending changesets remain queued for retry"
     );
     assert!(
-        !storage.exists("photos/hponly").await.expect("exists check"),
+        !blob_exists_at_recorded_location(&db, &storage, "photos", "hponly").await,
         "the failed blob upload did not publish the blob"
     );
 
@@ -1335,7 +1461,7 @@ async fn captured_changeset_retries_after_host_provided_blob_upload_failure() {
         "the pending changesets clear once the retry publishes"
     );
     assert!(
-        storage.exists("photos/hponly").await.expect("exists check"),
+        blob_exists_at_recorded_location(&db, &storage, "photos", "hponly").await,
         "the retried pending changeset uploads the host-provided blob"
     );
 }
@@ -1404,7 +1530,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         "the host-blob changeset stays queued while sealing is paused",
     );
     assert!(
-        !storage.exists("photos/hponly").await.expect("exists check"),
+        !blob_exists_at_recorded_location(&db, &storage, "photos", "hponly").await,
         "no host-provided blob is sealed to the cloud while sealing is paused",
     );
 
@@ -1417,7 +1543,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         "the queued changeset publishes on the first cycle after adoption",
     );
     assert!(
-        storage.exists("photos/hponly").await.expect("exists check"),
+        blob_exists_at_recorded_location(&db, &storage, "photos", "hponly").await,
         "the host-provided blob uploads on the first cycle after adoption",
     );
 }
@@ -1505,7 +1631,7 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
         "the make_remote intent stays queued while sealing is paused",
     );
     assert!(
-        !storage.exists("photos/hponly").await.expect("exists check"),
+        !blob_exists_at_recorded_location(&db, &storage, "photos", "hponly").await,
         "no host-provided blob is sealed to the cloud while sealing is paused",
     );
 
@@ -1525,7 +1651,7 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
         "completing the make_remote consumes its intent",
     );
     assert!(
-        storage.exists("photos/hponly").await.expect("exists check"),
+        blob_exists_at_recorded_location(&db, &storage, "photos", "hponly").await,
         "the host-provided blob uploads on the first cycle after adoption",
     );
 }
@@ -1595,10 +1721,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
         "cycle surfaces the second blob upload failure: {failed}"
     );
     assert!(
-        storage
-            .exists("photos/firstblob")
-            .await
-            .expect("exists check"),
+        blob_exists_at_recorded_location(&db, &storage, "photos", "firstblob").await,
         "the first blob reached cloud before the second upload failed"
     );
     assert!(
@@ -1929,6 +2052,163 @@ async fn missing_committed_stage_holds_sequence_and_pending_journal() {
         PendingChangesetBatch::Pending { .. }
     ));
     assert_eq!(storage.get_changeset("M", 1).await.unwrap(), staged);
+}
+
+#[tokio::test]
+async fn staged_pending_journal_marker_without_sequence_fails_closed() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (_tmp, ld) = temp_store_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [26u8; 32],
+    )));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    db.set_sync_state("staged_pending_changeset_id", "1")
+        .await
+        .expect("seed orphan pending marker");
+
+    let error = run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &PendingRotation::none(),
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    .expect_err("orphan pending marker must stop the cycle");
+    assert!(
+        error.contains("pending-journal marker exists without staged_seq"),
+        "{error}"
+    );
+    assert!(storage.get_changeset("M", 1).await.is_err());
+}
+
+#[tokio::test]
+async fn staged_sequence_without_pending_marker_rejects_a_nonempty_journal() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (_tmp, ld) = temp_store_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [27u8; 32],
+    )));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'First', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    db.set_sync_state("staged_seq", "1")
+        .await
+        .expect("seed staged sequence");
+
+    let error = run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &PendingRotation::none(),
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    .expect_err("missing pending marker must stop over journal rows");
+    assert!(
+        error.contains("staged_seq exists without its pending-journal marker"),
+        "{error}"
+    );
+    assert!(matches!(
+        db.pending_changeset_batch().await.unwrap(),
+        PendingChangesetBatch::Pending { .. }
+    ));
+    assert!(storage.get_changeset("M", 1).await.is_err());
+}
+
+#[tokio::test]
+async fn readable_tampering_of_a_staged_changeset_preserves_its_retry_state() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    let (_tmp, ld) = temp_store_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [25u8; 32],
+    )));
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'First', NULL, 1, '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    storage.fail_next_changeset_puts(1);
+    run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
+
+    let staged = cycle::read_staged_changeset(&ld)
+        .await
+        .expect("read staged changeset")
+        .expect("staged changeset exists");
+    let (mut envelope, changeset) = crate::sync::envelope::unpack(&staged).expect("unpack stage");
+    envelope.message.push_str(" tampered");
+    let tampered = crate::sync::envelope::pack(&envelope, &changeset);
+    crate::local_blob::write_atomic_durable(&cycle::staging_path(&ld), &tampered)
+        .await
+        .expect("replace stage with readable tampering");
+
+    let retry = run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &PendingRotation::none(),
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    .expect_err("tampered stage must fail before publication");
+
+    assert!(retry.contains("signature does not verify"), "{retry}");
+    assert!(storage.get_changeset("M", 1).await.is_err());
+    assert_eq!(
+        db.get_sync_state("staged_seq").await.unwrap().as_deref(),
+        Some("1")
+    );
+    assert_eq!(db.get_sync_state("local_seq").await.unwrap(), None);
+    assert!(db
+        .get_sync_state("staged_pending_changeset_id")
+        .await
+        .unwrap()
+        .is_some());
+    assert!(matches!(
+        db.pending_changeset_batch().await.unwrap(),
+        PendingChangesetBatch::Pending { .. }
+    ));
+    assert_eq!(
+        cycle::read_staged_changeset(&ld).await.unwrap(),
+        Some(tampered)
+    );
 }
 
 #[tokio::test]

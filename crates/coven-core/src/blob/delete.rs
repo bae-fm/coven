@@ -43,6 +43,7 @@
 //! durable operation.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tracing::{debug, warn};
 
 use crate::database::Database;
@@ -87,7 +88,7 @@ fn tombstone_key(cloud_key: &str, suffix: &str) -> String {
 /// a hashed key rather than a plain path that happens to have five segments.
 fn blob_key_uploader(cloud_key: &str) -> Option<String> {
     crate::store_dir::StoreDir::parse_uploader_hashed_key(cloud_key)
-        .map(|(_namespace, uploader, _id)| uploader)
+        .map(|(_namespace, uploader, _id, _generation)| uploader)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -425,6 +426,62 @@ async fn record_delete_failure(
     .await;
 }
 
+async fn drain_legacy_tombstone_cancels(
+    db: &Database,
+    cloud_home: &dyn CloudHome,
+    cipher: &dyn CloudCipherAccess,
+    clock: &dyn crate::clock::Clock,
+) -> Result<HashSet<String>, String> {
+    let cancels = db
+        .get_pending_cloud_cancels()
+        .await
+        .map_err(|e| format!("Failed to get pending legacy tombstone cancels: {e}"))?;
+    let now = clock.now();
+    let now_rfc = now.to_rfc3339();
+    let suffix = cipher.snapshot().suffix();
+    for entry in cancels {
+        if let Some(last) = entry.last_attempt_at.as_deref() {
+            if let Ok(last) = chrono::DateTime::parse_from_rfc3339(last) {
+                if now.signed_duration_since(last.with_timezone(&chrono::Utc))
+                    < crate::blob::upload::backoff_window(entry.attempt_count)
+                {
+                    continue;
+                }
+            }
+        }
+        let key = tombstone_key(&entry.cloud_key, suffix);
+        let result = match cloud_home.exists(&key).await {
+            Ok(true) => cloud_home.delete(&key).await.map_err(|e| e.to_string()),
+            Ok(false) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        };
+        match result {
+            Ok(()) => {
+                if let Err(error) = db.remove_cloud_outbox_entry(entry.id).await {
+                    warn!(
+                        "Failed to remove completed legacy tombstone cancel {}: {error}",
+                        entry.id
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(cloud_key = %entry.cloud_key, %error, "legacy tombstone cancel failed");
+                record_outbox_failure(
+                    db.record_cloud_cancel_failure(entry.id, &error, &now_rfc),
+                    "legacy tombstone cancel",
+                    &entry.cloud_key,
+                    entry.id,
+                )
+                .await;
+            }
+        }
+    }
+    db.get_pending_cloud_cancels()
+        .await
+        .map(|entries| entries.into_iter().map(|entry| entry.cloud_key).collect())
+        .map_err(|e| format!("Failed to reload pending legacy tombstone cancels: {e}"))
+}
+
 /// GC's live-row check for a tombstoned blob's `cloud_key`: whether a live row
 /// still references it and resolves as remote, the only state that cancels a
 /// past-grace tombstone.
@@ -496,6 +553,7 @@ pub async fn gc_tombstones(
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
 ) -> Result<usize, String> {
+    let pending_cancels = drain_legacy_tombstone_cancels(db, cloud_home, cipher, clock).await?;
     let suffix = cipher.snapshot().suffix();
     let keys = cloud_home
         .list(TOMBSTONE_PREFIX)
@@ -523,6 +581,10 @@ pub async fn gc_tombstones(
                 continue;
             }
         };
+        if pending_cancels.contains(&key_cloud_key) {
+            warn!(cloud_key = %key_cloud_key, "skipping reclaim while legacy tombstone cancellation remains pending");
+            continue;
+        }
 
         let stored = match cloud_home.read(&key).await {
             Ok(s) => s,
@@ -637,6 +699,41 @@ pub async fn gc_tombstones(
                 else {
                     return Ok(RowReference::NotLiveRemote);
                 };
+                let Some(blob) = decls
+                    .ref_for_row(conn, &table, &pk)
+                    .map_err(|e| crate::database::DbError(e.to_string()))?
+                else {
+                    return Ok(RowReference::NotLiveRemote);
+                };
+                let recorded_location =
+                    crate::database::Database::blob_location_on(conn, &blob.namespace, &blob.id)?;
+                let parsed_hashed =
+                    crate::store_dir::StoreDir::parse_uploader_hashed_key(&cloud_key);
+                let scheme = if parsed_hashed.is_some() {
+                    crate::sync::cloud_storage::BlobPathScheme::Hashed
+                } else {
+                    crate::sync::cloud_storage::BlobPathScheme::Plain
+                };
+                let legacy_location =
+                    parsed_hashed
+                        .as_ref()
+                        .and_then(|(_namespace, uploader, _id, generation)| {
+                            generation
+                                .is_none()
+                                .then(|| crate::blob::CloudBlobLocation::legacy(uploader.clone()))
+                        });
+                let location = recorded_location.as_ref().or(legacy_location.as_ref());
+                let exact_key = crate::sync::cloud_storage::CloudSyncStorage::blob_key_at(
+                    scheme,
+                    &blob.namespace,
+                    location,
+                    &blob.id,
+                    blob.cloud_path.as_deref(),
+                )
+                .map_err(|e| crate::database::DbError(e.to_string()))?;
+                if exact_key != cloud_key {
+                    return Ok(RowReference::NotLiveRemote);
+                }
                 let reference = match gates
                     .root_kept_of(conn, &table, &pk)
                     .map_err(|e| crate::database::DbError(e.to_string()))?

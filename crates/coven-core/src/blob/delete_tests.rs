@@ -586,6 +586,7 @@ async fn upload_carries_scope_delete_carries_no_extra_fields() {
             source_path: None,
             scope: BlobScope::Master,
             retain_pinned: false,
+            expected_hash: None,
         },
         "an upload entry carries its scope in the variant"
     );

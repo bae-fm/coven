@@ -174,6 +174,38 @@ async fn open_scoped_body(
     cipher.open_body(scope, file_path, &aad_context).await
 }
 
+pub(crate) async fn verified_upload_snapshot(
+    store_dir: &StoreDir,
+    source: &Path,
+    namespace: &str,
+    file_id: &str,
+    operation_id: &str,
+    expected_hash: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let local_path = store_dir
+        .local_blob_path(namespace, file_id)
+        .map_err(|error| error.to_string())?;
+    let parent = local_path.parent().ok_or_else(|| {
+        format!(
+            "upload staging path has no parent: {}",
+            local_path.display()
+        )
+    })?;
+    crate::local_blob::create_dir_all(parent).await?;
+    let operation_token = crate::blob::content_hash(operation_id.as_bytes());
+    let staged = parent.join(format!(".upload.{operation_token}"));
+    crate::local_blob::copy_atomic(source, &staged).await?;
+    let actual_hash = crate::blob::content_hash_file(&staged).await?;
+    if expected_hash.is_some_and(|expected_hash| actual_hash != expected_hash) {
+        let _ = crate::local_blob::remove_file(&staged).await;
+        return Err(format!(
+            "upload source content hash {actual_hash} does not match the row's signed hash {}",
+            expected_hash.unwrap_or_default()
+        ));
+    }
+    Ok(staged)
+}
+
 /// The result of one upload-queue drain pass.
 pub struct DrainOutcome {
     /// Number of successful uploads this pass.
@@ -391,6 +423,7 @@ async fn upload_entry(
         source_path,
         scope,
         retain_pinned,
+        expected_hash,
     } = &entry.operation
     else {
         unreachable!("get_pending_cloud_uploads returns only Upload rows");
@@ -425,12 +458,54 @@ async fn upload_entry(
         },
     };
 
+    let expected_hash = match expected_hash {
+        Some(hash) => Some(hash.clone()),
+        None => {
+            let decls = blob_decls.clone();
+            let namespace = namespace.to_string();
+            let file_id = file_id.to_string();
+            let queried_file_id = file_id.clone();
+            match db
+                .call(move |conn| {
+                    decls
+                        .hash_for_blob_in_namespace(conn, &namespace, &queried_file_id)
+                        .map_err(|error| DbError(error.to_string()))
+                })
+                .await
+            {
+                Ok(Some(hash)) => Some(hash),
+                Ok(None) => None,
+                Err(error) => {
+                    let message = format!("failed to read upload content hash: {error}");
+                    record_failure(db, &entry, &file_id, &message, now, observer).await;
+                    return EntryOutcome::NotUploaded;
+                }
+            }
+        }
+    };
+    let upload_source = match verified_upload_snapshot(
+        store_dir,
+        &file_path,
+        namespace,
+        file_id,
+        &entry.id.to_string(),
+        expected_hash.as_deref(),
+    )
+    .await
+    {
+        Ok(path) => path,
+        Err(message) => {
+            record_failure(db, &entry, file_id, &message, now, observer).await;
+            return EntryOutcome::NotUploaded;
+        }
+    };
+
     // Open a streaming body over the local plaintext — the body seals each chunk
     // under the scope's key as it uploads, never holding the whole blob.
     let body = match open_scoped_body(
         cipher,
         pending_rotation,
-        &file_path,
+        &upload_source,
         store_id,
         &entry.cloud_key,
         scope.clone(),
@@ -448,6 +523,9 @@ async fn upload_entry(
     if let Err(e) =
         upload_with_progress(cloud_home, &entry.cloud_key, file_id, body, observer).await
     {
+        if let Err(error) = crate::local_blob::remove_file(&upload_source).await {
+            warn!(path = %upload_source.display(), %error, "failed to remove failed upload staging file");
+        }
         let msg = format!("cloud write failed: {e}");
         warn!("Upload failed for {}: {msg}", entry.cloud_key);
         record_failure(db, &entry, file_id, &msg, now, observer).await;
@@ -463,7 +541,7 @@ async fn upload_entry(
     // re-fetches into the cache) rather than failing a completed upload.
     if *retain_pinned {
         if let Err(e) =
-            crate::blob::cache::populate_pinned(store_dir, namespace, file_id, &file_path).await
+            crate::blob::cache::populate_pinned(store_dir, namespace, file_id, &upload_source).await
         {
             warn!(
                 "Upload of {} succeeded but pinning it into the local cache (namespace {namespace}) failed (a later read will re-fetch): {e}",
@@ -474,6 +552,10 @@ async fn upload_entry(
 
     if let Some(obs) = observer {
         obs.on_blob_uploaded(file_id).await;
+    }
+
+    if let Err(error) = crate::local_blob::remove_file(&upload_source).await {
+        warn!(path = %upload_source.display(), %error, "failed to remove completed upload staging file");
     }
 
     // The post-upload commit: mint the gate-flip stamp off coven's HLC (the same
@@ -604,7 +686,7 @@ async fn commit_after_upload(
             None => None,
         };
         let Some((root_table, root_id)) = root else {
-            commit_finish(conn, final_outbox_id)?;
+            commit_finish(conn, final_outbox_id, &cloud_key, &now_rfc)?;
             return Ok(PostUpload::Continued);
         };
 
@@ -637,7 +719,7 @@ async fn commit_after_upload(
             .any(|b| b.provenance == Provenance::HostProvided);
         if crate::blob::transition::pending_upload_exists(conn, &blob_ids, Some(final_outbox_id))? {
             // Not the last blob: remove this row, leave the gate off until the rest land.
-            commit_finish(conn, final_outbox_id)?;
+            commit_finish(conn, final_outbox_id, &cloud_key, &now_rfc)?;
             return Ok(PostUpload::Continued);
         }
 
@@ -647,7 +729,7 @@ async fn commit_after_upload(
         // gate and clears the external refs. Removing this final outbox row is safe:
         // the intent remains as the durable driver for the remaining completion.
         if has_host_provided {
-            commit_finish(conn, final_outbox_id)?;
+            commit_finish(conn, final_outbox_id, &cloud_key, &now_rfc)?;
             return Ok(PostUpload::Continued);
         }
 
@@ -670,6 +752,8 @@ async fn commit_after_upload(
             &blob_ids,
             crate::blob::transition::MakeRemoteCompletion::FinalOutboxRow {
                 id: final_outbox_id,
+                cloud_key,
+                created_at: now_rfc,
             },
         )?;
         Ok(PostUpload::MadeRemote {
@@ -683,17 +767,30 @@ async fn commit_after_upload(
 /// The non-completing post-upload outcome: remove the upload's outbox row in its own
 /// transaction. The `Continued` branches — a plain upload with no gated root, and a
 /// non-final make_remote upload — share this single commit shape.
-fn commit_finish(conn: &Connection, id: i64) -> Result<(), DbError> {
+fn commit_finish(
+    conn: &Connection,
+    id: i64,
+    cloud_key: &str,
+    created_at: &str,
+) -> Result<(), DbError> {
     let tx = conn.unchecked_transaction()?;
-    finish_outbox_row(&tx, id)?;
+    finish_outbox_row(&tx, id, cloud_key, created_at)?;
     tx.commit().map_err(DbError::from)
 }
 
 /// Remove a completed upload's outbox row. Shared with the make_remote completion
 /// commit ([`crate::blob::transition::commit_make_remote_flip`]), which removes the
 /// final upload's row inside the flip.
-pub(crate) fn finish_outbox_row(conn: &Connection, id: i64) -> Result<(), DbError> {
+pub(crate) fn finish_outbox_row(
+    conn: &Connection,
+    id: i64,
+    cloud_key: &str,
+    created_at: &str,
+) -> Result<(), DbError> {
     conn.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
         .map_err(DbError::from)?;
+    if !crate::sync::cloud_storage::CloudSyncStorage::is_generated_blob_key(cloud_key) {
+        Database::enqueue_legacy_cancel_on(conn, cloud_key, created_at)?;
+    }
     Ok(())
 }

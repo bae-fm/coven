@@ -307,6 +307,14 @@ pub async fn make_remote(
         .collect();
     let created_at = hlc.now().to_string();
     let generated_location = crate::blob::CloudBlobLocation::generated(self_uploader, &created_at);
+    let mut locations = Vec::new();
+    for blob in &refs {
+        let location = match db.blob_location(&blob.namespace, &blob.id).await? {
+            Some(existing) if existing.version.is_some() => existing,
+            _ => generated_location.clone(),
+        };
+        locations.push((blob.namespace.clone(), blob.id.clone(), location));
+    }
     let mut uploads: Vec<(
         String,
         String,
@@ -314,6 +322,7 @@ pub async fn make_remote(
         String,
         crate::blob::BlobScope,
         crate::blob::CloudBlobLocation,
+        String,
     )> = Vec::new();
     for blob in &user_provided {
         let ext = db
@@ -337,10 +346,40 @@ pub async fn make_remote(
                 ),
             });
         }
-        let location = db
-            .blob_location(&blob.namespace, &blob.id)
-            .await?
-            .unwrap_or_else(|| generated_location.clone());
+        let expected_hash =
+            cache::expected_blob_hash(db, blob)
+                .await
+                .map_err(|error| MakeRemoteError::Source {
+                    blob_id: blob.id.clone(),
+                    path: ext.path.display().to_string(),
+                    detail: error.to_string(),
+                })?;
+        let actual_hash = crate::blob::content_hash_file(&ext.path)
+            .await
+            .map_err(|detail| MakeRemoteError::Source {
+                blob_id: blob.id.clone(),
+                path: ext.path.display().to_string(),
+                detail,
+            })?;
+        if actual_hash != expected_hash {
+            return Err(MakeRemoteError::Source {
+                blob_id: blob.id.clone(),
+                path: ext.path.display().to_string(),
+                detail: format!(
+                    "content hash {actual_hash} does not match the row's signed hash {expected_hash}"
+                ),
+            });
+        }
+        let location = locations
+            .iter()
+            .find(|(namespace, id, _)| namespace == &blob.namespace && id == &blob.id)
+            .map(|(_, _, location)| location.clone())
+            .ok_or_else(|| {
+                MakeRemoteError::CloudKey(
+                    blob.id.clone(),
+                    "make_remote did not assign a blob location".to_string(),
+                )
+            })?;
         let cloud_key = cloud_key_for_location(scheme, Some(&location), blob)
             .map_err(|e| MakeRemoteError::CloudKey(blob.id.clone(), e))?;
         let source = ext.path.to_str().ok_or_else(|| MakeRemoteError::Source {
@@ -355,6 +394,7 @@ pub async fn make_remote(
             source.to_string(),
             blob.scope.clone(),
             location,
+            expected_hash,
         ));
     }
 
@@ -376,7 +416,11 @@ pub async fn make_remote(
                 .map_err(|e| DbError(e.to_string()))?;
             if locality == Some(false) {
                 Database::insert_make_remote_intent_on(&tx, &rt, &ri, pin)?;
-                for (id, namespace, cloud_key, source, scope, location) in &uploads {
+                for (namespace, id, location) in &locations {
+                    Database::record_blob_location_on(&tx, namespace, id, location)?;
+                }
+                for (id, _namespace, cloud_key, source, scope, _location, expected_hash) in &uploads
+                {
                     Database::enqueue_upload_on(
                         &tx,
                         id,
@@ -384,12 +428,9 @@ pub async fn make_remote(
                         Some(source),
                         scope.clone(),
                         pin,
+                        Some(expected_hash),
                         &created_at,
                     )?;
-                    // Record that we uploaded this blob, atomically with the enqueue,
-                    // so a later self-read after a cache eviction keys it under us
-                    // without a listing scan.
-                    Database::record_blob_location_on(&tx, namespace, id, location)?;
                 }
                 tx.commit().map_err(DbError::from)?;
             }
@@ -434,7 +475,7 @@ pub async fn cancel_make_remote(
     db: &Database,
     store_dir: &StoreDir,
     scheme: BlobPathScheme,
-    self_uploader: &str,
+    _self_uploader: &str,
     hlc: &Hlc,
     root_table: &str,
     root_id: &str,
@@ -452,7 +493,12 @@ pub async fn cancel_make_remote(
         let location = db
             .blob_location(&blob.namespace, &blob.id)
             .await?
-            .unwrap_or_else(|| crate::blob::CloudBlobLocation::legacy(self_uploader));
+            .ok_or_else(|| {
+                MakeRemoteError::CloudKey(
+                    blob.id.clone(),
+                    "make_remote intent has no recorded blob location".to_string(),
+                )
+            })?;
         let cloud_key = cloud_key_for_location(scheme, Some(&location), blob)
             .map_err(|e| MakeRemoteError::CloudKey(blob.id.clone(), e))?;
         keyed.push((blob.id.clone(), blob.namespace.clone(), cloud_key));
@@ -491,7 +537,7 @@ pub async fn cancel_make_remote(
                     Database::enqueue_delete_on(&tx, cloud_key, &now)?;
                     dropped.push((id.clone(), namespace.clone()));
                 }
-                Database::clear_blob_location_on(&tx, namespace, id)?;
+                Database::clear_blob_location_on(&tx, namespace, id, &now)?;
             }
             Database::delete_make_remote_intent_on(&tx, &root_table_owned, &root_id_owned)?;
             tx.commit().map_err(DbError::from)?;
@@ -518,7 +564,11 @@ pub(crate) enum MakeRemoteCompletion {
     /// flip. Removing it here (not before) is the crash-safety invariant — until the
     /// commit the row is present, so a crash re-runs the idempotent upload and retries
     /// the flip.
-    FinalOutboxRow { id: i64 },
+    FinalOutboxRow {
+        id: i64,
+        cloud_key: String,
+        created_at: String,
+    },
     /// The sync cycle's host-provided path: the local-store dispositions for the
     /// host-provided blobs this cycle uploaded are committed inside the flip, keyed by
     /// the sequence the flip's re-emitted changeset publishes at. The insert's `ON
@@ -558,8 +608,12 @@ pub(crate) fn commit_make_remote_flip(
             Database::clear_external_blob_on(tx, id)?;
         }
         match &completion {
-            MakeRemoteCompletion::FinalOutboxRow { id } => {
-                crate::blob::upload::finish_outbox_row(tx, *id)?;
+            MakeRemoteCompletion::FinalOutboxRow {
+                id,
+                cloud_key,
+                created_at,
+            } => {
+                crate::blob::upload::finish_outbox_row(tx, *id, cloud_key, created_at)?;
             }
             MakeRemoteCompletion::Dispositions { intent_seq, drops } => {
                 for drop in drops {
@@ -729,6 +783,7 @@ pub async fn make_local(
     // an aborted make_local leaves no partial materialization behind. `written` tracks
     // what to remove (typed by kind so the rollback treats a local-store leftover
     // loud); the loop's result drives the cleanup-or-commit decision.
+    let stamp = hlc.now().to_string();
     let mut written: Vec<WrittenFile> = Vec::new();
     let materialized = match materialize_blobs(
         db,
@@ -741,6 +796,7 @@ pub async fn make_local(
         &refs,
         dest,
         cancel,
+        &stamp,
         &mut written,
     )
     .await
@@ -755,7 +811,6 @@ pub async fn make_local(
     // rewritten by a lossy conversion, registered as a wrong external ref, and its
     // cloud copy tombstoned (data loss). Tuple: (id, namespace, external-ref path or
     // None, size, cloud key).
-    let stamp = hlc.now().to_string();
     let (root_table_owned, root_id_owned) = (root_table.to_string(), root_id.to_string());
     let commit: Vec<(String, String, Option<String>, u64, String)> = match materialized
         .iter()
@@ -796,37 +851,41 @@ pub async fn make_local(
     // durable inside this commit, so a crash right after can never leave the root
     // Local with the cloud blobs un-tombstoned.
     let tables = db.synced_tables().to_vec();
-    db.call(move |conn| {
-        Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
-            crate::sync::gate::write_gate(
-                tx,
-                &root_table_owned,
-                &gate_col,
-                false,
-                &stamp,
-                &root_id_owned,
-            )
-            .map_err(DbError::from)?;
-            for (id, namespace, external_path, size, cloud_key) in &commit {
-                // A user-provided blob now lives at the user's path — register the
-                // external ref. A host-provided blob lives in the local store, tracked by
-                // file presence, so it registers no ref.
-                if let Some(path) = external_path {
-                    Database::register_external_blob_on(
-                        tx,
-                        id,
-                        namespace,
-                        std::path::Path::new(path),
-                        *size,
-                    )?;
+    let commit_result = db
+        .call(move |conn| {
+            Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                crate::sync::gate::write_gate(
+                    tx,
+                    &root_table_owned,
+                    &gate_col,
+                    false,
+                    &stamp,
+                    &root_id_owned,
+                )
+                .map_err(DbError::from)?;
+                for (id, namespace, external_path, size, cloud_key) in &commit {
+                    // A user-provided blob now lives at the user's path — register the
+                    // external ref. A host-provided blob lives in the local store, tracked by
+                    // file presence, so it registers no ref.
+                    if let Some(path) = external_path {
+                        Database::register_external_blob_on(
+                            tx,
+                            id,
+                            namespace,
+                            std::path::Path::new(path),
+                            *size,
+                        )?;
+                    }
+                    Database::enqueue_delete_on(tx, cloud_key, &stamp)?;
+                    Database::clear_blob_location_on(tx, namespace, id, &stamp)?;
                 }
-                Database::enqueue_delete_on(tx, cloud_key, &stamp)?;
-                Database::clear_blob_location_on(tx, namespace, id)?;
-            }
-            Ok(())
+                Ok(())
+            })
         })
-    })
-    .await?;
+        .await;
+    if let Err(error) = commit_result {
+        return Err(roll_back(&written, MakeLocalError::Db(error)).await);
+    }
 
     // Post-commit, best-effort: the bytes now live at their local file (a user path
     // or the local store) and the cloud blob is tombstoned, so the cache copies are
@@ -867,6 +926,7 @@ async fn materialize_blobs(
     refs: &[BlobRef],
     dest: &HashMap<String, PathBuf>,
     cancel: &watch::Receiver<bool>,
+    operation_id: &str,
     written: &mut Vec<WrittenFile>,
 ) -> Result<Vec<Materialized>, MakeLocalError> {
     let total = refs.len() as u64;
@@ -905,10 +965,12 @@ async fn materialize_blobs(
                         detail,
                     })?;
                 let temp_path =
-                    operation_temp_path(&dest_path).map_err(|detail| MakeLocalError::Write {
-                        blob_id: blob.id.clone(),
-                        path: dest_path.display().to_string(),
-                        detail,
+                    operation_temp_path(&dest_path, operation_id, i).map_err(|detail| {
+                        MakeLocalError::Write {
+                            blob_id: blob.id.clone(),
+                            path: dest_path.display().to_string(),
+                            detail,
+                        }
                     })?;
                 let size = cache::materialize_remote_blob_to_file(
                     db,
@@ -1048,14 +1110,19 @@ async fn prepare_parent_dir(dest: &std::path::Path) -> Result<(), String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn operation_temp_path(dest: &std::path::Path) -> Result<PathBuf, String> {
+fn operation_temp_path(
+    dest: &std::path::Path,
+    operation_id: &str,
+    blob_index: usize,
+) -> Result<PathBuf, String> {
     let parent = dest
         .parent()
         .ok_or_else(|| format!("blob path has no parent dir: {}", dest.display()))?;
+    let identity = format!("{operation_id}:{blob_index}:{}", dest.display());
     Ok(parent.join(format!(
         "{}{}",
         crate::local_blob::TEMP_BLOB_PREFIX,
-        uuid::Uuid::new_v4()
+        crate::blob::content_hash(identity.as_bytes())
     )))
 }
 

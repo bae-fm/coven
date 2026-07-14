@@ -417,6 +417,43 @@ async fn bad_item_does_not_block_good_later_item() {
     assert!(get_upload(&db, 2).await.is_none(), "uploaded entry removed");
 }
 
+#[tokio::test]
+async fn successful_retry_of_a_legacy_upload_durably_cancels_its_tombstone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_temp_file(tmp.path(), "legacy.bin", b"legacy-bytes");
+    let db = open_outbox_db();
+    let key = "photos/uploader/aa/bb/legacy-id";
+    insert_upload(&db, 1, "legacy-id", key, Some(path), 0, None).await;
+    let cloud = InMemoryCloudHome::new();
+
+    let outcome = run_drain(
+        &db,
+        &cloud,
+        &enc(),
+        &StoreDir::new(tmp.path()),
+        &fixed_clock(T0),
+        None,
+    )
+    .await
+    .expect("drain legacy upload");
+
+    assert_eq!(outcome.uploaded, 1);
+    assert!(get_upload(&db, 1).await.is_none());
+    let durable_cancel = db
+        .call(|conn| {
+            conn.query_row(
+                "SELECT cloud_key FROM cloud_outbox WHERE operation = 'cancel'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("read durable cancel");
+    assert_eq!(durable_cancel.as_deref(), Some(key));
+}
+
 /// While this device has not adopted a store-key rotation the cloud has already
 /// committed, the drain refuses to seal any entry rather than sealing it under
 /// the superseded generation: no object reaches the cloud, and the entry stays
@@ -708,6 +745,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             None,
             crate::blob::BlobScope::Master,
             false,
+            None,
             T0,
         )?;
         tx.rollback().map_err(DbError::from)
@@ -725,6 +763,7 @@ async fn enqueue_upload_on_is_transactional_with_host_writes() {
             Some("/tmp/source.flac"),
             crate::blob::BlobScope::Derived("rel-1".to_string()),
             false,
+            None,
             T0,
         )?;
         tx.commit().map_err(DbError::from)

@@ -42,7 +42,9 @@ async fn apply_result(
     let tables = test_synced_tables();
     let receiver_wall_ms = db.receive_wall_ms();
     db.call(move |conn| {
-        resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms).map(|_| ())
+        resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms)
+            .map(|_| ())
+            .map_err(|error| crate::database::DbError(error.to_string()))
     })
     .await
 }
@@ -222,6 +224,78 @@ async fn lww_earlier_update_loses() {
     assert_eq!(
         query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
         "LOCAL"
+    );
+}
+
+#[tokio::test]
+async fn losing_stale_update_does_not_replace_the_active_blob_location() {
+    use std::sync::Arc;
+
+    use crate::blob::{CacheFill, CloudBlobLocation, Provenance};
+    use crate::sync::apply::resolve_and_apply_changeset_with_schema;
+    use crate::sync::conflict::TableSchema;
+    use crate::sync::session::BlobDecl;
+
+    let decl = BlobDecl::new("photos", Provenance::UserProvided, CacheFill::CacheLazy);
+    let tables = test_synced_tables_with_blob(decl.clone());
+    let source = open_test_db_with_blob(decl.clone());
+    exec(
+        &source,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'root', NULL, '0000000001000-0000-s', '2026-01-01'); \
+         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('p1', 'n1', 'old', '0000000001000-0000-s', '2026-01-01')",
+    )
+    .await;
+    let _ = capture_bytes(&source, &[]).await;
+    let stale = capture_bytes(
+        &source,
+        &["UPDATE note_photos SET kind = 'stale', \
+           _updated_at = '0000000002000-0000-s' WHERE id = 'p1'"],
+    )
+    .await;
+
+    let target = open_test_db_with_blob(decl);
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'root', NULL, '0000000001000-0000-t', '2026-01-01'); \
+         INSERT INTO note_photos (id, note_id, kind, _updated_at, created_at) \
+         VALUES ('p1', 'n1', 'newer', '0000000003000-0000-t', '2026-01-01')",
+    )
+    .await;
+    let current = CloudBlobLocation::generated("new-uploader", "0000000003000-0000-t");
+    target
+        .record_blob_location("photos", "p1", &current)
+        .await
+        .unwrap();
+    let incoming = CloudBlobLocation::generated("stale-uploader", "0000000002000-0000-s");
+    let receiver_wall_ms = target.receive_wall_ms();
+    let applied_incoming = incoming.clone();
+    target
+        .call(move |conn| {
+            let table_names: Vec<&str> = tables.iter().map(|table| table.name()).collect();
+            let schema = Arc::new(TableSchema::from_db(conn, &table_names)?);
+            resolve_and_apply_changeset_with_schema(
+                conn,
+                &stale,
+                schema,
+                receiver_wall_ms,
+                &[("photos".to_string(), "p1".to_string(), applied_incoming)],
+            )
+            .map(|_| ())
+            .map_err(|error| crate::database::DbError(error.to_string()))
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        query_text(&target, "SELECT kind FROM note_photos WHERE id = 'p1'").await,
+        "newer",
+    );
+    assert_eq!(
+        target.blob_location("photos", "p1").await.unwrap(),
+        Some(current)
     );
 }
 

@@ -113,6 +113,10 @@ pub struct CloudBlobLocation {
     pub uploader: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
+    /// Causal order of this location assignment. Kept separate from the fixed-size
+    /// object token so location arbitration does not depend on decoding a path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl CloudBlobLocation {
@@ -120,13 +124,15 @@ impl CloudBlobLocation {
         Self {
             uploader: uploader.into(),
             generation: None,
+            version: None,
         }
     }
 
     pub fn generated(uploader: impl Into<String>, stamp: &str) -> Self {
         Self {
             uploader: uploader.into(),
-            generation: Some(hex::encode(stamp.as_bytes())),
+            generation: Some(hex::encode(Sha256::digest(stamp.as_bytes()))),
+            version: Some(stamp.to_string()),
         }
     }
 
@@ -142,7 +148,31 @@ impl CloudBlobLocation {
                 return Err("blob generation must be non-empty lowercase hexadecimal".to_string());
             }
         }
+        match (&self.generation, &self.version) {
+            (None, Some(_)) => {
+                return Err("legacy blob locations cannot carry a version".to_string())
+            }
+            (Some(_), Some(version)) => {
+                if crate::sync::hlc::Timestamp::parse(version).is_none() {
+                    return Err("blob location version must be an HLC timestamp".to_string());
+                }
+            }
+            (Some(_), None) | (None, None) => {}
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cloud_blob_location_tests {
+    use super::CloudBlobLocation;
+
+    #[test]
+    fn generated_location_uses_a_fixed_length_object_token() {
+        let stamp = format!("0000000001000-0000-{}", "device".repeat(10_000));
+        let location = CloudBlobLocation::generated("aa11", &stamp);
+
+        assert_eq!(location.generation.as_deref().unwrap().len(), 64);
     }
 }
 
@@ -157,6 +187,18 @@ impl CloudBlobLocation {
 /// the same way it writes the plaintext length into the size column.
 pub fn content_hash(plaintext: &[u8]) -> String {
     hex::encode(Sha256::digest(plaintext))
+}
+
+pub(crate) async fn content_hash_file(path: &std::path::Path) -> Result<String, String> {
+    let mut reader = crate::local_blob::open_reader(path).await?;
+    let mut hasher = ContentHasher::new();
+    loop {
+        let chunk = reader.next_chunk(64 * 1024).await?;
+        if chunk.is_empty() {
+            return Ok(hasher.finish());
+        }
+        hasher.update(&chunk);
+    }
 }
 
 /// An incremental SHA-256 over a blob's plaintext, so the streaming download path

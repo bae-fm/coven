@@ -458,6 +458,11 @@ async fn upload_host_provided_blob(
     let expected_size = expected_blob_size(db, blob).await?;
 
     let local = local_host_blob(store_dir, blob, expected_size).await?;
+    let expected_hash = match crate::blob::cache::expected_blob_hash(db, blob).await {
+        Ok(hash) => Some(hash),
+        Err(crate::blob::cache::BlobCacheError::MissingContentHash { .. }) => None,
+        Err(error) => return Err(SyncCycleError::AssetUpload(error.to_string())),
+    };
     // Every cloud key names the blob standing at it — the hashed scheme carries the id in
     // the key, and a browsable home's readable path is required to name it
     // ([`crate::sync::cloud_storage::CloudSyncStorage::blob_key`]). So no two blobs share
@@ -505,17 +510,29 @@ async fn upload_host_provided_blob(
     match (&local, uploaded) {
         (_, true) => {}
         (Some(local), false) => {
-            storage
+            let staged = crate::blob::upload::verified_upload_snapshot(
+                store_dir,
+                local.path(),
+                &blob.namespace,
+                &blob.id,
+                &format!("host:{timestamp}:{}:{}", blob.namespace, blob.id),
+                expected_hash.as_deref(),
+            )
+            .await
+            .map_err(SyncCycleError::AssetUpload)?;
+            let upload = storage
                 .put_blob_from_file_at(
                     &blob.namespace,
                     &location,
                     &blob.id,
                     blob.scope.clone(),
                     blob.cloud_path.as_deref(),
-                    local.path(),
+                    &staged,
                 )
-                .await
-                .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+                .await;
+            let cleanup = crate::local_blob::remove_file(&staged).await;
+            upload.map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+            cleanup.map_err(SyncCycleError::AssetUpload)?;
             info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
         }
         (None, false) => {

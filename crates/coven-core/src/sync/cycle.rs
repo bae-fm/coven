@@ -148,6 +148,8 @@ where
 /// Errors from publishing a changeset and its head.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ChangesetPublishError {
+    #[error("outgoing changeset validation failed: {0}")]
+    InvalidPacked(String),
     #[error("{0}")]
     BlobPreflight(#[from] PublishBlobError),
     #[error("{0}")]
@@ -163,6 +165,31 @@ pub(crate) async fn push_changeset(
     packed: Vec<u8>,
     timestamp: &str,
 ) -> Result<(), ChangesetPublishError> {
+    let (envelope, changeset) = super::envelope::unpack(&packed)
+        .map_err(|error| ChangesetPublishError::InvalidPacked(error.to_string()))?;
+    if envelope.device_id != device_id || envelope.seq != seq {
+        return Err(ChangesetPublishError::InvalidPacked(format!(
+            "expected {device_id}/{seq}, packed envelope names {}/{}",
+            envelope.device_id, envelope.seq
+        )));
+    }
+    if envelope.changeset_size != changeset.len() {
+        return Err(ChangesetPublishError::InvalidPacked(format!(
+            "envelope declares {} changeset bytes, packed payload has {}",
+            envelope.changeset_size,
+            changeset.len()
+        )));
+    }
+    if envelope.author_pubkey.is_none() || envelope.signature.is_none() {
+        return Err(ChangesetPublishError::InvalidPacked(
+            "outgoing changeset is unsigned".to_string(),
+        ));
+    }
+    if !super::envelope::verify_changeset_signature(&envelope, &changeset) {
+        return Err(ChangesetPublishError::InvalidPacked(
+            "outgoing changeset signature does not verify".to_string(),
+        ));
+    }
     ensure_publishable_changeset_blobs(db, storage, &packed).await?;
     storage.put_changeset(device_id, seq, packed).await?;
     storage.put_head(device_id, seq, timestamp).await?;
@@ -548,6 +575,25 @@ pub(crate) async fn run_single_sync_cycle(
             .filter(|value| !value.is_empty())
             .map(|value| parse_sync_state(STAGED_PENDING_CHANGESET_ID_KEY, &value))
             .transpose()?;
+    match (staged_seq, staged_pending_changeset_id) {
+        (None, Some(_)) => {
+            return Err("staged pending-journal marker exists without staged_seq".to_string())
+        }
+        (Some(_), None) => {
+            if matches!(
+                db.pending_changeset_batch()
+                    .await
+                    .map_err(|e| format!("Failed to validate staged pending journal: {e}"))?,
+                PendingChangesetBatch::Pending { .. }
+            ) {
+                return Err(
+                    "staged_seq exists without its pending-journal marker while journal rows remain"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {}
+    }
     drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
 
     // One wall-clock reading for this whole cycle. Every head this cycle writes
