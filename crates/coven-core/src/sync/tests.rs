@@ -6,6 +6,128 @@
 
 use crate::sync::test_helpers::*;
 
+async fn raw_changeset(db: &crate::database::Database, tables: &[&str], sql: &str) -> Vec<u8> {
+    let tables = tables
+        .iter()
+        .map(|table| table.to_string())
+        .collect::<Vec<_>>();
+    let sql = sql.to_string();
+    db.call(move |conn| {
+        let mut session =
+            rusqlite::session::Session::new(conn).map_err(crate::database::DbError::from)?;
+        for table in tables {
+            session
+                .attach(Some(table.as_str()))
+                .map_err(crate::database::DbError::from)?;
+        }
+        conn.execute_batch(&sql)
+            .map_err(crate::database::DbError::from)?;
+        let mut bytes = Vec::new();
+        session
+            .changeset_strm(&mut bytes)
+            .map_err(crate::database::DbError::from)?;
+        Ok(bytes)
+    })
+    .await
+    .expect("capture raw changeset")
+}
+
+async fn apply_result(
+    db: &crate::database::Database,
+    bytes: &[u8],
+) -> Result<(), crate::database::DbError> {
+    use crate::sync::apply::resolve_and_apply_changeset;
+
+    let bytes = bytes.to_vec();
+    let tables = test_synced_tables();
+    let receiver_wall_ms = db.receive_wall_ms();
+    db.call(move |conn| {
+        resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms).map(|_| ())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn undeclared_changeset_table_is_rejected() {
+    let source = open_test_db();
+    exec(
+        &source,
+        "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
+    )
+    .await;
+    let changeset = raw_changeset(
+        &source,
+        &["local_only"],
+        "INSERT INTO local_only (id, value) VALUES ('local-1', 'private');",
+    )
+    .await;
+
+    let target = open_test_db();
+    exec(
+        &target,
+        "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
+    )
+    .await;
+
+    let error = apply_result(&target, &changeset)
+        .await
+        .expect_err("an undeclared table must reject the changeset");
+    assert!(
+        error.to_string().contains("local_only"),
+        "rejection must name the undeclared table: {error}"
+    );
+    assert!(!row_exists(&target, "SELECT 1 FROM local_only WHERE id = 'local-1'").await);
+}
+
+#[tokio::test]
+async fn mixed_changeset_with_undeclared_table_is_rejected_atomically() {
+    let source = open_test_db();
+    exec(
+        &source,
+        "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+         INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n-premerge', 'title0', 'body0', '0000000001000-0000-base', '2026-01-01');",
+    )
+    .await;
+    let changeset = raw_changeset(
+        &source,
+        &["notes", "local_only"],
+        "UPDATE notes \
+         SET title = 'incoming-title', _updated_at = '0000000003000-0000-incoming' \
+         WHERE id = 'n-premerge';
+         INSERT INTO local_only (id, value) VALUES ('local-1', 'private');",
+    )
+    .await;
+
+    let target = open_test_db();
+    exec(
+        &target,
+        "CREATE TABLE local_only (id TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+         INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n-premerge', 'title0', 'body0', '0000000001000-0000-base', '2026-01-01');
+         UPDATE notes \
+         SET body = 'local-body', _updated_at = '0000000005000-0000-local' \
+         WHERE id = 'n-premerge';",
+    )
+    .await;
+
+    let result = apply_result(&target, &changeset).await;
+    assert_eq!(
+        query_text(&target, "SELECT title FROM notes WHERE id = 'n-premerge'").await,
+        "title0",
+        "the losing UPDATE must not premerge before table validation finishes"
+    );
+    assert!(
+        !row_exists(&target, "SELECT 1 FROM local_only WHERE id = 'local-1'").await,
+        "the undeclared row must not apply"
+    );
+    let error = result.expect_err("any undeclared table must reject the whole changeset");
+    assert!(
+        error.to_string().contains("local_only"),
+        "rejection must name the undeclared table: {error}"
+    );
+}
+
 #[tokio::test]
 async fn session_captures_and_applies_inserts() {
     let src = open_test_db();

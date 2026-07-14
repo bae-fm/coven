@@ -81,9 +81,8 @@ impl TableSchema {
     }
 
     /// The `_updated_at` column index for a table, or `None` if the table was not
-    /// in the synced set passed to `from_db`. A remote changeset can carry a table
-    /// this device hasn't declared (a newer peer added it); rather than panic mid-
-    /// apply, the caller treats an unresolved table as a row to omit.
+    /// in the synced set passed to `from_db`. Incoming apply rejects an entire
+    /// changeset containing an undeclared table before premerge or row arbitration.
     pub fn updated_at(&self, table: &str) -> Option<usize> {
         self.updated_at_by_table.get(table).copied()
     }
@@ -148,10 +147,9 @@ pub fn arbitrate_row_conflict(
     match conflict_type {
         ConflictType::SQLITE_CHANGESET_DATA | ConflictType::SQLITE_CHANGESET_CONFLICT => {
             let Some(uat) = schema.updated_at(table) else {
-                // The changeset carries a table this device doesn't declare (a
-                // newer peer's schema). We can't resolve its `_updated_at`, so we
-                // can't arbitrate it — omit rather than blindly apply a row we don't
-                // understand.
+                // Incoming apply rejects an entire changeset containing an
+                // undeclared table before this closure. This arm covers a direct
+                // caller supplying a schema inconsistent with the item.
                 warn!(
                     table,
                     "conflict on a table not in this device's synced set, omitting the row"

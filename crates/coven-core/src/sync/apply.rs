@@ -99,6 +99,8 @@ pub fn resolve_and_apply_changeset_with_schema(
     receiver_wall_ms: u64,
     blob_uploads: &[(String, String, String)],
 ) -> Result<ApplyResult, DbError> {
+    validate_changeset_tables(bytes, &schema)?;
+
     let fk_flag = Arc::new(AtomicBool::new(false));
     let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -108,9 +110,7 @@ pub fn resolve_and_apply_changeset_with_schema(
     let closure_constraint_conflict_tables = constraint_conflict_tables.clone();
     tx.apply_strm(
         &mut &bytes[..],
-        // Apply to every table in the changeset (it only ever carries synced
-        // tables; the gate already excluded local-only rows on the wire).
-        Some(|_table: &str| true),
+        None::<fn(&str) -> bool>,
         move |conflict_type, item| {
             // A FOREIGN_KEY conflict's iterator supports ONLY `fk_conflicts()`;
             // calling `op()`/`new_value()`/`conflict()` on it is undefined (it
@@ -185,6 +185,26 @@ pub fn resolve_and_apply_changeset_with_schema(
         had_fk_violations,
         constraint_conflict_tables,
     })
+}
+
+fn validate_changeset_tables(bytes: &[u8], schema: &TableSchema) -> Result<(), DbError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    let input: &mut dyn std::io::Read = &mut &bytes[..];
+    let mut iter = ChangesetIter::start_strm(&input).map_err(DbError::from)?;
+    while let Some(item) = iter.next().map_err(DbError::from)? {
+        let op = item.op().map_err(DbError::from)?;
+        let table = op.table_name();
+        if schema.columns(table).is_none() {
+            return Err(DbError(format!(
+                "changeset contains undeclared table {table}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

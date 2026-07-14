@@ -1259,9 +1259,9 @@ fn advance_max_updated_at(
 ) {
     for change in changes {
         let Some(idx) = schema.updated_at(&change.table) else {
-            // A table not in this device's synced set (a newer peer's schema): the
-            // apply omitted its rows, so there is no applied `_updated_at` here to
-            // advance the clock past.
+            // Incoming apply rejects the entire changeset before mutation when any
+            // operation names an undeclared table. Reaching this after a successful
+            // apply means its walked rows and the apply schema disagree.
             debug!(
                 table = %change.table,
                 "applied changeset references a table absent from the synced set, not advancing HLC"
