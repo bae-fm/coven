@@ -32,6 +32,7 @@ pub struct InMemoryCloudHome {
     deletes: Arc<Mutex<Vec<String>>>,
     fail_writes: Arc<AtomicBool>,
     fail_next_range_reads: Arc<AtomicUsize>,
+    sort_listings: Arc<AtomicBool>,
 }
 
 impl InMemoryCloudHome {
@@ -41,7 +42,17 @@ impl InMemoryCloudHome {
             deletes: Arc::new(Mutex::new(Vec::new())),
             fail_writes: Arc::new(AtomicBool::new(false)),
             fail_next_range_reads: Arc::new(AtomicUsize::new(0)),
+            sort_listings: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Return `list` results in sorted key order instead of the backing map's
+    /// arbitrary order. A real bucket LIST has no defined order, so the pull's
+    /// cross-device apply order is arbitrary; a test that needs a fixed order (to
+    /// reproduce an order-dependent bug deterministically) arms this and picks the
+    /// order through its device ids.
+    pub fn sort_listings(&self) {
+        self.sort_listings.store(true, Ordering::SeqCst);
     }
 
     /// Arm every subsequent write (`put_object` and `open_multipart`) to fail
@@ -204,14 +215,18 @@ impl CloudHome for InMemoryCloudHome {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        Ok(self
+        let mut keys: Vec<String> = self
             .writes
             .lock()
             .unwrap()
             .keys()
             .filter(|k| k.starts_with(prefix))
             .cloned()
-            .collect())
+            .collect();
+        if self.sort_listings.load(Ordering::SeqCst) {
+            keys.sort();
+        }
+        Ok(keys)
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
