@@ -150,6 +150,9 @@ impl DatabaseCore {
         let blob_decls = Arc::new(
             BlobDecls::from_tables(&conn, &synced_tables).map_err(|e| DbError(e.to_string()))?,
         );
+        blob_decls
+            .install_cleanup_guards(&conn)
+            .map_err(|e| DbError(e.to_string()))?;
         let core = DatabaseCore {
             conn,
             hlc,
@@ -1071,38 +1074,144 @@ impl Database {
             .prepare("SELECT device_id, last_seq FROM sync_cursors")
             .map_err(DbError::from)?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
-            })
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
             .map_err(DbError::from)?;
         let mut out = HashMap::new();
         for row in rows {
             let (id, seq) = row.map_err(DbError::from)?;
+            let seq = u64::try_from(seq).map_err(|_| {
+                DbError(format!(
+                    "sync cursor {id:?} contains negative sequence {seq}"
+                ))
+            })?;
             out.insert(id, seq);
         }
         Ok(out)
     }
 
-    pub async fn set_sync_cursor(&self, device_id: &str, seq: u64) -> Result<(), DbError> {
-        let device_id = device_id.to_string();
-        self.call(move |conn| Self::set_sync_cursor_on(conn, &device_id, seq))
-            .await
+    /// Seed the cursor vector carried by a snapshot before applying anything
+    /// above it. Existing coverage is never lowered when a caller supplies an
+    /// older snapshot position.
+    pub(crate) async fn seed_sync_cursors(
+        &self,
+        cursors: &HashMap<String, u64>,
+    ) -> Result<(), DbError> {
+        if cursors.is_empty() {
+            return Ok(());
+        }
+        let cursors = cursors.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            for (device_id, seq) in cursors {
+                Self::seed_sync_cursor_on(&tx, &device_id, seq)?;
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
     }
 
-    /// Advance one cursor on a connection or transaction the caller already
-    /// owns. Incoming apply uses this in the same transaction as the remote rows.
-    pub(crate) fn set_sync_cursor_on(
+    /// Seed one cursor on a connection or transaction the caller already owns.
+    /// Snapshot restoration may start from an empty bookkeeping table; an
+    /// existing newer position wins over an older seed.
+    pub(crate) fn seed_sync_cursor_on(
         conn: &Connection,
         device_id: &str,
         seq: u64,
     ) -> Result<(), DbError> {
+        if Self::read_sync_cursor_on(conn, device_id)?.is_some_and(|stored| stored >= seq) {
+            return Ok(());
+        }
+        let seq = i64::try_from(seq)
+            .map_err(|_| DbError(format!("sync cursor {device_id:?} exceeds SQLite INTEGER")))?;
         conn.execute(
             "INSERT INTO sync_cursors (device_id, last_seq) VALUES (?1, ?2) \
-             ON CONFLICT(device_id) DO UPDATE SET last_seq = excluded.last_seq",
-            (device_id, seq as i64),
+             ON CONFLICT(device_id) DO UPDATE SET last_seq = excluded.last_seq \
+             WHERE sync_cursors.last_seq < excluded.last_seq",
+            (device_id, seq),
         )
         .map(|_| ())
         .map_err(DbError::from)
+    }
+
+    /// Advance a cursor as its own atomic database operation. Pull paths that
+    /// accept no rows (an authenticated rejection or an empty changeset) use this;
+    /// row-bearing applies call [`Self::advance_sync_cursor_on`] inside their row
+    /// transaction.
+    pub(crate) async fn advance_sync_cursor(
+        &self,
+        device_id: &str,
+        expected_previous: u64,
+        next: u64,
+    ) -> Result<(), DbError> {
+        let device_id = device_id.to_string();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            Self::advance_sync_cursor_on(&tx, &device_id, expected_previous, next)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    /// Advance exactly one cursor step on a caller-owned transaction. The
+    /// expected predecessor binds incoming rows to the durable position they
+    /// follow; a stale caller fails instead of lowering or jumping the cursor.
+    pub(crate) fn advance_sync_cursor_on(
+        conn: &Connection,
+        device_id: &str,
+        expected_previous: u64,
+        next: u64,
+    ) -> Result<(), DbError> {
+        let expected_next = expected_previous.checked_add(1).ok_or_else(|| {
+            DbError(format!(
+                "sync cursor {device_id:?} cannot advance beyond {expected_previous}"
+            ))
+        })?;
+        if next != expected_next {
+            return Err(DbError(format!(
+                "sync cursor {device_id:?} expected next sequence {expected_next}, got {next}"
+            )));
+        }
+
+        let stored = Self::read_sync_cursor_on(conn, device_id)?;
+        let predecessor_matches = match stored {
+            Some(stored) => stored == expected_previous,
+            None => expected_previous == 0,
+        };
+        if !predecessor_matches {
+            return Err(DbError(format!(
+                "sync cursor {device_id:?} expected durable sequence {expected_previous}, \
+                 found {}",
+                stored.map_or_else(|| "absent".to_string(), |value| value.to_string())
+            )));
+        }
+
+        let next = i64::try_from(next)
+            .map_err(|_| DbError(format!("sync cursor {device_id:?} exceeds SQLite INTEGER")))?;
+        conn.execute(
+            "INSERT INTO sync_cursors (device_id, last_seq) VALUES (?1, ?2) \
+             ON CONFLICT(device_id) DO UPDATE SET last_seq = excluded.last_seq",
+            (device_id, next),
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    }
+
+    fn read_sync_cursor_on(conn: &Connection, device_id: &str) -> Result<Option<u64>, DbError> {
+        conn.query_row(
+            "SELECT last_seq FROM sync_cursors WHERE device_id = ?1",
+            [device_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .map(|value| {
+            u64::try_from(value).map_err(|_| {
+                DbError(format!(
+                    "sync cursor {device_id:?} contains negative sequence {value}"
+                ))
+            })
+        })
+        .transpose()
     }
 
     // ---- Cloud outbox ----

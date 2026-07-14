@@ -62,8 +62,12 @@ pub struct SyncCycleResult {
     pub device_activity: Vec<DeviceActivity>,
     /// RFC 3339 timestamp of when this cycle completed.
     pub sync_time: String,
-    /// Asset downloads failed — cursor not advanced for those changesets.
+    /// Blobs needed before apply failed to download; their changesets and cursors
+    /// remain pending.
     pub asset_downloads_failed: bool,
+    /// Post-commit local blob cleanup still has durable filesystem work pending.
+    /// Its corresponding rows and cursors are already durable.
+    pub local_blob_cleanup_pending: bool,
     /// Row changes from applied changesets, for the host to map to domain events.
     pub row_changes: Vec<RowChange>,
     /// The outbox drain broke this cycle to publish a just-completed make_remote
@@ -1074,6 +1078,7 @@ pub(crate) async fn run_single_sync_cycle(
         device_activity: core_status.other_devices,
         sync_time,
         asset_downloads_failed: sync_result.pull.asset_downloads_failed,
+        local_blob_cleanup_pending: sync_result.pull.local_blob_cleanup_pending,
         row_changes: sync_result.pull.row_changes,
         resume_drain_promptly,
         rotation_pending,
@@ -1615,7 +1620,7 @@ mod tests {
                 [],
             )
             .map_err(DbError::from)?;
-            Database::set_sync_cursor_on(&tx, "dev1", 1)?;
+            Database::seed_sync_cursor_on(&tx, "dev1", 1)?;
             tx.commit().map_err(DbError::from)
         })
         .await
@@ -1634,7 +1639,7 @@ mod tests {
                 [],
             )
             .map_err(DbError::from)?;
-            Database::set_sync_cursor_on(&tx, "dev1", 2)?;
+            Database::seed_sync_cursor_on(&tx, "dev1", 2)?;
             tx.commit().map_err(DbError::from)
         })
         .await

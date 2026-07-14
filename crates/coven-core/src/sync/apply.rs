@@ -80,7 +80,7 @@ pub fn resolve_and_apply_changeset(
 /// per changeset. The conflict closure resolves each conflicting row's table from
 /// its operation and decides REPLACE/OMIT by comparing `_updated_at`;
 /// FK violations flip a shared flag for the caller to retry; non-FK constraint
-/// conflicts are collected so the caller can surface the dropped rows.
+/// conflicts are collected so the caller can surface the rejected changeset.
 ///
 /// `schema` is an `Arc` so the same map moves into the `'static` conflict closure
 /// without re-deriving it per call. `receiver_wall_ms` is the receiver's current

@@ -140,8 +140,12 @@ pub struct PullResult {
     pub changesets_applied: u64,
     /// Number of distinct remote devices we pulled from.
     pub devices_pulled: u64,
-    /// Asset downloads failed — cursor not advanced, will retry next cycle.
+    /// A blob needed before apply failed to download. The affected changeset and
+    /// its cursor remain pending.
     pub asset_downloads_failed: bool,
+    /// A post-commit local blob cleanup could not remove its files. The row and
+    /// cursor are already durable; the cleanup intent remains durable too.
+    pub local_blob_cleanup_pending: bool,
     /// Changesets skipped due to schema version being newer than ours.
     pub skipped_schema: u64,
     /// Changesets skipped because their author is not a write-capable member,
@@ -165,11 +169,10 @@ pub struct PullResult {
     /// Used by the sync status UI to show other devices' activity.
     pub remote_heads: Vec<DeviceHead>,
     /// Row changes from applied changesets, for the host to map to domain events.
-    /// A refresh *hint*, not an exhaustive log: it can overstate what a peer will
-    /// converge to, because a changeset whose apply is later held still
-    /// contributed its changes here. A host maps these
-    /// to which rows to refresh, then re-reads each by primary key rather than
-    /// trusting the list as the final row state. Empty if nothing was applied.
+    /// A refresh *hint*, not an exhaustive log: several accepted changesets can
+    /// touch the same row, so a host maps these to which rows to refresh and then
+    /// re-reads each by primary key rather than treating the list as final row
+    /// state. Empty if nothing was applied.
     pub row_changes: Vec<RowChange>,
 }
 
@@ -196,6 +199,34 @@ struct CompletedChangeset<'a> {
 struct LocalBlobCleanupIntent {
     namespace: String,
     blob_id: String,
+}
+
+#[cfg(test)]
+struct LocalBlobCleanupPause {
+    namespace: String,
+    blob_id: String,
+    reached_filesystem: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static LOCAL_BLOB_CLEANUP_PAUSE: std::sync::Mutex<Option<LocalBlobCleanupPause>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn pause_local_blob_cleanup_before_filesystem(
+    namespace: &str,
+    blob_id: &str,
+) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+    let reached_filesystem = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    *LOCAL_BLOB_CLEANUP_PAUSE.lock().unwrap() = Some(LocalBlobCleanupPause {
+        namespace: namespace.to_string(),
+        blob_id: blob_id.to_string(),
+        reached_filesystem: reached_filesystem.clone(),
+        resume: resume.clone(),
+    });
+    (reached_filesystem, resume)
 }
 
 enum RemoteApplyOutcome {
@@ -316,6 +347,13 @@ pub async fn pull_changes(
     mut membership_chain: Option<MembershipChain>,
     owner_pubkey: Option<String>,
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
+    // A snapshot carries its covered cursor vector outside the scoped database
+    // image. Seed that coverage before any higher changeset can commit; an
+    // existing cursor is never lowered by an older caller-provided position.
+    db.seed_sync_cursors(cursors)
+        .await
+        .map_err(|e| PullError::Apply(e.0))?;
+
     // The opened database handle already resolved blob declarations from the final
     // synced set + live schema. Pull reuses that model for download-before-apply of
     // CacheEager blobs and apply-side cache drops for deleted blob-bearing rows.
@@ -405,6 +443,7 @@ pub async fn pull_changes(
         changesets_applied: 0,
         devices_pulled: 0,
         asset_downloads_failed: false,
+        local_blob_cleanup_pending: false,
         skipped_schema: 0,
         rejected_unauthorized: Vec::new(),
         invalid_signatures: Vec::new(),
@@ -413,12 +452,9 @@ pub async fn pull_changes(
         remote_heads: heads.clone(),
         row_changes: Vec::new(),
     };
-    if drain_local_blob_cleanup_intents(db, store_dir)
+    result.local_blob_cleanup_pending = drain_local_blob_cleanup_intents(db, store_dir)
         .await
-        .map_err(|e| PullError::Apply(e.0))?
-    {
-        result.asset_downloads_failed = true;
-    }
+        .map_err(|e| PullError::Apply(e.0))?;
     let mut deferred: Vec<DeferredChangeset> = Vec::new();
     let mut applied_devices: HashSet<String> = HashSet::new();
 
@@ -569,7 +605,7 @@ pub async fn pull_changes(
                     seq,
                     author: env.author_pubkey.clone(),
                 });
-                db.set_sync_cursor(&head.device_id, seq)
+                db.advance_sync_cursor(&head.device_id, seq - 1, seq)
                     .await
                     .map_err(|e| PullError::Apply(e.0))?;
                 updated_cursors.insert(head.device_id.clone(), seq);
@@ -661,7 +697,7 @@ pub async fn pull_changes(
                             seq,
                             author: env.author_pubkey.clone(),
                         });
-                        db.set_sync_cursor(&head.device_id, seq)
+                        db.advance_sync_cursor(&head.device_id, seq - 1, seq)
                             .await
                             .map_err(|e| PullError::Apply(e.0))?;
                         updated_cursors.insert(head.device_id.clone(), seq);
@@ -684,7 +720,7 @@ pub async fn pull_changes(
             }
 
             if changeset_bytes.is_empty() {
-                db.set_sync_cursor(&head.device_id, seq)
+                db.advance_sync_cursor(&head.device_id, seq - 1, seq)
                     .await
                     .map_err(|e| PullError::Apply(e.0))?;
                 updated_cursors.insert(head.device_id.clone(), seq);
@@ -992,7 +1028,7 @@ async fn commit_remote_changeset(
             )
             .map_err(crate::database::DbError::from)?;
         }
-        Database::set_sync_cursor_on(&tx, &device_id, seq)?;
+        Database::advance_sync_cursor_on(&tx, &device_id, seq - 1, seq)?;
         tx.commit().map_err(crate::database::DbError::from)?;
         Ok(RemoteApplyOutcome::Applied)
     })
@@ -1037,9 +1073,7 @@ async fn finish_applied_changeset(
     // operation leaves its durable intent for the next drain. Keep this after the
     // register advance: no awaited work may expose the committed rows to a host
     // write before the host clock has observed their timestamps.
-    if drain_local_blob_cleanup_intents(db, store_dir).await? {
-        result.asset_downloads_failed = true;
-    }
+    result.local_blob_cleanup_pending = drain_local_blob_cleanup_intents(db, store_dir).await?;
     Ok(())
 }
 
@@ -1597,6 +1631,8 @@ async fn drain_local_blob_cleanup_intents(
             })
             .await?;
         if live_row.is_none() {
+            #[cfg(test)]
+            pause_local_blob_cleanup_if_armed(&intent).await;
             if let Err(error) = crate::blob::cache::drop_all_local_copies(
                 store_dir,
                 &intent.namespace,
@@ -1629,6 +1665,24 @@ async fn drain_local_blob_cleanup_intents(
         .await?;
     }
     Ok(has_pending_filesystem_work)
+}
+
+#[cfg(test)]
+async fn pause_local_blob_cleanup_if_armed(intent: &LocalBlobCleanupIntent) {
+    let pause = {
+        let mut armed = LOCAL_BLOB_CLEANUP_PAUSE.lock().unwrap();
+        if armed.as_ref().is_some_and(|pause| {
+            pause.namespace == intent.namespace && pause.blob_id == intent.blob_id
+        }) {
+            armed.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        pause.reached_filesystem.notify_one();
+        pause.resume.notified().await;
+    }
 }
 
 /// Download each blob in `blobs` into the evictable cache

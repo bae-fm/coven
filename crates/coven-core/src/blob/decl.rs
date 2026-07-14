@@ -394,6 +394,46 @@ impl BlobDecls {
         Ok(BlobDecls { tables: map })
     }
 
+    /// Install connection-local guards that keep a blob cleanup intent exclusive
+    /// until its filesystem deletion finishes. A cleanup intent is committed
+    /// before the database releases the row; while it exists, no INSERT or UPDATE
+    /// may make the same `(namespace, blob id)` live again. TEMP triggers keep this
+    /// runtime guard out of snapshots and use each declaration's resolved blob-id
+    /// column rather than assuming the row primary key carries the blob id.
+    pub(crate) fn install_cleanup_guards(&self, conn: &Connection) -> Result<(), BlobDeclError> {
+        for (table, blob) in &self.tables {
+            let table_ident = quote_ident(table);
+            let id_ident = quote_ident(&blob.id_col_name);
+            let namespace_literal: String =
+                conn.query_row("SELECT quote(?1)", [&blob.namespace], |row| row.get(0))?;
+            let insert_trigger = quote_ident(&format!("coven_cleanup_guard_insert_{table}"));
+            let update_trigger = quote_ident(&format!("coven_cleanup_guard_update_{table}"));
+            conn.execute_batch(&format!(
+                "CREATE TEMP TRIGGER {insert_trigger} \
+                 BEFORE INSERT ON main.{table_ident} \
+                 WHEN NEW.{id_ident} IS NOT NULL AND EXISTS (\
+                     SELECT 1 FROM local_cleanup_intents \
+                     WHERE namespace = {namespace_literal} \
+                       AND blob_id = NEW.{id_ident}\
+                 ) \
+                 BEGIN \
+                     SELECT RAISE(ABORT, 'blob local cleanup in progress'); \
+                 END; \
+                 CREATE TEMP TRIGGER {update_trigger} \
+                 BEFORE UPDATE OF {id_ident} ON main.{table_ident} \
+                 WHEN NEW.{id_ident} IS NOT NULL AND EXISTS (\
+                     SELECT 1 FROM local_cleanup_intents \
+                     WHERE namespace = {namespace_literal} \
+                       AND blob_id = NEW.{id_ident}\
+                 ) \
+                 BEGIN \
+                     SELECT RAISE(ABORT, 'blob local cleanup in progress'); \
+                 END;"
+            ))?;
+        }
+        Ok(())
+    }
+
     /// The blob a single changeset row references, or `None` when the row's table
     /// carries no blob or the blob id is absent/NULL. Reads the declared columns
     /// off the changeset row (which reports columns in schema order, the order the

@@ -259,6 +259,9 @@ fn log_alerts(alerts: &SyncLoopAlerts) {
         );
     }
     if alerts.asset_downloads_failed {
-        warn!("Some files failed to download, will retry");
+        warn!("Some files failed to download; their changes remain pending");
+    }
+    if alerts.local_blob_cleanup_pending {
+        warn!("Some obsolete local file copies are still pending cleanup");
     }
 }

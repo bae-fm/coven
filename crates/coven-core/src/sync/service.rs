@@ -42,7 +42,8 @@ pub struct SyncResult {
     pub outgoing: Option<OutgoingChangeset>,
     /// Pull results (how many incoming changesets were applied).
     pub pull: PullResult,
-    /// Updated cursor map (caller should persist to sync_cursors table).
+    /// The durable cursor vector after pull, returned for this device's signed
+    /// acknowledgement and other cycle reporting.
     pub updated_cursors: HashMap<String, u64>,
 }
 

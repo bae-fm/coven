@@ -196,6 +196,46 @@ async fn cursor_write_failure_rolls_back_the_remote_rows() {
 }
 
 #[tokio::test]
+async fn stale_pull_cursor_cannot_regress_durable_coverage_or_commit_rows() {
+    let storage = MockSyncStorage::new();
+    let source = open_test_db();
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('stale-row', 'Remote', NULL, \
+                     '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &changeset, SCHEMA_VERSION);
+
+    let target = open_test_db();
+    target
+        .seed_sync_cursors(&HashMap::from([("dev1".to_string(), 2)]))
+        .await
+        .unwrap();
+    let (_tmp, store_dir) = temp_store_dir();
+    let (updated, result) = pull_into(&target, &storage, "dev2", &HashMap::new(), &store_dir).await;
+
+    assert_eq!(updated.get("dev1"), None);
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.held_changesets.len(), 1);
+    assert!(matches!(
+        result.held_changesets[0].reason,
+        HeldChangesetReason::ApplyFailed { .. }
+    ));
+    assert_eq!(
+        target.get_all_sync_cursors().await.unwrap().get("dev1"),
+        Some(&2),
+    );
+    assert!(
+        !row_exists(&target, "SELECT 1 FROM notes WHERE id = 'stale-row'").await,
+        "a stale cursor advance rolls its incoming rows back",
+    );
+}
+
+#[tokio::test]
 async fn host_write_after_remote_apply_observes_the_matching_cursor() {
     let storage = MockSyncStorage::new();
     let source = open_test_db();
@@ -3164,7 +3204,11 @@ async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
 
     let (updated, first) = pull_into(&target, &storage, "dev2", &HashMap::new(), &store_dir).await;
     assert_eq!(first.changesets_applied, 1, "first pull: {first:?}");
-    assert!(first.asset_downloads_failed);
+    assert!(
+        !first.asset_downloads_failed,
+        "post-commit cleanup does not mean a pre-apply blob download failed",
+    );
+    assert!(first.local_blob_cleanup_pending);
     assert_eq!(updated.get("dev1"), Some(&1));
     assert_eq!(
         target.get_all_sync_cursors().await.unwrap().get("dev1"),
@@ -3194,6 +3238,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
         pull_into(&restarted, &storage, "dev2", &durable_cursors, &store_dir).await;
     assert_eq!(second.changesets_applied, 0);
     assert!(!second.asset_downloads_failed);
+    assert!(!second.local_blob_cleanup_pending);
     let pending_after_restart: i64 = restarted
         .call(|conn| {
             conn.query_row("SELECT COUNT(*) FROM local_cleanup_intents", [], |row| {
@@ -3204,6 +3249,119 @@ async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
         .await
         .unwrap();
     assert_eq!(pending_after_restart, 0);
+}
+
+#[tokio::test]
+async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
+    let storage = std::sync::Arc::new(MockSyncStorage::new());
+    let decl = BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy)
+        .with_id_column("blob_id");
+    let target = open_test_db_with_blob(decl);
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'Host write parent', NULL, \
+                 '0000000001000-0000-dev2', '2026-01-01'); \
+         INSERT INTO note_photos \
+         (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
+         VALUES ('existing-row', 'n1', 'cover', 9, NULL, 'other-blob', \
+                 '0000000001000-0000-dev2', '2026-01-01')",
+    )
+    .await;
+    target
+        .call(|conn| {
+            conn.execute(
+                "INSERT INTO local_cleanup_intents (namespace, blob_id) \
+                 VALUES ('photos', 'cleanup-race')",
+                [],
+            )
+            .map(|_| ())
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .unwrap();
+
+    let (_tmp, store_dir) = temp_store_dir();
+    store_local(&store_dir, "cleanup-race", b"old bytes").await;
+    let (reached_filesystem, resume_cleanup) =
+        crate::sync::pull::pause_local_blob_cleanup_before_filesystem("photos", "cleanup-race");
+    let pull_db = target.clone();
+    let pull_storage = storage.clone();
+    let pull_store_dir = store_dir.clone();
+    let cleanup = tokio::spawn(async move {
+        pull_into(
+            &pull_db,
+            pull_storage.as_ref(),
+            "dev2",
+            &HashMap::new(),
+            &pull_store_dir,
+        )
+        .await
+    });
+
+    reached_filesystem.notified().await;
+    let tables = target.synced_tables().to_vec();
+    let update_tables = tables.clone();
+    let host_write = target
+        .call(move |conn| {
+            crate::database::Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                tx.execute(
+                    "INSERT INTO note_photos \
+                         (id, note_id, kind, size, hash, blob_id, _updated_at, created_at) \
+                         VALUES ('new-row', 'n1', 'cover', 9, NULL, 'cleanup-race', \
+                                 '0000000002000-0000-dev2', '2026-01-01')",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+            })
+        })
+        .await;
+    let host_update = target
+        .call(move |conn| {
+            crate::database::Database::run_pending_journaled_transaction_on(
+                conn,
+                &update_tables,
+                |tx| {
+                    tx.execute(
+                        "UPDATE note_photos SET blob_id = 'cleanup-race', \
+                         _updated_at = '0000000002001-0000-dev2' \
+                         WHERE id = 'existing-row'",
+                        [],
+                    )
+                    .map(|_| ())
+                    .map_err(crate::database::DbError::from)
+                },
+            )
+        })
+        .await;
+    resume_cleanup.notify_one();
+    cleanup.await.expect("cleanup pull task");
+
+    assert!(
+        host_write.is_err(),
+        "the host insert must abort while the cleanup intent owns the blob",
+    );
+    assert!(
+        host_update.is_err(),
+        "the host update must abort while the cleanup intent owns the blob",
+    );
+    assert!(!row_exists(&target, "SELECT 1 FROM note_photos WHERE id = 'new-row'").await);
+    assert!(
+        row_exists(
+            &target,
+            "SELECT 1 FROM note_photos \
+         WHERE id = 'existing-row' AND blob_id = 'other-blob'",
+        )
+        .await
+    );
+    assert!(
+        !store_dir
+            .local_blob_path("photos", "cleanup-race")
+            .unwrap()
+            .exists(),
+        "cleanup removes the unreferenced old bytes",
+    );
 }
 
 #[tokio::test]

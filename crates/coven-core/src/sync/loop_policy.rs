@@ -43,6 +43,7 @@ pub struct SyncLoopAlerts {
     pub held_changesets: Vec<HeldChangeset>,
     pub constraint_conflicts: u64,
     pub asset_downloads_failed: bool,
+    pub local_blob_cleanup_pending: bool,
 }
 
 impl SyncLoopAlerts {
@@ -85,7 +86,9 @@ impl SyncLoopAlerts {
                 self.constraint_conflicts, noun,
             ))
         } else if self.asset_downloads_failed {
-            Some("Some files failed to download, will retry".to_string())
+            Some("Some files failed to download; their changes remain pending.".to_string())
+        } else if self.local_blob_cleanup_pending {
+            Some("Some obsolete local file copies are still pending cleanup.".to_string())
         } else {
             None
         }
@@ -102,10 +105,9 @@ pub struct SyncLoopSuccess {
     pub data_changed: bool,
     /// Row changes from applied changesets, for the host to map to domain events.
     /// `Some` when `data_changed`. A refresh *hint*, not a complete stream: a
-    /// lagged subscriber can miss it entirely, and it can overstate a
-    /// partially-applied changeset (see [`PullResult::row_changes`]), so a host
-    /// re-reads the affected rows by primary key rather than trusting it as
-    /// exhaustive.
+    /// lagged subscriber can miss it entirely, and several accepted changesets
+    /// can touch the same row, so a host re-reads affected rows by primary key
+    /// rather than trusting it as exhaustive.
     ///
     /// [`PullResult::row_changes`]: crate::sync::pull::PullResult::row_changes
     pub row_changes: Option<Vec<RowChange>>,
@@ -155,6 +157,7 @@ pub fn after_success(result: SyncCycleResult) -> SyncLoopDecision {
                 held_changesets: result.held_changesets,
                 constraint_conflicts: result.constraint_conflicts,
                 asset_downloads_failed: result.asset_downloads_failed,
+                local_blob_cleanup_pending: result.local_blob_cleanup_pending,
             },
         }),
     }
@@ -216,6 +219,7 @@ mod tests {
             device_activity: device_activity(2),
             sync_time: "2026-07-03T00:00:00Z".to_string(),
             asset_downloads_failed: false,
+            local_blob_cleanup_pending: false,
             row_changes: vec![],
             resume_drain_promptly: false,
             rotation_pending: None,
@@ -303,6 +307,7 @@ mod tests {
             held_changesets: held(4),
             constraint_conflicts: 5,
             asset_downloads_failed: true,
+            local_blob_cleanup_pending: true,
         };
 
         assert_eq!(
@@ -324,6 +329,7 @@ mod tests {
             held_changesets: held(4),
             constraint_conflicts: 5,
             asset_downloads_failed: true,
+            local_blob_cleanup_pending: true,
         };
 
         let message = alerts.primary_message().expect("rotation pending alert");
@@ -343,11 +349,30 @@ mod tests {
             held_changesets: Vec::new(),
             constraint_conflicts: 1,
             asset_downloads_failed: false,
+            local_blob_cleanup_pending: false,
         };
 
         assert_eq!(
             alerts.primary_message().as_deref(),
             Some("1 change hit a local uniqueness or constraint conflict."),
         );
+    }
+
+    #[test]
+    fn post_commit_cleanup_has_its_own_alert() {
+        let mut result = cycle_result();
+        result.local_blob_cleanup_pending = true;
+
+        let decision = after_success(result);
+
+        let SyncLoopReport::Success(success) = decision.report else {
+            panic!("expected success report");
+        };
+        assert_eq!(
+            success.alerts.primary_message().as_deref(),
+            Some("Some obsolete local file copies are still pending cleanup."),
+        );
+        assert!(!success.alerts.asset_downloads_failed);
+        assert!(success.alerts.local_blob_cleanup_pending);
     }
 }
