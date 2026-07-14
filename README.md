@@ -92,6 +92,15 @@ handle.sync_now();
   returns explicit unsupported errors for operations whose browser backend is
   not implemented.
 
+## Development
+
+coven is greenfield software. Repository changes implement the intended design
+directly; they do not preserve earlier development-state APIs, storage formats,
+or behavior through compatibility shims, legacy readers or writers, fallback
+paths, or compatibility migrations unless explicitly requested. The
+application-schema migration API shown above is product functionality, not a
+compatibility promise for coven's own pre-release internals.
+
 ## Status
 
 Pre-1.0.
