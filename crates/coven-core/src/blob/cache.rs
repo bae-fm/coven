@@ -1397,6 +1397,54 @@ pub(crate) async fn expected_blob_hash(
     })
 }
 
+/// The plaintext byte length on row `pk` of `table` — the value a changeset UPDATE omitted
+/// because it did not change. Read back from the row the change is about, named by its
+/// primary key (see [`crate::blob::decl::BlobDecls::size_for_row`]).
+pub(crate) async fn row_blob_size(
+    db: &Database,
+    table: &str,
+    pk: &str,
+) -> Result<u64, BlobCacheError> {
+    let decls = db.blob_decls();
+    let (table, pk) = (table.to_string(), pk.to_string());
+    let (owned_table, owned_pk) = (table.clone(), pk.clone());
+    db.call(move |conn| {
+        decls
+            .size_for_row(conn, &owned_table, &owned_pk)
+            .map_err(|e| DbError(e.to_string()))
+    })
+    .await
+    .map_err(BlobCacheError::Metadata)?
+    .ok_or_else(|| {
+        BlobCacheError::Metadata(DbError(format!(
+            "row {table}.{pk} carries no plaintext size for the blob its change names"
+        )))
+    })
+}
+
+/// The content hash on row `pk` of `table`. The sibling of [`row_blob_size`].
+pub(crate) async fn row_blob_hash(
+    db: &Database,
+    table: &str,
+    pk: &str,
+) -> Result<String, BlobCacheError> {
+    let decls = db.blob_decls();
+    let (table, pk) = (table.to_string(), pk.to_string());
+    let (owned_table, owned_pk) = (table.clone(), pk.clone());
+    db.call(move |conn| {
+        decls
+            .hash_for_row(conn, &owned_table, &owned_pk)
+            .map_err(|e| DbError(e.to_string()))
+    })
+    .await
+    .map_err(BlobCacheError::Metadata)?
+    .ok_or_else(|| {
+        BlobCacheError::Metadata(DbError(format!(
+            "row {table}.{pk} carries no content hash for the blob its change names"
+        )))
+    })
+}
+
 /// The readable cloud path from the row that owns `blob` — the key a browsable home
 /// stores it at.
 ///

@@ -4294,3 +4294,102 @@ mod blob_path_traversal {
         );
     }
 }
+
+/// A row repointed at a blob of the SAME plaintext length still pulls on a device that
+/// applied a different repointing of that row first.
+///
+/// A changeset UPDATE reports only the columns whose values CHANGED, so a repointing whose
+/// new blob happens to be the same length as the old one carries no `size` column at all —
+/// neither in its new values nor its old ones. The download has to recover that length from
+/// the row the change is about, and it names that row by its **primary key**, which every
+/// change carries. Naming it by the *old blob id* instead asks a question a device whose
+/// row already moved on cannot answer: no row carries that blob any more, the lookup fails,
+/// the blob never downloads, and the cursor holds there for good.
+///
+/// Device A publishes a cover; A and B each repoint the row at their own new blob, both the
+/// same length as the original. A third device pulls everything and must apply all three.
+#[tokio::test]
+async fn plain_scheme_a_same_length_repointing_pulls_after_a_concurrent_one() {
+    let home = InMemoryCloudHome::new();
+    let keypair = UserKeypair::generate();
+    let storage = CloudSyncStorage::new(
+        std::sync::Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        keypair.clone(),
+    );
+    let tables = test_synced_tables_with_blob(replaceable_photo_decl());
+
+    // All three are the same length, so no repointing ever carries a `size` column.
+    let original = b"ORIGINAL-COVER";
+    let from_a = b"COVER-FROM-A--";
+    let from_b = b"COVER-FROM-B--";
+
+    let db_a = open_test_db_with_blob(replaceable_photo_decl());
+    let (_ta, ld_a) = temp_store_dir();
+    store_local(&ld_a, "p0cover", original).await;
+    let outgoing = capture_bytes(
+        &db_a,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'WithCover', NULL, 1, '0000000001000-0000-dev1', '2026-01-01')",
+            &format!(
+                "INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, cloud_path, blob_id, _updated_at, created_at) \
+                 VALUES ('ph1', 'n1', 'cover', {}, '{}', 'n1/cover-p0cover.jpg', 'p0cover', \
+                 '0000000001000-0000-dev1', '2026-01-01')",
+                original.len(),
+                crate::blob::content_hash(original),
+            ),
+        ],
+    )
+    .await;
+    push_cycle(&db_a, &tables, &storage, outgoing, 0, &keypair, &ld_a).await;
+
+    let db_b = open_test_db_with_blob(replaceable_photo_decl());
+    let (_tb, ld_b) = temp_store_dir();
+    pull_into(&db_b, &storage, "dev2", &HashMap::new(), &ld_b).await;
+
+    store_local(&ld_a, "pAcover", from_a).await;
+    let outgoing_a = capture_bytes(
+        &db_a,
+        &[&format!(
+            "UPDATE note_photos SET blob_id = 'pAcover', cloud_path = 'n1/cover-pAcover.jpg', \
+             hash = '{}', _updated_at = '0000000002000-0000-dev1' WHERE id = 'ph1'",
+            crate::blob::content_hash(from_a),
+        )],
+    )
+    .await;
+    store_local(&ld_b, "pBcover", from_b).await;
+    let outgoing_b = capture_bytes(
+        &db_b,
+        &[&format!(
+            "UPDATE note_photos SET blob_id = 'pBcover', cloud_path = 'n1/cover-pBcover.jpg', \
+             hash = '{}', _updated_at = '0000000003000-0000-dev2' WHERE id = 'ph1'",
+            crate::blob::content_hash(from_b),
+        )],
+    )
+    .await;
+    push_cycle(&db_a, &tables, &storage, outgoing_a, 1, &keypair, &ld_a).await;
+    push_cycle_as(
+        "dev2", &db_b, &tables, &storage, outgoing_b, 0, &keypair, &ld_b,
+    )
+    .await;
+
+    // The third device applies one repointing, which moves its row off `p0cover` — the blob
+    // the other repointing's omitted `size` column would have been looked up under.
+    let db_c = open_test_db_with_blob(replaceable_photo_decl());
+    let (_tc, ld_c) = temp_store_dir();
+    let (_updated, result) = pull_into(&db_c, &storage, "dev3", &HashMap::new(), &ld_c).await;
+
+    assert!(
+        !result.asset_downloads_failed,
+        "a repointing that carries no size column must still resolve it, from the row it \
+         names by primary key",
+    );
+    assert_eq!(
+        result.changesets_applied, 3,
+        "the original and both repointings all apply — none is stranded",
+    );
+}

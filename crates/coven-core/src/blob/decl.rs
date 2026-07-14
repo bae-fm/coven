@@ -570,6 +570,49 @@ impl BlobDecls {
         Ok(cloud_path)
     }
 
+    /// The plaintext byte length and content hash on row `pk` of `table` — the values a
+    /// changeset UPDATE omitted because they did not change.
+    ///
+    /// Keyed by the row's primary key, which is the only handle a change always carries and
+    /// a device can always resolve. The blob id would seem the natural key — it is how the
+    /// size and hash are read everywhere else — but "the row carrying blob X" has no answer
+    /// on a device that already applied a concurrent repointing of that very row: no row
+    /// carries X any more, though the row itself is sitting right there under its `pk`.
+    ///
+    /// `None` when `table` carries no blob, has no such row, or the column is NULL.
+    pub fn size_for_row(
+        &self,
+        conn: &Connection,
+        table: &str,
+        pk: &str,
+    ) -> Result<Option<u64>, BlobDeclError> {
+        let Some(tb) = self.tables.get(table) else {
+            return Ok(None);
+        };
+        let size = column_on_row::<i64>(conn, table, &tb.size_col_name, pk)?;
+        size.map(|value| {
+            u64::try_from(value).map_err(|_| BlobDeclError::InvalidSize {
+                table: table.to_string(),
+                value,
+            })
+        })
+        .transpose()
+    }
+
+    /// The content hash on row `pk` of `table`. The sibling of [`Self::size_for_row`], and
+    /// keyed the same way and for the same reason.
+    pub fn hash_for_row(
+        &self,
+        conn: &Connection,
+        table: &str,
+        pk: &str,
+    ) -> Result<Option<String>, BlobDeclError> {
+        let Some(tb) = self.tables.get(table) else {
+            return Ok(None);
+        };
+        column_on_row::<String>(conn, table, &tb.hash_col_name, pk)
+    }
+
     /// The `(table, primary key)` of a live row whose declared blob resolves to
     /// `cloud_key`. Hashed homes encode namespace + blob id in the key itself;
     /// readable homes encode namespace + declared `cloud_path`. This is the GC-side
@@ -682,6 +725,25 @@ fn pk_carrying_blob_cloud_path(
         quote_ident(&tb.id_col_name),
     );
     conn.query_row(&sql, [blob_id], |row| row.get::<_, Option<String>>(0))
+        .optional()
+        .map(Option::flatten)
+        .map_err(BlobDeclError::from)
+}
+
+/// One column's value off the row with primary key `pk`. The row is named by the key every
+/// changeset change carries, so this resolves on any device holding the row.
+fn column_on_row<T: rusqlite::types::FromSql>(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    pk: &str,
+) -> Result<Option<T>, BlobDeclError> {
+    let sql = format!(
+        "SELECT {} FROM {} WHERE id = ?1",
+        quote_ident(column),
+        quote_ident(table),
+    );
+    conn.query_row(&sql, [pk], |row| row.get::<_, Option<T>>(0))
         .optional()
         .map(Option::flatten)
         .map_err(BlobDeclError::from)

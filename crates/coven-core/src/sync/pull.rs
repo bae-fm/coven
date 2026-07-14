@@ -1309,22 +1309,45 @@ pub(crate) struct BlobDownload {
     cloud_path: BlobDownloadCloudPath,
 }
 
+/// The row a change is about, named the way every change names it: its table and primary
+/// key. A changeset UPDATE reports only the columns whose values CHANGED, so a column it
+/// omits has to be read back from the row itself — and this is the only handle on that row
+/// that a change always carries, and that a device always resolves.
+///
+/// Naming it by the change's *old blob id* instead — "the row that carries blob X" — asks a
+/// question a device whose row has already moved on cannot answer: a concurrent repointing
+/// of the same row leaves no row carrying X at all, and the lookup fails on a row that is
+/// sitting right there under its primary key.
+///
+/// What the row can answer is the value it currently holds, which is the author's omitted
+/// value exactly when this device agrees with the author's pre-image on that column. It
+/// does not when a *concurrent* change moved that same column: then the author's value is
+/// in no local state and in no part of the changeset, and the download fails its hash
+/// check. Recovering an omitted column from local state cannot cover that; only reading the
+/// blob's length from its own cloud object would, and the object is reachable precisely
+/// because its key names the blob.
+#[derive(Clone)]
+struct PreApplyRow {
+    table: String,
+    pk: String,
+}
+
 /// Where the download reads a blob's declared plaintext size and content hash
 /// from. Both ride with the changeset row when the row change carries them
 /// (`Declared`); an update that changed the blob id but not size/hash omits those
-/// columns, so the pre-apply DB row is the lookup key for the unchanged value
-/// (`ExistingRow`); a snapshot backfill reads both from the freshly bootstrapped
-/// DB row (`InstalledRow`).
+/// columns — from its old values as well as its new ones — so they are read back from the
+/// [`PreApplyRow`] (`ExistingRow`); a snapshot backfill reads both from the freshly
+/// bootstrapped DB row (`InstalledRow`).
 enum BlobDownloadSize {
     Declared(u64),
-    ExistingRow(crate::blob::BlobRef),
+    ExistingRow(PreApplyRow),
     InstalledRow,
     Missing,
 }
 
 enum BlobDownloadHash {
     Declared(String),
-    ExistingRow(crate::blob::BlobRef),
+    ExistingRow(PreApplyRow),
     InstalledRow,
     Missing,
 }
@@ -1347,15 +1370,16 @@ impl BlobDownload {
         source_size: Option<u64>,
         source_hash: Option<String>,
         lookup_blob: Option<crate::blob::BlobRef>,
+        pre_apply: Option<PreApplyRow>,
     ) -> Self {
-        let size = match (source_size, lookup_blob.clone()) {
+        let size = match (source_size, pre_apply.clone()) {
             (Some(size), _) => BlobDownloadSize::Declared(size),
-            (None, Some(blob)) => BlobDownloadSize::ExistingRow(blob),
+            (None, Some(row)) => BlobDownloadSize::ExistingRow(row),
             (None, None) => BlobDownloadSize::Missing,
         };
-        let hash = match (source_hash, lookup_blob.clone()) {
+        let hash = match (source_hash, pre_apply) {
             (Some(hash), _) => BlobDownloadHash::Declared(hash),
-            (None, Some(blob)) => BlobDownloadHash::ExistingRow(blob),
+            (None, Some(row)) => BlobDownloadHash::ExistingRow(row),
             (None, None) => BlobDownloadHash::Missing,
         };
         let cloud_path = match (blob.cloud_path.clone(), lookup_blob) {
@@ -1392,8 +1416,8 @@ impl BlobDownload {
     ) -> Result<u64, String> {
         match size {
             BlobDownloadSize::Declared(size) => Ok(size),
-            BlobDownloadSize::ExistingRow(lookup) => {
-                crate::blob::cache::expected_blob_size(db, &lookup)
+            BlobDownloadSize::ExistingRow(row) => {
+                crate::blob::cache::row_blob_size(db, &row.table, &row.pk)
                     .await
                     .map_err(|e| e.to_string())
             }
@@ -1414,8 +1438,8 @@ impl BlobDownload {
     ) -> Result<String, String> {
         match hash {
             BlobDownloadHash::Declared(hash) => Ok(hash),
-            BlobDownloadHash::ExistingRow(lookup) => {
-                crate::blob::cache::expected_blob_hash(db, &lookup)
+            BlobDownloadHash::ExistingRow(row) => {
+                crate::blob::cache::row_blob_hash(db, &row.table, &row.pk)
                     .await
                     .map_err(|e| e.to_string())
             }
@@ -1469,10 +1493,16 @@ pub(crate) fn cache_eager_blobs(
         .filter_map(
             |(old, change)| match blob_decls.ref_size_hash_from_change(change) {
                 Ok(Some((blob, size, hash))) if blob.fill == CacheFill::CacheEager => {
+                    // The row this change is about: every change carries its primary key,
+                    // in its old values as well as its new ones.
+                    let pre_apply = change.pk().map(|pk| PreApplyRow {
+                        table: change.table.clone(),
+                        pk: pk.to_string(),
+                    });
                     match blob_decls.ref_from_change(old) {
-                        Ok(old_blob) => {
-                            Some(Ok(BlobDownload::from_change(blob, size, hash, old_blob)))
-                        }
+                        Ok(old_blob) => Some(Ok(BlobDownload::from_change(
+                            blob, size, hash, old_blob, pre_apply,
+                        ))),
                         Err(e) => Some(Err(e)),
                     }
                 }
