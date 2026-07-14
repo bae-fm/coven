@@ -786,6 +786,104 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     );
 }
 
+#[tokio::test]
+async fn bootstrap_installs_snapshot_cursors_before_ordinary_pull() {
+    let storage = MockSyncStorage::new();
+    let tables = test_synced_tables();
+    let db_a = open_test_db();
+
+    capture_bytes(
+        &db_a,
+        &[
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n1', 'Snapshot', NULL, 1, '0000000001000-0000-A', '2026-01-01')",
+        ],
+    )
+    .await;
+    let snapshot_dir = tempfile::tempdir().expect("snapshot temp dir");
+    let snapshot_path = snapshot_dir.path().to_path_buf();
+    let snapshot_tables = tables.clone();
+    let snapshot = db_a
+        .call(move |conn| {
+            create_snapshot(conn, &snapshot_path, &snapshot_tables)
+                .map_err(|error| DbError(error.to_string()))
+        })
+        .await
+        .expect("create snapshot at A/1");
+    push_snapshot(
+        &storage,
+        "test-lib",
+        snapshot,
+        "A",
+        HashMap::from([("A".to_string(), 1)]),
+        1,
+        db_a.schema_version(),
+        &UserKeypair::generate(),
+        &SystemClock,
+        SnapshotBlobPreflight {
+            db: &db_a,
+            blobs: &[],
+        },
+    )
+    .await
+    .expect("publish snapshot at A/1");
+
+    let second = capture_bytes(
+        &db_a,
+        &["UPDATE notes SET title = 'After snapshot', \
+             _updated_at = '0000000002000-0000-A' WHERE id = 'n1'"],
+    )
+    .await;
+    storage.store_changeset("A", 2, &second, SCHEMA_VERSION);
+
+    let (_tmp_b, lib_b) = temp_store_dir();
+    let boot = bootstrap_from_snapshot(&storage, "test-lib", None, 1, &lib_b.db_path())
+        .await
+        .expect("bootstrap B from A/1 snapshot");
+    assert_eq!(boot.cursors.get("A"), Some(&1));
+    let applied = open_db_and_pull(
+        &lib_b.db_path(),
+        &tables,
+        &test_migrations(),
+        "B",
+        None,
+        &[],
+        &storage,
+        &boot.cursors,
+        &lib_b,
+        &never_cancelled(),
+    )
+    .await
+    .expect("install snapshot cursor and pull A/2");
+    assert_eq!(applied, 1);
+
+    let (db_b, _stamper) = Database::open(
+        &lib_b.db_path(),
+        tables,
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        "B".to_string(),
+        &test_migrations(),
+    )
+    .expect("open bootstrapped B");
+    assert_eq!(
+        query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
+        "After snapshot",
+    );
+    let durable_cursor: i64 = db_b
+        .call(|conn| {
+            conn.query_row(
+                "SELECT last_seq FROM sync_cursors WHERE device_id = 'A'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("read durable A cursor");
+    assert_eq!(durable_cursor, 2);
+}
+
 /// The per-reader membership-head watermark is the only defense against a
 /// storage provider replaying an older, otherwise validly signed membership
 /// state — but a high-water mark only defends state a reader has already seen.

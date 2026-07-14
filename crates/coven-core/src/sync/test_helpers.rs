@@ -1844,7 +1844,6 @@ pub async fn pull_into(
     db: &Database,
     storage: &dyn SyncStorage,
     device_id: &str,
-    cursors: &HashMap<String, u64>,
     store_dir: &crate::store_dir::StoreDir,
 ) -> (HashMap<String, u64>, crate::sync::pull::PullResult) {
     let membership = crate::sync::pull::load_cycle_membership(storage, db)
@@ -1855,7 +1854,6 @@ pub async fn pull_into(
         db.synced_tables(),
         storage,
         device_id,
-        cursors,
         store_dir,
         membership.chain,
         membership.pinned_owner,
@@ -1871,7 +1869,6 @@ pub async fn pull_into_result(
     db: &Database,
     storage: &dyn SyncStorage,
     device_id: &str,
-    cursors: &HashMap<String, u64>,
     store_dir: &crate::store_dir::StoreDir,
 ) -> Result<(HashMap<String, u64>, crate::sync::pull::PullResult), crate::sync::pull::PullError> {
     let membership = crate::sync::pull::load_cycle_membership(storage, db).await?;
@@ -1880,7 +1877,6 @@ pub async fn pull_into_result(
         db.synced_tables(),
         storage,
         device_id,
-        cursors,
         store_dir,
         membership.chain,
         membership.pinned_owner,

@@ -24,6 +24,7 @@ use super::membership::{MemberRole, MembershipChain, MembershipCoord};
 use super::session::SyncedTable;
 use super::storage::{DeviceHead, StorageError, SyncStorage};
 use crate::blob::decl::BlobDecls;
+use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
 use crate::blob::{CacheFill, Provenance};
 use crate::changeset::RowChange;
 use crate::database::Database;
@@ -195,38 +196,32 @@ struct CompletedChangeset<'a> {
     changes: &'a [RowChange],
 }
 
-#[derive(Clone, Debug)]
-struct LocalBlobCleanupIntent {
-    namespace: String,
-    blob_id: String,
-}
-
-#[cfg(test)]
-struct LocalBlobCleanupPause {
-    namespace: String,
-    blob_id: String,
-    reached_filesystem: Arc<tokio::sync::Notify>,
+#[cfg(any(test, feature = "test-utils"))]
+struct RemoteCommitPause {
+    device_id: String,
+    seq: u64,
+    reached: Arc<tokio::sync::Notify>,
     resume: Arc<tokio::sync::Notify>,
 }
 
-#[cfg(test)]
-static LOCAL_BLOB_CLEANUP_PAUSE: std::sync::Mutex<Option<LocalBlobCleanupPause>> =
+#[cfg(any(test, feature = "test-utils"))]
+static REMOTE_COMMIT_PAUSE: std::sync::Mutex<Option<RemoteCommitPause>> =
     std::sync::Mutex::new(None);
 
-#[cfg(test)]
-pub(crate) fn pause_local_blob_cleanup_before_filesystem(
-    namespace: &str,
-    blob_id: &str,
+#[cfg(any(test, feature = "test-utils"))]
+pub fn pause_pull_after_remote_commit(
+    device_id: &str,
+    seq: u64,
 ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-    let reached_filesystem = Arc::new(tokio::sync::Notify::new());
+    let reached = Arc::new(tokio::sync::Notify::new());
     let resume = Arc::new(tokio::sync::Notify::new());
-    *LOCAL_BLOB_CLEANUP_PAUSE.lock().unwrap() = Some(LocalBlobCleanupPause {
-        namespace: namespace.to_string(),
-        blob_id: blob_id.to_string(),
-        reached_filesystem: reached_filesystem.clone(),
+    *REMOTE_COMMIT_PAUSE.lock().unwrap() = Some(RemoteCommitPause {
+        device_id: device_id.to_string(),
+        seq,
+        reached: reached.clone(),
         resume: resume.clone(),
     });
-    (reached_filesystem, resume)
+    (reached, resume)
 }
 
 enum RemoteApplyOutcome {
@@ -332,9 +327,9 @@ pub async fn load_cycle_membership(
 /// network phases journals normally.
 ///
 /// `tables` is the host's declared synced set; call sites pass
-/// `db.synced_tables()`. `cursors` maps
-/// device_id -> last_seq we've applied from that device. `membership_chain` and
-/// `owner_pubkey` are the cycle's once-loaded membership (see [`CycleMembership`]).
+/// `db.synced_tables()`. The durable `sync_cursors` table is the sole pull
+/// position. `membership_chain` and `owner_pubkey` are the cycle's once-loaded
+/// membership (see [`CycleMembership`]).
 ///
 /// Returns the updated cursors map and a summary of what was applied.
 pub async fn pull_changes(
@@ -342,15 +337,12 @@ pub async fn pull_changes(
     tables: &[SyncedTable],
     storage: &dyn SyncStorage,
     our_device_id: &str,
-    cursors: &HashMap<String, u64>,
     store_dir: &StoreDir,
     mut membership_chain: Option<MembershipChain>,
     owner_pubkey: Option<String>,
 ) -> Result<(HashMap<String, u64>, PullResult), PullError> {
-    // A snapshot carries its covered cursor vector outside the scoped database
-    // image. Seed that coverage before any higher changeset can commit; an
-    // existing cursor is never lowered by an older caller-provided position.
-    db.seed_sync_cursors(cursors)
+    let cursors = db
+        .get_all_sync_cursors()
         .await
         .map_err(|e| PullError::Apply(e.0))?;
 
@@ -452,7 +444,7 @@ pub async fn pull_changes(
         remote_heads: heads.clone(),
         row_changes: Vec::new(),
     };
-    result.local_blob_cleanup_pending = drain_local_blob_cleanup_intents(db, store_dir)
+    result.local_blob_cleanup_pending = local_cleanup::drain(db, store_dir)
         .await
         .map_err(|e| PullError::Apply(e.0))?;
     let mut deferred: Vec<DeferredChangeset> = Vec::new();
@@ -464,7 +456,7 @@ pub async fn pull_changes(
             continue;
         }
 
-        let local_seq = cursor_for_device(cursors, &head.device_id);
+        let local_seq = cursor_for_device(&cursors, &head.device_id);
         if head.seq <= local_seq {
             continue;
         }
@@ -845,6 +837,7 @@ pub async fn pull_changes(
                 &head.device_id,
                 seq,
                 &changeset_bytes,
+                &changes,
                 schema.clone(),
                 receiver_wall_ms,
                 &blob_uploads,
@@ -868,6 +861,9 @@ pub async fn pull_changes(
                     break;
                 }
             };
+
+            #[cfg(any(test, feature = "test-utils"))]
+            pause_pull_after_remote_commit_if_armed(&head.device_id, seq).await;
 
             match apply_outcome {
                 RemoteApplyOutcome::Applied => {}
@@ -899,8 +895,6 @@ pub async fn pull_changes(
                 },
                 db,
                 store_dir,
-                &schema,
-                receiver_wall_ms,
             )
             .await
             .map_err(|e| PullError::Apply(e.0))?;
@@ -921,6 +915,7 @@ pub async fn pull_changes(
                 &d.device_id,
                 d.seq,
                 &d.changeset,
+                &d.changes,
                 schema.clone(),
                 receiver_wall_ms,
                 &d.blob_uploads,
@@ -944,6 +939,9 @@ pub async fn pull_changes(
                     continue;
                 }
             };
+
+            #[cfg(any(test, feature = "test-utils"))]
+            pause_pull_after_remote_commit_if_armed(&d.device_id, d.seq).await;
 
             match retry_outcome {
                 RemoteApplyOutcome::Applied => {}
@@ -971,8 +969,6 @@ pub async fn pull_changes(
                 },
                 db,
                 store_dir,
-                &schema,
-                receiver_wall_ms,
             )
             .await
             .map_err(|e| PullError::Apply(e.0))?;
@@ -984,12 +980,32 @@ pub async fn pull_changes(
     Ok((updated_cursors, result))
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+async fn pause_pull_after_remote_commit_if_armed(device_id: &str, seq: u64) {
+    let pause = {
+        let mut armed = REMOTE_COMMIT_PAUSE.lock().unwrap();
+        if armed
+            .as_ref()
+            .is_some_and(|pause| pause.device_id == device_id && pause.seq == seq)
+        {
+            armed.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        pause.reached.notify_one();
+        pause.resume.notified().await;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn commit_remote_changeset(
     db: &Database,
     device_id: &str,
     seq: u64,
     changeset: &[u8],
+    changes: &[RowChange],
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
     blob_uploads: &[(String, String, String)],
@@ -999,6 +1015,10 @@ async fn commit_remote_changeset(
     let changeset = changeset.to_vec();
     let blob_uploads = blob_uploads.to_vec();
     let cleanup_intents = cleanup_intents.to_vec();
+    let mut changeset_max = None;
+    advance_max_updated_at(&mut changeset_max, changes, &schema, receiver_wall_ms);
+    let hlc = db.hlc();
+    let blob_decls = db.blob_decls();
     db.call(move |conn| {
         let tx = conn
             .unchecked_transaction()
@@ -1010,26 +1030,24 @@ async fn commit_remote_changeset(
             receiver_wall_ms,
             &blob_uploads,
         )?;
-        if apply.had_fk_violations {
-            tx.rollback().map_err(crate::database::DbError::from)?;
-            return Ok(RemoteApplyOutcome::DeferredForeignKey);
-        }
         if !apply.constraint_conflict_tables.is_empty() {
             tx.rollback().map_err(crate::database::DbError::from)?;
             return Ok(RemoteApplyOutcome::ConstraintConflict(
                 apply.constraint_conflict_tables,
             ));
         }
+        if apply.had_fk_violations {
+            tx.rollback().map_err(crate::database::DbError::from)?;
+            return Ok(RemoteApplyOutcome::DeferredForeignKey);
+        }
         for intent in cleanup_intents {
-            tx.execute(
-                "INSERT OR IGNORE INTO local_cleanup_intents (namespace, blob_id) \
-                 VALUES (?1, ?2)",
-                (&intent.namespace, &intent.blob_id),
-            )
-            .map_err(crate::database::DbError::from)?;
+            local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
         }
         Database::advance_sync_cursor_on(&tx, &device_id, seq - 1, seq)?;
         tx.commit().map_err(crate::database::DbError::from)?;
+        if let Some(max_applied) = &changeset_max {
+            hlc.advance_past(max_applied);
+        }
         Ok(RemoteApplyOutcome::Applied)
     })
     .await
@@ -1042,27 +1060,7 @@ async fn finish_applied_changeset(
     applied: CompletedChangeset<'_>,
     db: &Database,
     store_dir: &StoreDir,
-    schema: &TableSchema,
-    receiver_wall_ms: u64,
 ) -> Result<(), crate::database::DbError> {
-    // Advance the shared register past this changeset's applied rows, now — while
-    // the pull is still running (more changesets, per-changeset blob downloads, the
-    // FK retry pass all follow). The host write path stamps `_updated_at` off this
-    // same `Arc<Hlc>`, so a local write that lands between changesets must already
-    // sort above everything the pull has committed to disk; an advance deferred to
-    // the end of the cycle would let that write mint a stamp below an already-applied
-    // row and lose last-writer-wins to it. The register is itself the monotonic
-    // accumulator, so a per-changeset max (skew-bounded) is all it needs.
-    let mut changeset_max = None;
-    advance_max_updated_at(
-        &mut changeset_max,
-        applied.changes,
-        schema,
-        receiver_wall_ms,
-    );
-    if let Some(max_applied) = &changeset_max {
-        db.hlc().advance_past(max_applied);
-    }
     result.changesets_applied += 1;
     result.row_changes.extend(applied.changes.to_vec());
     applied_devices.insert(applied.device_id.to_string());
@@ -1071,9 +1069,9 @@ async fn finish_applied_changeset(
     // Cleanup obligations were committed beside the row and cursor. Draining them
     // does not control whether the changeset is materialized; a failed filesystem
     // operation leaves its durable intent for the next drain. Keep this after the
-    // register advance: no awaited work may expose the committed rows to a host
-    // write before the host clock has observed their timestamps.
-    result.local_blob_cleanup_pending = drain_local_blob_cleanup_intents(db, store_dir).await?;
+    // row-and-cursor transaction advanced the shared clock before returning, so
+    // awaited filesystem work cannot expose a committed row under an older clock.
+    result.local_blob_cleanup_pending = local_cleanup::drain(db, store_dir).await?;
     Ok(())
 }
 
@@ -1581,108 +1579,10 @@ fn local_blob_cleanup_intents(
             crate::changeset::ChangeOp::Insert => None,
         };
         if let Some(blob) = old_blob_to_drop {
-            intents.push(LocalBlobCleanupIntent {
-                namespace: blob.namespace,
-                blob_id: blob.id,
-            });
+            intents.push(LocalBlobCleanupIntent::new(blob.namespace, blob.id));
         }
     }
     Ok(intents)
-}
-
-/// Drain durable cleanup intents. Returns whether any filesystem deletion
-/// remains pending. A blob another live row still references no longer needs the
-/// cleanup, so that intent is removed without touching its files.
-async fn drain_local_blob_cleanup_intents(
-    db: &Database,
-    store_dir: &StoreDir,
-) -> Result<bool, crate::database::DbError> {
-    let intents = db
-        .call(|conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT namespace, blob_id FROM local_cleanup_intents \
-                     ORDER BY namespace, blob_id",
-                )
-                .map_err(crate::database::DbError::from)?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok(LocalBlobCleanupIntent {
-                        namespace: row.get(0)?,
-                        blob_id: row.get(1)?,
-                    })
-                })
-                .map_err(crate::database::DbError::from)?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(crate::database::DbError::from)
-        })
-        .await?;
-
-    let mut has_pending_filesystem_work = false;
-    for intent in intents {
-        let decls = db.blob_decls();
-        let namespace = intent.namespace.clone();
-        let blob_id = intent.blob_id.clone();
-        let live_row = db
-            .call(move |conn| {
-                decls
-                    .row_for_blob_in_namespace(conn, &namespace, &blob_id)
-                    .map_err(|e| crate::database::DbError(e.to_string()))
-            })
-            .await?;
-        if live_row.is_none() {
-            #[cfg(test)]
-            pause_local_blob_cleanup_if_armed(&intent).await;
-            if let Err(error) = crate::blob::cache::drop_all_local_copies(
-                store_dir,
-                &intent.namespace,
-                &intent.blob_id,
-            )
-            .await
-            {
-                warn!(
-                    namespace = %intent.namespace,
-                    blob_id = %intent.blob_id,
-                    error = %error,
-                    "pulled blob local cleanup remains pending"
-                );
-                has_pending_filesystem_work = true;
-                continue;
-            }
-        }
-
-        let namespace = intent.namespace;
-        let blob_id = intent.blob_id;
-        db.call(move |conn| {
-            conn.execute(
-                "DELETE FROM local_cleanup_intents \
-                 WHERE namespace = ?1 AND blob_id = ?2",
-                (&namespace, &blob_id),
-            )
-            .map(|_| ())
-            .map_err(crate::database::DbError::from)
-        })
-        .await?;
-    }
-    Ok(has_pending_filesystem_work)
-}
-
-#[cfg(test)]
-async fn pause_local_blob_cleanup_if_armed(intent: &LocalBlobCleanupIntent) {
-    let pause = {
-        let mut armed = LOCAL_BLOB_CLEANUP_PAUSE.lock().unwrap();
-        if armed.as_ref().is_some_and(|pause| {
-            pause.namespace == intent.namespace && pause.blob_id == intent.blob_id
-        }) {
-            armed.take()
-        } else {
-            None
-        }
-    };
-    if let Some(pause) = pause {
-        pause.reached_filesystem.notify_one();
-        pause.resume.notified().await;
-    }
 }
 
 /// Download each blob in `blobs` into the evictable cache

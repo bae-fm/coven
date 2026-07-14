@@ -99,6 +99,8 @@
 pub mod cache;
 pub mod decl;
 pub mod delete;
+#[doc(hidden)]
+pub mod local_cleanup;
 pub mod local_files;
 pub mod transition;
 pub mod upload;

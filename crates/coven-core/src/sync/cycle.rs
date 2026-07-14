@@ -620,13 +620,6 @@ pub(crate) async fn run_single_sync_cycle(
         }
     }
 
-    // This device's pull cursors: where the pull starts from, and what we publish
-    // in our head so peers know how far we've consumed each of them.
-    let cursors = db
-        .get_all_sync_cursors()
-        .await
-        .map_err(|e| format!("Failed to load sync cursors: {e}"))?;
-
     // Retry a staged changeset left behind by a failed push in an earlier cycle.
     // Staging holds the gated, push-ready bytes so a lost push can re-push exactly
     // them next cycle without re-deriving; the span below stages-then-pushes.
@@ -711,7 +704,6 @@ pub(crate) async fn run_single_sync_cycle(
         tables,
         outgoing_changeset,
         local_seq,
-        &cursors,
         storage,
         &timestamp,
         "background sync",
@@ -827,8 +819,8 @@ pub(crate) async fn run_single_sync_cycle(
     }
 
     // Flush the clock's high-water mark so a restart re-seeds past it. The pull
-    // already advanced the clock past every applied row as each changeset landed
-    // (see `finish_applied_changeset`), so `high_water` here reflects both that
+    // already advanced the clock in the row-and-cursor commit closure, so
+    // `high_water` here reflects both that
     // advance and any host stamps minted this cycle (e.g. the changeset envelope
     // timestamp), since it reads the clock's current state. A persist error aborts
     // the cycle rather than risking a backward jump after restart.
@@ -1620,7 +1612,7 @@ mod tests {
                 [],
             )
             .map_err(DbError::from)?;
-            Database::seed_sync_cursor_on(&tx, "dev1", 1)?;
+            Database::install_snapshot_cursor_on(&tx, "dev1", 1)?;
             tx.commit().map_err(DbError::from)
         })
         .await
@@ -1639,7 +1631,7 @@ mod tests {
                 [],
             )
             .map_err(DbError::from)?;
-            Database::seed_sync_cursor_on(&tx, "dev1", 2)?;
+            Database::install_snapshot_cursor_on(&tx, "dev1", 2)?;
             tx.commit().map_err(DbError::from)
         })
         .await

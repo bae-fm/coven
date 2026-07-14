@@ -150,7 +150,7 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
 
     // A fresh peer pulls: it gets the shareable row, never the gated-false one.
     let db_b = open_test_db();
-    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld).await;
+    pull_into(&db_b, &storage, "B", &ld).await;
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'pub'").await,
         "Shareable",
@@ -186,7 +186,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
 
     let db_b = open_test_db();
-    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld).await;
+    pull_into(&db_b, &storage, "B", &ld).await;
     assert!(
         !row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'n1'").await,
         "a gated-false row must not reach a peer",
@@ -204,7 +204,7 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
     // n1 was gated-false in cycle 1 (cut → no changeset pushed), so the flip
     // re-emits it at seq 1. Re-pull from empty cursors to pick it up wherever it
     // landed.
-    pull_into(&db_b, &storage, "B", &HashMap::new(), &ld).await;
+    pull_into(&db_b, &storage, "B", &ld).await;
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
         "Album Title",
@@ -1180,7 +1180,7 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     run_cycle_m_storage(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
 
     let db_c = open_test_db();
-    pull_into(&db_c, &storage, "C", &HashMap::new(), &ld).await;
+    pull_into(&db_c, &storage, "C", &ld).await;
     assert_eq!(
         query_text(&db_c, "SELECT title FROM notes WHERE id = 'm_mid'").await,
         "WrittenMidCycle",
@@ -1228,14 +1228,31 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     );
 
     // Cycle 2: M pushes whatever it captured since. The applied row must not be in
-    // it. A third device C pulls ONLY M's changesets (skip A's by pre-seeding C's
-    // cursor for A) and must not receive 'a1' from M.
+    // it. A third device C pulls from a storage view containing only M's stream
+    // and must not receive 'a1' from M.
     run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
 
+    let m_only = MockSyncStorage::new();
+    let m_sequences = storage
+        .list_changesets("M")
+        .await
+        .expect("list M changesets");
+    for seq in &m_sequences {
+        let packed = storage
+            .get_changeset("M", *seq)
+            .await
+            .expect("read M changeset");
+        m_only
+            .put_changeset("M", *seq, packed)
+            .await
+            .expect("copy M changeset");
+    }
+    m_only
+        .put_head("M", m_sequences.last().copied().unwrap_or(0), T0)
+        .await
+        .expect("publish isolated M head");
     let db_c = open_test_db();
-    let mut c_cursors = HashMap::new();
-    c_cursors.insert("A".to_string(), 1); // C already has A's seq 1; only pull M.
-    pull_into(&db_c, &storage, "C", &c_cursors, &ld).await;
+    pull_into(&db_c, &m_only, "C", &ld).await;
     assert!(
         !row_exists(&db_c, "SELECT 1 FROM notes WHERE id = 'a1'").await,
         "the row M applied from A must NOT echo back through M's own changeset \
@@ -2139,9 +2156,17 @@ async fn cycle_keeps_a_behind_peers_changeset() {
 
     // And the behind peer pulls the kept changeset forward.
     let db_b = open_test_db();
-    let mut b_cursors = HashMap::new();
-    b_cursors.insert("A".to_string(), 1);
-    pull_into(&db_b, &storage, "B", &b_cursors, &ld).await;
+    exec(
+        &db_b,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('a1', 'Title Alpha', NULL, 1, \
+                 '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    db_b.install_snapshot_cursors(&HashMap::from([("A".to_string(), 1)]))
+        .await
+        .expect("install B's verified snapshot coverage");
+    pull_into(&db_b, &storage, "B", &ld).await;
     assert!(
         row_exists(&db_b, "SELECT 1 FROM notes WHERE id = 'a2'").await,
         "the behind peer pulls the kept changeset forward",

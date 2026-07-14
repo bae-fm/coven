@@ -7,8 +7,6 @@
 //! folder (`storage/pinned/` vs `storage/cache/`), and a read serves a local copy
 //! without a cloud round-trip.
 
-use std::collections::HashMap;
-
 use super::cache::{
     clear_cache, evict_to_budget, open_blob_stream, pin, read_blob, unpin, write_blob,
     BlobCacheError,
@@ -324,7 +322,7 @@ async fn cache_eager_lands_in_cache_on_pull() {
     // store dir's evictable cache tree.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_tmp, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
@@ -607,7 +605,7 @@ async fn cache_lazy_fetches_on_first_read() {
         CacheFill::CacheLazy,
     ));
     let (_tmp, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     // The row applied, but the CacheLazy blob is in neither folder — pull skipped it.
     assert_eq!(result.changesets_applied, 1);
@@ -1345,7 +1343,7 @@ async fn remote_root_cache_lazy_host_blob_pulls_row_then_reads_on_demand() {
         CacheFill::CacheLazy,
     ));
     let (_tmp, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(
@@ -1830,7 +1828,7 @@ async fn a_pinned_blob_is_never_evicted_even_far_over_budget() {
 
     let db2 = open_test_db_with_blob(photo_decl());
     let (_tmp, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
     assert_eq!(result.changesets_applied, 1);
     assert!(
         ld.cache_blob_path("photos", "mir0aaaa").unwrap().exists(),

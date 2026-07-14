@@ -8,7 +8,6 @@
 //! [`crate::database::Database`] (with an injected, wall-clock-controlled `Hlc`)
 //! so the register lives where production puts it: inside the owned connection.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::clock::SystemClock;
@@ -143,7 +142,6 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         &test_synced_tables(),
         &storage,
         "dev-a",
-        &HashMap::new(),
         &temp_store_dir().1,
         // Exercise pull directly before membership initialization.
         None,
@@ -165,8 +163,8 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
 /// clock far behind A's, the pull's per-changeset advance is the only thing that
 /// can lift B's next stamp above A's applied row.
 ///
-/// The unit under test is `pull_changes` (its `finish_applied_changeset` advances
-/// the register): after it applies A's changeset, B's shared clock — which the
+/// The unit under test is `pull_changes` (its row-and-cursor commit advances the
+/// register): after it applies A's changeset, B's shared clock — which the
 /// host write path stamps off — must already outrank A's row, with no cycle
 /// wrapping the pull.
 #[tokio::test]
@@ -198,7 +196,6 @@ async fn pull_advances_register_as_each_changeset_applies() {
         &test_synced_tables(),
         &storage,
         "dev-b",
-        &HashMap::new(),
         &temp_store_dir().1,
         // Exercise pull directly before membership initialization.
         None,
@@ -216,6 +213,77 @@ async fn pull_advances_register_as_each_changeset_applies() {
         "a host write after the pull applied A's row (stamp {a_stamp}) minted \
          {host_stamp}, which sorts below it — the register did not advance as the \
          changeset applied, so a causally-later local edit would lose LWW",
+    );
+}
+
+#[tokio::test]
+async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row() {
+    let storage = Arc::new(MockSyncStorage::new());
+    let remote_hlc = Hlc::with_wall_clock("dev-a".into(), || 9_000);
+    let remote_stamp = remote_hlc.now().to_string();
+    let source = open_test_db();
+    let changeset = capture_bytes(
+        &source,
+        &[&format!(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('remote-boundary', 'Remote', NULL, '{remote_stamp}', '2026-01-01')"
+        )],
+    )
+    .await;
+    storage.store_changeset("dev-a", 1, &changeset, SCHEMA_VERSION);
+
+    let local_hlc = Arc::new(Hlc::with_wall_clock("dev-b".into(), || 1_000));
+    let target = open_test_db_with_hlc(local_hlc, |_conn| Ok(()));
+    let (_tmp, store_dir) = temp_store_dir();
+    let (commit_reached, _resume_pull) =
+        crate::sync::pull::pause_pull_after_remote_commit("dev-a", 1);
+    let pull_db = target.clone();
+    let pull_storage = storage.clone();
+    let pull_store_dir = store_dir.clone();
+    let pull = tokio::spawn(async move {
+        pull_changes(
+            &pull_db,
+            pull_db.synced_tables(),
+            pull_storage.as_ref(),
+            "dev-b",
+            &pull_store_dir,
+            None,
+            None,
+        )
+        .await
+    });
+
+    commit_reached.notified().await;
+    let tables = target.synced_tables().to_vec();
+    let stamper = target.stamper();
+    let host_stamp = target
+        .call(move |conn| {
+            crate::database::Database::run_pending_journaled_transaction_on(conn, &tables, |tx| {
+                let stamp = stamper.stamp();
+                tx.execute(
+                    "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                         VALUES ('local-boundary', 'Local', NULL, ?1, '2026-01-01')",
+                    [stamp.as_str()],
+                )
+                .map_err(crate::database::DbError::from)?;
+                Ok::<String, crate::database::DbError>(stamp)
+            })
+        })
+        .await
+        .expect("queued host write commits");
+    pull.abort();
+    let _ = pull.await;
+
+    assert!(
+        host_stamp > remote_stamp,
+        "host stamp {host_stamp} must sort after the already-committed remote row \
+         {remote_stamp}",
+    );
+    assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'remote-boundary'").await);
+    assert_eq!(
+        target.get_all_sync_cursors().await.unwrap().get("dev-a"),
+        Some(&1),
+        "cancellation after the commit leaves its row and cursor durable",
     );
 }
 
@@ -320,7 +388,6 @@ async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
         &test_synced_tables(),
         &storage,
         "dev2",
-        &HashMap::new(),
         &temp_store_dir().1,
         membership.chain,
         membership.pinned_owner,
@@ -551,14 +618,7 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
     storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
 
     // B pulls A's changeset.
-    let (_cursors, _result) = pull_into(
-        &db_b,
-        &storage,
-        "dev-b",
-        &HashMap::new(),
-        &temp_store_dir().1,
-    )
-    .await;
+    let (_cursors, _result) = pull_into(&db_b, &storage, "dev-b", &temp_store_dir().1).await;
 
     // (a) LWW: the grossly-future row must NOT win — B's honest local edit stands.
     assert_eq!(
@@ -617,14 +677,7 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     .await;
     storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
 
-    let (_cursors, _result) = pull_into(
-        &db_b,
-        &storage,
-        "dev-b",
-        &HashMap::new(),
-        &temp_store_dir().1,
-    )
-    .await;
+    let (_cursors, _result) = pull_into(&db_b, &storage, "dev-b", &temp_store_dir().1).await;
 
     // A's causally-later (within-allowance) edit wins.
     assert_eq!(

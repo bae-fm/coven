@@ -38,7 +38,6 @@ async fn sync_for_test(
     tables: &[SyncedTable],
     outgoing: Vec<u8>,
     local_seq: u64,
-    cursors: &HashMap<String, u64>,
     storage: &dyn SyncStorage,
     timestamp: &str,
     message: &str,
@@ -54,7 +53,6 @@ async fn sync_for_test(
         tables,
         outgoing,
         local_seq,
-        cursors,
         storage,
         timestamp,
         message,
@@ -91,6 +89,31 @@ fn unique_note_db() -> crate::database::Database {
                     title TEXT NOT NULL,
                     _updated_at TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                ) STRICT;",
+            )
+            .map_err(crate::database::DbError::from)
+        })],
+    )
+}
+
+fn mixed_constraint_db() -> crate::database::Database {
+    open_test_db_schema(
+        vec![
+            SyncedTable::new("constraint_parents"),
+            SyncedTable::new("constraint_items"),
+        ],
+        vec![Migration::run(1, "mixed-constraint-schema", |conn| {
+            conn.execute_batch(
+                "CREATE TABLE constraint_parents (
+                    id TEXT PRIMARY KEY,
+                    _updated_at TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE constraint_items (
+                    id TEXT PRIMARY KEY,
+                    parent_id TEXT NOT NULL,
+                    slug TEXT NOT NULL UNIQUE,
+                    _updated_at TEXT NOT NULL,
+                    FOREIGN KEY (parent_id) REFERENCES constraint_parents (id)
                 ) STRICT;",
             )
             .map_err(crate::database::DbError::from)
@@ -138,7 +161,7 @@ async fn pull_applies_remote_changeset_and_surfaces_row_changes() {
     // Second device pulls.
     let db2 = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert_eq!(updated.get("dev1"), Some(&1));
@@ -179,7 +202,7 @@ async fn cursor_write_failure_rolls_back_the_remote_rows() {
     )
     .await;
     let (_tmp, store_dir) = temp_store_dir();
-    let (updated, result) = pull_into(&target, &storage, "dev2", &HashMap::new(), &store_dir).await;
+    let (updated, result) = pull_into(&target, &storage, "dev2", &store_dir).await;
 
     assert_eq!(updated.get("dev1"), None);
     assert_eq!(result.changesets_applied, 0);
@@ -196,7 +219,7 @@ async fn cursor_write_failure_rolls_back_the_remote_rows() {
 }
 
 #[tokio::test]
-async fn stale_pull_cursor_cannot_regress_durable_coverage_or_commit_rows() {
+async fn ordinary_pull_starts_from_its_durable_cursor() {
     let storage = MockSyncStorage::new();
     let source = open_test_db();
     let changeset = capture_bytes(
@@ -211,27 +234,129 @@ async fn stale_pull_cursor_cannot_regress_durable_coverage_or_commit_rows() {
     storage.store_changeset("dev1", 1, &changeset, SCHEMA_VERSION);
 
     let target = open_test_db();
-    target
-        .seed_sync_cursors(&HashMap::from([("dev1".to_string(), 2)]))
-        .await
-        .unwrap();
     let (_tmp, store_dir) = temp_store_dir();
-    let (updated, result) = pull_into(&target, &storage, "dev2", &HashMap::new(), &store_dir).await;
+    let (updated, result) = pull_into(&target, &storage, "dev2", &store_dir).await;
 
-    assert_eq!(updated.get("dev1"), None);
-    assert_eq!(result.changesets_applied, 0);
-    assert_eq!(result.held_changesets.len(), 1);
-    assert!(matches!(
-        result.held_changesets[0].reason,
-        HeldChangesetReason::ApplyFailed { .. }
-    ));
+    assert_eq!(updated.get("dev1"), Some(&1));
+    assert_eq!(result.changesets_applied, 1);
+    assert!(result.held_changesets.is_empty());
+    assert_eq!(
+        target.get_all_sync_cursors().await.unwrap().get("dev1"),
+        Some(&1),
+    );
+    assert!(
+        row_exists(&target, "SELECT 1 FROM notes WHERE id = 'stale-row'").await,
+        "ordinary pull derives coverage from durable rows, not caller input",
+    );
+}
+
+#[tokio::test]
+async fn ordinary_pull_uses_its_durable_cursor_on_every_call() {
+    let storage = MockSyncStorage::new();
+    let source = open_test_db();
+    let first = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('cursor-row', 'One', NULL, \
+                     '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    let second = capture_bytes(
+        &source,
+        &["UPDATE notes SET title = 'Two', \
+             _updated_at = '0000000002000-0000-dev1' WHERE id = 'cursor-row'"],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &first, SCHEMA_VERSION);
+
+    let target = open_test_db();
+    let (_tmp, store_dir) = temp_store_dir();
+    pull_into(&target, &storage, "dev2", &store_dir).await;
+    storage.store_changeset("dev1", 2, &second, SCHEMA_VERSION);
+
+    let (updated, result) = pull_into(&target, &storage, "dev2", &store_dir).await;
+
+    assert_eq!(result.changesets_applied, 1);
+    assert!(result.held_changesets.is_empty());
+    assert_eq!(updated.get("dev1"), Some(&2));
+    assert_eq!(
+        query_text(&target, "SELECT title FROM notes WHERE id = 'cursor-row'").await,
+        "Two",
+    );
+}
+
+#[tokio::test]
+async fn ordinary_pull_applies_the_change_immediately_after_its_durable_cursor() {
+    let storage = MockSyncStorage::new();
+    let source = open_test_db();
+    let first = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+             VALUES ('next-row', 'One', NULL, \
+                     '0000000001000-0000-dev1', '2026-01-01')",
+        ],
+    )
+    .await;
+    let second = capture_bytes(
+        &source,
+        &["UPDATE notes SET title = 'Two', \
+             _updated_at = '0000000002000-0000-dev1' WHERE id = 'next-row'"],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &first, SCHEMA_VERSION);
+
+    let target = open_test_db();
+    let (_tmp, store_dir) = temp_store_dir();
+    pull_into(&target, &storage, "dev2", &store_dir).await;
+    storage.store_changeset("dev1", 2, &second, SCHEMA_VERSION);
+
+    let (updated, result) = pull_into(&target, &storage, "dev2", &store_dir).await;
+
+    assert_eq!(result.changesets_applied, 1);
+    assert_eq!(updated.get("dev1"), Some(&2));
     assert_eq!(
         target.get_all_sync_cursors().await.unwrap().get("dev1"),
         Some(&2),
     );
-    assert!(
-        !row_exists(&target, "SELECT 1 FROM notes WHERE id = 'stale-row'").await,
-        "a stale cursor advance rolls its incoming rows back",
+}
+
+#[tokio::test]
+async fn negative_durable_cursor_is_rejected_by_every_cursor_read_path() {
+    let target = open_test_db();
+    exec(
+        &target,
+        "INSERT INTO sync_cursors (device_id, last_seq) VALUES ('bad-device', -1)",
+    )
+    .await;
+
+    assert!(target.get_all_sync_cursors().await.is_err());
+    assert!(target
+        .install_snapshot_cursors(&HashMap::from([("bad-device".to_string(), 1)]))
+        .await
+        .is_err());
+    assert!(target
+        .advance_sync_cursor("bad-device", 0, 1)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn empty_changeset_advances_the_durable_cursor() {
+    let storage = MockSyncStorage::new();
+    storage.store_changeset("dev1", 1, &[], SCHEMA_VERSION);
+    let target = open_test_db();
+    let (_tmp, store_dir) = temp_store_dir();
+
+    let (updated, result) = pull_into(&target, &storage, "dev2", &store_dir).await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(updated.get("dev1"), Some(&1));
+    assert_eq!(
+        target.get_all_sync_cursors().await.unwrap().get("dev1"),
+        Some(&1),
     );
 }
 
@@ -251,7 +376,7 @@ async fn host_write_after_remote_apply_observes_the_matching_cursor() {
 
     let target = open_test_db();
     let (_tmp, store_dir) = temp_store_dir();
-    pull_into(&target, &storage, "dev2", &HashMap::new(), &store_dir).await;
+    pull_into(&target, &storage, "dev2", &store_dir).await;
 
     let tables = target.synced_tables().to_vec();
     target
@@ -324,7 +449,7 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
 
     let db2 = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert_eq!(result.held_changesets.len(), 1);
@@ -364,7 +489,7 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_cursor() {
     )
     .await;
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.constraint_conflicts.len(), 1);
     assert_eq!(result.constraint_conflicts[0].device_id, "dev1");
@@ -385,6 +510,78 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_cursor() {
         )
         .await,
         "rows before the constraint conflict roll back with the rejected changeset",
+    );
+}
+
+#[tokio::test]
+async fn non_retryable_constraint_is_reported_even_when_the_changeset_also_violates_a_foreign_key()
+{
+    let storage = MockSyncStorage::new();
+    let source = mixed_constraint_db();
+    exec(
+        &source,
+        "INSERT INTO constraint_parents (id, _updated_at) \
+         VALUES ('missing-on-target', '0000000001000-0000-dev1'); \
+         INSERT INTO constraint_parents (id, _updated_at) \
+         VALUES ('present-on-target', '0000000001000-0000-dev1')",
+    )
+    .await;
+    let changeset = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO constraint_items (id, parent_id, slug, _updated_at) \
+             VALUES ('fk-row', 'missing-on-target', 'free-slug', \
+                     '0000000002000-0000-dev1')",
+            "INSERT INTO constraint_items (id, parent_id, slug, _updated_at) \
+             VALUES ('unique-row', 'present-on-target', 'duplicate-slug', \
+                     '0000000002001-0000-dev1')",
+        ],
+    )
+    .await;
+    storage.store_changeset("dev1", 1, &changeset, SCHEMA_VERSION);
+
+    let target = mixed_constraint_db();
+    exec(
+        &target,
+        "INSERT INTO constraint_parents (id, _updated_at) \
+         VALUES ('present-on-target', '0000000001000-0000-dev2'); \
+         INSERT INTO constraint_items (id, parent_id, slug, _updated_at) \
+         VALUES ('local-row', 'present-on-target', 'duplicate-slug', \
+                 '0000000003000-0000-dev2')",
+    )
+    .await;
+    let (_tmp, store_dir) = temp_store_dir();
+
+    let (updated, result) = pull_into(&target, &storage, "dev2", &store_dir).await;
+
+    assert_eq!(result.changesets_applied, 0);
+    assert_eq!(result.constraint_conflicts.len(), 1);
+    assert_eq!(result.constraint_conflicts[0].table, "constraint_items");
+    assert_eq!(updated.get("dev1"), None);
+    assert_eq!(
+        target.get_all_sync_cursors().await.unwrap().get("dev1"),
+        None
+    );
+    assert!(
+        !row_exists(
+            &target,
+            "SELECT 1 FROM constraint_items WHERE id = 'fk-row'"
+        )
+        .await
+    );
+    assert!(
+        !row_exists(
+            &target,
+            "SELECT 1 FROM constraint_items WHERE id = 'unique-row'"
+        )
+        .await
+    );
+    assert!(
+        row_exists(
+            &target,
+            "SELECT 1 FROM constraint_items WHERE id = 'local-row'"
+        )
+        .await
     );
 }
 
@@ -426,7 +623,7 @@ async fn fk_violation_still_retries_and_resolves() {
 
     let target = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&target, &storage, "dev-target", &HashMap::new(), &ld).await;
+    let (updated, result) = pull_into(&target, &storage, "dev-target", &ld).await;
 
     assert_eq!(updated.get("dev-child"), Some(&1));
     assert_eq!(updated.get("dev-parent"), Some(&1));
@@ -454,8 +651,7 @@ async fn pull_skips_changeset_from_newer_schema() {
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION + 1);
 
     let db2 = open_test_db();
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert_eq!(result.skipped_schema, 1);
@@ -508,8 +704,7 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
     storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &changeset_bytes));
 
     let db2 = open_test_db();
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     // Reported as tamper, not routine version skew: skipped_schema untouched.
     assert_eq!(result.skipped_schema, 0);
@@ -554,8 +749,7 @@ async fn a_signed_newer_schema_changeset_still_counts_as_a_schema_skip() {
     storage.publish_head_as("dev1", 1, &author);
 
     let db2 = open_test_db();
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.skipped_schema, 1);
     assert!(result.invalid_signatures.is_empty());
@@ -607,8 +801,7 @@ async fn pull_gate_tracks_the_dbs_schema_version() {
         n,
         "both peers open the same migration ladder, so they share the wire version"
     );
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(
         result.changesets_applied, 1,
@@ -657,7 +850,6 @@ async fn push_stamps_the_dbs_schema_version() {
         &tables,
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -703,7 +895,6 @@ async fn sync_reuses_opened_schema_models() {
         db.synced_tables(),
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -749,8 +940,7 @@ async fn pull_does_not_advance_cursor_past_a_blob_failed_changeset() {
     // The puller declares note_photos blob-bearing, so seq 1's missing blob fails
     // while seq 2 (no blob) would succeed.
     let db2 = open_test_db_with_blob(photo_decl());
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert!(
         result.asset_downloads_failed,
@@ -825,8 +1015,7 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     storage.put_changeset_packed("dev1", 1, envelope::pack(&env, &cs));
 
     let db2 = open_test_db();
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert!(
@@ -896,8 +1085,11 @@ async fn a_changeset_replayed_at_another_seq_is_held_not_applied() {
     // pull legitimately begins at the relocated object's slot, seq 9.
     let db2 = open_test_db();
     let cursors = HashMap::from([("dev".to_string(), 8u64)]);
+    db2.install_snapshot_cursors(&cursors)
+        .await
+        .expect("install prior verified coverage");
 
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &cursors, &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     // The relocated seq-5 content is not applied at seq 9, the cursor holds at 8
     // (never advances past the tampered slot), and the relocation is surfaced.
@@ -957,8 +1149,7 @@ async fn a_changeset_relocated_to_another_device_is_held() {
     storage.put_changeset_packed("devAttacker", 1, packed);
 
     let db2 = open_test_db();
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert!(
@@ -1013,8 +1204,7 @@ async fn a_changeset_at_its_own_position_still_applies() {
     storage.publish_head_as("dev", 1, &author);
 
     let db2 = open_test_db();
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
@@ -1064,7 +1254,7 @@ async fn apply_failure_isolates_to_one_device() {
     )
     .await;
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into_result(&target, &storage, "devTarget", &HashMap::new(), &ld)
+    let (updated, result) = pull_into_result(&target, &storage, "devTarget", &ld)
         .await
         .expect("pull isolates apply failure");
 
@@ -1111,7 +1301,7 @@ async fn malformed_envelope_isolates_to_one_device() {
 
     let target = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    let (updated, result) = pull_into_result(&target, &storage, "devTarget", &HashMap::new(), &ld)
+    let (updated, result) = pull_into_result(&target, &storage, "devTarget", &ld)
         .await
         .expect("a malformed envelope must not fail the whole pull");
 
@@ -1143,7 +1333,7 @@ async fn re_pushed_valid_envelope_resumes_the_held_device() {
 
     let db2 = open_test_db();
     let (_tmp, ld) = temp_store_dir();
-    let (held_cursors, first) = pull_into_result(&db2, &storage, "dev2", &HashMap::new(), &ld)
+    let (held_cursors, first) = pull_into_result(&db2, &storage, "dev2", &ld)
         .await
         .expect("a malformed envelope must not fail the whole pull");
     assert_eq!(first.changesets_applied, 0);
@@ -1162,7 +1352,7 @@ async fn re_pushed_valid_envelope_resumes_the_held_device() {
     .await;
     storage.store_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
-    let (updated, second) = pull_into_result(&db2, &storage, "dev2", &held_cursors, &ld)
+    let (updated, second) = pull_into_result(&db2, &storage, "dev2", &ld)
         .await
         .expect("resume pull");
     assert_eq!(second.changesets_applied, 1);
@@ -1213,7 +1403,7 @@ async fn blob_round_trips_through_storage_via_blob_plan() {
     // cache (`storage/cache/<id>`) on pull — which coven builds from the validated id.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_t, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
@@ -1262,7 +1452,6 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
         &tables,
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -1314,7 +1503,7 @@ async fn update_uploads_and_downloads_new_blob_id_and_drops_old_local_copy() {
     .await
     .expect("seed old cache");
 
-    let (_updated, pull) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld2).await;
+    let (_updated, pull) = pull_into(&db2, &storage, "dev2", &ld2).await;
     assert_eq!(pull.changesets_applied, 1);
     assert!(
         ld2.cache_blob_path("photos", "newaaaa")
@@ -1381,7 +1570,7 @@ async fn update_to_null_drops_old_local_blob_copy() {
     .await
     .expect("seed old cache");
 
-    let (_updated, pull) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (_updated, pull) = pull_into(&db2, &storage, "dev2", &ld).await;
     assert_eq!(pull.changesets_applied, 1);
     assert!(
         !ld.cache_blob_path("photos", "oldnull")
@@ -1445,7 +1634,6 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         &audio_tables(),
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -1489,7 +1677,7 @@ async fn user_provided_blob_is_not_pushed_inline_and_not_downloaded_on_pull() {
         CacheFill::CacheLazy,
     ));
     let (_t, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     // The row applied and the cursor advanced — the CacheLazy blob never blocks the
     // apply, and its absence is not a download failure.
@@ -1545,7 +1733,6 @@ async fn user_provided_blob_with_external_ref_aborts_before_changeset_publish() 
         )),
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -1603,7 +1790,6 @@ async fn missing_remote_user_provided_blob_aborts_before_changeset_publish() {
         )),
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -1671,7 +1857,6 @@ async fn present_remote_user_provided_blob_can_publish_changeset() {
         )),
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -1730,7 +1915,6 @@ async fn delete_ref_does_not_require_remote_blob_to_publish_changeset() {
         )),
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -1790,7 +1974,6 @@ async fn sync_aborts_when_a_referenced_blob_file_is_missing() {
         &test_synced_tables_with_blob(photo_decl()),
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -1873,7 +2056,6 @@ async fn plain_scheme_a_re_emitted_row_whose_blob_is_only_in_the_cloud_skips_the
         &tables,
         outgoing,
         1,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -1945,7 +2127,6 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
         &test_synced_tables_with_blob(readable_photo_decl()),
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -1996,7 +2177,7 @@ async fn plain_scheme_blob_round_trips_at_the_readable_key() {
     // pulls and downloads the cover from the readable key.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld) = temp_store_dir();
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
@@ -2055,7 +2236,6 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
         &tables,
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -2139,7 +2319,7 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
     // replaced blob when the new one arrives.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    let (cursors, _) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld2).await;
+    pull_into(&db2, &storage, "dev2", &ld2).await;
 
     // Replace the cover: a new blob, whose bytes the host stages in the local store,
     // carried by a fresh row whose readable path names it; the replaced row and its local
@@ -2179,7 +2359,7 @@ async fn plain_scheme_replacing_a_blob_writes_a_new_object_at_its_own_key() {
 
     // Device B pulls the replacement. Its download verifies the object against the new
     // row's content hash, so an object holding the replaced bytes would fail the pull.
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &cursors, &ld2).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
 
     assert!(
         !result.asset_downloads_failed,
@@ -2247,7 +2427,7 @@ async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
 
     let db_b = open_test_db_with_blob(replaceable_photo_decl());
     let (_tb, ld_b) = temp_store_dir();
-    pull_into(&db_b, &storage, "dev2", &HashMap::new(), &ld_b).await;
+    pull_into(&db_b, &storage, "dev2", &ld_b).await;
 
     // Both devices repoint `ph1` before seeing the other's change — the same row, two new
     // blobs. Each blob id is fresh, so each path names a different blob and keys a
@@ -2304,7 +2484,7 @@ async fn plain_scheme_two_devices_replacing_one_blob_write_two_objects() {
     // already overwritten, and no retry would ever resolve it.
     let db_c = open_test_db_with_blob(replaceable_photo_decl());
     let (_tc, ld_c) = temp_store_dir();
-    let (_updated, result) = pull_into(&db_c, &storage, "dev3", &HashMap::new(), &ld_c).await;
+    let (_updated, result) = pull_into(&db_c, &storage, "dev3", &ld_c).await;
     assert!(
         !result.asset_downloads_failed,
         "every row the third device applies names an object that holds its bytes",
@@ -2411,7 +2591,7 @@ async fn plain_scheme_a_changeset_older_than_a_replacement_still_finds_its_blob(
     // row names the replaced blob. Its bytes are still at their own key.
     let db2 = open_test_db_with_blob(readable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld2).await;
+    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
 
     assert!(
         !result.asset_downloads_failed,
@@ -2499,7 +2679,7 @@ async fn plain_scheme_a_write_once_blob_keeps_a_stable_readable_path() {
     // A peer pulls it off that readable key and verifies it against the row's hash.
     let db2 = open_test_db_with_blob(write_once_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld2).await;
+    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
     assert!(!result.asset_downloads_failed);
     assert_eq!(result.changesets_applied, 1);
     let cached = std::fs::read(
@@ -2577,7 +2757,6 @@ async fn plain_scheme_repointing_a_write_once_row_is_refused() {
         &tables,
         outgoing,
         1,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -2668,7 +2847,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     // replaced blob when the new one arrives.
     let db2 = open_test_db_with_blob(replaceable_photo_decl());
     let (_t2, ld2) = temp_store_dir();
-    let (cursors, _) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld2).await;
+    pull_into(&db2, &storage, "dev2", &ld2).await;
 
     // Repoint the row at a new blob: same primary key, new blob id, and the cloud path
     // moves with it because it names the blob. The replaced blob's local copy goes away.
@@ -2702,7 +2881,7 @@ async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
 
     // Device B pulls the repointing. Its download verifies the object against the new
     // row's content hash, so serving it the replaced bytes would fail the pull outright.
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &cursors, &ld2).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld2).await;
 
     assert!(
         !result.asset_downloads_failed,
@@ -2789,7 +2968,6 @@ async fn plain_scheme_repointing_a_row_without_moving_its_cloud_path_is_refused(
         &tables,
         outgoing,
         1,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -2831,7 +3009,6 @@ async fn push_cycle_as(
         tables,
         outgoing,
         local_seq,
-        &HashMap::new(),
         storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -2920,7 +3097,6 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
         &test_synced_tables_with_blob(decl()),
         outgoing,
         0,
-        &HashMap::new(),
         &storage,
         "2026-01-01T00:00:00Z",
         "",
@@ -2963,7 +3139,7 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
     // Device B: a fresh DB and its own store dir, same cloud + key + declaration.
     let db2 = open_test_db_with_blob(decl());
     let (_t, ld) = temp_store_dir();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
@@ -3150,7 +3326,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     // dev2 pulls → the CacheEager cover lands in the evictable cache.
     let db2 = open_test_db_with_blob(photo_decl());
     let (_t, ld) = temp_store_dir();
-    let (cursors, _) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    pull_into(&db2, &storage, "dev2", &ld).await;
     assert!(
         ld.cache_blob_path("photos", "pdel1234").unwrap().exists(),
         "the cover lands in the evictable cache after the first pull",
@@ -3159,7 +3335,7 @@ async fn applying_a_blob_bearing_delete_drops_the_local_copy() {
     // dev1 deletes the cover row; dev2 pulls the DELETE.
     let cs2 = capture_bytes(&db1, &["DELETE FROM note_photos WHERE id = 'pdel1234'"]).await;
     storage.store_changeset("dev1", 2, &cs2, SCHEMA_VERSION);
-    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &cursors, &ld).await;
+    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1, "the DELETE changeset applied");
     assert!(
@@ -3202,7 +3378,7 @@ async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
     let obstructing_file = store_dir.as_ref().join("storage");
     std::fs::write(&obstructing_file, b"not a directory").expect("obstruct cleanup paths");
 
-    let (updated, first) = pull_into(&target, &storage, "dev2", &HashMap::new(), &store_dir).await;
+    let (updated, first) = pull_into(&target, &storage, "dev2", &store_dir).await;
     assert_eq!(first.changesets_applied, 1, "first pull: {first:?}");
     assert!(
         !first.asset_downloads_failed,
@@ -3233,9 +3409,11 @@ async fn local_blob_cleanup_intent_survives_restart_after_cursor_commit() {
     std::fs::remove_file(&obstructing_file).expect("restore cleanup paths");
 
     let restarted = open_blob_test_db_at(&database_path, cleanup_decl());
-    let durable_cursors = restarted.get_all_sync_cursors().await.unwrap();
-    let (_updated, second) =
-        pull_into(&restarted, &storage, "dev2", &durable_cursors, &store_dir).await;
+    assert_eq!(
+        restarted.get_all_sync_cursors().await.unwrap().get("dev1"),
+        Some(&1),
+    );
+    let (_updated, second) = pull_into(&restarted, &storage, "dev2", &store_dir).await;
     assert_eq!(second.changesets_applied, 0);
     assert!(!second.asset_downloads_failed);
     assert!(!second.local_blob_cleanup_pending);
@@ -3284,19 +3462,12 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
     let (_tmp, store_dir) = temp_store_dir();
     store_local(&store_dir, "cleanup-race", b"old bytes").await;
     let (reached_filesystem, resume_cleanup) =
-        crate::sync::pull::pause_local_blob_cleanup_before_filesystem("photos", "cleanup-race");
+        crate::blob::local_cleanup::pause_before_filesystem("photos", "cleanup-race");
     let pull_db = target.clone();
     let pull_storage = storage.clone();
     let pull_store_dir = store_dir.clone();
     let cleanup = tokio::spawn(async move {
-        pull_into(
-            &pull_db,
-            pull_storage.as_ref(),
-            "dev2",
-            &HashMap::new(),
-            &pull_store_dir,
-        )
-        .await
+        pull_into(&pull_db, pull_storage.as_ref(), "dev2", &pull_store_dir).await
     });
 
     reached_filesystem.notified().await;
@@ -3402,7 +3573,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
 
     let db2 = open_test_db_with_blob(decl);
     let (_tmp, ld) = temp_store_dir();
-    let (cursors, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+    let (_cursors, result) = pull_into(&db2, &storage, "dev2", &ld).await;
     assert_eq!(result.changesets_applied, 1);
     assert!(
         ld.cache_blob_path("photos", "sharedblob").unwrap().exists(),
@@ -3431,7 +3602,7 @@ async fn blob_changing_update_keeps_old_blob_copy_while_another_row_references_i
     .await;
     storage.store_changeset("dev1", 2, &cs2, SCHEMA_VERSION);
 
-    let (_updated, result) = pull_into(&db2, &storage, "dev2", &cursors, &ld).await;
+    let (_updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(
@@ -3480,8 +3651,7 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
     storage.store_unsigned_changeset("dev1", 1, &cs, SCHEMA_VERSION);
 
     let db2 = open_test_db();
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
@@ -3494,6 +3664,10 @@ async fn pull_rejects_unsigned_changeset_when_chain_exists() {
     assert_eq!(result.rejected_unauthorized[0].seq, 1);
     assert_eq!(result.rejected_unauthorized[0].author, None);
     assert_eq!(updated.get("dev1"), Some(&1));
+    assert_eq!(
+        db2.get_all_sync_cursors().await.unwrap().get("dev1"),
+        Some(&1),
+    );
 }
 
 /// Owner anchoring (issue #95/#102): a puller with a pinned owner refuses a chain
@@ -3518,8 +3692,7 @@ async fn pull_refuses_a_chain_not_anchored_to_the_pinned_owner() {
         .await
         .unwrap();
 
-    let result =
-        pull_into_result(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
         matches!(result, Err(PullError::MembershipTampered(_))),
         "a chain founded by a non-owner must be refused, got {:?}",
@@ -3540,8 +3713,7 @@ async fn pull_refuses_wiped_membership_when_owner_pinned() {
         .await
         .unwrap();
 
-    let result =
-        pull_into_result(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
         matches!(result, Err(PullError::MembershipTampered(_))),
         "an empty chain with a pinned owner must be refused, got {:?}",
@@ -3745,7 +3917,6 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
         target.synced_tables(),
         &storage,
         "dev2",
-        &HashMap::new(),
         &store_dir,
         cycle_membership.chain,
         cycle_membership.pinned_owner,
@@ -3797,8 +3968,7 @@ async fn pull_aborts_when_membership_listing_fails_on_owner_pinned_store() {
     // with authorization silently disabled.
     storage.fail_membership_listing();
 
-    let result =
-        pull_into_result(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
         matches!(result, Err(PullError::Storage(_))),
         "a membership-list failure on an owner-pinned store must abort the cycle, got {:?}",
@@ -3857,8 +4027,7 @@ async fn pull_accepts_a_chain_anchored_to_the_pinned_owner() {
         .await
         .unwrap();
 
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
@@ -3905,14 +4074,7 @@ async fn pull_rejects_a_current_owner_changeset_without_a_membership_grant() {
         .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let (updated, result) = pull_into(
-        &target,
-        &storage,
-        "dev2",
-        &HashMap::new(),
-        &temp_store_dir().1,
-    )
-    .await;
+    let (updated, result) = pull_into(&target, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert_eq!(result.rejected_unauthorized.len(), 1);
@@ -3975,14 +4137,7 @@ async fn pull_rejects_a_changeset_whose_signer_differs_from_the_device_head() {
         .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let (updated, result) = pull_into(
-        &target,
-        &storage,
-        "dev2",
-        &HashMap::new(),
-        &temp_store_dir().1,
-    )
-    .await;
+    let (updated, result) = pull_into(&target, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert_eq!(result.rejected_unauthorized.len(), 1);
@@ -4058,8 +4213,7 @@ async fn pull_resolves_a_changeset_whose_authorizing_entry_lags_the_listing() {
         .await
         .unwrap();
 
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     // The lagging entry was fetched by coordinate and the changeset applied — not
     // dropped as non-member, and not surfaced as a rejection.
@@ -4122,8 +4276,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         .await
         .unwrap();
 
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     // Nothing applied; the changeset is surfaced as rejected-unauthorized and the
     // cursor advances past it (the device must not stall on forged content).
@@ -4137,6 +4290,10 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         Some(hex::encode(outsider.public_key()))
     );
     assert_eq!(updated.get("devX"), Some(&1));
+    assert_eq!(
+        db2.get_all_sync_cursors().await.unwrap().get("devX"),
+        Some(&1),
+    );
 }
 
 /// Issue #86 — a changeset whose signature does not verify (forged or corrupt in
@@ -4193,8 +4350,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
         .await
         .unwrap();
 
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     // Nothing applied; surfaced as an invalid signature (NOT unauthorized) and the
     // cursor holds at the bad object.
@@ -4273,8 +4429,7 @@ async fn pull_skips_a_removed_members_changeset() {
         .await
         .unwrap();
 
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
@@ -4364,8 +4519,7 @@ async fn removed_member_is_not_re_admitted_by_a_lagging_listing() {
         .await
         .unwrap();
 
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     // Not applied: the removed member is not re-admitted by the lagging listing.
     // Surfaced as rejected-unauthorized and the cursor advances so the device is
@@ -4439,8 +4593,7 @@ async fn pull_rejects_a_changeset_naming_a_grant_no_head_covers() {
         .await
         .unwrap();
 
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     // The Add is visible by keyed GET but absent from the signed committed prefix.
     assert_eq!(storage.membership_list_count(), 2);
@@ -4511,14 +4664,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         .set_sync_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
         .await
         .unwrap();
-    let (updated, result) = pull_into(
-        &target,
-        &storage,
-        "dev2",
-        &HashMap::new(),
-        &temp_store_dir().1,
-    )
-    .await;
+    let (updated, result) = pull_into(&target, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert_eq!(result.rejected_unauthorized.len(), 1);
@@ -4589,8 +4735,7 @@ async fn pull_holds_the_cursor_when_the_mid_cycle_membership_list_fails() {
         .await
         .unwrap();
 
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     // The failed read leaves authorization undecided and the cursor unchanged.
     assert_eq!(storage.membership_list_count(), 2);
@@ -4646,8 +4791,7 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
 
     // First cycle: accepts the head at seq 3 (member removed), persisting the
     // reader's watermark at 3.
-    let (updated, _) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     // A stale replica serves the head from before the Remove (seq 2, signed over
     // the Add's tip hash).
@@ -4657,7 +4801,7 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
         .await
         .unwrap();
 
-    let result = pull_into_result(&db2, &storage, "dev2", &updated, &temp_store_dir().1).await;
+    let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
         matches!(result, Err(PullError::MembershipTampered(_))),
         "a head regressing below the accepted watermark must be refused, got {:?}",
@@ -4692,8 +4836,7 @@ async fn pull_refuses_a_malformed_chain_when_owner_pinned() {
         .await
         .unwrap();
 
-    let result =
-        pull_into_result(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
         matches!(result, Err(PullError::MembershipTampered(_))),
         "a malformed chain on a pinned-owner store must be refused, got {:?}",
@@ -4737,8 +4880,7 @@ async fn pull_rejects_a_stream_authored_by_a_non_member() {
         .await
         .unwrap();
 
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 0);
     assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
@@ -4792,8 +4934,7 @@ async fn pull_honors_a_head_authored_by_a_current_member() {
         .await
         .unwrap();
 
-    let (updated, result) =
-        pull_into(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
 
     assert_eq!(result.changesets_applied, 1);
     assert!(row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
@@ -4841,8 +4982,7 @@ async fn pull_ignores_min_schema_version_from_a_non_owner() {
 
     // The pull must succeed (the non-owner floor is ignored), not error with
     // SchemaVersionTooOld.
-    let result =
-        pull_into_result(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
         result.is_ok(),
         "a non-owner floor must be ignored, not trip SchemaVersionTooOld; got {:?}",
@@ -4875,8 +5015,7 @@ async fn pull_honors_min_schema_version_from_a_current_owner() {
         .await
         .unwrap();
 
-    let result =
-        pull_into_result(&db2, &storage, "dev2", &HashMap::new(), &temp_store_dir().1).await;
+    let result = pull_into_result(&db2, &storage, "dev2", &temp_store_dir().1).await;
     assert!(
         matches!(
             result,
@@ -4969,7 +5108,7 @@ mod blob_path_traversal {
         // proven by the `store_dir` unit tests).
         let db2 = open_test_db_with_blob(photo_decl());
         let (_t, ld) = temp_store_dir();
-        let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+        let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
         // It is bad data, so the row that carries it is not applied and the cursor
         // does not advance — the same posture as any other failed-blob changeset.
@@ -5009,7 +5148,7 @@ mod blob_path_traversal {
         let db2 = open_test_db_with_blob(photo_decl());
         let (_t, ld) = temp_store_dir();
         // The pull completes (no panic); the unindexable row is refused.
-        let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+        let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
         assert!(
             result.asset_downloads_failed,
@@ -5055,7 +5194,7 @@ mod blob_path_traversal {
 
         let db2 = open_test_db_with_blob(photo_decl());
         let (_t, ld) = temp_store_dir();
-        let (updated, result) = pull_into(&db2, &storage, "dev2", &HashMap::new(), &ld).await;
+        let (updated, result) = pull_into(&db2, &storage, "dev2", &ld).await;
 
         assert_eq!(result.changesets_applied, 1, "a well-formed row applies");
         assert!(!result.asset_downloads_failed);
@@ -5124,7 +5263,7 @@ async fn update_applied_before_its_insert_diverges_notfound_omit() {
 
     let db_upd = open_test_db();
     let (_tu, ld_upd) = temp_store_dir();
-    pull_into(&db_upd, &storage, "dev-a", &HashMap::new(), &ld_upd).await;
+    pull_into(&db_upd, &storage, "dev-a", &ld_upd).await;
     let update = capture_bytes(
         &db_upd,
         &[
@@ -5140,7 +5279,7 @@ async fn update_applied_before_its_insert_diverges_notfound_omit() {
 
     let db_c = open_test_db();
     let (_tc, ld_c) = temp_store_dir();
-    pull_into(&db_c, &storage, "dev-c", &HashMap::new(), &ld_c).await;
+    pull_into(&db_c, &storage, "dev-c", &ld_c).await;
 
     assert_eq!(
         query_text(&db_c, "SELECT title FROM notes WHERE id = 'n1'").await,

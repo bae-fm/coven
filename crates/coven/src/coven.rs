@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use tracing::{debug, warn};
 
 use crate::blob::local_files::LocalBlobError;
@@ -567,7 +567,8 @@ impl CovenHandle {
         };
         match outcome {
             Ok(value) => {
-                if let Err(error) = drain_local_cleanup_intents(self.db(), &self.store_dir()).await
+                if let Err(error) =
+                    crate::blob::local_cleanup::drain(self.db(), &self.store_dir()).await
                 {
                     warn!(
                         error = %error,
@@ -749,94 +750,6 @@ fn sync_parent_dir(path: &Path) -> CovenResult<()> {
     Ok(())
 }
 
-fn record_local_cleanup_intents(
-    tx: &rusqlite::Transaction<'_>,
-    store_dir: &crate::store_dir::StoreDir,
-    deleted: &[BlobRef],
-) -> CovenResult<()> {
-    for blob in deleted {
-        let _ = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
-        let _ = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
-        let _ = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
-        let pending: Option<i64> = tx
-            .query_row(
-                "SELECT 1 FROM local_cleanup_intents WHERE namespace = ?1 AND blob_id = ?2",
-                rusqlite::params![blob.namespace, blob.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if pending.is_some() {
-            debug!(
-                namespace = %blob.namespace,
-                blob_id = %blob.id,
-                "local blob cleanup intent is already pending"
-            );
-        } else {
-            tx.execute(
-                "INSERT INTO local_cleanup_intents (namespace, blob_id) VALUES (?1, ?2)",
-                rusqlite::params![blob.namespace, blob.id],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-async fn drain_local_cleanup_intents(
-    db: &Database,
-    store_dir: &crate::store_dir::StoreDir,
-) -> CovenResult<()> {
-    let intents = db
-        .call(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT namespace, blob_id FROM local_cleanup_intents ORDER BY namespace, blob_id",
-            )?;
-            let intents = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(DbError::from)?;
-            Ok(intents)
-        })
-        .await?;
-
-    for (namespace, id) in intents {
-        match crate::blob::cache::drop_all_local_copies(store_dir, &namespace, &id).await {
-            Ok(()) => {
-                let delete_namespace = namespace.clone();
-                let delete_id = id.clone();
-                if let Err(error) = db
-                    .call(move |conn| {
-                        conn.execute(
-                            "DELETE FROM local_cleanup_intents WHERE namespace = ?1 AND blob_id = ?2",
-                            rusqlite::params![delete_namespace, delete_id],
-                        )
-                        .map(|_| ())
-                        .map_err(DbError::from)
-                    })
-                    .await
-                {
-                    warn!(
-                        namespace = %namespace,
-                        blob_id = %id,
-                        error = %error,
-                        "failed to clear local blob cleanup intent"
-                    );
-                }
-            }
-            Err(error) => {
-                warn!(
-                    namespace = %namespace,
-                    blob_id = %id,
-                    error = %error,
-                    "local blob cleanup intent remains pending"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 fn run_write_batch_on_connection<R>(
     conn: &Connection,
     stamper: UpdatedAtStamper,
@@ -891,18 +804,22 @@ fn run_write_batch_on_connection<R>(
             })) {
                 Ok(Ok(value)) => {
                     for blob in &deleted {
-                        match decls.row_for_blob_in_namespace(tx, &blob.namespace, &blob.id) {
-                            Ok(Some(_)) => {
-                                return Err(CovenError::BlobStillReferenced {
-                                    namespace: blob.namespace.clone(),
-                                    id: blob.id.clone(),
-                                });
-                            }
-                            Ok(None) => {}
-                            Err(e) => return Err(CovenError::Blob(e.to_string())),
+                        let _ = store_dir.local_blob_path(&blob.namespace, &blob.id)?;
+                        let _ = store_dir.pinned_blob_path(&blob.namespace, &blob.id)?;
+                        let _ = store_dir.cache_blob_path(&blob.namespace, &blob.id)?;
+                        let intent = crate::blob::local_cleanup::LocalBlobCleanupIntent::new(
+                            &blob.namespace,
+                            &blob.id,
+                        );
+                        if !crate::blob::local_cleanup::record_if_unreferenced_on(
+                            tx, &decls, &intent,
+                        )? {
+                            return Err(CovenError::BlobStillReferenced {
+                                namespace: blob.namespace.clone(),
+                                id: blob.id.clone(),
+                            });
                         }
                     }
-                    record_local_cleanup_intents(tx, &store_dir, &deleted)?;
                     Ok(value)
                 }
                 Ok(Err(error)) => Err(error),
@@ -948,10 +865,11 @@ mod tests {
     use crate::sync::session::BlobDecl;
     use crate::sync::storage::SyncStorage;
     use crate::sync::test_helpers::run_test_cycle as drive_test_cycle;
-    use crate::sync::test_helpers::{pull_into, query_text, row_exists, MockSyncStorage};
+    use crate::sync::test_helpers::{
+        capture_bytes, pull_into, query_text, row_exists, MockSyncStorage,
+    };
     use async_trait::async_trait;
     use rusqlite::params;
-    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::RwLock;
     use std::time::Duration;
@@ -1150,14 +1068,7 @@ mod tests {
         run_test_cycle(&storage, &reopened, &keypair).await;
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(
-            peer.db(),
-            &storage,
-            "peer",
-            &HashMap::new(),
-            &peer.store_dir(),
-        )
-        .await;
+        pull_into(peer.db(), &storage, "peer", &peer.store_dir()).await;
         assert_eq!(
             query_text(
                 peer.db(),
@@ -1193,14 +1104,7 @@ mod tests {
         run_test_cycle(&storage, &reopened, &keypair).await;
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(
-            peer.db(),
-            &storage,
-            "peer",
-            &HashMap::new(),
-            &peer.store_dir(),
-        )
-        .await;
+        pull_into(peer.db(), &storage, "peer", &peer.store_dir()).await;
         assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'file-pending-a'").await);
         assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'file-pending-b'").await);
     }
@@ -1226,14 +1130,7 @@ mod tests {
         run_test_cycle(&storage, &handle, &keypair).await;
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(
-            peer.db(),
-            &storage,
-            "peer",
-            &HashMap::new(),
-            &peer.store_dir(),
-        )
-        .await;
+        pull_into(peer.db(), &storage, "peer", &peer.store_dir()).await;
         assert!(
             row_exists(
                 peer.db(),
@@ -1256,9 +1153,7 @@ mod tests {
         let reopened = open_files_handle_in(dir);
         run_test_cycle(&storage, &reopened, &keypair).await;
 
-        let mut cursors = HashMap::new();
-        cursors.insert("device-test".to_string(), 1);
-        pull_into(peer.db(), &storage, "peer", &cursors, &peer.store_dir()).await;
+        pull_into(peer.db(), &storage, "peer", &peer.store_dir()).await;
         assert!(
             !row_exists(
                 peer.db(),
@@ -2015,6 +1910,111 @@ mod tests {
             .local_blob_path("media-files", "oldddddd")
             .expect("local path")
             .exists());
+    }
+
+    #[tokio::test]
+    async fn native_write_drain_preserves_a_blob_still_referenced_after_remote_delete() {
+        let (_tmp, handle) = open_files_handle();
+        let blob_id = "shared01";
+        handle
+            .sql(move |sql| {
+                sql.tx().execute_batch(
+                    "INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('remote-deletes', 'shared01', 4, \
+                             '0000000001000-0000-dev-remote'); \
+                     INSERT INTO files (id, blob_id, size, _updated_at) \
+                     VALUES ('still-live', 'shared01', 4, \
+                             '0000000001000-0000-dev-remote');",
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed two rows sharing the blob");
+
+        let local = handle
+            .store_dir()
+            .local_blob_path("media-files", blob_id)
+            .expect("local path");
+        let pinned = handle
+            .store_dir()
+            .pinned_blob_path("media-files", blob_id)
+            .expect("pinned path");
+        let cached = handle
+            .store_dir()
+            .cache_blob_path("media-files", blob_id)
+            .expect("cache path");
+        write_raw_file(&local, b"live").await;
+        write_raw_file(&pinned, b"live").await;
+        write_raw_file(&cached, b"live").await;
+
+        let (source, _stamper) = Database::open(
+            std::path::Path::new(":memory:"),
+            vec![files_table()],
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            "dev-remote".to_string(),
+            &[files_migration()],
+        )
+        .expect("open remote source");
+        capture_bytes(
+            &source,
+            &["INSERT INTO files (id, blob_id, size, _updated_at) \
+                 VALUES ('remote-deletes', 'shared01', 4, \
+                         '0000000001000-0000-dev-remote')"],
+        )
+        .await;
+        let remote_delete =
+            capture_bytes(&source, &["DELETE FROM files WHERE id = 'remote-deletes'"]).await;
+        let storage = Arc::new(MockSyncStorage::new());
+        storage.store_changeset("dev-remote", 1, &remote_delete, 1);
+
+        let (commit_reached, resume_pull) =
+            crate::sync::pull::pause_pull_after_remote_commit("dev-remote", 1);
+        let pull_handle = handle.clone();
+        let pull_storage = storage.clone();
+        let pull = tokio::spawn(async move {
+            pull_into(
+                pull_handle.db(),
+                pull_storage.as_ref(),
+                "device-test",
+                &pull_handle.store_dir(),
+            )
+            .await
+        });
+
+        commit_reached.notified().await;
+        handle
+            .write(
+                |_| Ok(()),
+                |sql| {
+                    sql.tx().execute(
+                        "INSERT INTO files (id, blob_id, size, _updated_at) \
+                         VALUES ('drain-trigger', NULL, 0, ?1)",
+                        [sql.stamp()],
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("native write drains cleanup queue");
+        resume_pull.notify_one();
+        pull.await.expect("pull task");
+
+        assert!(
+            !row_exists(
+                handle.db(),
+                "SELECT 1 FROM files WHERE id = 'remote-deletes'"
+            )
+            .await
+        );
+        assert!(row_exists(handle.db(), "SELECT 1 FROM files WHERE id = 'still-live'").await);
+        assert!(local.exists(), "the live blob's local copy survives");
+        assert!(pinned.exists(), "the live blob's pinned copy survives");
+        assert!(cached.exists(), "the live blob's cache copy survives");
+        assert_eq!(
+            cleanup_intent_count(&handle, "media-files", blob_id).await,
+            0,
+        );
     }
 
     #[tokio::test]

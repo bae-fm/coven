@@ -1089,10 +1089,11 @@ impl Database {
         Ok(out)
     }
 
-    /// Seed the cursor vector carried by a snapshot before applying anything
-    /// above it. Existing coverage is never lowered when a caller supplies an
-    /// older snapshot position.
-    pub(crate) async fn seed_sync_cursors(
+    /// Install the cursor vector carried by a verified snapshot before applying
+    /// anything above it. Existing coverage is never lowered by an older
+    /// snapshot position.
+    #[doc(hidden)]
+    pub async fn install_snapshot_cursors(
         &self,
         cursors: &HashMap<String, u64>,
     ) -> Result<(), DbError> {
@@ -1103,17 +1104,17 @@ impl Database {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             for (device_id, seq) in cursors {
-                Self::seed_sync_cursor_on(&tx, &device_id, seq)?;
+                Self::install_snapshot_cursor_on(&tx, &device_id, seq)?;
             }
             tx.commit().map_err(DbError::from)
         })
         .await
     }
 
-    /// Seed one cursor on a connection or transaction the caller already owns.
-    /// Snapshot restoration may start from an empty bookkeeping table; an
-    /// existing newer position wins over an older seed.
-    pub(crate) fn seed_sync_cursor_on(
+    /// Install one verified snapshot cursor on a connection or transaction the
+    /// caller already owns. Snapshot restoration may start from an empty
+    /// bookkeeping table; an existing newer position wins over an older snapshot.
+    pub(crate) fn install_snapshot_cursor_on(
         conn: &Connection,
         device_id: &str,
         seq: u64,

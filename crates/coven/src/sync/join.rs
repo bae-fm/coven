@@ -887,12 +887,16 @@ pub(crate) async fn open_db_and_pull(
     let membership = crate::sync::pull::load_cycle_membership(storage, &db)
         .await
         .map_err(BootstrapError::Pull)?;
+    db.install_snapshot_cursors(cursors)
+        .await
+        .map_err(|error| {
+            BootstrapError::Database(format!("Failed to install snapshot cursors: {error}"))
+        })?;
     let (_, pull_result) = pull_changes(
         &db,
         db.synced_tables(),
         storage,
         device_id,
-        cursors,
         store_dir,
         membership.chain,
         membership.pinned_owner,
@@ -938,8 +942,8 @@ pub(crate) async fn open_db_and_pull(
         }
     }
 
-    // Pull seeded the snapshot's cursor vector before applying anything above it,
-    // and committed each higher cursor with its rows. Record the remaining
+    // Bootstrap installed the snapshot's cursor vector before pulling anything
+    // above it, and each higher cursor committed with its rows. Record the remaining
     // bootstrap marker so the first real cycle treats this device as a joiner,
     // not a brand-new store that should publish an initial snapshot.
     db.set_sync_state("snapshot_seq", "0")
