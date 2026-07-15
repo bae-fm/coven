@@ -126,6 +126,7 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
         inverse_changeset,
         base,
         blob_facts,
+        partitions: _partitions,
     }) = db.prepare_store_write().await?
     else {
         return Ok(false);

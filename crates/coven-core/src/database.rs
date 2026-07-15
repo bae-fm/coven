@@ -709,9 +709,23 @@ pub struct Database {
 pub(crate) struct PreparedStoreWrite {
     pub write_id: WriteId,
     pub changeset: Vec<u8>,
+    pub partitions: PreparedStoreWritePartitions,
     pub inverse_changeset: Vec<u8>,
     pub base: StoreWriteBase,
     pub blob_facts: StoreWriteBlobFacts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedStoreWritePartitions {
+    pub store: Option<gate::AudiencePartition>,
+    pub circles: Vec<gate::AudiencePartition>,
+}
+
+impl PreparedStoreWritePartitions {
+    #[cfg(test)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &gate::AudiencePartition> {
+        self.store.iter().chain(self.circles.iter())
+    }
 }
 
 pub(crate) struct SerialStoreBranchPreparationWork {
@@ -2269,7 +2283,7 @@ impl Database {
         Ok((!changeset.is_empty())
             .then_some(gate::AudiencePartition {
                 audience: crate::sync::circle::Audience::Store,
-                control_coord_json: None,
+                control: None,
                 changeset,
             })
             .into_iter()
@@ -2378,16 +2392,15 @@ impl Database {
                 }
                 crate::sync::circle::Audience::Circle(circle_id) => circle_id.to_string(),
             };
+            let control = partition
+                .control
+                .as_ref()
+                .map(gate::CirclePartitionControl::stored_json);
             tx.execute(
                 "INSERT INTO store_write_partitions
                  (write_id, audience, control_coord, changeset)
                  VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![
-                    write_id.as_str(),
-                    audience,
-                    partition.control_coord_json,
-                    partition.changeset,
-                ],
+                rusqlite::params![write_id.as_str(), audience, control, partition.changeset,],
             )
             .map_err(DbError::from)?;
         }
@@ -2531,8 +2544,10 @@ impl Database {
     }
 
     pub(crate) async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
-        self.call(|conn| {
-            conn.query_row(
+        let write_policy = self.write_policy();
+        self.call(move |conn| {
+            let stored = conn
+                .query_row(
                 "SELECT write_id, changeset, inverse_changeset, base, blob_facts FROM store_writes
                  WHERE status = '\"pending\"'
                    AND ordinal = (
@@ -2556,25 +2571,132 @@ impl Database {
                     ))
                 },
             )
-            .optional()
-            .map_err(DbError::from)?
-            .map(
-                |(write_id, changeset, inverse_changeset, base, blob_facts)| {
-                    Ok(PreparedStoreWrite {
-                        write_id: WriteId::from_generated(write_id),
-                        changeset,
-                        inverse_changeset,
-                        base: serde_json::from_str(&base)
-                            .map_err(|error| DbError(format!("pending write base: {error}")))?,
-                        blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
-                            DbError(format!("pending write blob facts: {error}"))
-                        })?,
-                    })
-                },
-            )
-            .transpose()
+                .optional()
+                .map_err(DbError::from)?;
+            let Some((write_id, changeset, inverse_changeset, base, blob_facts)) = stored else {
+                return Ok(None);
+            };
+            let partitions = Self::prepared_store_write_partitions_on(
+                conn,
+                &write_id,
+                &changeset,
+                write_policy,
+            )?;
+            Ok(Some(PreparedStoreWrite {
+                write_id: WriteId::from_generated(write_id),
+                changeset,
+                partitions,
+                inverse_changeset,
+                base: serde_json::from_str(&base)
+                    .map_err(|error| DbError(format!("pending write base: {error}")))?,
+                blob_facts: serde_json::from_str(&blob_facts)
+                    .map_err(|error| DbError(format!("pending write blob facts: {error}")))?,
+            }))
         })
         .await
+    }
+
+    fn prepared_store_write_partitions_on(
+        conn: &Connection,
+        write_id: &str,
+        stored_store_changeset: &[u8],
+        write_policy: WritePolicy,
+    ) -> Result<PreparedStoreWritePartitions, DbError> {
+        let mut statement = conn
+            .prepare(
+                "SELECT audience, control_coord, changeset
+                 FROM store_write_partitions
+                 WHERE write_id = ?1
+                 ORDER BY CASE audience WHEN 'store' THEN 0 ELSE 1 END,
+                          audience, control_coord",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([write_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?;
+        let mut store = None;
+        let mut circles = Vec::new();
+        for row in rows {
+            let (audience, control, changeset) = row.map_err(DbError::from)?;
+            if audience == "store" {
+                if control.is_some() {
+                    return Err(DbError(format!(
+                        "pending write {write_id} Store partition carries a Circle control"
+                    )));
+                }
+                if store.is_some() {
+                    return Err(DbError(format!(
+                        "pending write {write_id} carries more than one Store partition"
+                    )));
+                }
+                store = Some(gate::AudiencePartition {
+                    audience: crate::sync::circle::Audience::Store,
+                    control: None,
+                    changeset,
+                });
+                continue;
+            }
+            let circle_id = audience
+                .parse::<crate::sync::circle::CircleId>()
+                .map_err(|error| {
+                    DbError(format!(
+                        "pending write {write_id} has invalid audience {audience:?}: {error}"
+                    ))
+                })?;
+            let control_json = control.ok_or_else(|| {
+                DbError(format!(
+                    "pending write {write_id} Circle {circle_id} has no control coordinate"
+                ))
+            })?;
+            let control =
+                gate::CirclePartitionControl::from_stored_json(control_json).map_err(|error| {
+                    DbError(format!(
+                        "pending write {write_id} Circle {circle_id} control coordinate: {error}"
+                    ))
+                })?;
+            let control_policy = match control.coordinate() {
+                crate::sync::circle::CircleControlCoord::MergeConcurrent { .. } => {
+                    WritePolicy::MergeConcurrent
+                }
+                crate::sync::circle::CircleControlCoord::Serial { .. } => WritePolicy::Serial,
+            };
+            if control_policy != write_policy {
+                return Err(DbError(format!(
+                    "pending write {write_id} Circle {circle_id} control uses {control_policy:?}, database uses {write_policy:?}"
+                )));
+            }
+            circles.push(gate::AudiencePartition {
+                audience: crate::sync::circle::Audience::Circle(circle_id),
+                control: Some(control),
+                changeset,
+            });
+        }
+        drop(statement);
+        match &store {
+            Some(partition) if partition.changeset != stored_store_changeset => {
+                return Err(DbError(format!(
+                    "pending write {write_id} Store partition differs from store_writes.changeset"
+                )));
+            }
+            None if !stored_store_changeset.is_empty() => {
+                return Err(DbError(format!(
+                    "pending write {write_id} has a store_writes.changeset without a Store partition"
+                )));
+            }
+            Some(_) | None => {}
+        }
+        if store.is_none() && circles.is_empty() {
+            return Err(DbError(format!(
+                "pending write {write_id} has no durable audience partitions"
+            )));
+        }
+        Ok(PreparedStoreWritePartitions { store, circles })
     }
 
     pub(crate) async fn reserve_serial_store_branch(
@@ -2672,9 +2794,16 @@ impl Database {
                         return Ok(None);
                     }
                 }
+                let partitions = Self::prepared_store_write_partitions_on(
+                    &tx,
+                    &write_id,
+                    &changeset,
+                    WritePolicy::Serial,
+                )?;
                 writes.push(PreparedStoreWrite {
                     write_id: WriteId::from_generated(write_id),
                     changeset,
+                    partitions,
                     inverse_changeset,
                     base: parsed_base,
                     blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
@@ -2728,7 +2857,7 @@ impl Database {
             let inverse_changeset = Self::invert_changeset(&changeset)?;
             let partitions = vec![gate::AudiencePartition {
                 audience: crate::sync::circle::Audience::Store,
-                control_coord_json: None,
+                control: None,
                 changeset,
             }];
             let blob_facts =
@@ -7918,5 +8047,221 @@ mod tests {
                 }
             );
         }
+    }
+
+    const RESTART_CIRCLE_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn restart_circle_coord(policy: WritePolicy) -> String {
+        match policy {
+            WritePolicy::MergeConcurrent => serde_json::json!({
+                "merge_concurrent": {
+                    "device_id": "restart-control-device",
+                    "author_pubkey": "restart-owner",
+                    "author_owner_grant": "11".repeat(32),
+                    "seq": 1,
+                    "control_hash": "22".repeat(32)
+                }
+            }),
+            WritePolicy::Serial => serde_json::json!({
+                "serial": {
+                    "author_pubkey": "restart-owner",
+                    "generation": 1,
+                    "control_hash": "33".repeat(32)
+                }
+            }),
+        }
+        .to_string()
+    }
+
+    async fn capture_scoped_write_then_reopen(
+        policy: WritePolicy,
+        name: &str,
+    ) -> (
+        tempfile::TempDir,
+        Database,
+        Vec<(String, Option<String>, Vec<u8>)>,
+    ) {
+        let temp = tempfile::tempdir().expect("temporary scoped Store");
+        let path = temp.path().join(format!("{name}.db"));
+        let tables =
+            vec![
+                SyncedTable::new("accounts", crate::sync::session::RowIdentity::SharedKey)
+                    .scoped_by("audience"),
+            ];
+        let migrations = vec![Migration::sql(
+            1,
+            "accounts",
+            "CREATE TABLE accounts (
+                id TEXT PRIMARY KEY,
+                audience TEXT,
+                _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )];
+        let (db, _) = Database::open(
+            &path,
+            tables.clone(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            policy,
+            format!("{name}-device"),
+            &migrations,
+        )
+        .expect("open scoped Store");
+        let control = restart_circle_coord(policy);
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO protocol_state (key, value)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (
+                    STORE_ROOT_HASH_STATE_KEY,
+                    ObjectHash::digest(b"restart-scoped-root").to_string(),
+                ),
+            )
+            .map_err(DbError::from)?;
+            conn.execute(
+                "INSERT INTO circle_control_activations
+                 (circle_id, control_coord, stream_id, seq, commit_hash, control_bytes)
+                 VALUES (?1, ?2, 'restart-control-device', 1, ?3, X'01')",
+                (RESTART_CIRCLE_ID, &control, "44".repeat(32)),
+            )
+            .map_err(DbError::from)?;
+            conn.execute(
+                "INSERT INTO circle_access_cache
+                 (circle_id, control_coord, owner_pubkey, disposition, access_bytes)
+                 VALUES (?1, ?2, 'restart-owner', 'active', X'02')",
+                (RESTART_CIRCLE_ID, &control),
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("seed active Circle authority");
+
+        let gates = db.gates();
+        let blob_decls = db.blob_decls();
+        let write_id = db.new_write_id();
+        let routing =
+            (policy == WritePolicy::MergeConcurrent).then(|| EncryptionService::from_key([7; 32]));
+        let capture_tables = tables.clone();
+        db.call(move |conn| {
+            Database::run_store_write_transaction_on(
+                conn,
+                &capture_tables,
+                &gates,
+                &blob_decls,
+                policy,
+                routing.as_ref(),
+                write_id,
+                |tx| {
+                    tx.execute(
+                        "INSERT INTO accounts (id, audience, _updated_at)
+                         VALUES ('store-account', NULL, '0000000001000-0000-restart')",
+                        [],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO accounts (id, audience, _updated_at)
+                         VALUES ('circle-account', ?1, '0000000001001-0000-restart')",
+                        [RESTART_CIRCLE_ID],
+                    )?;
+                    Ok::<_, DbError>(())
+                },
+            )
+        })
+        .await
+        .expect("capture Store and Circle partitions");
+        let expected = db
+            .call(|conn| {
+                conn.prepare(
+                    "SELECT audience, control_coord, changeset
+                     FROM store_write_partitions
+                     ORDER BY CASE audience WHEN 'store' THEN 0 ELSE 1 END,
+                              audience, control_coord",
+                )
+                .and_then(|mut statement| {
+                    statement
+                        .query_map([], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, Vec<u8>>(2)?,
+                            ))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .map_err(DbError::from)
+            })
+            .await
+            .expect("read exact persisted audience partitions");
+        assert_eq!(expected.len(), 2);
+        drop(db);
+
+        let (reopened, _) = Database::open(
+            &path,
+            tables,
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            policy,
+            format!("{name}-device"),
+            &migrations,
+        )
+        .expect("reopen scoped Store");
+        (temp, reopened, expected)
+    }
+
+    fn assert_prepared_partitions(
+        actual: &PreparedStoreWritePartitions,
+        expected: &[(String, Option<String>, Vec<u8>)],
+    ) {
+        let actual = actual
+            .iter()
+            .map(|partition| {
+                let audience = match partition.audience {
+                    crate::sync::circle::Audience::Store => "store".to_string(),
+                    crate::sync::circle::Audience::Circle(circle) => circle.to_string(),
+                    crate::sync::circle::Audience::Local => {
+                        panic!("Local audience entered Store preparation")
+                    }
+                };
+                (
+                    audience,
+                    partition.control.as_ref().map(|control| {
+                        let parsed = serde_json::from_str(control.stored_json())
+                            .expect("parse stored control");
+                        assert_eq!(control.coordinate(), &parsed);
+                        control.stored_json().to_string()
+                    }),
+                    partition.changeset.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn merge_preparation_reloads_exact_scoped_partitions_after_restart() {
+        let (_temp, reopened, expected) =
+            capture_scoped_write_then_reopen(WritePolicy::MergeConcurrent, "merge-restart").await;
+        let prepared = reopened
+            .prepare_store_write()
+            .await
+            .expect("prepare restarted Merge write")
+            .expect("pending Merge write");
+
+        assert_prepared_partitions(&prepared.partitions, &expected);
+    }
+
+    #[tokio::test]
+    async fn serial_preparation_reloads_exact_scoped_partitions_after_restart() {
+        let (_temp, reopened, expected) =
+            capture_scoped_write_then_reopen(WritePolicy::Serial, "serial-restart").await;
+        let branch = reopened
+            .reserve_serial_store_branch()
+            .await
+            .expect("reserve restarted Serial branch")
+            .expect("pending Serial branch");
+        assert_eq!(branch.writes.len(), 1);
+
+        assert_prepared_partitions(&branch.writes[0].partitions, &expected);
     }
 }

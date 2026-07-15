@@ -71,7 +71,7 @@ mod outbound;
 
 pub(crate) use audience::{
     capture_routing_changes, is_routing_table, partition_outbound, AudiencePartition,
-    RoutingChanges,
+    CirclePartitionControl, RoutingChanges,
 };
 pub(crate) use model::write_gate;
 pub use model::Gates;

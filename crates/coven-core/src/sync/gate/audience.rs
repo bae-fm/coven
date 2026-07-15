@@ -19,10 +19,37 @@ pub(crate) fn is_routing_table(table: &str) -> bool {
     matches!(table, "_coven_audience" | "_coven_row_routes")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AudiencePartition {
     pub(crate) audience: Audience,
-    pub(crate) control_coord_json: Option<String>,
+    pub(crate) control: Option<CirclePartitionControl>,
     pub(crate) changeset: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CirclePartitionControl {
+    coordinate: CircleControlCoord,
+    stored_json: String,
+}
+
+impl CirclePartitionControl {
+    pub(crate) fn from_stored_json(stored_json: String) -> Result<Self, String> {
+        let coordinate: CircleControlCoord =
+            serde_json::from_str(&stored_json).map_err(|error| error.to_string())?;
+        coordinate.validate().map_err(|error| error.to_string())?;
+        Ok(Self {
+            coordinate,
+            stored_json,
+        })
+    }
+
+    pub(crate) fn coordinate(&self) -> &CircleControlCoord {
+        &self.coordinate
+    }
+
+    pub(crate) fn stored_json(&self) -> &str {
+        &self.stored_json
+    }
 }
 
 pub(crate) struct RoutingChanges {
@@ -42,7 +69,7 @@ impl RoutingChanges {
 }
 
 struct PartitionGroup {
-    control_coord_json: Option<String>,
+    control: Option<CirclePartitionControl>,
     group: Changegroup,
 }
 
@@ -135,7 +162,7 @@ unsafe fn partition_outbound_raw(
         .map(|(audience, group)| {
             Ok(AudiencePartition {
                 audience,
-                control_coord_json: group.control_coord_json,
+                control: group.control,
                 changeset: group.group.output()?,
             })
         })
@@ -518,7 +545,7 @@ unsafe fn partition_group<'a>(
     audience: Audience,
     write_policy: WritePolicy,
 ) -> Result<&'a mut PartitionGroup, GateError> {
-    let control_coord_json = match audience {
+    let control = match audience {
         Audience::Circle(circle_id) => Some(active_circle_control(conn, circle_id, write_policy)?),
         Audience::Store | Audience::Local => None,
     };
@@ -527,10 +554,7 @@ unsafe fn partition_group<'a>(
         std::collections::btree_map::Entry::Vacant(entry) => {
             let group = Changegroup::new()?;
             group.set_schema(conn.handle())?;
-            Ok(entry.insert(PartitionGroup {
-                control_coord_json,
-                group,
-            }))
+            Ok(entry.insert(PartitionGroup { control, group }))
         }
     }
 }
@@ -748,7 +772,7 @@ fn active_circle_control(
     conn: &Connection,
     circle_id: CircleId,
     write_policy: WritePolicy,
-) -> Result<String, GateError> {
+) -> Result<CirclePartitionControl, GateError> {
     let mut statement = conn
         .prepare(
             "SELECT access.control_coord
@@ -772,18 +796,9 @@ fn active_circle_control(
             active_records: controls.len(),
         });
     };
-    let parsed: CircleControlCoord =
-        serde_json::from_str(control).map_err(|error| GateError::InvalidCircleControl {
-            circle_id,
-            reason: error.to_string(),
-        })?;
-    parsed
-        .validate()
-        .map_err(|error| GateError::InvalidCircleControl {
-            circle_id,
-            reason: error.to_string(),
-        })?;
-    let control_policy = match parsed {
+    let parsed = CirclePartitionControl::from_stored_json(control.clone())
+        .map_err(|reason| GateError::InvalidCircleControl { circle_id, reason })?;
+    let control_policy = match parsed.coordinate() {
         CircleControlCoord::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
         CircleControlCoord::Serial { .. } => WritePolicy::Serial,
     };
@@ -794,5 +809,5 @@ fn active_circle_control(
             actual: control_policy,
         });
     }
-    Ok(control.clone())
+    Ok(parsed)
 }
