@@ -166,7 +166,7 @@ pub async fn complete_host_provided_make_remotes(
         db.write_policy(),
         routing_encryption,
     )
-    .map_err(|error| SyncCycleError::AssetUpload(error.0))?;
+    .map_err(|error| SyncCycleError::AssetUpload(error.into_message()))?;
     let roots = ready_host_provided_make_remotes(db, tables).await?;
     let mut completed = false;
     for root in roots {
@@ -340,7 +340,7 @@ async fn cancel_host_blob_tombstone(
         cancel.now_rfc,
     )
     .await
-    .map_err(|e| SyncCycleError::AssetUpload(e.0))
+    .map_err(|e| SyncCycleError::AssetUpload(e.into_message()))
 }
 
 /// Where this device holds a host-provided blob's plaintext, if it holds it at all.
@@ -494,7 +494,7 @@ async fn record_self_upload(
     if let Some(uploader) = storage.own_uploader() {
         db.record_blob_uploader(&blob.namespace, &blob.id, &uploader)
             .await
-            .map_err(|e| SyncCycleError::AssetUpload(e.0))?;
+            .map_err(|e| SyncCycleError::AssetUpload(e.into_message()))?;
     }
     Ok(())
 }
@@ -506,10 +506,10 @@ async fn expected_blob_size(db: &Database, blob: &BlobRef) -> Result<u64, SyncCy
     db.call(move |conn| {
         decls
             .size_for_blob_in_namespace(conn, &namespace, &id)
-            .map_err(|e| crate::database::DbError(e.to_string()))
+            .map_err(|e| crate::database::DbError::Message(e.to_string()))
     })
     .await
-    .map_err(|e| SyncCycleError::AssetScan(e.0))?
+    .map_err(|e| SyncCycleError::AssetScan(e.into_message()))?
     .ok_or_else(|| {
         SyncCycleError::AssetScan(format!(
             "cannot read expected size for blob {}/{}: no carrying row",
@@ -642,7 +642,7 @@ async fn ready_host_provided_make_remotes(
                 row.map_err(crate::database::DbError::from)?;
             let refs = decls
                 .refs_for_root(conn, &gates, &root_table, &root_id)
-                .map_err(|e| crate::database::DbError(e.to_string()))?;
+                .map_err(|e| crate::database::DbError::Message(e.to_string()))?;
             let user_blob_ids: Vec<String> = refs
                 .iter()
                 .filter(|blob| blob.provenance == Provenance::UserProvided)
@@ -670,7 +670,7 @@ async fn ready_host_provided_make_remotes(
                 continue;
             }
             let gate_column = gate_columns.get(&root_table).cloned().ok_or_else(|| {
-                crate::database::DbError(format!(
+                crate::database::DbError::Message(format!(
                     "make_remote completion: gated root {root_table} has no gate column"
                 ))
             })?;
@@ -688,7 +688,7 @@ async fn ready_host_provided_make_remotes(
         Ok(ready)
     })
     .await
-    .map_err(|e| SyncCycleError::AssetScan(e.0))
+    .map_err(|e| SyncCycleError::AssetScan(e.into_message()))
 }
 
 async fn finish_host_provided_make_remote(
@@ -722,7 +722,7 @@ async fn finish_host_provided_make_remote(
         )
     })
     .await
-    .map_err(|e| SyncCycleError::AssetUpload(e.0))
+    .map_err(|e| SyncCycleError::AssetUpload(e.into_message()))
 }
 
 #[derive(Debug)]

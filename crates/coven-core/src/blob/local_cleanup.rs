@@ -41,7 +41,7 @@ pub fn record_if_unreferenced_on(
 ) -> Result<bool, DbError> {
     if decls
         .row_for_blob_in_namespace(conn, intent.namespace(), intent.blob_id())
-        .map_err(|error| DbError(error.to_string()))?
+        .map_err(|error| DbError::Message(error.to_string()))?
         .is_some()
     {
         return Ok(false);

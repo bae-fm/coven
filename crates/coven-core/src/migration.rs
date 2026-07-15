@@ -407,7 +407,7 @@ mod tests {
             Migration::run(2, "boom", |conn| {
                 conn.execute("CREATE TABLE late (id TEXT PRIMARY KEY)", [])
                     .map_err(DbError::from)?;
-                Err(DbError("backfill failed".to_string()))
+                Err(DbError::Message("backfill failed".to_string()))
             }),
         ];
         let err = run_migrations(&conn, &migrations).expect_err("must fail");

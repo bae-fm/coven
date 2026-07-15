@@ -208,7 +208,7 @@ mod bootstrap_capability_tests {
         let image = source
             .call(move |connection| {
                 create_snapshot(connection, &snapshot_dir, &tables)
-                    .map_err(|error| crate::database::DbError(error.to_string()))
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
             })
             .await
             .expect("create snapshot image");
@@ -302,7 +302,7 @@ mod bootstrap_capability_tests {
         let image = source
             .call(move |connection| {
                 create_snapshot(connection, &snapshot_dir, &tables)
-                    .map_err(|error| crate::database::DbError(error.to_string()))
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
             })
             .await
             .expect("create snapshot image");
@@ -385,10 +385,10 @@ mod bootstrap_capability_tests {
             .expect("consume verified snapshot capability");
 
         assert_eq!(
-            db.get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
+            db.required_store_root_hash()
                 .await
                 .expect("read installed Store protocol root"),
-            Some(fixture.store_root_hash.to_string())
+            fixture.store_root_hash
         );
         assert_eq!(
             db.snapshot_coverage_frontier()
@@ -790,10 +790,10 @@ pub async fn reconcile_snapshot_blobs(
     let blobs: Vec<crate::sync::pull::BlobDownload> = {
         let conn = Connection::open(db_path).map_err(crate::database::DbError::from)?;
         let decls = crate::blob::decl::BlobDecls::from_tables(&conn, tables)
-            .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))?;
+            .map_err(|e| crate::database::DbError::Message(format!("blob decls: {e}")))?;
         decls
             .refs_in_db(&conn)
-            .map_err(|e| crate::database::DbError(format!("blob decls: {e}")))?
+            .map_err(|e| crate::database::DbError::Message(format!("blob decls: {e}")))?
             .into_iter()
             .filter(|blob| blob.fill == crate::blob::CacheFill::CacheEager)
             .map(crate::sync::pull::BlobDownload::from_installed_db)

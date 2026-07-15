@@ -197,12 +197,13 @@ async fn refs_for_root(
     root_id: String,
 ) -> Result<Vec<BlobRef>, DbError> {
     db.call(move |conn| {
-        let gates = Gates::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
+        let gates =
+            Gates::from_tables(conn, &tables).map_err(|e| DbError::Message(e.to_string()))?;
         let decls = crate::blob::decl::BlobDecls::from_tables(conn, &tables)
-            .map_err(|e| DbError(e.to_string()))?;
+            .map_err(|e| DbError::Message(e.to_string()))?;
         decls
             .refs_for_root(conn, &gates, &root_table, &root_id)
-            .map_err(|e| DbError(e.to_string()))
+            .map_err(|e| DbError::Message(e.to_string()))
     })
     .await
 }
@@ -354,7 +355,7 @@ pub async fn make_remote(
         .call(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let locality = crate::sync::gate::query_truth(&tx, &rt, &gc, &ri)
-                .map_err(|e| DbError(e.to_string()))?;
+                .map_err(|e| DbError::Message(e.to_string()))?;
             if locality == Some(false) {
                 Database::insert_make_remote_intent_on(&tx, &rt, &ri, pin)?;
                 for (id, namespace, cloud_key, source, scope) in &uploads {
@@ -649,7 +650,8 @@ pub async fn make_local(
     );
     let locality = db
         .call(move |conn| {
-            crate::sync::gate::query_truth(conn, &rt, &gc, &ri).map_err(|e| DbError(e.to_string()))
+            crate::sync::gate::query_truth(conn, &rt, &gc, &ri)
+                .map_err(|e| DbError::Message(e.to_string()))
         })
         .await?;
     match locality {

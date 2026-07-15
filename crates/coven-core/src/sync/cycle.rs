@@ -397,17 +397,17 @@ async fn capture_snapshot_cut(
             )
             .map_err(DbError::from)?;
         if pending != 0 {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "snapshot cut refused while unpublished Store writes exist".to_string(),
             ));
         }
         let snapshot = super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
-            .map_err(|e| DbError(e.to_string()))?;
+            .map_err(|e| DbError::Message(e.to_string()))?;
         let coverage = super::store_commit::CommitFrontier::from_positions(
             write_policy,
             Database::materialized_frontier_on(conn, None)?,
         )
-        .map_err(|error| DbError(format!("snapshot coverage: {error}")))?;
+        .map_err(|error| DbError::Message(format!("snapshot coverage: {error}")))?;
         Ok(SnapshotCut { snapshot, coverage })
     })
     .await
@@ -480,12 +480,9 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     let tables = db.synced_tables();
 
     let store_root_hash = db
-        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
+        .required_store_root_hash()
         .await
-        .map_err(|error| format!("read store protocol root hash: {error}"))?
-        .ok_or_else(|| "store protocol root hash is absent".to_string())?
-        .parse()
-        .map_err(|error| format!("store protocol root hash is invalid: {error}"))?;
+        .map_err(|error| format!("read store protocol root hash: {error}"))?;
 
     // Resolve the policy's authorization state before this cycle pushes, judges,
     // or decrypts. MergeConcurrent anchors its causal membership chain once for
@@ -1360,7 +1357,7 @@ pub async fn init_sync_over_storage(
         db.write_policy(),
         routing_encryption.as_ref(),
     )
-    .map_err(|error| InitSyncError::RowRouting(error.0))?;
+    .map_err(|error| InitSyncError::RowRouting(error.into_message()))?;
 
     let cipher = storage.cipher_state().clone();
     let cipher_is_plaintext = cipher.is_plaintext();

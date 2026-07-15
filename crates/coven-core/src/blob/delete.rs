@@ -688,13 +688,13 @@ pub async fn gc_tombstones(
             .call(move |conn| {
                 let Some((table, pk)) = decls
                     .row_for_blob_cloud_key(conn, &cloud_key)
-                    .map_err(|e| crate::database::DbError(e.to_string()))?
+                    .map_err(|e| crate::database::DbError::Message(e.to_string()))?
                 else {
                     return Ok(RowReference::NotLiveRemote);
                 };
                 let reference = match gates
                     .root_kept_of(conn, &table, &pk)
-                    .map_err(|e| crate::database::DbError(e.to_string()))?
+                    .map_err(|e| crate::database::DbError::Message(e.to_string()))?
                 {
                     Some(true) => RowReference::LiveRemote,
                     Some(false) => RowReference::NotLiveRemote,

@@ -42,8 +42,13 @@
 use async_trait::async_trait;
 use std::path::Path;
 
-use crate::storage::cloud::{AppendedObject, CloudHeadVersion, ListingCoverage};
-use crate::sync::store_commit::ObjectHash;
+use crate::storage::cloud::{AppendedObject, CloudHeadVersion, CopyId, ListingCoverage};
+use crate::sync::store_commit::{
+    ObjectHash, STORE_ACK_PREFIX, STORE_COMMIT_PREFIX, STORE_DEVICE_REGISTRATION_PREFIX,
+    STORE_HEAD_PREFIX, STORE_MEMBERSHIP_ENTRY_PREFIX, STORE_MEMBERSHIP_HEAD_PREFIX,
+    STORE_PACKAGE_PREFIX, STORE_PROTOCOL_ROOT_PREFIX, STORE_SNAPSHOT_IMAGE_PREFIX,
+    STORE_SNAPSHOT_META_PREFIX,
+};
 
 /// Signed object kind bound into symmetric-protection AAD and checked against
 /// the semantic path before storage I/O.
@@ -61,52 +66,79 @@ pub enum ProtocolObjectDomain {
     StorePackage,
 }
 
+#[derive(Clone, Copy)]
+struct ProtocolObjectMetadata {
+    aad_label: &'static [u8],
+    path_prefix: &'static str,
+    extension: &'static str,
+}
+
 impl ProtocolObjectDomain {
-    pub(crate) fn aad_label(self) -> &'static [u8] {
+    fn metadata(self) -> ProtocolObjectMetadata {
         match self {
-            Self::StoreProtocolRoot => b"store-protocol-root",
-            Self::StoreCommit => b"store-commit",
-            Self::StoreHead => b"store-head",
-            Self::StoreAck => b"store-ack",
-            Self::StoreDeviceRegistration => b"store-device-registration",
-            Self::StoreSnapshotMeta => b"store-snapshot-meta",
-            Self::StoreSnapshotImage => b"store-snapshot-image",
-            Self::StoreMembershipEntry => b"store-membership-entry",
-            Self::StoreMembershipHead => b"store-membership-head",
-            Self::StorePackage => b"store-package",
+            Self::StoreProtocolRoot => ProtocolObjectMetadata {
+                aad_label: b"store-protocol-root",
+                path_prefix: STORE_PROTOCOL_ROOT_PREFIX,
+                extension: ".json",
+            },
+            Self::StoreCommit => ProtocolObjectMetadata {
+                aad_label: b"store-commit",
+                path_prefix: STORE_COMMIT_PREFIX,
+                extension: ".json",
+            },
+            Self::StoreHead => ProtocolObjectMetadata {
+                aad_label: b"store-head",
+                path_prefix: STORE_HEAD_PREFIX,
+                extension: ".json",
+            },
+            Self::StoreAck => ProtocolObjectMetadata {
+                aad_label: b"store-ack",
+                path_prefix: STORE_ACK_PREFIX,
+                extension: ".json",
+            },
+            Self::StoreDeviceRegistration => ProtocolObjectMetadata {
+                aad_label: b"store-device-registration",
+                path_prefix: STORE_DEVICE_REGISTRATION_PREFIX,
+                extension: ".json",
+            },
+            Self::StoreSnapshotMeta => ProtocolObjectMetadata {
+                aad_label: b"store-snapshot-meta",
+                path_prefix: STORE_SNAPSHOT_META_PREFIX,
+                extension: ".json",
+            },
+            Self::StoreSnapshotImage => ProtocolObjectMetadata {
+                aad_label: b"store-snapshot-image",
+                path_prefix: STORE_SNAPSHOT_IMAGE_PREFIX,
+                extension: ".db",
+            },
+            Self::StoreMembershipEntry => ProtocolObjectMetadata {
+                aad_label: b"store-membership-entry",
+                path_prefix: STORE_MEMBERSHIP_ENTRY_PREFIX,
+                extension: ".json",
+            },
+            Self::StoreMembershipHead => ProtocolObjectMetadata {
+                aad_label: b"store-membership-head",
+                path_prefix: STORE_MEMBERSHIP_HEAD_PREFIX,
+                extension: ".json",
+            },
+            Self::StorePackage => ProtocolObjectMetadata {
+                aad_label: b"store-package",
+                path_prefix: STORE_PACKAGE_PREFIX,
+                extension: ".pkg",
+            },
         }
     }
 
-    fn accepts_path(self, semantic_prefix: &str) -> bool {
-        match self {
-            Self::StoreProtocolRoot => semantic_prefix.starts_with("store-v1/store-protocol-root/"),
-            Self::StoreCommit => semantic_prefix.starts_with("store-v1/commits/"),
-            Self::StoreHead => semantic_prefix.starts_with("store-v1/heads/"),
-            Self::StoreAck => semantic_prefix.starts_with("store-v1/acks/"),
-            Self::StoreDeviceRegistration => semantic_prefix.starts_with("store-v1/devices/"),
-            Self::StoreSnapshotMeta => semantic_prefix.starts_with("store-v1/snapshots/"),
-            Self::StoreSnapshotImage => semantic_prefix.starts_with("store-v1/snapshot-images/"),
-            Self::StoreMembershipEntry => {
-                semantic_prefix.starts_with("store-v1/membership/entries/")
-            }
-            Self::StoreMembershipHead => semantic_prefix.starts_with("store-v1/membership/heads/"),
-            Self::StorePackage => semantic_prefix.starts_with("store-v1/packages/"),
-        }
+    pub(crate) fn aad_label(self) -> &'static [u8] {
+        self.metadata().aad_label
+    }
+
+    pub(crate) fn path_prefix(self) -> &'static str {
+        self.metadata().path_prefix
     }
 
     pub(crate) fn extension(self) -> &'static str {
-        match self {
-            Self::StoreSnapshotImage => ".db",
-            Self::StorePackage => ".pkg",
-            Self::StoreProtocolRoot
-            | Self::StoreCommit
-            | Self::StoreHead
-            | Self::StoreAck
-            | Self::StoreDeviceRegistration
-            | Self::StoreSnapshotMeta
-            | Self::StoreMembershipEntry
-            | Self::StoreMembershipHead => ".json",
-        }
+        self.metadata().extension
     }
 }
 
@@ -133,7 +165,9 @@ impl ProtocolObjectContext {
     }
 
     pub fn validate_path(&self, semantic_prefix: &str) -> Result<(), StorageError> {
-        if semantic_prefix.contains("/copies/") || !self.domain.accepts_path(semantic_prefix) {
+        if semantic_prefix.contains("/copies/")
+            || !semantic_prefix.starts_with(self.domain.path_prefix())
+        {
             return Err(StorageError::Parse(format!(
                 "object domain {:?} does not accept semantic path {semantic_prefix:?}",
                 self.domain
@@ -178,12 +212,12 @@ impl ProtocolObjectContext {
                     self.domain.extension()
                 ))
             })?;
-        if copy_key.is_empty() || copy_key.contains('/') {
-            return Err(StorageError::Parse(format!(
-                "protocol object {:?} has an invalid copy key",
+        copy_key.parse::<CopyId>().map_err(|error| {
+            StorageError::Parse(format!(
+                "protocol object {:?} has a non-canonical copy id: {error}",
                 object.logical_key()
-            )));
-        }
+            ))
+        })?;
         Ok(())
     }
 }

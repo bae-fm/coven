@@ -70,7 +70,7 @@ impl TableSchema {
             let columns = table_columns(conn, table).map_err(DbError::from)?;
             let updated_at = columns.iter().position(|name| name == "_updated_at");
             let updated_at = updated_at.ok_or_else(|| {
-                DbError(format!("synced table {table} has no _updated_at column"))
+                DbError::Message(format!("synced table {table} has no _updated_at column"))
             })?;
             updated_at_by_table.insert(table.to_string(), updated_at);
             columns_by_table.insert(table.to_string(), columns);

@@ -243,7 +243,7 @@ async fn serial_join_receives_the_exact_invite_floor() {
     let snapshot = owner_db
         .call(move |connection| {
             create_snapshot(connection, &snapshot_path, &tables_for_snapshot)
-                .map_err(|error| DbError(error.to_string()))
+                .map_err(|error| DbError::Message(error.to_string()))
         })
         .await
         .expect("create Serial snapshot");
@@ -923,7 +923,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
     let tables_c = tables.clone();
     let snapshot = db
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("create owner snapshot");
@@ -1087,7 +1087,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
     let tables_c = tables.clone();
     let empty_snap = db_a
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("owner empty snapshot");
@@ -1238,7 +1238,7 @@ async fn bootstrap_installs_snapshot_coverage_before_ordinary_pull() {
     let snapshot = db_a
         .call(move |conn| {
             create_snapshot(conn, &snapshot_path, &snapshot_tables)
-                .map_err(|error| DbError(error.to_string()))
+                .map_err(|error| DbError::Message(error.to_string()))
         })
         .await
         .expect("create snapshot at A/1");
@@ -1439,7 +1439,7 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
     let tables_c = tables.clone();
     let snapshot = db_owner
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("owner snapshot");
@@ -1596,7 +1596,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
     let tables_c = tables.clone();
     let snapshot = db_owner
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("owner snapshot");
@@ -1698,7 +1698,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
     let tables_c = tables.clone();
     let snapshot = db_a
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("owner snapshot");
@@ -1816,7 +1816,7 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
     let tables_c = tables.clone();
     let snapshot = db_a
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("owner snapshot");
@@ -1922,7 +1922,7 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
     let tables_c = tables.clone();
     let snapshot = db_a
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("owner snapshot");
@@ -2103,7 +2103,7 @@ async fn joiner_fixture() -> JoinerFixture {
     let tables_c = tables.clone();
     let snapshot = db
         .call(move |conn| {
-            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError(e.to_string()))
+            create_snapshot(conn, &snap_dir, &tables_c).map_err(|e| DbError::Message(e.to_string()))
         })
         .await
         .expect("create owner snapshot");

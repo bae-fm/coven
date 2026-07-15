@@ -820,7 +820,7 @@ mod tests {
         let image = source
             .call(move |connection| {
                 crate::sync::snapshot::create_snapshot(connection, &snapshot_dir, &tables)
-                    .map_err(|error| crate::database::DbError(error.to_string()))
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
             })
             .await
             .expect("create Serial snapshot image");

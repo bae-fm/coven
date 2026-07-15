@@ -22,7 +22,7 @@ pub enum StoreAckError {
 
 impl From<crate::database::DbError> for StoreAckError {
     fn from(error: crate::database::DbError) -> Self {
-        Self::Database(error.0)
+        Self::Database(error.into_message())
     }
 }
 
@@ -37,7 +37,7 @@ pub async fn stage_store_ack(
             "a prior acknowledgement remains queued".to_string(),
         ));
     }
-    let store_root_hash = store_root_hash(db).await?;
+    let store_root_hash = required_store_root_hash(db).await?;
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await?
@@ -71,7 +71,7 @@ pub async fn drain_outbound_store_acks(
     db: &Database,
     storage: &dyn SyncStorage,
 ) -> Result<u64, StoreAckError> {
-    let store_root_hash = store_root_hash(db).await?;
+    let store_root_hash = required_store_root_hash(db).await?;
     let device_id = db
         .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
         .await?
@@ -114,18 +114,21 @@ pub async fn drain_outbound_store_acks(
     Ok(published)
 }
 
-async fn store_root_hash(db: &Database) -> Result<ObjectHash, StoreAckError> {
-    let raw = db
-        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
-        .await?
-        .ok_or(StoreAckError::MissingState(
-            crate::database::STORE_ROOT_HASH_STATE_KEY,
-        ))?;
-    raw.parse::<ObjectHash>()
-        .map_err(|error| StoreAckError::InvalidState {
-            key: crate::database::STORE_ROOT_HASH_STATE_KEY,
-            reason: error.to_string(),
-        })
+async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, StoreAckError> {
+    db.required_store_root_hash().await.map_err(|error| {
+        match error.into_store_root_hash_failure() {
+            Ok(crate::database::StoreRootHashFailure::Missing) => {
+                StoreAckError::MissingState(crate::database::STORE_ROOT_HASH_STATE_KEY)
+            }
+            Ok(crate::database::StoreRootHashFailure::Invalid { reason }) => {
+                StoreAckError::InvalidState {
+                    key: crate::database::STORE_ROOT_HASH_STATE_KEY,
+                    reason,
+                }
+            }
+            Err(error) => error.into(),
+        }
+    })
 }
 
 #[cfg(test)]

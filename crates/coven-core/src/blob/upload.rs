@@ -681,8 +681,10 @@ async fn build_transition_models(
     let tables = db.synced_tables().to_vec();
     let gate_columns = crate::blob::transition::gate_columns(&tables);
     db.call(move |conn| {
-        let gates = Gates::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
-        let decls = BlobDecls::from_tables(conn, &tables).map_err(|e| DbError(e.to_string()))?;
+        let gates =
+            Gates::from_tables(conn, &tables).map_err(|e| DbError::Message(e.to_string()))?;
+        let decls =
+            BlobDecls::from_tables(conn, &tables).map_err(|e| DbError::Message(e.to_string()))?;
         Ok((Arc::new(gates), Arc::new(decls), Arc::new(gate_columns)))
     })
     .await
@@ -718,11 +720,11 @@ async fn commit_after_upload(
         let namespace = crate::sync::cloud_storage::namespace_from_cloud_key(&cloud_key);
         let root = match decls
             .row_for_blob_in_namespace(conn, namespace, &blob_id)
-            .map_err(|e| DbError(e.to_string()))?
+            .map_err(|e| DbError::Message(e.to_string()))?
         {
             Some((table, pk)) => gates
                 .resolve_root_of(conn, &table, &pk)
-                .map_err(|e| DbError(e.to_string()))?,
+                .map_err(|e| DbError::Message(e.to_string()))?,
             None => None,
         };
         let Some((root_table, root_id)) = root else {
@@ -748,7 +750,7 @@ async fn commit_after_upload(
         // cleared here.
         let refs = decls
             .refs_for_root(conn, &gates, &root_table, &root_id)
-            .map_err(|e| DbError(e.to_string()))?;
+            .map_err(|e| DbError::Message(e.to_string()))?;
         let blob_ids: Vec<String> = refs
             .iter()
             .filter(|b| b.provenance == Provenance::UserProvided)
@@ -778,7 +780,7 @@ async fn commit_after_upload(
         // invariant — until commit the row is present, so a crash re-runs the
         // idempotent upload and retries this flip.
         let gate_col = gate_columns.get(&root_table).ok_or_else(|| {
-            DbError(format!(
+            DbError::Message(format!(
                 "make_remote completion: gated root {root_table} has no gate column"
             ))
         })?;

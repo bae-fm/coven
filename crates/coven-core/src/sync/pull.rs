@@ -86,13 +86,10 @@ pub async fn load_cycle_membership(
         .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|e| PullError::Apply(format!("read pinned owner: {e}")))?;
-    let store_root_hash: super::store_commit::ObjectHash = db
-        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
+    let store_root_hash = db
+        .required_store_root_hash()
         .await
-        .map_err(|e| PullError::Apply(format!("read Store protocol root: {e}")))?
-        .ok_or_else(|| PullError::Apply("Store protocol root is absent".to_string()))?
-        .parse()
-        .map_err(|e| PullError::Apply(format!("parse Store protocol root: {e}")))?;
+        .map_err(|error| PullError::Apply(format!("read Store protocol root: {error}")))?;
 
     let membership_listing =
         match super::store_objects::list_membership_entry_objects(storage, store_root_hash).await {

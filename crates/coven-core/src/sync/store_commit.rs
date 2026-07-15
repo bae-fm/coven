@@ -20,6 +20,19 @@ use crate::{WriteId, WritePolicy};
 
 pub const STORE_PROTOCOL_VERSION: u32 = 1;
 
+pub(crate) const STORE_PROTOCOL_PREFIX: &str = "store-v1/";
+pub(crate) const STORE_PROTOCOL_ROOT_PREFIX: &str = "store-v1/store-protocol-root/";
+pub(crate) const STORE_COMMIT_PREFIX: &str = "store-v1/commits/";
+pub(crate) const STORE_HEAD_PREFIX: &str = "store-v1/heads/";
+pub(crate) const STORE_ACK_PREFIX: &str = "store-v1/acks/";
+pub(crate) const STORE_DEVICE_REGISTRATION_PREFIX: &str = "store-v1/devices/";
+pub(crate) const STORE_SNAPSHOT_META_PREFIX: &str = "store-v1/snapshots/";
+pub(crate) const STORE_SNAPSHOT_IMAGE_PREFIX: &str = "store-v1/snapshot-images/";
+pub(crate) const STORE_MEMBERSHIP_ENTRY_PREFIX: &str = "store-v1/membership/entries/";
+pub(crate) const STORE_MEMBERSHIP_HEAD_PREFIX: &str = "store-v1/membership/heads/";
+pub(crate) const STORE_PACKAGE_PREFIX: &str = "store-v1/packages/";
+const STORE_SERIAL_HEAD_KEY: &str = "store-v1/heads/serial.json";
+
 const STORE_PROTOCOL_ROOT_DOMAIN: &[u8] = b"coven.store-protocol-root.v1\0";
 const COMMIT_DOMAIN: &[u8] = b"coven.store-batch-commit.v1\0";
 const HEAD_DOMAIN: &[u8] = b"coven.store-device-head.v1\0";
@@ -1759,19 +1772,18 @@ pub struct SnapshotCopySlot {
 pub fn parse_store_protocol_root_copy_key(
     path: &str,
 ) -> Result<(ObjectHash, CopyId), StoreProtocolError> {
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() != 5
-        || segments[0] != "store-v1"
-        || segments[1] != "store-protocol-root"
-        || segments[3] != "copies"
-    {
+    let Some(relative) = path.strip_prefix(STORE_PROTOCOL_ROOT_PREFIX) else {
+        return Err(StoreProtocolError::MalformedPath(path.to_string()));
+    };
+    let segments: Vec<&str> = relative.split('/').collect();
+    if segments.len() != 3 || segments[1] != "copies" {
         return Err(StoreProtocolError::MalformedPath(path.to_string()));
     }
     Ok((
-        segments[2]
+        segments[0]
             .parse()
             .map_err(|_| StoreProtocolError::MalformedPath(path.to_string()))?,
-        parse_copy_filename(segments[4], ".json", path)?,
+        parse_copy_filename(segments[2], ".json", path)?,
     ))
 }
 
@@ -1799,130 +1811,128 @@ fn parse_copy_filename(
 
 fn parse_hashed_copy_slot(
     path: &str,
-    namespace: &[&str],
+    prefix: &str,
     extension: &str,
     allow_zero: bool,
 ) -> Result<HashedCopySlot, StoreProtocolError> {
-    let segments: Vec<&str> = path.split('/').collect();
-    let offset = namespace.len();
-    if segments.len() != offset + 5
-        || segments[..offset] != *namespace
-        || segments[offset + 3] != "copies"
-    {
+    let Some(relative) = path.strip_prefix(prefix) else {
+        return Err(StoreProtocolError::MalformedPath(path.to_string()));
+    };
+    let segments: Vec<&str> = relative.split('/').collect();
+    if segments.len() != 5 || segments[3] != "copies" {
         return Err(StoreProtocolError::MalformedPath(path.to_string()));
     }
-    let owner = segments[offset].to_string();
+    let owner = segments[0].to_string();
     validate_device_id(&owner)?;
     Ok(HashedCopySlot {
         owner,
-        sequence: parse_decimal(segments[offset + 1], allow_zero, path)?,
-        semantic_hash: segments[offset + 2]
+        sequence: parse_decimal(segments[1], allow_zero, path)?,
+        semantic_hash: segments[2]
             .parse()
             .map_err(|_| StoreProtocolError::MalformedPath(path.to_string()))?,
-        copy_id: parse_copy_filename(segments[offset + 4], extension, path)?,
+        copy_id: parse_copy_filename(segments[4], extension, path)?,
     })
 }
 
 pub fn parse_package_copy_key(path: &str) -> Result<HashedCopySlot, StoreProtocolError> {
-    parse_hashed_copy_slot(path, &["store-v1", "packages"], ".pkg", false)
+    parse_hashed_copy_slot(path, STORE_PACKAGE_PREFIX, ".pkg", false)
 }
 
 pub fn parse_commit_copy_key(path: &str) -> Result<HashedCopySlot, StoreProtocolError> {
-    parse_hashed_copy_slot(path, &["store-v1", "commits"], ".json", false)
+    parse_hashed_copy_slot(path, STORE_COMMIT_PREFIX, ".json", false)
 }
 
 pub fn parse_head_copy_key(path: &str) -> Result<HashedCopySlot, StoreProtocolError> {
-    parse_hashed_copy_slot(path, &["store-v1", "heads"], ".json", true)
+    parse_hashed_copy_slot(path, STORE_HEAD_PREFIX, ".json", true)
 }
 
 pub fn parse_registration_copy_key(path: &str) -> Result<HashedCopySlot, StoreProtocolError> {
-    parse_hashed_copy_slot(path, &["store-v1", "devices"], ".json", false)
+    parse_hashed_copy_slot(path, STORE_DEVICE_REGISTRATION_PREFIX, ".json", false)
 }
 
 pub fn parse_ack_copy_key(path: &str) -> Result<HashedCopySlot, StoreProtocolError> {
-    parse_hashed_copy_slot(path, &["store-v1", "acks"], ".json", false)
+    parse_hashed_copy_slot(path, STORE_ACK_PREFIX, ".json", false)
 }
 
 fn parse_membership_copy_key(
     path: &str,
-    object_kind: &str,
+    prefix: &str,
 ) -> Result<MembershipCopySlot, StoreProtocolError> {
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() != 9
-        || segments[..3] != ["store-v1", "membership", object_kind]
-        || segments[7] != "copies"
-    {
+    let Some(relative) = path.strip_prefix(prefix) else {
+        return Err(StoreProtocolError::MalformedPath(path.to_string()));
+    };
+    let segments: Vec<&str> = relative.split('/').collect();
+    if segments.len() != 6 || segments[4] != "copies" {
         return Err(StoreProtocolError::MalformedPath(path.to_string()));
     }
-    validate_device_id(segments[3])?;
+    validate_device_id(segments[0])?;
     Ok(MembershipCopySlot {
-        author: segments[3].to_string(),
+        author: segments[0].to_string(),
         author_owner_grant: OwnerGrantId(
-            segments[4]
+            segments[1]
                 .parse()
                 .map_err(|_| StoreProtocolError::MalformedPath(path.to_string()))?,
         ),
-        sequence: parse_decimal(segments[5], false, path)?,
-        semantic_hash: segments[6]
+        sequence: parse_decimal(segments[2], false, path)?,
+        semantic_hash: segments[3]
             .parse()
             .map_err(|_| StoreProtocolError::MalformedPath(path.to_string()))?,
-        copy_id: parse_copy_filename(segments[8], ".json", path)?,
+        copy_id: parse_copy_filename(segments[5], ".json", path)?,
     })
 }
 
 pub fn parse_membership_entry_copy_key(
     path: &str,
 ) -> Result<MembershipCopySlot, StoreProtocolError> {
-    parse_membership_copy_key(path, "entries")
+    parse_membership_copy_key(path, STORE_MEMBERSHIP_ENTRY_PREFIX)
 }
 
 pub fn parse_membership_head_copy_key(
     path: &str,
 ) -> Result<MembershipCopySlot, StoreProtocolError> {
-    parse_membership_copy_key(path, "heads")
+    parse_membership_copy_key(path, STORE_MEMBERSHIP_HEAD_PREFIX)
 }
 
 fn parse_snapshot_copy_key(
     path: &str,
-    namespace: &str,
+    prefix: &str,
     extension: &str,
 ) -> Result<SnapshotCopySlot, StoreProtocolError> {
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() != 6
-        || segments[0] != "store-v1"
-        || segments[1] != namespace
-        || segments[4] != "copies"
-    {
+    let Some(relative) = path.strip_prefix(prefix) else {
+        return Err(StoreProtocolError::MalformedPath(path.to_string()));
+    };
+    let segments: Vec<&str> = relative.split('/').collect();
+    if segments.len() != 4 || segments[2] != "copies" {
         return Err(StoreProtocolError::MalformedPath(path.to_string()));
     }
-    validate_device_id(segments[2])?;
+    validate_device_id(segments[0])?;
     Ok(SnapshotCopySlot {
-        author: segments[2].to_string(),
-        semantic_hash: segments[3]
+        author: segments[0].to_string(),
+        semantic_hash: segments[1]
             .parse()
             .map_err(|_| StoreProtocolError::MalformedPath(path.to_string()))?,
-        copy_id: parse_copy_filename(segments[5], extension, path)?,
+        copy_id: parse_copy_filename(segments[3], extension, path)?,
     })
 }
 
 pub fn parse_snapshot_meta_copy_key(path: &str) -> Result<SnapshotCopySlot, StoreProtocolError> {
-    parse_snapshot_copy_key(path, "snapshots", ".json")
+    parse_snapshot_copy_key(path, STORE_SNAPSHOT_META_PREFIX, ".json")
 }
 
 pub fn parse_snapshot_image_copy_key(path: &str) -> Result<SnapshotCopySlot, StoreProtocolError> {
-    parse_snapshot_copy_key(path, "snapshot-images", ".db")
+    parse_snapshot_copy_key(path, STORE_SNAPSHOT_IMAGE_PREFIX, ".db")
 }
 
 pub fn protocol_prefix() -> &'static str {
-    "store-v1/"
+    STORE_PROTOCOL_PREFIX
 }
 
 pub fn serial_head_key() -> &'static str {
-    "store-v1/heads/serial.json"
+    STORE_SERIAL_HEAD_KEY
 }
 
 pub fn store_protocol_root_semantic_prefix(store_root_hash: ObjectHash) -> String {
-    format!("store-v1/store-protocol-root/{store_root_hash}")
+    format!("{STORE_PROTOCOL_ROOT_PREFIX}{store_root_hash}")
 }
 
 pub fn store_protocol_root_copy_key(store_root_hash: ObjectHash, copy_id: CopyId) -> String {
@@ -1933,7 +1943,7 @@ pub fn store_protocol_root_copy_key(store_root_hash: ObjectHash, copy_id: CopyId
 }
 
 pub fn package_semantic_prefix(device_id: &str, seq: u64, package_hash: ObjectHash) -> String {
-    format!("store-v1/packages/{device_id}/{seq}/{package_hash}")
+    format!("{STORE_PACKAGE_PREFIX}{device_id}/{seq}/{package_hash}")
 }
 
 pub fn circle_package_semantic_prefix(
@@ -1958,7 +1968,7 @@ pub fn package_copy_key(
 }
 
 pub fn commit_slot_prefix(device_id: &str, seq: u64) -> String {
-    format!("store-v1/commits/{device_id}/{seq}")
+    format!("{STORE_COMMIT_PREFIX}{device_id}/{seq}")
 }
 
 pub fn commit_semantic_prefix(device_id: &str, seq: u64, commit_hash: ObjectHash) -> String {
@@ -1978,7 +1988,7 @@ pub fn commit_copy_key(
 }
 
 pub fn head_slot_prefix(device_id: &str, seq: u64) -> String {
-    format!("store-v1/heads/{device_id}/{seq}")
+    format!("{STORE_HEAD_PREFIX}{device_id}/{seq}")
 }
 
 pub fn head_semantic_prefix(device_id: &str, seq: u64, head_hash: ObjectHash) -> String {
@@ -1993,7 +2003,7 @@ pub fn head_copy_key(device_id: &str, seq: u64, head_hash: ObjectHash, copy_id: 
 }
 
 pub fn registration_slot_prefix(device_id: &str, revision: u64) -> String {
-    format!("store-v1/devices/{device_id}/{revision}")
+    format!("{STORE_DEVICE_REGISTRATION_PREFIX}{device_id}/{revision}")
 }
 
 pub fn registration_semantic_prefix(
@@ -2020,7 +2030,7 @@ pub fn registration_copy_key(
 }
 
 pub fn ack_slot_prefix(device_id: &str, revision: u64) -> String {
-    format!("store-v1/acks/{device_id}/{revision}")
+    format!("{STORE_ACK_PREFIX}{device_id}/{revision}")
 }
 
 pub fn ack_semantic_prefix(device_id: &str, revision: u64, ack_hash: ObjectHash) -> String {
@@ -2045,7 +2055,7 @@ pub fn membership_entry_semantic_prefix(
     seq: u64,
     entry_hash: ObjectHash,
 ) -> String {
-    format!("store-v1/membership/entries/{author}/{author_owner_grant}/{seq}/{entry_hash}")
+    format!("{STORE_MEMBERSHIP_ENTRY_PREFIX}{author}/{author_owner_grant}/{seq}/{entry_hash}")
 }
 
 pub fn membership_entry_copy_key(
@@ -2067,7 +2077,7 @@ pub fn membership_head_semantic_prefix(
     seq: u64,
     head_hash: ObjectHash,
 ) -> String {
-    format!("store-v1/membership/heads/{author}/{author_owner_grant}/{seq}/{head_hash}")
+    format!("{STORE_MEMBERSHIP_HEAD_PREFIX}{author}/{author_owner_grant}/{seq}/{head_hash}")
 }
 
 pub fn membership_head_copy_key(
@@ -2084,7 +2094,7 @@ pub fn membership_head_copy_key(
 }
 
 pub fn snapshot_image_semantic_prefix(author: &str, image_hash: ObjectHash) -> String {
-    format!("store-v1/snapshot-images/{author}/{image_hash}")
+    format!("{STORE_SNAPSHOT_IMAGE_PREFIX}{author}/{image_hash}")
 }
 
 pub fn snapshot_image_copy_key(author: &str, image_hash: ObjectHash, copy_id: CopyId) -> String {
@@ -2095,7 +2105,7 @@ pub fn snapshot_image_copy_key(author: &str, image_hash: ObjectHash, copy_id: Co
 }
 
 pub fn snapshot_semantic_prefix(author: &str, snapshot_hash: ObjectHash) -> String {
-    format!("store-v1/snapshots/{author}/{snapshot_hash}")
+    format!("{STORE_SNAPSHOT_META_PREFIX}{author}/{snapshot_hash}")
 }
 
 pub fn snapshot_copy_key(author: &str, snapshot_hash: ObjectHash, copy_id: CopyId) -> String {

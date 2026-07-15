@@ -79,7 +79,7 @@ pub enum InviteError {
 
 impl From<crate::database::DbError> for InviteError {
     fn from(error: crate::database::DbError) -> Self {
-        Self::Database(error.0)
+        Self::Database(error.into_message())
     }
 }
 

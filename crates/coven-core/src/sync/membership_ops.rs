@@ -151,12 +151,17 @@ pub enum MembershipOpsError {
 }
 
 async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, MembershipOpsError> {
-    db.get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
-        .await
-        .map_err(|error| MembershipOpsError::Database(error.to_string()))?
-        .ok_or(MembershipOpsError::NoFounderChain)?
-        .parse()
-        .map_err(|error| MembershipOpsError::Database(format!("Store protocol root hash: {error}")))
+    db.required_store_root_hash().await.map_err(|error| {
+        match error.into_store_root_hash_failure() {
+            Ok(crate::database::StoreRootHashFailure::Missing) => {
+                MembershipOpsError::NoFounderChain
+            }
+            Ok(crate::database::StoreRootHashFailure::Invalid { reason }) => {
+                MembershipOpsError::Database(format!("Store protocol root hash: {reason}"))
+            }
+            Err(error) => MembershipOpsError::Database(error.to_string()),
+        }
+    })
 }
 
 /// `protocol_state` key holding the hex Ed25519 pubkey of the store's established
@@ -1878,27 +1883,27 @@ async fn read_head_watermarks(
         for row in rows {
             let (key, value) = row.map_err(crate::database::DbError::from)?;
             let grant = key.strip_prefix(&prefix).ok_or_else(|| {
-                crate::database::DbError(format!(
+                crate::database::DbError::Message(format!(
                     "membership head watermark key {key:?} is outside its queried prefix"
                 ))
             })?;
             if grant.is_empty() {
-                return Err(crate::database::DbError(
+                return Err(crate::database::DbError::Message(
                     "membership head watermark has an empty grant".to_string(),
                 ));
             }
             let grant = OwnerGrantId(grant.parse().map_err(|error| {
-                crate::database::DbError(format!(
+                crate::database::DbError::Message(format!(
                     "membership head watermark grant is malformed: {error}"
                 ))
             })?);
             let coord: MembershipCoord = serde_json::from_str(&value).map_err(|error| {
-                crate::database::DbError(format!(
+                crate::database::DbError::Message(format!(
                     "membership head watermark for {grant} is malformed: {error}"
                 ))
             })?;
             if coord.author_owner_grant != grant || coord.seq == 0 {
-                return Err(crate::database::DbError(format!(
+                return Err(crate::database::DbError::Message(format!(
                     "membership head watermark for {grant} has an invalid exact coordinate"
                 )));
             }
@@ -1934,7 +1939,7 @@ fn upsert_head_watermark_on(
         .map_err(crate::database::DbError::from)?;
     if let Some(existing) = existing {
         let existing: MembershipCoord = serde_json::from_str(&existing).map_err(|error| {
-            crate::database::DbError(format!(
+            crate::database::DbError::Message(format!(
                 "membership head watermark for {} is malformed: {error}",
                 coord.author_pubkey
             ))
@@ -1946,14 +1951,14 @@ fn upsert_head_watermark_on(
             if existing == *coord {
                 return Ok(());
             }
-            return Err(crate::database::DbError(format!(
+            return Err(crate::database::DbError::Message(format!(
                 "membership head watermark for {} forks at seq {}: {} versus {}",
                 coord.author_pubkey, coord.seq, existing.entry_hash, coord.entry_hash
             )));
         }
     }
     let value = serde_json::to_string(coord).map_err(|error| {
-        crate::database::DbError(format!("serialize membership head watermark: {error}"))
+        crate::database::DbError::Message(format!("serialize membership head watermark: {error}"))
     })?;
     conn.execute(
         "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
@@ -2000,7 +2005,7 @@ async fn persist_owner_and_head_watermarks(
             .map_err(crate::database::DbError::from)?;
         if let Some(pinned) = pinned {
             if pinned != owner_pubkey {
-                return Err(crate::database::DbError(format!(
+                return Err(crate::database::DbError::Message(format!(
                     "owner {pinned} is already pinned; refusing to replace it with {owner_pubkey}"
                 )));
             }

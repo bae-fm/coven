@@ -89,9 +89,9 @@ pub(crate) fn routing_encryption_from_custody(
 ) -> Result<EncryptionService, DbError> {
     let keyring = custody
         .unlock()
-        .map_err(|error| DbError(format!("unlock Store key for row routing: {error}")))?
+        .map_err(|error| DbError::Message(format!("unlock Store key for row routing: {error}")))?
         .ok_or_else(|| {
-            DbError("Merge scoped write requires an established Store key".to_string())
+            DbError::Message("Merge scoped write requires an established Store key".to_string())
         })?;
     Ok(EncryptionService::from(keyring))
 }

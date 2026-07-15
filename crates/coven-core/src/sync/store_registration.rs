@@ -80,7 +80,7 @@ pub async fn ensure_active_registration_with_coordination(
         None => {}
     }
     let registration = StoreDeviceRegistration::signed(
-        protocol_hash(db).await?,
+        required_store_root_hash(db).await?,
         protocol_value(db, crate::database::LOCAL_DEVICE_ID_STATE_KEY).await?,
         1,
         None,
@@ -133,7 +133,7 @@ pub async fn retire_registration_with_coordination(
         )));
     }
     let registration = StoreDeviceRegistration::signed(
-        protocol_hash(db).await?,
+        required_store_root_hash(db).await?,
         protocol_value(db, crate::database::LOCAL_DEVICE_ID_STATE_KEY).await?,
         latest.revision + 1,
         Some(latest.registration_hash),
@@ -156,7 +156,7 @@ pub async fn drain_registration_outbox(
     membership: Option<&MembershipChain>,
     published_at: &str,
 ) -> Result<u64, StoreRegistrationError> {
-    let store_root_hash = protocol_hash(db).await?;
+    let store_root_hash = required_store_root_hash(db).await?;
     let device_id = protocol_value(db, crate::database::LOCAL_DEVICE_ID_STATE_KEY).await?;
     let mut published = 0_u64;
     while let Some(outbound) = db
@@ -477,13 +477,20 @@ async fn publish_registration_activation(
     }
 }
 
-async fn protocol_hash(db: &Database) -> Result<ObjectHash, StoreRegistrationError> {
-    protocol_value(db, crate::database::STORE_ROOT_HASH_STATE_KEY)
-        .await?
-        .parse()
-        .map_err(|error| {
-            StoreRegistrationError::Invalid(format!("store protocol root hash: {error}"))
-        })
+async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, StoreRegistrationError> {
+    db.required_store_root_hash().await.map_err(|error| {
+        match error.into_store_root_hash_failure() {
+            Ok(crate::database::StoreRootHashFailure::Missing) => {
+                StoreRegistrationError::MissingState {
+                    key: crate::database::STORE_ROOT_HASH_STATE_KEY,
+                }
+            }
+            Ok(crate::database::StoreRootHashFailure::Invalid { reason }) => {
+                StoreRegistrationError::Invalid(format!("store protocol root hash: {reason}"))
+            }
+            Err(error) => database_error(error),
+        }
+    })
 }
 
 async fn require_activated_registration(

@@ -123,8 +123,8 @@ pub fn resolve_and_apply_changeset_with_schema(
     receiver_wall_ms: u64,
     blob_uploads: &[(String, String, String)],
 ) -> Result<ApplyResult, DbError> {
-    let changeset =
-        ValidatedChangeset::new(bytes, schema).map_err(|error| DbError(error.to_string()))?;
+    let changeset = ValidatedChangeset::new(bytes, schema)
+        .map_err(|error| DbError::Message(error.to_string()))?;
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
     let result =
         resolve_and_apply_changeset_with_schema_on(&tx, changeset, receiver_wall_ms, blob_uploads)?;
@@ -217,7 +217,7 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
     let constraint_conflict_tables = constraint_conflict_tables
         .lock()
         .map_err(|error| {
-            DbError(format!(
+            DbError::Message(format!(
                 "constraint conflict table collection poisoned: {error}"
             ))
         })?
@@ -351,7 +351,7 @@ fn incoming_update(
             }),
             (None, None) => {}
             _ => {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "UPDATE changeset for {table} has only one side for column {index}"
                 )));
             }
@@ -372,11 +372,11 @@ fn merge_losing_update(
     update: &IncomingUpdate,
     receiver_wall_ms: u64,
 ) -> Result<bool, DbError> {
-    let columns = schema
-        .columns(&update.table)
-        .ok_or_else(|| DbError(format!("synced table {} has no column map", update.table)))?;
+    let columns = schema.columns(&update.table).ok_or_else(|| {
+        DbError::Message(format!("synced table {} has no column map", update.table))
+    })?;
     let updated_at_index = schema.updated_at(&update.table).ok_or_else(|| {
-        DbError(format!(
+        DbError::Message(format!(
             "synced table {} has no _updated_at column index",
             update.table
         ))
@@ -387,7 +387,7 @@ fn merge_losing_update(
         .any(|c| c.index >= columns.len())
         || updated_at_index >= columns.len()
     {
-        return Err(DbError(format!(
+        return Err(DbError::Message(format!(
             "UPDATE changeset for {} names a column outside the local schema",
             update.table
         )));
@@ -425,7 +425,7 @@ fn merge_losing_update(
         .last()
         .and_then(timestamp_from_value)
         .ok_or_else(|| {
-            DbError(format!(
+            DbError::Message(format!(
                 "local row in {} has no parseable _updated_at",
                 update.table
             ))
@@ -500,19 +500,19 @@ fn changeset_value(
     };
     match value {
         Ok(value) => Value::try_from(value).map(Some).map_err(|error| {
-            DbError(format!(
+            DbError::Message(format!(
                 "changeset {side:?} value conversion failed for column {column}: {error}"
             ))
         }),
         Err(rusqlite::Error::InvalidColumnIndex(_)) => Ok(None),
-        Err(error) => Err(DbError(format!(
+        Err(error) => Err(DbError::Message(format!(
             "changeset {side:?} value read failed for column {column}: {error}"
         ))),
     }
 }
 
 fn update_pk_value(item: &ChangesetItem, table: &str) -> Result<String, DbError> {
-    update_pk_key(item, table).map_err(DbError)
+    update_pk_key(item, table).map_err(DbError::Message)
 }
 
 fn is_premerged_update(

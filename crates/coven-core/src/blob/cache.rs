@@ -1096,11 +1096,11 @@ async fn resolve_source(db: &Database, blob: &BlobRef) -> Result<BlobSource, Blo
         .call(move |conn| {
             match blob_decls
                 .row_for_blob_in_namespace(conn, &namespace, &id)
-                .map_err(|e| DbError(e.to_string()))?
+                .map_err(|e| DbError::Message(e.to_string()))?
             {
                 Some((table, pk)) => gates
                     .root_kept_of(conn, &table, &pk)
-                    .map_err(|e| DbError(e.to_string())),
+                    .map_err(|e| DbError::Message(e.to_string())),
                 // The namespace declares no table, or no row in it carries this id —
                 // no gate to read.
                 None => Ok(None),
@@ -1317,7 +1317,7 @@ pub(crate) async fn resolve_blob_uploader(
     match db
         .blob_uploader(&blob.namespace, &blob.id)
         .await
-        .map_err(|e| BlobCacheError::Io(e.0))?
+        .map_err(|e| BlobCacheError::Io(e.into_message()))?
     {
         Some(uploader) => Ok(Some(uploader)),
         None => Err(BlobCacheError::UploaderUnresolved {
@@ -1384,7 +1384,7 @@ pub(crate) async fn expected_blob_size(
     db.call(move |conn| {
         decls
             .size_for_blob_in_namespace(conn, &namespace, &id)
-            .map_err(|e| DbError(e.to_string()))
+            .map_err(|e| DbError::Message(e.to_string()))
     })
     .await
     .map_err(BlobCacheError::Metadata)?
@@ -1407,7 +1407,7 @@ pub(crate) async fn expected_blob_hash(
     db.call(move |conn| {
         decls
             .hash_for_blob_in_namespace(conn, &namespace, &id)
-            .map_err(|e| DbError(e.to_string()))
+            .map_err(|e| DbError::Message(e.to_string()))
     })
     .await
     .map_err(BlobCacheError::Metadata)?
@@ -1431,12 +1431,12 @@ pub(crate) async fn row_blob_size(
     db.call(move |conn| {
         decls
             .size_for_row(conn, &owned_table, &owned_pk)
-            .map_err(|e| DbError(e.to_string()))
+            .map_err(|e| DbError::Message(e.to_string()))
     })
     .await
     .map_err(BlobCacheError::Metadata)?
     .ok_or_else(|| {
-        BlobCacheError::Metadata(DbError(format!(
+        BlobCacheError::Metadata(DbError::Message(format!(
             "row {table}.{pk} carries no plaintext size for the blob its change names"
         )))
     })
@@ -1454,12 +1454,12 @@ pub(crate) async fn row_blob_hash(
     db.call(move |conn| {
         decls
             .hash_for_row(conn, &owned_table, &owned_pk)
-            .map_err(|e| DbError(e.to_string()))
+            .map_err(|e| DbError::Message(e.to_string()))
     })
     .await
     .map_err(BlobCacheError::Metadata)?
     .ok_or_else(|| {
-        BlobCacheError::Metadata(DbError(format!(
+        BlobCacheError::Metadata(DbError::Message(format!(
             "row {table}.{pk} carries no content hash for the blob its change names"
         )))
     })
@@ -1485,7 +1485,7 @@ pub(crate) async fn row_cloud_path(
     db.call(move |conn| {
         decls
             .cloud_path_for_blob_in_namespace(conn, &namespace, &id)
-            .map_err(|e| DbError(e.to_string()))
+            .map_err(|e| DbError::Message(e.to_string()))
     })
     .await
     .map_err(BlobCacheError::Metadata)

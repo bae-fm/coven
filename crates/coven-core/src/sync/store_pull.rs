@@ -169,7 +169,7 @@ pub enum StorePullMembershipError {
 
 impl From<DbError> for StorePullError {
     fn from(error: DbError) -> Self {
-        Self::Database(error.0)
+        Self::Database(error.into_message())
     }
 }
 
@@ -1121,7 +1121,7 @@ async fn apply_serial_candidate(
     db.call(move |conn| {
         let tx = conn.unchecked_transaction().map_err(DbError::from)?;
         apply_changeset_strict_on(&tx, changeset, &uploads).map_err(|error| {
-            DbError(format!(
+            DbError::Message(format!(
                 "Serial commit {} did not apply exactly: {error}",
                 commit.seq()
             ))
@@ -3126,7 +3126,7 @@ mod tests {
                         )
                         .map_err(DbError::from)?;
                     if remote_title != "remote" {
-                        return Err(DbError(
+                        return Err(DbError::Message(
                             "replacement did not observe remote tip".to_string(),
                         ));
                     }
@@ -3238,7 +3238,7 @@ mod tests {
                         [],
                     )
                     .map_err(DbError::from)?;
-                    Err::<(), _>(DbError("injected replacement failure".to_string()))
+                    Err::<(), _>(DbError::Message("injected replacement failure".to_string()))
                 },
             )
             .await

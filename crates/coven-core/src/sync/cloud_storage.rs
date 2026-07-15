@@ -1880,7 +1880,7 @@ mod tests {
     async fn cloud_blob_hash_mismatch_is_not_provider_transport() {
         let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
-            Arc::new(home),
+            Arc::new(home.clone()),
             CloudCipher::Plaintext,
             BlobPathScheme::Hashed,
             "hash-mismatch-store",
@@ -2622,6 +2622,45 @@ mod tests {
             crate::storage::cloud::ListingCoverage::CompleteAtScan
         );
         assert_eq!(listing.objects.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn protocol_object_read_rejects_a_noncanonical_copy_id() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([8u8; 32])),
+            BlobPathScheme::Hashed,
+            "copy-id-store",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("copy-id")));
+        let root = crate::sync::store_commit::ObjectHash::digest(b"copy-id-root");
+        let commit_hash = crate::sync::store_commit::ObjectHash::digest(b"commit");
+        let semantic = crate::sync::store_commit::commit_semantic_prefix("device", 1, commit_hash);
+        let context = crate::sync::storage::ProtocolObjectContext::store(
+            root,
+            crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+        );
+        let object = storage
+            .append_protocol_object(&context, &semantic, ".json", b"signed commit".to_vec())
+            .await
+            .expect("append Store commit");
+        let stored = home
+            .get_appended(object.physical().logical_key())
+            .expect("read stored ciphertext");
+        let malformed_logical = format!("{semantic}/copies/not-a-copy-id.json");
+        let malformed_physical =
+            home.insert_appended_candidate(&format!("{malformed_logical}.enc"), stored);
+        let malformed =
+            crate::sync::storage::ProtocolObjectLocator::new(malformed_logical, malformed_physical);
+
+        assert!(matches!(
+            storage
+                .read_protocol_object(&context, &malformed, &semantic)
+                .await,
+            Err(crate::sync::storage::StorageError::Parse(_))
+        ));
     }
 
     #[tokio::test]

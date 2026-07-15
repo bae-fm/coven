@@ -55,7 +55,7 @@ pub enum StoreOutboundError {
 
 impl From<crate::database::DbError> for StoreOutboundError {
     fn from(error: crate::database::DbError) -> Self {
-        Self::Database(error.0)
+        Self::Database(error.into_message())
     }
 }
 
@@ -156,7 +156,7 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
         )
         .await
         .map_err(StoreOutboundError::Preparation)?;
-        let store_root_hash = store_root_hash(db).await?;
+        let store_root_hash = required_store_root_hash(db).await?;
         let previous = db.latest_local_store_position().await?;
         let seq = previous
             .as_ref()
@@ -235,7 +235,7 @@ pub(crate) async fn drain_store_writes_with_coordination(
         db.set_write_status(&write_id, crate::WriteStatus::Publishing)
             .await?;
         let attempt = async {
-            let store_root_hash = store_root_hash(db).await?;
+            let store_root_hash = required_store_root_hash(db).await?;
             let device_id = db
                 .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
                 .await?
@@ -321,7 +321,7 @@ pub(crate) async fn current_serial_authorization(
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,
 ) -> Result<SerialAuthorizationState, StoreOutboundError> {
-    let store_root_hash = store_root_hash(db).await?;
+    let store_root_hash = required_store_root_hash(db).await?;
     let observed = observe_serial_head(db, coordination).await?;
     match observed.head() {
         Some(head) => {
@@ -359,7 +359,7 @@ pub(crate) async fn prepare_serial_control(
     control: StoreControl,
     keypair: &UserKeypair,
 ) -> Result<PreparedSerialControl, StoreOutboundError> {
-    let store_root_hash = store_root_hash(db).await?;
+    let store_root_hash = required_store_root_hash(db).await?;
     let observed = observe_serial_head(db, coordination).await?;
     let authorization = current_serial_authorization(db, storage, coordination).await?;
     let base = observed.position();
@@ -520,7 +520,7 @@ async fn observe_serial_head(
     db: &Database,
     coordination: &dyn CoordinationStorage,
 ) -> Result<SerialHeadObservation, StoreOutboundError> {
-    let store_root_hash = store_root_hash(db).await?;
+    let store_root_hash = required_store_root_hash(db).await?;
     match coordination.read_head(serial_head_key()).await {
         Ok(object) => {
             let head = StoreSerialHead::parse(&object.bytes, store_root_hash).map_err(|error| {
@@ -576,7 +576,7 @@ async fn prepare_serial_store_branch(
                 "local Serial identity is not a current writer".to_string(),
             ));
         }
-        let store_root_hash = store_root_hash(db).await?;
+        let store_root_hash = required_store_root_hash(db).await?;
         let mut predecessor = branch.base.clone();
         let mut prepared = Vec::with_capacity(branch.writes.len());
         for write in branch.writes {
@@ -713,7 +713,7 @@ async fn drain_serial_store_branch(
         let current = observed.position();
         return conflict_serial_branch(db, branch, current).await;
     }
-    let store_root_hash = store_root_hash(db).await?;
+    let store_root_hash = required_store_root_hash(db).await?;
     for write in &branch.writes {
         validate_manifest(storage, &write.blob_manifest).await?;
         let commit = StoreBatchCommit::parse_at(
@@ -960,18 +960,23 @@ async fn validate_manifest(
     Ok(())
 }
 
-async fn store_root_hash(db: &Database) -> Result<ObjectHash, StoreOutboundError> {
-    let raw = db
-        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
-        .await?
-        .ok_or(StoreOutboundError::MissingState {
-            key: crate::database::STORE_ROOT_HASH_STATE_KEY,
-        })?;
-    raw.parse::<ObjectHash>()
-        .map_err(|error| StoreOutboundError::InvalidState {
-            key: crate::database::STORE_ROOT_HASH_STATE_KEY,
-            reason: error.to_string(),
-        })
+async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, StoreOutboundError> {
+    db.required_store_root_hash().await.map_err(|error| {
+        match error.into_store_root_hash_failure() {
+            Ok(crate::database::StoreRootHashFailure::Missing) => {
+                StoreOutboundError::MissingState {
+                    key: crate::database::STORE_ROOT_HASH_STATE_KEY,
+                }
+            }
+            Ok(crate::database::StoreRootHashFailure::Invalid { reason }) => {
+                StoreOutboundError::InvalidState {
+                    key: crate::database::STORE_ROOT_HASH_STATE_KEY,
+                    reason,
+                }
+            }
+            Err(error) => error.into(),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1781,7 +1786,7 @@ mod tests {
         );
         let loaded = super::super::store_objects::load_commit_slot(
             &fixture.storage,
-            store_root_hash(&fixture.db).await.unwrap(),
+            fixture.db.required_store_root_hash().await.unwrap(),
             "dev-writer",
             1,
         )

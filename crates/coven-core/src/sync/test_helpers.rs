@@ -2237,12 +2237,9 @@ pub async fn pull_cloud_into(
     crate::sync::store_pull::StorePullResult,
 ) {
     let store_root_hash = trusted_store_db
-        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
+        .required_store_root_hash()
         .await
-        .expect("read trusted Store protocol root")
-        .expect("trusted database is bound to a Store protocol root")
-        .parse()
-        .expect("trusted Store protocol root hash");
+        .expect("read trusted Store protocol root");
     crate::sync::store_protocol_root::open_store(
         db,
         storage,

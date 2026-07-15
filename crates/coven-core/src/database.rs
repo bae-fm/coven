@@ -78,12 +78,52 @@ fn authorize_host_sql(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::ho
 
 /// An error from the owned database.
 #[derive(Debug, thiserror::Error)]
-#[error("database error: {0}")]
-pub struct DbError(pub String);
+pub enum DbError {
+    #[error("database error: {0}")]
+    Message(String),
+    #[error("database error: Store protocol root hash is absent")]
+    StoreRootHashMissing,
+    #[error("database error: Store protocol root hash is invalid: {reason}")]
+    StoreRootHashInvalid { reason: String },
+}
+
+#[derive(Debug)]
+pub(crate) enum StoreRootHashFailure {
+    Missing,
+    Invalid { reason: String },
+}
+
+impl DbError {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Message(message) => message,
+            Self::StoreRootHashMissing => "Store protocol root hash is absent".to_string(),
+            Self::StoreRootHashInvalid { reason } => {
+                format!("Store protocol root hash is invalid: {reason}")
+            }
+        }
+    }
+
+    pub(crate) fn into_store_root_hash_failure(self) -> Result<StoreRootHashFailure, Self> {
+        match self {
+            Self::StoreRootHashMissing => Ok(StoreRootHashFailure::Missing),
+            Self::StoreRootHashInvalid { reason } => Ok(StoreRootHashFailure::Invalid { reason }),
+            error @ Self::Message(_) => Err(error),
+        }
+    }
+
+    fn missing_store_root_hash() -> Self {
+        Self::StoreRootHashMissing
+    }
+
+    fn invalid_store_root_hash(reason: String) -> Self {
+        Self::StoreRootHashInvalid { reason }
+    }
+}
 
 impl From<rusqlite::Error> for DbError {
     fn from(e: rusqlite::Error) -> Self {
-        DbError(e.to_string())
+        DbError::Message(e.to_string())
     }
 }
 
@@ -266,7 +306,7 @@ enum CovenMetadataOpen {
 
 fn serialized_write_policy(write_policy: WritePolicy) -> Result<String, DbError> {
     serde_json::to_string(&write_policy)
-        .map_err(|error| DbError(format!("serialize Store write policy: {error}")))
+        .map_err(|error| DbError::Message(format!("serialize Store write policy: {error}")))
 }
 
 fn initialize_write_policy(conn: &Connection, write_policy: WritePolicy) -> Result<(), DbError> {
@@ -306,7 +346,7 @@ fn has_coven_initialization_marker(conn: &Connection) -> Result<bool, DbError> {
     match marker.as_deref() {
         None => Ok(false),
         Some(COVEN_INITIALIZED_STATE_VALUE) => Ok(true),
-        Some(value) => Err(DbError(format!(
+        Some(value) => Err(DbError::Message(format!(
             "Store database has invalid Coven initialization marker {value:?}"
         ))),
     }
@@ -323,8 +363,10 @@ fn initialize_coven_metadata_on(
         crate::db::apply_coven_routing_schema(conn).map_err(DbError::from)?;
     }
     initialize_write_policy(conn, write_policy)?;
-    let contract_json = String::from_utf8(sync_routing_contract.bytes().to_vec())
-        .map_err(|error| DbError(format!("encode sync-routing contract metadata: {error}")))?;
+    let contract_json =
+        String::from_utf8(sync_routing_contract.bytes().to_vec()).map_err(|error| {
+            DbError::Message(format!("encode sync-routing contract metadata: {error}"))
+        })?;
     conn.execute(
         "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
         (SYNC_ROUTING_CONTRACT_STATE_KEY, contract_json),
@@ -351,7 +393,7 @@ fn load_coven_metadata(
     write_policy: WritePolicy,
 ) -> Result<SyncRoutingContract, DbError> {
     if !has_coven_initialization_marker(conn)? {
-        return Err(DbError(
+        return Err(DbError::Message(
             "Store database is missing required Coven initialization metadata".to_string(),
         ));
     }
@@ -365,10 +407,13 @@ fn load_coven_metadata(
         .optional()
         .map_err(DbError::from)?
         .ok_or_else(|| {
-            DbError("Store database is missing required sync_routing_contract metadata".to_string())
+            DbError::Message(
+                "Store database is missing required sync_routing_contract metadata".to_string(),
+            )
         })?;
-    let contract = SyncRoutingContract::from_bytes(contract_bytes.as_bytes())
-        .map_err(|error| DbError(format!("Store sync-routing contract is invalid: {error}")))?;
+    let contract = SyncRoutingContract::from_bytes(contract_bytes.as_bytes()).map_err(|error| {
+        DbError::Message(format!("Store sync-routing contract is invalid: {error}"))
+    })?;
     let stored_hash = conn
         .query_row(
             "SELECT value FROM protocol_state WHERE key = ?1",
@@ -378,15 +423,17 @@ fn load_coven_metadata(
         .optional()
         .map_err(DbError::from)?
         .ok_or_else(|| {
-            DbError("Store database is missing required sync_routing_hash metadata".to_string())
+            DbError::Message(
+                "Store database is missing required sync_routing_hash metadata".to_string(),
+            )
         })?;
     let stored_hash: ObjectHash = stored_hash.parse().map_err(|error| {
-        DbError(format!(
+        DbError::Message(format!(
             "Store sync_routing_hash metadata is invalid: {error}"
         ))
     })?;
     if stored_hash != contract.hash() {
-        return Err(DbError(format!(
+        return Err(DbError::Message(format!(
             "Store sync-routing contract hashes to {}, but metadata records {stored_hash}",
             contract.hash(),
         )));
@@ -399,7 +446,7 @@ fn validate_sync_routing_contract(
     resolved: &SyncRoutingContract,
 ) -> Result<(), DbError> {
     if pinned.bytes() != resolved.bytes() || pinned.hash() != resolved.hash() {
-        return Err(DbError(format!(
+        return Err(DbError::Message(format!(
             "Store sync-routing hash is {}, but open resolved {}",
             pinned.hash(),
             resolved.hash(),
@@ -418,12 +465,13 @@ fn validate_write_policy(conn: &Connection, requested: WritePolicy) -> Result<()
         .optional()
         .map_err(DbError::from)?
         .ok_or_else(|| {
-            DbError("Store database is missing required write_policy metadata".to_string())
+            DbError::Message("Store database is missing required write_policy metadata".to_string())
         })?;
-    let stored: WritePolicy = serde_json::from_str(&stored)
-        .map_err(|error| DbError(format!("Store write_policy metadata is invalid: {error}")))?;
+    let stored: WritePolicy = serde_json::from_str(&stored).map_err(|error| {
+        DbError::Message(format!("Store write_policy metadata is invalid: {error}"))
+    })?;
     if stored != requested {
-        return Err(DbError(format!(
+        return Err(DbError::Message(format!(
             "Store write policy is {stored:?}, but open requested {requested:?}"
         )));
     }
@@ -462,7 +510,7 @@ impl DatabaseCore {
                 // leave either its DDL or `user_version` advance committed.
                 validate_host_synced_tables(&tx, &synced_tables)?;
                 let resolved = SyncRoutingContract::from_connection(&tx, &synced_tables)
-                    .map_err(|error| DbError(error.to_string()))?;
+                    .map_err(|error| DbError::Message(error.to_string()))?;
                 if let Some(pinned) = &pinned_routing_contract {
                     validate_sync_routing_contract(pinned, &resolved)?;
                 } else {
@@ -474,9 +522,9 @@ impl DatabaseCore {
                     )?;
                 }
                 let gates = Gates::from_tables(&tx, &synced_tables)
-                    .map_err(|error| DbError(error.to_string()))?;
+                    .map_err(|error| DbError::Message(error.to_string()))?;
                 let blob_decls = BlobDecls::from_tables(&tx, &synced_tables)
-                    .map_err(|error| DbError(error.to_string()))?;
+                    .map_err(|error| DbError::Message(error.to_string()))?;
                 Ok((schema_version, resolved, gates, blob_decls))
             })();
             match outcome {
@@ -518,9 +566,9 @@ impl DatabaseCore {
         let blob_decls = Arc::new(blob_decls);
         blob_decls
             .install_cleanup_guards(&conn)
-            .map_err(|e| DbError(e.to_string()))?;
+            .map_err(|e| DbError::Message(e.to_string()))?;
         gate::attach_empty_clone(&conn, &gates)
-            .map_err(|error| DbError(format!("install host transaction gate: {error}")))?;
+            .map_err(|error| DbError::Message(format!("install host transaction gate: {error}")))?;
         let core = DatabaseCore {
             conn,
             hlc,
@@ -571,7 +619,7 @@ impl DatabaseCore {
         validate_host_synced_tables(&conn, &synced_tables)?;
         let pinned_routing_contract = load_coven_metadata(&conn, write_policy)?;
         let sync_routing_contract = SyncRoutingContract::from_connection(&conn, &synced_tables)
-            .map_err(|error| DbError(error.to_string()))?;
+            .map_err(|error| DbError::Message(error.to_string()))?;
         validate_sync_routing_contract(&pinned_routing_contract, &sync_routing_contract)?;
         let sync_routing_hash = sync_routing_contract.hash();
 
@@ -580,10 +628,12 @@ impl DatabaseCore {
         // No register-clock seeding: a reader never mints an `_updated_at`, so it has
         // no stamp to keep ahead of on-disk values.
         let gates = Arc::new(
-            Gates::from_tables(&conn, &synced_tables).map_err(|e| DbError(e.to_string()))?,
+            Gates::from_tables(&conn, &synced_tables)
+                .map_err(|e| DbError::Message(e.to_string()))?,
         );
         let blob_decls = Arc::new(
-            BlobDecls::from_tables(&conn, &synced_tables).map_err(|e| DbError(e.to_string()))?,
+            BlobDecls::from_tables(&conn, &synced_tables)
+                .map_err(|e| DbError::Message(e.to_string()))?,
         );
         let core = DatabaseCore {
             conn,
@@ -968,22 +1018,24 @@ fn validate_host_synced_tables(
     for table in synced_tables {
         let name = table.name();
         if name.is_empty() {
-            return Err(DbError("synced table name must not be empty".to_string()));
+            return Err(DbError::Message(
+                "synced table name must not be empty".to_string(),
+            ));
         }
         if is_reserved_table_name(name) {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "synced table {name:?} is reserved by coven"
             )));
         }
         let sqlite_name = name.to_ascii_lowercase();
         if let Some(prior) = table_by_sqlite_name.insert(sqlite_name, name) {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "synced tables {prior:?} and {name:?} are declared as the same SQLite table more than once"
             )));
         }
         if let Some(live_name) = canonical_table_name(conn, name)? {
             if live_name != name {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "synced table {name:?} does not use the live schema's exact spelling {live_name:?}"
                 )));
             }
@@ -993,7 +1045,7 @@ fn validate_host_synced_tables(
         if let Some(decl) = table.blob() {
             let namespace = decl.namespace.as_str();
             if let Some(prior) = namespace_owner.insert(namespace, name) {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "synced tables {prior:?} and {name:?} both declare blob namespace \
                      {namespace:?}; a namespace must be owned by exactly one table"
                 )));
@@ -1033,7 +1085,7 @@ fn validate_existing_row_identities(conn: &Connection, table: &SyncedTable) -> R
     for id in ids {
         let id = id.map_err(DbError::from)?;
         crate::sync::session::validate_row_identity(table.name(), table.row_identity(), &id)
-            .map_err(|error| DbError(error.to_string()))?;
+            .map_err(|error| DbError::Message(error.to_string()))?;
     }
     Ok(())
 }
@@ -1059,14 +1111,14 @@ struct ColumnInfo {
 fn validate_synced_table_contract(conn: &Connection, table: &str) -> Result<(), DbError> {
     match table_is_strict(conn, table)? {
         None => {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "synced table {table:?} is declared in `synced_tables` but no migration \
                  creates it — add a `CREATE TABLE {table} (...) STRICT` to the schema \
                  migrations, or remove the declaration"
             )));
         }
         Some(false) => {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "synced table {table:?} is not declared STRICT; the sync contract assumes typed \
                  columns (apply preserves storage classes peer-to-peer, LWW arbitration renders \
                  values to strings for comparison), which STRICT enforces at the insert — declare \
@@ -1101,35 +1153,35 @@ fn validate_synced_table_contract(conn: &Connection, table: &str) -> Result<(), 
     let pk = match pk_columns.as_slice() {
         [single] => *single,
         [] => {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "synced table {table:?} has no primary key; the contract requires a single \
                  `id` TEXT primary key at column 0"
             )))
         }
         _ => {
             let names: Vec<&str> = pk_columns.iter().map(|c| c.name.as_str()).collect();
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "synced table {table:?} has a composite primary key {names:?}; the contract \
                  requires a single `id` TEXT primary key at column 0"
             )));
         }
     };
     if pk.name != "id" {
-        return Err(DbError(format!(
+        return Err(DbError::Message(format!(
             "synced table {table:?} primary key is {:?}, not `id`; the contract requires the \
              primary key to be the `id` column",
             pk.name
         )));
     }
     if pk.position != 0 {
-        return Err(DbError(format!(
+        return Err(DbError::Message(format!(
             "synced table {table:?} primary key `id` is at column {}, not column 0; the \
              contract requires `id` to be the first column",
             pk.position
         )));
     }
     if !declared_as_text(&pk.declared_type) {
-        return Err(DbError(format!(
+        return Err(DbError::Message(format!(
             "synced table {table:?} primary key `id` is declared {:?}, not TEXT; the contract \
              requires an `id` TEXT primary key",
             pk.declared_type
@@ -1140,20 +1192,20 @@ fn validate_synced_table_contract(conn: &Connection, table: &str) -> Result<(), 
         .iter()
         .find(|c| c.name == "_updated_at")
         .ok_or_else(|| {
-            DbError(format!(
+            DbError::Message(format!(
                 "synced table {table:?} has no `_updated_at` column; the contract requires \
                  `_updated_at TEXT NOT NULL`"
             ))
         })?;
     if !declared_as_text(&updated_at.declared_type) {
-        return Err(DbError(format!(
+        return Err(DbError::Message(format!(
             "synced table {table:?} column `_updated_at` is declared {:?}, not TEXT; the \
              contract requires `_updated_at TEXT NOT NULL`",
             updated_at.declared_type
         )));
     }
     if !updated_at.not_null {
-        return Err(DbError(format!(
+        return Err(DbError::Message(format!(
             "synced table {table:?} column `_updated_at` is nullable; the contract requires \
              `_updated_at TEXT NOT NULL`"
         )));
@@ -1218,7 +1270,7 @@ impl Database {
         status: &WriteStatus,
     ) -> Result<(), DbError> {
         let status = serde_json::to_string(status)
-            .map_err(|error| DbError(format!("serialize write status: {error}")))?;
+            .map_err(|error| DbError::Message(format!("serialize write status: {error}")))?;
         let updated = conn
             .execute(
                 "UPDATE store_writes SET status = ?2 WHERE write_id = ?1",
@@ -1226,7 +1278,7 @@ impl Database {
             )
             .map_err(DbError::from)?;
         if updated != 1 {
-            return Err(DbError(format!("write {write_id} does not exist")));
+            return Err(DbError::Message(format!("write {write_id} does not exist")));
         }
         Ok(())
     }
@@ -1258,7 +1310,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             serde_json::from_str(&raw)
-                .map_err(|error| DbError(format!("write {write_id} status: {error}")))
+                .map_err(|error| DbError::Message(format!("write {write_id} status: {error}")))
         })
         .await
     }
@@ -1287,10 +1339,12 @@ impl Database {
                 let (write_id, status, affected_rows) = row.map_err(DbError::from)?;
                 Ok(PendingWrite {
                     write_id: WriteId::from_generated(write_id),
-                    status: serde_json::from_str(&status)
-                        .map_err(|error| DbError(format!("pending write status: {error}")))?,
-                    affected_rows: serde_json::from_str(&affected_rows)
-                        .map_err(|error| DbError(format!("pending affected rows: {error}")))?,
+                    status: serde_json::from_str(&status).map_err(|error| {
+                        DbError::Message(format!("pending write status: {error}"))
+                    })?,
+                    affected_rows: serde_json::from_str(&affected_rows).map_err(|error| {
+                        DbError::Message(format!("pending affected rows: {error}"))
+                    })?,
                 })
             })
             .collect()
@@ -1324,12 +1378,12 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             let status: WriteStatus = serde_json::from_str(&raw_status)
-                .map_err(|error| DbError(format!("blocked write {write_id} status: {error}")))?;
+                .map_err(|error| DbError::Message(format!("blocked write {write_id} status: {error}")))?;
             if !matches!(status, WriteStatus::Blocked(_)) {
-                return Err(DbError(format!("write {write_id} is not blocked")));
+                return Err(DbError::Message(format!("write {write_id} is not blocked")));
             }
             let base: StoreWriteBase = serde_json::from_str(&raw_base)
-                .map_err(|error| DbError(format!("blocked write {write_id} base: {error}")))?;
+                .map_err(|error| DbError::Message(format!("blocked write {write_id} base: {error}")))?;
 
             let mut retried = Vec::new();
             match base {
@@ -1337,10 +1391,10 @@ impl Database {
                     if let Some(raw_prepared) = prepared.as_deref() {
                         let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
                             .map_err(|error| {
-                                DbError(format!("blocked write {write_id} preparation: {error}"))
+                                DbError::Message(format!("blocked write {write_id} preparation: {error}"))
                             })?;
                         if !matches!(prepared, PreparedStoreWriteState::MergeConcurrent { .. }) {
-                            return Err(DbError(format!(
+                            return Err(DbError::Message(format!(
                                 "blocked MergeConcurrent write {write_id} has Serial preparation"
                             )));
                         }
@@ -1351,7 +1405,7 @@ impl Database {
                         WriteStatus::Pending
                     };
                     let next_json = serde_json::to_string(&next)
-                        .map_err(|error| DbError(format!("serialize retry status: {error}")))?;
+                        .map_err(|error| DbError::Message(format!("serialize retry status: {error}")))?;
                     let updated = tx
                         .execute(
                             "UPDATE store_writes SET status = ?2
@@ -1360,7 +1414,7 @@ impl Database {
                         )
                         .map_err(DbError::from)?;
                     if updated != 1 {
-                        return Err(DbError(format!(
+                        return Err(DbError::Message(format!(
                             "blocked write {write_id} changed during retry"
                         )));
                     }
@@ -1371,7 +1425,7 @@ impl Database {
                     base: branch_base,
                 } => {
                     if prepared.is_some() {
-                        return Err(DbError(format!(
+                        return Err(DbError::Message(format!(
                             "blocked Serial branch {} retains publication preparation",
                             branch_id.first_write_id()
                         )));
@@ -1405,19 +1459,19 @@ impl Database {
                         let (stored_id, raw_status, raw_base, prepared) =
                             row.map_err(DbError::from)?;
                         let stored_base: StoreWriteBase = serde_json::from_str(&raw_base)
-                            .map_err(|error| DbError(format!("Serial retry base: {error}")))?;
+                            .map_err(|error| DbError::Message(format!("Serial retry base: {error}")))?;
                         if stored_base != expected_base {
-                            return Err(DbError(
+                            return Err(DbError::Message(
                                 "Serial database contains more than one unresolved branch"
                                     .to_string(),
                             ));
                         }
                         let stored_status: WriteStatus = serde_json::from_str(&raw_status)
-                            .map_err(|error| DbError(format!("Serial retry status: {error}")))?;
+                            .map_err(|error| DbError::Message(format!("Serial retry status: {error}")))?;
                         if !matches!(stored_status, WriteStatus::Pending | WriteStatus::Blocked(_))
                             || prepared.is_some()
                         {
-                            return Err(DbError(format!(
+                            return Err(DbError::Message(format!(
                                 "Serial branch write {stored_id} is not pending or blocked without preparation"
                             )));
                         }
@@ -1427,7 +1481,7 @@ impl Database {
                     }
                     drop(statement);
                     let pending = serde_json::to_string(&WriteStatus::Pending)
-                        .map_err(|error| DbError(format!("serialize retry status: {error}")))?;
+                        .map_err(|error| DbError::Message(format!("serialize retry status: {error}")))?;
                     for branch_write_id in branch_write_ids {
                         let updated = tx
                             .execute(
@@ -1439,7 +1493,7 @@ impl Database {
                             )
                             .map_err(DbError::from)?;
                         if updated != 1 {
-                            return Err(DbError(format!(
+                            return Err(DbError::Message(format!(
                                 "blocked Serial write {branch_write_id} changed during retry"
                             )));
                         }
@@ -1476,9 +1530,9 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             let target_status: WriteStatus = serde_json::from_str(&raw_status)
-                .map_err(|error| DbError(format!("blocked write {write_id} status: {error}")))?;
+                .map_err(|error| DbError::Message(format!("blocked write {write_id} status: {error}")))?;
             if !matches!(target_status, WriteStatus::Blocked(_)) {
-                return Err(DbError(format!("write {write_id} is not blocked")));
+                return Err(DbError::Message(format!("write {write_id} is not blocked")));
             }
 
             let mut statement = tx
@@ -1504,9 +1558,9 @@ impl Database {
             for row in rows {
                 let (stored_id, raw_status, inverse) = row.map_err(DbError::from)?;
                 let status: WriteStatus = serde_json::from_str(&raw_status)
-                    .map_err(|error| DbError(format!("discard write status: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("discard write status: {error}")))?;
                 if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "write {stored_id} after blocked write {write_id} has non-discardable status {status:?}"
                     )));
                 }
@@ -1514,7 +1568,7 @@ impl Database {
             }
             drop(statement);
             if discarded.first().map(|(stored_id, _)| stored_id) != Some(&write_id) {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "blocked write {write_id} is absent from its unpublished suffix"
                 )));
             }
@@ -1527,9 +1581,9 @@ impl Database {
                     inverse,
                     schema.clone(),
                 )
-                .map_err(|error| DbError(format!("invalid blocked-write inverse: {error}")))?;
+                .map_err(|error| DbError::Message(format!("invalid blocked-write inverse: {error}")))?;
                 crate::sync::apply::apply_changeset_strict_on(&tx, inverse, &[])
-                    .map_err(|error| DbError(format!("reverse blocked-write suffix: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("reverse blocked-write suffix: {error}")))?;
             }
             let discarded_ids: Vec<_> = discarded
                 .into_iter()
@@ -1574,13 +1628,16 @@ impl Database {
                 records.push((
                     PendingWrite {
                         write_id: WriteId::from_generated(write_id),
-                        status: serde_json::from_str(&status)
-                            .map_err(|error| DbError(format!("pending write status: {error}")))?,
-                        affected_rows: serde_json::from_str(&affected_rows)
-                            .map_err(|error| DbError(format!("pending affected rows: {error}")))?,
+                        status: serde_json::from_str(&status).map_err(|error| {
+                            DbError::Message(format!("pending write status: {error}"))
+                        })?,
+                        affected_rows: serde_json::from_str(&affected_rows).map_err(|error| {
+                            DbError::Message(format!("pending affected rows: {error}"))
+                        })?,
                     },
-                    serde_json::from_str::<StoreWriteBase>(&base)
-                        .map_err(|error| DbError(format!("pending write base: {error}")))?,
+                    serde_json::from_str::<StoreWriteBase>(&base).map_err(|error| {
+                        DbError::Message(format!("pending write base: {error}"))
+                    })?,
                 ));
             }
             drop(statement);
@@ -1595,12 +1652,12 @@ impl Database {
                     base: stored_base,
                 } = base
                 else {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "MergeConcurrent base carries a Serial conflict".to_string(),
                     ));
                 };
                 if branch_id != &candidate.branch_id || stored_base != &candidate.base {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "Serial conflict status differs from its durable branch base".to_string(),
                     ));
                 }
@@ -1608,7 +1665,7 @@ impl Database {
                     None => conflict = Some(candidate.clone()),
                     Some(existing) if existing == candidate => {}
                     Some(_) => {
-                        return Err(DbError(
+                        return Err(DbError::Message(
                             "Serial database contains more than one conflict branch".to_string(),
                         ))
                     }
@@ -1627,7 +1684,7 @@ impl Database {
                     continue;
                 }
                 if base != expected_base {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "Serial database contains more than one unresolved branch".to_string(),
                     ));
                 }
@@ -1635,7 +1692,7 @@ impl Database {
                     &write.status,
                     WriteStatus::Conflict(_) | WriteStatus::Pending
                 ) {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "conflicted Serial branch write {} has non-resolvable status {:?}",
                         write.write_id, write.status
                     )));
@@ -1675,14 +1732,17 @@ impl Database {
             for row in rows {
                 let (raw_base, raw_status) = row.map_err(DbError::from)?;
                 let StoreWriteBase::Serial { branch_id, base } = serde_json::from_str(&raw_base)
-                    .map_err(|error| DbError(format!("unresolved Serial base: {error}")))?
+                    .map_err(|error| {
+                        DbError::Message(format!("unresolved Serial base: {error}"))
+                    })?
                 else {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "MergeConcurrent base reached a Serial branch query".to_string(),
                     ));
                 };
-                let status: WriteStatus = serde_json::from_str(&raw_status)
-                    .map_err(|error| DbError(format!("unresolved Serial status: {error}")))?;
+                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                    DbError::Message(format!("unresolved Serial status: {error}"))
+                })?;
                 match &mut branch {
                     None => {
                         branch = Some(UnresolvedSerialBranch {
@@ -1695,7 +1755,7 @@ impl Database {
                         existing.conflicted |= matches!(status, WriteStatus::Conflict(_));
                     }
                     Some(_) => {
-                        return Err(DbError(
+                        return Err(DbError::Message(
                             "Serial database contains more than one unresolved branch".to_string(),
                         ));
                     }
@@ -1721,7 +1781,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             let current: WriteStatus = serde_json::from_str(&raw)
-                .map_err(|error| DbError(format!("write {write_id} status: {error}")))?;
+                .map_err(|error| DbError::Message(format!("write {write_id} status: {error}")))?;
             let mut senders = statuses.lock().expect("write status mutex poisoned");
             let sender = senders
                 .entry(write_id)
@@ -1788,7 +1848,8 @@ impl Database {
         device_id: String,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), OpenError> {
-        let hlc = Hlc::try_new(device_id).map_err(|e| DbError(format!("device_id {e}")))?;
+        let hlc =
+            Hlc::try_new(device_id).map_err(|e| DbError::Message(format!("device_id {e}")))?;
         Self::open_with_hlc_and_coven_metadata(
             path,
             synced_tables,
@@ -1810,7 +1871,8 @@ impl Database {
         device_id: String,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), OpenError> {
-        let hlc = Hlc::try_new(device_id).map_err(|e| DbError(format!("device_id {e}")))?;
+        let hlc =
+            Hlc::try_new(device_id).map_err(|e| DbError::Message(format!("device_id {e}")))?;
         Self::open_with_hlc_and_coven_metadata(
             path,
             synced_tables,
@@ -1877,7 +1939,7 @@ impl Database {
             let join = std::thread::Builder::new()
                 .name("coven-db".to_string())
                 .spawn(move || run_connection_thread(core, jobs_rx))
-                .map_err(|e| DbError(format!("spawn database connection thread: {e}")))?;
+                .map_err(|e| DbError::Message(format!("spawn database connection thread: {e}")))?;
             Database {
                 thread: Arc::new(ConnectionThread {
                     jobs: jobs_tx,
@@ -1914,7 +1976,8 @@ impl Database {
         device_id: String,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
-        let hlc = Hlc::try_new(device_id).map_err(|e| DbError(format!("device_id {e}")))?;
+        let hlc =
+            Hlc::try_new(device_id).map_err(|e| DbError::Message(format!("device_id {e}")))?;
         let (core, state) = DatabaseCore::open_read_only(
             path,
             synced_tables,
@@ -1928,7 +1991,7 @@ impl Database {
         let join = std::thread::Builder::new()
             .name("coven-db-ro".to_string())
             .spawn(move || run_connection_thread(core, jobs_rx))
-            .map_err(|e| DbError(format!("spawn database connection thread: {e}")))?;
+            .map_err(|e| DbError::Message(format!("spawn database connection thread: {e}")))?;
         Ok(Database {
             thread: Arc::new(ConnectionThread {
                 jobs: jobs_tx,
@@ -2126,7 +2189,7 @@ impl Database {
         let value = Self::run_host_sql_on(conn, f)?;
         let captured = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
         crate::sync::session::validate_changeset_row_identities(&captured, synced_tables)
-            .map_err(|error| DbError(error.to_string()))
+            .map_err(|error| DbError::Message(error.to_string()))
             .map_err(E::from)?;
         Ok((value, captured))
     }
@@ -2138,17 +2201,17 @@ impl Database {
         blob_decls: &BlobDecls,
     ) -> Result<StoreWriteBlobFacts, DbError> {
         let changes = crate::changeset::walk(changeset)
-            .map_err(|error| DbError(format!("read Store write blobs: {error}")))?;
+            .map_err(|error| DbError::Message(format!("read Store write blobs: {error}")))?;
         let mut facts = BTreeMap::new();
         for change in changes {
             let Some((blob, size)) = blob_decls
                 .publication_blob_from_change(tx, &change)
-                .map_err(|error| DbError(format!("capture Store write blob: {error}")))?
+                .map_err(|error| DbError::Message(format!("capture Store write blob: {error}")))?
             else {
                 continue;
             };
             let pk = change.pk().ok_or_else(|| {
-                DbError(format!(
+                DbError::Message(format!(
                     "blob-bearing Store write row in {:?} has no primary key",
                     change.table
                 ))
@@ -2178,7 +2241,7 @@ impl Database {
                         match gates
                             .resolve_root_of(tx, &change.table, pk)
                             .map_err(|error| {
-                                DbError(format!("resolve Store write blob root: {error}"))
+                                DbError::Message(format!("resolve Store write blob root: {error}"))
                             })? {
                             Some((root_table, root_id)) => {
                                 match Self::make_remote_intent_retain_pinned(
@@ -2202,7 +2265,7 @@ impl Database {
             let key = (fact.blob().namespace.clone(), fact.blob().id.clone());
             if let Some(prior) = facts.insert(key.clone(), fact.clone()) {
                 if prior != fact {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "Store write gives blob {}/{} conflicting publication facts",
                         key.0, key.1
                     )));
@@ -2233,7 +2296,7 @@ impl Database {
                 let key = (fact.blob().namespace.clone(), fact.blob().id.clone());
                 if let Some(prior) = facts.insert(key.clone(), fact.clone()) {
                     if prior != fact {
-                        return Err(DbError(format!(
+                        return Err(DbError::Message(format!(
                             "audience partitions give blob {}/{} conflicting publication facts",
                             key.0, key.1
                         )));
@@ -2255,23 +2318,19 @@ impl Database {
     ) -> Result<Vec<gate::AudiencePartition>, DbError> {
         match routing {
             StoreWriteRouting::MergeScoped(encryption) => {
-                let store_root_hash = tx
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [STORE_ROOT_HASH_STATE_KEY],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .map_err(DbError::from)?
-                    .parse::<ObjectHash>()
-                    .map_err(|error| {
-                        DbError(format!("parse Store root for row routing: {error}"))
-                    })?;
+                let store_root_hash = Self::required_store_root_hash_on(tx)?;
                 let key = crate::sync::circle::derive_row_routing_key(encryption, store_root_hash)
-                    .map_err(|error| DbError(format!("derive row routing key: {error}")))?;
+                    .map_err(|error| {
+                        DbError::Message(format!("derive row routing key: {error}"))
+                    })?;
                 let routing_changeset = gate::capture_routing_changes(tx, captured, gates, &key)
-                    .map_err(|error| DbError(format!("capture scoped routing changes: {error}")))?;
+                    .map_err(|error| {
+                        DbError::Message(format!("capture scoped routing changes: {error}"))
+                    })?;
                 gate::partition_outbound(tx, captured, &routing_changeset, gates, write_policy)
-                    .map_err(|error| DbError(format!("partition scoped host transaction: {error}")))
+                    .map_err(|error| {
+                        DbError::Message(format!("partition scoped host transaction: {error}"))
+                    })
             }
             StoreWriteRouting::SerialScoped => gate::partition_outbound(
                 tx,
@@ -2280,10 +2339,12 @@ impl Database {
                 gates,
                 write_policy,
             )
-            .map_err(|error| DbError(format!("partition scoped host transaction: {error}"))),
+            .map_err(|error| {
+                DbError::Message(format!("partition scoped host transaction: {error}"))
+            }),
             StoreWriteRouting::Unscoped => {
                 let changeset = gate::gate_outbound(tx, captured, gates)
-                    .map_err(|error| DbError(format!("gate host transaction: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("gate host transaction: {error}")))?;
                 Ok((!changeset.is_empty())
                     .then_some(gate::AudiencePartition {
                         audience: crate::sync::circle::Audience::Store,
@@ -2308,7 +2369,7 @@ impl Database {
             WritePolicy::MergeConcurrent => routing_encryption
                 .map(StoreWriteRouting::MergeScoped)
                 .ok_or_else(|| {
-                    DbError(
+                    DbError::Message(
                         "Merge scoped write requires the Store generation-1 routing key"
                             .to_string(),
                     )
@@ -2362,12 +2423,14 @@ impl Database {
             for partition in partitions {
                 affected.extend(
                     crate::changeset::walk(&partition.changeset)
-                        .map_err(|error| DbError(format!("read affected write rows: {error}")))?
+                        .map_err(|error| {
+                            DbError::Message(format!("read affected write rows: {error}"))
+                        })?
                         .into_iter()
                         .filter(|row| !gate::is_routing_table(&row.table))
                         .map(|row| {
                             let primary_key = row.pk().map(str::to_owned).ok_or_else(|| {
-                                DbError(format!(
+                                DbError::Message(format!(
                                     "shared write row in {:?} has no primary key",
                                     row.table
                                 ))
@@ -2390,13 +2453,14 @@ impl Database {
             WriteStatus::Pending
         };
         let base = serde_json::to_string(base)
-            .map_err(|error| DbError(format!("serialize pending Store base: {error}")))?;
+            .map_err(|error| DbError::Message(format!("serialize pending Store base: {error}")))?;
         let status_json = serde_json::to_string(&status)
-            .map_err(|error| DbError(format!("serialize write status: {error}")))?;
+            .map_err(|error| DbError::Message(format!("serialize write status: {error}")))?;
         let affected_rows = serde_json::to_string(&affected_rows)
-            .map_err(|error| DbError(format!("serialize affected rows: {error}")))?;
-        let blob_facts_json = serde_json::to_string(blob_facts)
-            .map_err(|error| DbError(format!("serialize Store write blob facts: {error}")))?;
+            .map_err(|error| DbError::Message(format!("serialize affected rows: {error}")))?;
+        let blob_facts_json = serde_json::to_string(blob_facts).map_err(|error| {
+            DbError::Message(format!("serialize Store write blob facts: {error}"))
+        })?;
         let store_changeset = partitions
             .iter()
             .find(|partition| partition.audience == crate::sync::circle::Audience::Store)
@@ -2421,7 +2485,7 @@ impl Database {
             let audience = match partition.audience {
                 crate::sync::circle::Audience::Store => "store".to_string(),
                 crate::sync::circle::Audience::Local => {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "Local audience must not enter the durable outbound journal".to_string(),
                     ));
                 }
@@ -2516,7 +2580,7 @@ impl Database {
                     match existing {
                         Some(existing) => serde_json::from_str(&existing)
                             .map_err(|error| {
-                                DbError(format!("pending serial branch base: {error}"))
+                                DbError::Message(format!("pending serial branch base: {error}"))
                             })
                             .map_err(E::from)?,
                         None => StoreWriteBase::Serial {
@@ -2558,10 +2622,10 @@ impl Database {
         E: From<DbError>,
     {
         let gates = Gates::from_tables(conn, synced_tables)
-            .map_err(|error| DbError(error.to_string()))
+            .map_err(|error| DbError::Message(error.to_string()))
             .map_err(E::from)?;
         let blob_decls = BlobDecls::from_tables(conn, synced_tables)
-            .map_err(|error| DbError(error.to_string()))
+            .map_err(|error| DbError::Message(error.to_string()))
             .map_err(E::from)?;
         Self::run_store_write_transaction_on(
             conn,
@@ -2621,9 +2685,10 @@ impl Database {
                 partitions,
                 inverse_changeset,
                 base: serde_json::from_str(&base)
-                    .map_err(|error| DbError(format!("pending write base: {error}")))?,
-                blob_facts: serde_json::from_str(&blob_facts)
-                    .map_err(|error| DbError(format!("pending write blob facts: {error}")))?,
+                    .map_err(|error| DbError::Message(format!("pending write base: {error}")))?,
+                blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
+                    DbError::Message(format!("pending write blob facts: {error}"))
+                })?,
             }))
         })
         .await
@@ -2659,12 +2724,12 @@ impl Database {
             let (audience, control, changeset) = row.map_err(DbError::from)?;
             if audience == "store" {
                 if control.is_some() {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "pending write {write_id} Store partition carries a Circle control"
                     )));
                 }
                 if store.is_some() {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "pending write {write_id} carries more than one Store partition"
                     )));
                 }
@@ -2678,18 +2743,18 @@ impl Database {
             let circle_id = audience
                 .parse::<crate::sync::circle::CircleId>()
                 .map_err(|error| {
-                    DbError(format!(
+                    DbError::Message(format!(
                         "pending write {write_id} has invalid audience {audience:?}: {error}"
                     ))
                 })?;
             let control_json = control.ok_or_else(|| {
-                DbError(format!(
+                DbError::Message(format!(
                     "pending write {write_id} Circle {circle_id} has no control coordinate"
                 ))
             })?;
             let control =
                 gate::CirclePartitionControl::from_stored_json(control_json).map_err(|error| {
-                    DbError(format!(
+                    DbError::Message(format!(
                         "pending write {write_id} Circle {circle_id} control coordinate: {error}"
                     ))
                 })?;
@@ -2700,7 +2765,7 @@ impl Database {
                 crate::sync::circle::CircleControlCoord::Serial { .. } => WritePolicy::Serial,
             };
             if control_policy != write_policy {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "pending write {write_id} Circle {circle_id} control uses {control_policy:?}, database uses {write_policy:?}"
                 )));
             }
@@ -2713,19 +2778,19 @@ impl Database {
         drop(statement);
         match &store {
             Some(partition) if partition.changeset != stored_store_changeset => {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "pending write {write_id} Store partition differs from store_writes.changeset"
                 )));
             }
             None if !stored_store_changeset.is_empty() => {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "pending write {write_id} has a store_writes.changeset without a Store partition"
                 )));
             }
             Some(_) | None => {}
         }
         if store.is_none() && circles.is_empty() {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "pending write {write_id} has no durable audience partitions"
             )));
         }
@@ -2736,7 +2801,7 @@ impl Database {
         &self,
     ) -> Result<Option<SerialStoreBranchPreparationWork>, DbError> {
         if self.write_policy() != WritePolicy::Serial {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "Serial branch reservation requires the Serial write policy".to_string(),
             ));
         }
@@ -2776,23 +2841,23 @@ impl Database {
                 return Ok(None);
             };
             let first_base: StoreWriteBase = serde_json::from_str(&first.3)
-                .map_err(|error| DbError(format!("pending Serial write base: {error}")))?;
+                .map_err(|error| DbError::Message(format!("pending Serial write base: {error}")))?;
             let StoreWriteBase::Serial { branch_id, base } = first_base else {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "MergeConcurrent write exists in a Serial database".to_string(),
                 ));
             };
             let preparing = serde_json::to_string(&PreparedStoreWriteState::SerialPreparing)
-                .map_err(|error| DbError(format!("serialize Serial reservation: {error}")))?;
+                .map_err(|error| DbError::Message(format!("serialize Serial reservation: {error}")))?;
             let publishing = serde_json::to_string(&WriteStatus::Publishing)
-                .map_err(|error| DbError(format!("serialize write status: {error}")))?;
+                .map_err(|error| DbError::Message(format!("serialize write status: {error}")))?;
             let mut writes = Vec::new();
             let mut newly_reserved = Vec::new();
             for (write_id, changeset, inverse_changeset, raw_base, blob_facts, status, prepared) in
                 records
             {
                 let parsed_base: StoreWriteBase = serde_json::from_str(&raw_base)
-                    .map_err(|error| DbError(format!("pending Serial write base: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("pending Serial write base: {error}")))?;
                 if parsed_base
                     != (StoreWriteBase::Serial {
                         branch_id: branch_id.clone(),
@@ -2811,7 +2876,7 @@ impl Database {
                             )
                             .map_err(DbError::from)?;
                         if updated != 1 {
-                            return Err(DbError(format!(
+                            return Err(DbError::Message(format!(
                                 "Serial write {write_id} lost branch reservation"
                             )));
                         }
@@ -2840,12 +2905,12 @@ impl Database {
                     inverse_changeset,
                     base: parsed_base,
                     blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
-                        DbError(format!("pending Serial write blob facts: {error}"))
+                        DbError::Message(format!("pending Serial write blob facts: {error}"))
                     })?,
                 });
             }
             if writes.is_empty() {
-                return Err(DbError("Serial branch reservation is empty".to_string()));
+                return Err(DbError::Message("Serial branch reservation is empty".to_string()));
             }
             tx.commit().map_err(DbError::from)?;
             for write_id in newly_reserved {
@@ -2926,20 +2991,12 @@ impl Database {
                 .map_err(DbError::from)?;
             if stage.commit.device_id != local_device_id || stage.head.device_id != local_device_id
             {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "prepared Store write belongs to {:?}/{:?}, local device is {:?}",
                     stage.commit.device_id, stage.head.device_id, local_device_id
                 )));
             }
-            let store_root_hash: ObjectHash = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [STORE_ROOT_HASH_STATE_KEY],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)?
-                .parse()
-                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
+            let store_root_hash = Self::required_store_root_hash_on(&tx)?;
             stage
                 .commit
                 .verify_at(
@@ -2948,13 +3005,17 @@ impl Database {
                     &local_device_id,
                     stage.commit.seq(),
                 )
-                .map_err(|error| DbError(format!("verify prepared Store commit: {error}")))?;
+                .map_err(|error| {
+                    DbError::Message(format!("verify prepared Store commit: {error}"))
+                })?;
             stage
                 .commit
                 .verify_store_package(&stage.package_bytes)
-                .map_err(|error| DbError(format!("verify prepared Store package: {error}")))?;
+                .map_err(|error| {
+                    DbError::Message(format!("verify prepared Store package: {error}"))
+                })?;
             if stage.commit.write_id != stage.write_id {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "prepared write id differs from signed commit".to_string(),
                 ));
             }
@@ -2972,35 +3033,36 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if stored_status != "\"pending\"" || stored_preparation.is_some() {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "write {} is not an unprepared pending write",
                     stage.write_id
                 )));
             }
             if stored_changeset != stage.package_bytes {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "prepared package differs from write {} changeset",
                     stage.write_id
                 )));
             }
-            let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)
-                .map_err(|error| DbError(format!("write {} base: {error}", stage.write_id)))?;
+            let stored_base: StoreWriteBase =
+                serde_json::from_str(&stored_base).map_err(|error| {
+                    DbError::Message(format!("write {} base: {error}", stage.write_id))
+                })?;
             let StoreWriteBase::MergeConcurrent {
                 dependencies: stored_dependencies,
             } = stored_base
             else {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "serial write {} reached MergeConcurrent preparation",
                     stage.write_id
                 )));
             };
             if stored_dependencies
-                != *stage
-                    .commit
-                    .merge_dependencies()
-                    .map_err(|error| DbError(format!("prepared Store commit policy: {error}")))?
+                != *stage.commit.merge_dependencies().map_err(|error| {
+                    DbError::Message(format!("prepared Store commit policy: {error}"))
+                })?
             {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "prepared commit dependencies differ from write {}",
                     stage.write_id
                 )));
@@ -3016,13 +3078,13 @@ impl Database {
                 .optional()
                 .map_err(DbError::from)?;
             if let Some(other_write_id) = another_prepared {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "write {other_write_id} already owns Store publication"
                 )));
             }
             let expected_position = stage.commit.position();
             if stage.head.position.as_ref() != Some(&expected_position) {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "outbound Store head does not activate its commit".to_string(),
                 ));
             }
@@ -3033,9 +3095,9 @@ impl Database {
                 &local_device_id,
                 stage.commit.seq(),
             )
-            .map_err(|error| DbError(format!("verify prepared Store head: {error}")))?;
+            .map_err(|error| DbError::Message(format!("verify prepared Store head: {error}")))?;
             if parsed_head != stage.head {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "prepared Store head changed during encoding".to_string(),
                 ));
             }
@@ -3048,7 +3110,7 @@ impl Database {
             if stage.commit.seq() != expected_seq
                 || stage.commit.previous_commit_hash() != expected_hash
             {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "outbound Store commit is {}/{:?}, expected {expected_seq}/{expected_hash:?}",
                     stage.commit.seq(),
                     stage.commit.previous_commit_hash()
@@ -3062,10 +3124,11 @@ impl Database {
                 local_cleanup: stage.local_cleanup,
                 completion: stage.completion,
             };
-            let prepared = serde_json::to_string(&prepared)
-                .map_err(|error| DbError(format!("serialize prepared Store write: {error}")))?;
+            let prepared = serde_json::to_string(&prepared).map_err(|error| {
+                DbError::Message(format!("serialize prepared Store write: {error}"))
+            })?;
             let status = serde_json::to_string(&WriteStatus::Publishing)
-                .map_err(|error| DbError(format!("serialize write status: {error}")))?;
+                .map_err(|error| DbError::Message(format!("serialize write status: {error}")))?;
             let updated = tx
                 .execute(
                     "UPDATE store_writes SET prepared = ?2, status = ?3
@@ -3074,7 +3137,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if updated != 1 {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "write {} lost pending preparation ownership",
                     stage.write_id
                 )));
@@ -3091,12 +3154,14 @@ impl Database {
         stage: SerialStoreWritePreparation,
     ) -> Result<(), DbError> {
         if self.write_policy() != WritePolicy::Serial {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "Serial branch preparation requires the Serial write policy".to_string(),
             ));
         }
         if stage.writes.is_empty() {
-            return Err(DbError("prepared Serial branch is empty".to_string()));
+            return Err(DbError::Message(
+                "prepared Serial branch is empty".to_string(),
+            ));
         }
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
@@ -3107,24 +3172,18 @@ impl Database {
                     |row| row.get(0),
                 )
                 .map_err(DbError::from)?;
-            let store_root_hash: ObjectHash = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [STORE_ROOT_HASH_STATE_KEY],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)?
-                .parse()
-                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
+            let store_root_hash = Self::required_store_root_hash_on(&tx)?;
             let expected_base = StoreWriteBase::Serial {
                 branch_id: stage.branch_id.clone(),
                 base: stage.base.clone(),
             };
             let head_bytes = stage.head.to_bytes();
-            let parsed_head = StoreSerialHead::parse(&head_bytes, store_root_hash)
-                .map_err(|error| DbError(format!("verify prepared Serial head: {error}")))?;
+            let parsed_head =
+                StoreSerialHead::parse(&head_bytes, store_root_hash).map_err(|error| {
+                    DbError::Message(format!("verify prepared Serial head: {error}"))
+                })?;
             if parsed_head != stage.head {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "prepared Serial head changed during encoding".to_string(),
                 ));
             }
@@ -3132,7 +3191,7 @@ impl Database {
             if stage.head.commit.as_ref() != Some(&tip.commit.position())
                 || stage.head.tip_write_id.as_ref() != Some(&tip.write_id)
             {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "prepared Serial head does not activate the branch tip".to_string(),
                 ));
             }
@@ -3141,7 +3200,7 @@ impl Database {
                 if write.commit.write_id != write.write_id
                     || write.commit.device_id != local_device_id
                 {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "prepared Serial write {} identity differs from its commit",
                         write.write_id
                     )));
@@ -3158,13 +3217,17 @@ impl Database {
                         SERIAL_STREAM_ID,
                         expected_seq,
                     )
-                    .map_err(|error| DbError(format!("verify prepared Serial commit: {error}")))?;
+                    .map_err(|error| {
+                        DbError::Message(format!("verify prepared Serial commit: {error}"))
+                    })?;
                 write
                     .commit
                     .verify_store_package(&write.package_bytes)
-                    .map_err(|error| DbError(format!("verify prepared Serial package: {error}")))?;
+                    .map_err(|error| {
+                        DbError::Message(format!("verify prepared Serial package: {error}"))
+                    })?;
                 if write.commit.previous_commit_hash() != expected_hash {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "prepared Serial commit {} has the wrong predecessor",
                         write.write_id
                     )));
@@ -3183,15 +3246,17 @@ impl Database {
                     )
                     .map_err(DbError::from)?;
                 let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)
-                    .map_err(|error| DbError(format!("stored Serial base: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("stored Serial base: {error}")))?;
                 let stored_prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
-                    .map_err(|error| DbError(format!("stored Serial reservation: {error}")))?;
+                    .map_err(|error| {
+                        DbError::Message(format!("stored Serial reservation: {error}"))
+                    })?;
                 if stored_changeset != write.package_bytes
                     || stored_base != expected_base
                     || status != "\"publishing\""
                     || !matches!(stored_prepared, PreparedStoreWriteState::SerialPreparing)
                 {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "Serial write {} no longer owns its exact branch reservation",
                         write.write_id
                     )));
@@ -3205,7 +3270,7 @@ impl Database {
                     completion: write.completion.clone(),
                 };
                 let durable = serde_json::to_string(&durable).map_err(|error| {
-                    DbError(format!("serialize prepared Serial write: {error}"))
+                    DbError::Message(format!("serialize prepared Serial write: {error}"))
                 })?;
                 let updated = tx
                     .execute(
@@ -3215,7 +3280,7 @@ impl Database {
                     )
                     .map_err(DbError::from)?;
                 if updated != 1 {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "Serial write {} lost exact preparation ownership",
                         write.write_id
                     )));
@@ -3231,10 +3296,11 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if reserved_count
-                != i64::try_from(stage.writes.len())
-                    .map_err(|_| DbError("Serial branch length exceeds SQLite integer".into()))?
+                != i64::try_from(stage.writes.len()).map_err(|_| {
+                    DbError::Message("Serial branch length exceeds SQLite integer".into())
+                })?
             {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "prepared Serial branch contains {} writes but {reserved_count} are reserved",
                     stage.writes.len()
                 )));
@@ -3255,7 +3321,7 @@ impl Database {
         for row in rows {
             let (write_id, raw_base) = row.map_err(DbError::from)?;
             let stored_base: StoreWriteBase = serde_json::from_str(&raw_base)
-                .map_err(|error| DbError(format!("stored Serial base: {error}")))?;
+                .map_err(|error| DbError::Message(format!("stored Serial base: {error}")))?;
             if &stored_base == expected_base {
                 write_ids.push(WriteId::from_generated(write_id));
             }
@@ -3293,11 +3359,11 @@ impl Database {
         for row in rows {
             let (write_id, raw_status, raw_base, prepared) = row.map_err(DbError::from)?;
             let status: WriteStatus = serde_json::from_str(&raw_status)
-                .map_err(|error| DbError(format!("Serial branch status: {error}")))?;
+                .map_err(|error| DbError::Message(format!("Serial branch status: {error}")))?;
             let base: StoreWriteBase = serde_json::from_str(&raw_base)
-                .map_err(|error| DbError(format!("Serial branch base: {error}")))?;
+                .map_err(|error| DbError::Message(format!("Serial branch base: {error}")))?;
             if branch_base.as_ref().is_some_and(|stored| stored != &base) {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "Serial database contains more than one unresolved branch".to_string(),
                 ));
             }
@@ -3305,13 +3371,13 @@ impl Database {
             if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_))
                 || prepared.is_some()
             {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "Serial branch write {write_id} cannot be rebased during registration activation"
                 )));
             }
-            branch_len = branch_len
-                .checked_add(1)
-                .ok_or_else(|| DbError("Serial branch length exceeds usize".to_string()))?;
+            branch_len = branch_len.checked_add(1).ok_or_else(|| {
+                DbError::Message("Serial branch length exceeds usize".to_string())
+            })?;
         }
         drop(statement);
         let Some(StoreWriteBase::Serial { branch_id, base }) = branch_base else {
@@ -3334,17 +3400,17 @@ impl Database {
                  WHERE base = ?1 AND prepared IS NULL
                    AND (status = '\"pending\"' OR json_extract(status, '$.blocked') IS NOT NULL)",
                 rusqlite::params![
-                    serde_json::to_string(&old_base).map_err(|error| DbError(format!(
+                    serde_json::to_string(&old_base).map_err(|error| DbError::Message(format!(
                         "serialize prior Serial branch base: {error}"
                     )))?,
-                    serde_json::to_string(&rebased).map_err(|error| DbError(format!(
+                    serde_json::to_string(&rebased).map_err(|error| DbError::Message(format!(
                         "serialize rebased Serial branch: {error}"
                     )))?,
                 ],
             )
             .map_err(DbError::from)?;
         if updated != branch_len {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "Serial branch changed during registration activation".to_string(),
             ));
         }
@@ -3358,7 +3424,7 @@ impl Database {
         status: WriteStatus,
     ) -> Result<(), DbError> {
         if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "Serial preparation can only return a reservation to pending or blocked"
                     .to_string(),
             ));
@@ -3368,9 +3434,11 @@ impl Database {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let expected_base = StoreWriteBase::Serial { branch_id, base };
             let preparing = serde_json::to_string(&PreparedStoreWriteState::SerialPreparing)
-                .map_err(|error| DbError(format!("serialize Serial reservation: {error}")))?;
+                .map_err(|error| {
+                    DbError::Message(format!("serialize Serial reservation: {error}"))
+                })?;
             let status_json = serde_json::to_string(&status)
-                .map_err(|error| DbError(format!("serialize write status: {error}")))?;
+                .map_err(|error| DbError::Message(format!("serialize write status: {error}")))?;
             let mut statement = tx
                 .prepare(
                     "SELECT write_id, base FROM store_writes
@@ -3386,7 +3454,7 @@ impl Database {
             let write_ids = Self::write_ids_matching_serial_base(rows, &expected_base)?;
             drop(statement);
             if write_ids.is_empty() {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "reserved Serial branch disappeared during preparation".to_string(),
                 ));
             }
@@ -3399,7 +3467,7 @@ impl Database {
                     )
                     .map_err(DbError::from)?;
                 if updated != 1 {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "reserved Serial write {write_id} disappeared during release"
                     )));
                 }
@@ -3436,7 +3504,7 @@ impl Database {
             .map_err(DbError::from)?
             .map(|(write_id, package_bytes, base, prepared)| {
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
-                    .map_err(|error| DbError(format!("prepared Store write: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("prepared Store write: {error}")))?;
                 let PreparedStoreWriteState::MergeConcurrent {
                     commit_bytes,
                     head_bytes,
@@ -3444,33 +3512,32 @@ impl Database {
                     ..
                 } = prepared
                 else {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "serial branch reached MergeConcurrent publication".to_string(),
                     ));
                 };
                 let commit: StoreBatchCommit = serde_json::from_slice(&commit_bytes)
-                    .map_err(|error| DbError(format!("prepared Store commit: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("prepared Store commit: {error}")))?;
                 let head: StoreDeviceHead = serde_json::from_slice(&head_bytes)
-                    .map_err(|error| DbError(format!("prepared Store head: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("prepared Store head: {error}")))?;
                 let write_id = WriteId::from_generated(write_id);
                 if commit.write_id != write_id {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "prepared write id differs from signed commit".to_string(),
                     ));
                 }
                 let base: StoreWriteBase = serde_json::from_str(&base)
-                    .map_err(|error| DbError(format!("prepared write base: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("prepared write base: {error}")))?;
                 let StoreWriteBase::MergeConcurrent { dependencies } = base else {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "serial base reached MergeConcurrent publication".to_string(),
                     ));
                 };
-                if *commit
-                    .merge_dependencies()
-                    .map_err(|error| DbError(format!("prepared Store commit policy: {error}")))?
-                    != dependencies
+                if *commit.merge_dependencies().map_err(|error| {
+                    DbError::Message(format!("prepared Store commit policy: {error}"))
+                })? != dependencies
                 {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "prepared commit differs from its write dependency frontier".to_string(),
                     ));
                 }
@@ -3520,12 +3587,12 @@ impl Database {
             for row in rows {
                 let (write_id, package_bytes, raw_base, prepared) = row.map_err(DbError::from)?;
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
-                    .map_err(|error| DbError(format!("prepared Serial write: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("prepared Serial write: {error}")))?;
                 if matches!(prepared, PreparedStoreWriteState::SerialPreparing) {
                     if writes.is_empty() {
                         return Ok(None);
                     }
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "Serial branch mixes reserved and exact prepared writes".to_string(),
                     ));
                 }
@@ -3536,7 +3603,7 @@ impl Database {
                     ..
                 } = prepared
                 else {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "MergeConcurrent write reached Serial publication".to_string(),
                     ));
                 };
@@ -3544,9 +3611,9 @@ impl Database {
                     branch_id: row_branch_id,
                     base: row_base,
                 } = serde_json::from_str(&raw_base)
-                    .map_err(|error| DbError(format!("prepared Serial base: {error}")))?
+                    .map_err(|error| DbError::Message(format!("prepared Serial base: {error}")))?
                 else {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "MergeConcurrent base reached Serial publication".to_string(),
                     ));
                 };
@@ -3555,27 +3622,31 @@ impl Database {
                     .is_some_and(|value| value != &row_branch_id)
                     || base.as_ref().is_some_and(|value| value != &row_base)
                 {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "prepared Serial writes do not share one branch base".to_string(),
                     ));
                 }
                 branch_id.get_or_insert(row_branch_id);
                 base.get_or_insert(row_base);
-                let commit: StoreBatchCommit = serde_json::from_slice(&commit_bytes)
-                    .map_err(|error| DbError(format!("prepared Serial commit: {error}")))?;
+                let commit: StoreBatchCommit =
+                    serde_json::from_slice(&commit_bytes).map_err(|error| {
+                        DbError::Message(format!("prepared Serial commit: {error}"))
+                    })?;
                 if commit.write_id.as_str() != write_id {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "prepared Serial write id differs from signed commit".to_string(),
                     ));
                 }
                 if let Some(head_bytes) = tip_head_bytes {
                     if head.is_some() {
-                        return Err(DbError(
+                        return Err(DbError::Message(
                             "prepared Serial branch has more than one tip head".to_string(),
                         ));
                     }
-                    let value: StoreSerialHead = serde_json::from_slice(&head_bytes)
-                        .map_err(|error| DbError(format!("prepared Serial head: {error}")))?;
+                    let value: StoreSerialHead =
+                        serde_json::from_slice(&head_bytes).map_err(|error| {
+                            DbError::Message(format!("prepared Serial head: {error}"))
+                        })?;
                     head = Some(ExactProtocolObject {
                         value,
                         bytes: head_bytes,
@@ -3594,11 +3665,11 @@ impl Database {
                 return Ok(None);
             }
             let head = head.ok_or_else(|| {
-                DbError("prepared Serial branch has no activating tip head".to_string())
+                DbError::Message("prepared Serial branch has no activating tip head".to_string())
             })?;
             if writes.last().map(|write| write.commit.value.position()) != head.value.commit.clone()
             {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "prepared Serial head does not activate the final commit".to_string(),
                 ));
             }
@@ -3669,7 +3740,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if prepared_count != 1 {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "Store publication expected one prepared write, found {prepared_count}"
                 )));
             }
@@ -3682,7 +3753,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
-                .map_err(|error| DbError(format!("prepared Store write: {error}")))?;
+                .map_err(|error| DbError::Message(format!("prepared Store write: {error}")))?;
             let PreparedStoreWriteState::MergeConcurrent {
                 commit_bytes,
                 local_cleanup,
@@ -3690,19 +3761,11 @@ impl Database {
                 ..
             } = prepared
             else {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "serial branch reached MergeConcurrent completion".to_string(),
                 ));
             };
-            let store_root_hash: ObjectHash = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [STORE_ROOT_HASH_STATE_KEY],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)?
-                .parse()
-                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
+            let store_root_hash = Self::required_store_root_hash_on(&tx)?;
             let commit = StoreBatchCommit::parse_at(
                 &commit_bytes,
                 store_root_hash,
@@ -3710,16 +3773,16 @@ impl Database {
                 &local_device_id,
                 position.seq,
             )
-            .map_err(|error| DbError(format!("outbound commit: {error}")))?;
+            .map_err(|error| DbError::Message(format!("outbound commit: {error}")))?;
             if commit.position() != position {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "prepared Store write is {:?}, completion named {:?}",
                     commit.position(),
                     position
                 )));
             }
             if commit.write_id.as_str() != stored_write_id {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "prepared write id differs from signed commit".to_string(),
                 ));
             }
@@ -3734,7 +3797,7 @@ impl Database {
                         Self::sequence_to_sqlite(&local_device_id, position.seq)?,
                         drop.namespace,
                         drop.id,
-                        i64::try_from(drop.size).map_err(|_| DbError(
+                        i64::try_from(drop.size).map_err(|_| DbError::Message(
                             "outbound local cleanup size exceeds SQLite integer".to_string()
                         ))?,
                         drop.disposition.as_db(),
@@ -3758,7 +3821,9 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if cleared != 1 {
-                return Err(DbError("prepared Store write disappeared".to_string()));
+                return Err(DbError::Message(
+                    "prepared Store write disappeared".to_string(),
+                ));
             }
             let write_id = commit.write_id;
             let status = WriteStatus::Published(PublishedPosition::MergeConcurrent {
@@ -3793,7 +3858,7 @@ impl Database {
             };
             let status = WriteStatus::Conflict(conflict);
             let status_json = serde_json::to_string(&status)
-                .map_err(|error| DbError(format!("serialize Serial conflict: {error}")))?;
+                .map_err(|error| DbError::Message(format!("serialize Serial conflict: {error}")))?;
             let mut statement = tx
                 .prepare(
                     "SELECT write_id, base FROM store_writes
@@ -3811,7 +3876,7 @@ impl Database {
             let write_ids = Self::write_ids_matching_serial_base(rows, &expected_base)?;
             drop(statement);
             if write_ids.is_empty() {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "Serial branch {:?} has no pending writes",
                     branch_id.first_write_id()
                 )));
@@ -3824,7 +3889,7 @@ impl Database {
                     )
                     .map_err(DbError::from)?;
                 if updated != 1 {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "Serial conflict write {write_id} disappeared"
                     )));
                 }
@@ -3846,15 +3911,7 @@ impl Database {
         let statuses = self.state.write_statuses.clone();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let store_root_hash: ObjectHash = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [STORE_ROOT_HASH_STATE_KEY],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)?
-                .parse()
-                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
+            let store_root_hash = Self::required_store_root_hash_on(&tx)?;
             let mut statement = tx
                 .prepare(
                     "SELECT write_id, prepared, base FROM store_writes
@@ -3876,10 +3933,10 @@ impl Database {
             for row in rows {
                 let (stored_write_id, prepared, raw_base) = row.map_err(DbError::from)?;
                 let stored_base: StoreWriteBase = serde_json::from_str(&raw_base)
-                    .map_err(|error| DbError(format!("prepared Serial base: {error}")))?;
+                    .map_err(|error| DbError::Message(format!("prepared Serial base: {error}")))?;
                 match &completed_base {
                     Some(expected) if expected != &stored_base => {
-                        return Err(DbError(
+                        return Err(DbError::Message(
                             "prepared Serial branch contains inconsistent bases".to_string(),
                         ));
                     }
@@ -3892,14 +3949,16 @@ impl Database {
                     completion,
                     ..
                 } = serde_json::from_str(&prepared)
-                    .map_err(|error| DbError(format!("prepared Serial write: {error}")))?
+                    .map_err(|error| DbError::Message(format!("prepared Serial write: {error}")))?
                 else {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "non-Serial write reached Serial completion".to_string(),
                     ));
                 };
-                let commit: StoreBatchCommit = serde_json::from_slice(&commit_bytes)
-                    .map_err(|error| DbError(format!("prepared Serial commit: {error}")))?;
+                let commit: StoreBatchCommit =
+                    serde_json::from_slice(&commit_bytes).map_err(|error| {
+                        DbError::Message(format!("prepared Serial commit: {error}"))
+                    })?;
                 commit
                     .verify_at(
                         store_root_hash,
@@ -3907,9 +3966,11 @@ impl Database {
                         SERIAL_STREAM_ID,
                         commit.seq(),
                     )
-                    .map_err(|error| DbError(format!("outbound Serial commit: {error}")))?;
+                    .map_err(|error| {
+                        DbError::Message(format!("outbound Serial commit: {error}"))
+                    })?;
                 if commit.write_id.as_str() != stored_write_id {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "prepared Serial write id differs from signed commit".to_string(),
                     ));
                 }
@@ -3924,7 +3985,7 @@ impl Database {
                             Self::sequence_to_sqlite(SERIAL_STREAM_ID, commit.seq())?,
                             drop.namespace,
                             drop.id,
-                            i64::try_from(drop.size).map_err(|_| DbError(
+                            i64::try_from(drop.size).map_err(|_| DbError::Message(
                                 "outbound local cleanup size exceeds SQLite integer".to_string()
                             ))?,
                             drop.disposition.as_db(),
@@ -3954,22 +4015,26 @@ impl Database {
             }
             drop(statement);
             let Some((final_write_id, _, final_position)) = completed.last() else {
-                return Err(DbError("prepared Serial branch is absent".to_string()));
+                return Err(DbError::Message(
+                    "prepared Serial branch is absent".to_string(),
+                ));
             };
             if final_write_id != &tip_write_id || final_position != &activated {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "activated Serial head differs from the prepared branch tip".to_string(),
                 ));
             }
-            let completed_base = completed_base
-                .ok_or_else(|| DbError("prepared Serial branch base is absent".to_string()))?;
+            let completed_base = completed_base.ok_or_else(|| {
+                DbError::Message("prepared Serial branch base is absent".to_string())
+            })?;
             let suffix_first: Option<String> = tx
                 .query_row(
                     "SELECT write_id FROM store_writes
                      WHERE status = '\"pending\"' AND prepared IS NULL AND base = ?1
                      ORDER BY ordinal LIMIT 1",
-                    [serde_json::to_string(&completed_base)
-                        .map_err(|error| DbError(format!("serialize Serial base: {error}")))?],
+                    [serde_json::to_string(&completed_base).map_err(|error| {
+                        DbError::Message(format!("serialize Serial base: {error}"))
+                    })?],
                     |row| row.get(0),
                 )
                 .optional()
@@ -3985,18 +4050,20 @@ impl Database {
                     "UPDATE store_writes SET base = ?2
                      WHERE status = '\"pending\"' AND prepared IS NULL AND base = ?1",
                     rusqlite::params![
-                        serde_json::to_string(&completed_base).map_err(|error| DbError(
-                            format!("serialize completed Serial base: {error}")
+                        serde_json::to_string(&completed_base).map_err(
+                            |error| DbError::Message(format!(
+                                "serialize completed Serial base: {error}"
+                            ))
+                        )?,
+                        serde_json::to_string(&rebased).map_err(|error| DbError::Message(
+                            format!("serialize rebased Serial suffix: {error}")
                         ))?,
-                        serde_json::to_string(&rebased).map_err(|error| DbError(format!(
-                            "serialize rebased Serial suffix: {error}"
-                        )))?,
                     ],
                 )
                 .map_err(DbError::from)?;
             }
             let count = u64::try_from(completed.len())
-                .map_err(|_| DbError("Serial completion count exceeds u64".to_string()))?;
+                .map_err(|_| DbError::Message("Serial completion count exceeds u64".to_string()))?;
             tx.commit().map_err(DbError::from)?;
             for (write_id, status, _) in completed {
                 Self::notify_write_status_in(&statuses, &write_id, status);
@@ -4043,27 +4110,27 @@ impl Database {
         for row in rows {
             let (write_id, status, inverse, raw_base, prepared) = row.map_err(DbError::from)?;
             let status: WriteStatus = serde_json::from_str(&status)
-                .map_err(|error| DbError(format!("Serial branch status: {error}")))?;
+                .map_err(|error| DbError::Message(format!("Serial branch status: {error}")))?;
             let base: StoreWriteBase = serde_json::from_str(&raw_base)
-                .map_err(|error| DbError(format!("Serial branch base: {error}")))?;
+                .map_err(|error| DbError::Message(format!("Serial branch base: {error}")))?;
             let StoreWriteBase::Serial {
                 branch_id: stored_branch_id,
                 base,
             } = base
             else {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "MergeConcurrent base reached Serial resolution".to_string(),
                 ));
             };
             if &stored_branch_id != branch_id {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "Serial database contains more than one unresolved branch".to_string(),
                 ));
             }
             match status {
                 WriteStatus::Conflict(conflict) => {
                     if conflict.branch_id != stored_branch_id || conflict.base != base {
-                        return Err(DbError(
+                        return Err(DbError::Message(
                             "Serial conflict status differs from its durable branch base"
                                 .to_string(),
                         ));
@@ -4072,18 +4139,18 @@ impl Database {
                 }
                 WriteStatus::Pending if prepared.is_none() => {}
                 status => {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "conflicted Serial branch write {write_id} has non-resolvable status {status:?}"
                     )))
                 }
             }
             if prepared.is_some() {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "conflicted Serial branch contains prepared publication state".to_string(),
                 ));
             }
             if branch_base.as_ref().is_some_and(|stored| stored != &base) {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "Serial conflict branch has inconsistent bases".to_string(),
                 ));
             }
@@ -4092,7 +4159,7 @@ impl Database {
         }
         drop(statement);
         if branch.is_empty() || !saw_conflict {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "Serial branch {} is not conflicted",
                 branch_id.first_write_id()
             )));
@@ -4100,15 +4167,15 @@ impl Database {
         let branch_base = branch_base.expect("nonempty branch has a base value");
         let durable_base = Self::latest_position_for_device_on(tx, SERIAL_STREAM_ID)?;
         if durable_base != branch_base {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "local Serial position {durable_base:?} differs from branch base {branch_base:?}"
             )));
         }
         for (_, inverse) in branch.iter().rev() {
             let inverse = crate::sync::apply::ValidatedChangeset::new(inverse, schema.clone())
-                .map_err(|error| DbError(format!("invalid Serial inverse: {error}")))?;
+                .map_err(|error| DbError::Message(format!("invalid Serial inverse: {error}")))?;
             crate::sync::apply::apply_changeset_strict_on(tx, inverse, &[])
-                .map_err(|error| DbError(format!("reverse Serial branch: {error}")))?;
+                .map_err(|error| DbError::Message(format!("reverse Serial branch: {error}")))?;
         }
         let mut predecessor = branch_base;
         for resolution in plan.commits {
@@ -4119,25 +4186,28 @@ impl Database {
             if resolution.commit.seq() != expected_seq
                 || resolution.commit.previous_commit_hash() != expected_hash
             {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "Serial resolution commit {} does not follow the branch base",
                     resolution.commit.seq()
                 )));
             }
             if let Some(package) = resolution.package {
-                let changeset =
-                    crate::sync::apply::ValidatedChangeset::new(package, schema.clone()).map_err(
-                        |error| DbError(format!("invalid Serial resolution changeset: {error}")),
-                    )?;
+                let changeset = crate::sync::apply::ValidatedChangeset::new(
+                    package,
+                    schema.clone(),
+                )
+                .map_err(|error| {
+                    DbError::Message(format!("invalid Serial resolution changeset: {error}"))
+                })?;
                 crate::sync::apply::apply_changeset_strict_on(tx, changeset, &resolution.uploads)
                     .map_err(|error| {
-                    DbError(format!(
+                    DbError::Message(format!(
                         "apply Serial resolution commit {}: {error}",
                         resolution.commit.seq()
                     ))
                 })?;
                 let blob_decls = BlobDecls::from_tables(tx, synced_tables)
-                    .map_err(|error| DbError(error.to_string()))?;
+                    .map_err(|error| DbError::Message(error.to_string()))?;
                 for intent in resolution.cleanup {
                     crate::blob::local_cleanup::record_if_unreferenced_on(
                         tx,
@@ -4160,7 +4230,7 @@ impl Database {
             predecessor = Some(resolution.commit.position());
         }
         if predecessor != plan.head.commit {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "Serial resolution commits do not reach the verified global head".to_string(),
             ));
         }
@@ -4315,8 +4385,9 @@ impl Database {
             .map(|(revision, hash)| {
                 Ok((
                     Self::sequence_from_sqlite("Store acknowledgement", revision)?,
-                    hash.parse()
-                        .map_err(|error| DbError(format!("Store acknowledgement hash: {error}")))?,
+                    hash.parse().map_err(|error| {
+                        DbError::Message(format!("Store acknowledgement hash: {error}"))
+                    })?,
                 ))
             })
             .transpose()
@@ -4327,15 +4398,7 @@ impl Database {
     pub(crate) async fn stage_store_ack(&self, ack: StoreAck) -> Result<(), DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let store_root_hash: ObjectHash = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [STORE_ROOT_HASH_STATE_KEY],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)?
-                .parse()
-                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
+            let store_root_hash = Self::required_store_root_hash_on(&tx)?;
             let device_id: String = tx
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
@@ -4344,7 +4407,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             StoreAck::parse_at(&ack.to_bytes(), store_root_hash, &device_id, ack.revision)
-                .map_err(|error| DbError(format!("verify staged Store acknowledgement: {error}")))?;
+                .map_err(|error| DbError::Message(format!("verify staged Store acknowledgement: {error}")))?;
             let previous = tx
                 .query_row(
                     "SELECT revision, ack_hash FROM published_store_acks \
@@ -4358,14 +4421,14 @@ impl Database {
             let expected_previous = previous
                 .map(|(_, hash)| {
                     hash.parse::<ObjectHash>().map_err(|error| {
-                        DbError(format!("published Store acknowledgement hash: {error}"))
+                        DbError::Message(format!("published Store acknowledgement hash: {error}"))
                     })
                 })
                 .transpose()?;
             if i64::try_from(ack.revision).ok() != Some(expected_revision)
                 || ack.previous_ack_hash != expected_previous
             {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "Store acknowledgement does not extend local chain at revision {expected_revision}"
                 )));
             }
@@ -4410,12 +4473,12 @@ impl Database {
                 Ok(OutboundStoreAck {
                     revision: Self::sequence_from_sqlite("Store acknowledgement", revision)?,
                     ack_hash: ack_hash.parse().map_err(|error| {
-                        DbError(format!("outbound Store acknowledgement hash: {error}"))
+                        DbError::Message(format!("outbound Store acknowledgement hash: {error}"))
                     })?,
                     previous_ack_hash: previous_ack_hash
                         .map(|hash| {
                             hash.parse().map_err(|error| {
-                                DbError(format!(
+                                DbError::Message(format!(
                                     "outbound Store previous acknowledgement hash: {error}"
                                 ))
                             })
@@ -4446,7 +4509,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if deleted != 1 {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "outbound Store acknowledgement disappeared".to_string(),
                 ));
             }
@@ -4482,11 +4545,11 @@ impl Database {
             .optional()
             .map_err(DbError::from)?
             .map(|(hash, plan_bytes, progress_bytes)| {
-                let intent_hash: ObjectHash = hash
-                    .parse()
-                    .map_err(|error| DbError(format!("membership intent hash: {error}")))?;
+                let intent_hash: ObjectHash = hash.parse().map_err(|error| {
+                    DbError::Message(format!("membership intent hash: {error}"))
+                })?;
                 if ObjectHash::digest(&plan_bytes) != intent_hash {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "membership intent hash differs from its exact plan bytes".to_string(),
                     ));
                 }
@@ -4521,7 +4584,7 @@ impl Database {
                 if existing_hash == intent_hash.to_string() && existing_plan == plan_bytes {
                     return Ok(intent_hash);
                 }
-                return Err(DbError(
+                return Err(DbError::Message(
                     "a different membership mutation is already pending".to_string(),
                 ));
             }
@@ -4551,7 +4614,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if updated != 1 {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "membership mutation ownership row is absent or changed".to_string(),
                 ));
             }
@@ -4573,7 +4636,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if deleted != 1 {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "membership mutation ownership row is absent or changed".to_string(),
                 ));
             }
@@ -4602,14 +4665,14 @@ impl Database {
             .optional()
             .map_err(DbError::from)?
             .map(|(snapshot_hash, image_hash, image_bytes, meta_bytes)| {
-                let snapshot_hash = snapshot_hash
-                    .parse()
-                    .map_err(|error| DbError(format!("outbound snapshot hash: {error}")))?;
-                let image_hash: ObjectHash = image_hash
-                    .parse()
-                    .map_err(|error| DbError(format!("outbound snapshot image hash: {error}")))?;
+                let snapshot_hash = snapshot_hash.parse().map_err(|error| {
+                    DbError::Message(format!("outbound snapshot hash: {error}"))
+                })?;
+                let image_hash: ObjectHash = image_hash.parse().map_err(|error| {
+                    DbError::Message(format!("outbound snapshot image hash: {error}"))
+                })?;
                 if ObjectHash::digest(&image_bytes) != image_hash {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "outbound snapshot image hash differs from its exact bytes".to_string(),
                     ));
                 }
@@ -4634,7 +4697,7 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |conn| {
             if ObjectHash::digest(&image_bytes) != image_hash {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "staged snapshot image hash differs from its exact bytes".to_string(),
                 ));
             }
@@ -4664,7 +4727,7 @@ impl Database {
                 {
                     return Ok(());
                 }
-                return Err(DbError(
+                return Err(DbError::Message(
                     "a different snapshot publication is already pending".to_string(),
                 ));
             }
@@ -4701,36 +4764,41 @@ impl Database {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .map_err(DbError::from)?;
-            let image_hash: ObjectHash = stored_image_hash
-                .parse()
-                .map_err(|error| DbError(format!("outbound snapshot image hash: {error}")))?;
+            let image_hash: ObjectHash = stored_image_hash.parse().map_err(|error| {
+                DbError::Message(format!("outbound snapshot image hash: {error}"))
+            })?;
             if ObjectHash::digest(&image_bytes) != image_hash {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "outbound snapshot image hash differs from its exact bytes".to_string(),
                 ));
             }
-            let unverified: SnapshotMeta = serde_json::from_slice(&meta_bytes)
-                .map_err(|error| DbError(format!("outbound snapshot metadata: {error}")))?;
+            let unverified: SnapshotMeta =
+                serde_json::from_slice(&meta_bytes).map_err(|error| {
+                    DbError::Message(format!("outbound snapshot metadata: {error}"))
+                })?;
             let meta = SnapshotMeta::parse_at(
                 &meta_bytes,
                 unverified.store_root_hash,
                 &unverified.author_pubkey,
                 snapshot_hash,
             )
-            .map_err(|error| DbError(format!("verify outbound snapshot metadata: {error}")))?;
+            .map_err(|error| {
+                DbError::Message(format!("verify outbound snapshot metadata: {error}"))
+            })?;
             if meta.image_hash != image_hash {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "outbound snapshot metadata names different image bytes".to_string(),
                 ));
             }
             if meta.coverage.policy() != write_policy {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "outbound snapshot coverage uses {:?}, database uses {write_policy:?}",
                     meta.coverage.policy()
                 )));
             }
-            let frontier = serde_json::to_string(&meta.coverage)
-                .map_err(|error| DbError(format!("serialize snapshot frontier: {error}")))?;
+            let frontier = serde_json::to_string(&meta.coverage).map_err(|error| {
+                DbError::Message(format!("serialize snapshot frontier: {error}"))
+            })?;
             for (key, value) in [
                 (LAST_SNAPSHOT_HASH_STATE_KEY, snapshot_hash.to_string()),
                 ("last_snapshot_time", meta.created_at.clone()),
@@ -4759,7 +4827,7 @@ impl Database {
             match snapshot_position {
                 Some(position) => {
                     let encoded = serde_json::to_string(position).map_err(|error| {
-                        DbError(format!("serialize snapshot position: {error}"))
+                        DbError::Message(format!("serialize snapshot position: {error}"))
                     })?;
                     tx.execute(
                         "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
@@ -4784,7 +4852,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if deleted != 1 {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "outbound snapshot ownership row is absent or changed".to_string(),
                 ));
             }
@@ -4814,14 +4882,14 @@ impl Database {
             .map(|(hash, bytes, published)| {
                 Ok(DurableProtocolObject {
                     semantic_hash: hash.parse().map_err(|error| {
-                        DbError(format!("local store protocol root hash: {error}"))
+                        DbError::Message(format!("local store protocol root hash: {error}"))
                     })?,
                     bytes,
                     published: match published {
                         0 => false,
                         1 => true,
                         value => {
-                            return Err(DbError(format!(
+                            return Err(DbError::Message(format!(
                                 "local store protocol root has invalid published value {value}"
                             )))
                         }
@@ -4840,9 +4908,9 @@ impl Database {
         self.call(move |conn| {
             let bytes = store_protocol_root.to_bytes();
             let parsed = StoreProtocolRoot::parse(&bytes)
-                .map_err(|error| DbError(format!("verify staged store protocol root: {error}")))?;
+                .map_err(|error| DbError::Message(format!("verify staged store protocol root: {error}")))?;
             if parsed != store_protocol_root {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "staged store protocol root changed during encoding".to_string(),
                 ));
             }
@@ -4860,7 +4928,7 @@ impl Database {
                 if existing_hash == hash.to_string() && existing_bytes == bytes {
                     return Ok(());
                 }
-                return Err(DbError(
+                return Err(DbError::Message(
                     "local store protocol root already owns different bytes".to_string(),
                 ));
             }
@@ -4889,7 +4957,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if updated != 1 {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "local store protocol root ownership row is absent".to_string(),
                 ));
             }
@@ -4958,24 +5026,26 @@ impl Database {
                     published,
                 )| {
                     let revision = u64::try_from(revision).map_err(|_| {
-                        DbError(format!(
+                        DbError::Message(format!(
                             "local Store device registration has invalid revision {revision}"
                         ))
                     })?;
                     if revision == 0 {
-                        return Err(DbError(
+                        return Err(DbError::Message(
                             "local Store device registration has revision zero".to_string(),
                         ));
                     }
                     Ok(DurableDeviceRegistration {
                         revision,
                         registration_hash: hash.parse().map_err(|error| {
-                            DbError(format!("local Store device registration hash: {error}"))
+                            DbError::Message(format!(
+                                "local Store device registration hash: {error}"
+                            ))
                         })?,
                         previous_registration_hash: previous_hash
                             .map(|hash| {
                                 hash.parse().map_err(|error| {
-                                    DbError(format!(
+                                    DbError::Message(format!(
                                         "local Store device previous registration hash: {error}"
                                     ))
                                 })
@@ -4985,7 +5055,7 @@ impl Database {
                             "active" => StoreDeviceRegistrationState::Active,
                             "retired" => StoreDeviceRegistrationState::Retired,
                             _ => {
-                                return Err(DbError(format!(
+                                return Err(DbError::Message(format!(
                                     "local Store device registration has invalid state {state:?}"
                                 )))
                             }
@@ -4997,7 +5067,7 @@ impl Database {
                             0 => false,
                             1 => true,
                             value => {
-                                return Err(DbError(format!(
+                                return Err(DbError::Message(format!(
                             "local Store device registration has invalid published value {value}"
                         )))
                             }
@@ -5015,15 +5085,7 @@ impl Database {
         registration: StoreDeviceRegistration,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
-            let store_root_hash: ObjectHash = conn
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [STORE_ROOT_HASH_STATE_KEY],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(DbError::from)?
-                .parse()
-                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
+            let store_root_hash = Self::required_store_root_hash_on(conn)?;
             let device_id: String = conn
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
@@ -5038,9 +5100,11 @@ impl Database {
                 &device_id,
                 registration.revision,
             )
-            .map_err(|error| DbError(format!("verify Store device registration: {error}")))?;
+            .map_err(|error| {
+                DbError::Message(format!("verify Store device registration: {error}"))
+            })?;
             if parsed != registration {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "Store device registration changed during verification".to_string(),
                 ));
             }
@@ -5064,13 +5128,15 @@ impl Database {
                 .map_err(DbError::from)?;
             if let Some((revision, existing_hash, state, existing_bytes, published)) = existing {
                 let revision = u64::try_from(revision).map_err(|_| {
-                    DbError("local Store device registration revision is negative".to_string())
+                    DbError::Message(
+                        "local Store device registration revision is negative".to_string(),
+                    )
                 })?;
                 if revision == registration.revision {
                     if existing_hash == hash.to_string() && existing_bytes == bytes {
                         return Ok(());
                     }
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "local Store device registration revision {revision} owns different bytes"
                     )));
                 }
@@ -5081,32 +5147,34 @@ impl Database {
                     revision,
                 )
                 .map_err(|error| {
-                    DbError(format!(
+                    DbError::Message(format!(
                         "verify previous Store device registration: {error}"
                     ))
                 })?;
                 if previous.registration_hash().to_string() != existing_hash
                     || previous.author_pubkey != registration.author_pubkey
                 {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "Store device registration successor must retain the exact author chain"
                             .to_string(),
                     ));
                 }
                 if published != 1 {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "local Store device registration revision {revision} is not published"
                     )));
                 }
                 if registration.revision != revision + 1
                     || registration.previous_registration_hash
                         != Some(existing_hash.parse().map_err(|error| {
-                            DbError(format!("previous Store device registration hash: {error}"))
+                            DbError::Message(format!(
+                                "previous Store device registration hash: {error}"
+                            ))
                         })?)
                     || state != "active"
                     || registration.state != StoreDeviceRegistrationState::Retired
                 {
-                    return Err(DbError(
+                    return Err(DbError::Message(
                         "Store device registration must transition from published Active to Retired"
                             .to_string(),
                     ));
@@ -5115,12 +5183,14 @@ impl Database {
                 || registration.previous_registration_hash.is_some()
                 || registration.state != StoreDeviceRegistrationState::Active
             {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "first Store device registration must be revision 1 Active".to_string(),
                 ));
             }
             let revision = i64::try_from(registration.revision).map_err(|_| {
-                DbError("Store device registration revision exceeds SQLite INTEGER".to_string())
+                DbError::Message(
+                    "Store device registration revision exceeds SQLite INTEGER".to_string(),
+                )
             })?;
             let state = match registration.state {
                 StoreDeviceRegistrationState::Active => "active",
@@ -5158,7 +5228,7 @@ impl Database {
             if commit.policy() != WritePolicy::MergeConcurrent
                 || head.position.as_ref() != Some(&commit.position())
             {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "Merge Store device registration activation has an invalid commit/head"
                         .to_string(),
                 ));
@@ -5185,7 +5255,7 @@ impl Database {
             if commit.policy() != WritePolicy::Serial
                 || head.commit.as_ref() != Some(&commit.position())
             {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "Serial Store device registration activation has an invalid commit/head"
                         .to_string(),
                 ));
@@ -5209,7 +5279,9 @@ impl Database {
         head_bytes: &[u8],
     ) -> Result<(), DbError> {
         let revision = i64::try_from(revision).map_err(|_| {
-            DbError("Store device registration revision exceeds SQLite INTEGER".to_string())
+            DbError::Message(
+                "Store device registration revision exceeds SQLite INTEGER".to_string(),
+            )
         })?;
         let stored = conn
             .query_row(
@@ -5233,7 +5305,9 @@ impl Database {
             &commit.device_id,
             revision as u64,
         )
-        .map_err(|error| DbError(format!("verify local Store device registration: {error}")))?;
+        .map_err(|error| {
+            DbError::Message(format!("verify local Store device registration: {error}"))
+        })?;
         let reference = StoreDeviceRegistrationRef::from_registration(&registration);
         if commit.device_registrations.as_slice() != [reference]
             || commit.author_pubkey != registration.author_pubkey
@@ -5242,7 +5316,7 @@ impl Database {
             || commit.store_package.is_some()
             || !commit.circle_packages.is_empty()
         {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "Store device registration activation is not an exact control-only batch"
                     .to_string(),
             ));
@@ -5274,7 +5348,7 @@ impl Database {
             {
                 Ok(())
             }
-            _ => Err(DbError(
+            _ => Err(DbError::Message(
                 "Store device registration owns different activation bytes".to_string(),
             )),
         }
@@ -5344,7 +5418,9 @@ impl Database {
         commit: &StoreBatchCommit,
     ) -> Result<StoreDeviceRegistration, DbError> {
         let revision_sql = i64::try_from(revision).map_err(|_| {
-            DbError("Store device registration revision exceeds SQLite INTEGER".to_string())
+            DbError::Message(
+                "Store device registration revision exceeds SQLite INTEGER".to_string(),
+            )
         })?;
         let (registration_bytes, activation_commit_bytes): (Vec<u8>, Vec<u8>) = tx
             .query_row(
@@ -5356,7 +5432,7 @@ impl Database {
             )
             .map_err(DbError::from)?;
         if activation_commit_bytes != commit.to_bytes() {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "Store device registration activation commit differs from durable bytes"
                     .to_string(),
             ));
@@ -5367,7 +5443,9 @@ impl Database {
             &commit.device_id,
             revision,
         )
-        .map_err(|error| DbError(format!("verify owned Store device registration: {error}")))
+        .map_err(|error| {
+            DbError::Message(format!("verify owned Store device registration: {error}"))
+        })
     }
 
     fn mark_store_device_registration_published_on(
@@ -5376,7 +5454,9 @@ impl Database {
         registration_hash: ObjectHash,
     ) -> Result<(), DbError> {
         let revision = i64::try_from(revision).map_err(|_| {
-            DbError("Store device registration revision exceeds SQLite INTEGER".to_string())
+            DbError::Message(
+                "Store device registration revision exceeds SQLite INTEGER".to_string(),
+            )
         })?;
         let updated = tx
             .execute(
@@ -5387,7 +5467,7 @@ impl Database {
             )
             .map_err(DbError::from)?;
         if updated != 1 {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "local Store device registration activation row is absent".to_string(),
             ));
         }
@@ -5395,6 +5475,24 @@ impl Database {
     }
 
     // ---- Bookkeeping: protocol_state ----
+
+    fn required_store_root_hash_on(conn: &Connection) -> Result<ObjectHash, DbError> {
+        let raw = conn
+            .query_row(
+                "SELECT value FROM protocol_state WHERE key = ?1",
+                [STORE_ROOT_HASH_STATE_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .ok_or_else(DbError::missing_store_root_hash)?;
+        raw.parse::<ObjectHash>()
+            .map_err(|error| DbError::invalid_store_root_hash(error.to_string()))
+    }
+
+    pub(crate) async fn required_store_root_hash(&self) -> Result<ObjectHash, DbError> {
+        self.call(Self::required_store_root_hash_on).await
+    }
 
     pub async fn get_protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
         let key = key.to_string();
@@ -5447,7 +5545,7 @@ impl Database {
         let key = crate::blob::cache::cache_budget_state_key(namespace);
         match self.get_protocol_state(&key).await? {
             Some(raw) => raw.parse::<u64>().map(Some).map_err(|e| {
-                DbError(format!(
+                DbError::Message(format!(
                     "cache budget for {namespace:?} in protocol_state is not a byte count: {e}"
                 ))
             }),
@@ -5568,9 +5666,9 @@ impl Database {
                     device_id.clone(),
                     CommitPosition {
                         seq: Self::sequence_from_sqlite(&device_id, seq)?,
-                        commit_hash: hash
-                            .parse()
-                            .map_err(|error| DbError(format!("snapshot coverage hash: {error}")))?,
+                        commit_hash: hash.parse().map_err(|error| {
+                            DbError::Message(format!("snapshot coverage hash: {error}"))
+                        })?,
                     },
                 );
             }
@@ -5611,9 +5709,9 @@ impl Database {
                 device_id.clone(),
                 CommitPosition {
                     seq: Self::sequence_from_sqlite(&device_id, seq)?,
-                    commit_hash: hash
-                        .parse()
-                        .map_err(|error| DbError(format!("materialized commit hash: {error}")))?,
+                    commit_hash: hash.parse().map_err(|error| {
+                        DbError::Message(format!("materialized commit hash: {error}"))
+                    })?,
                 },
             );
         }
@@ -5637,9 +5735,9 @@ impl Database {
             }
             let position = CommitPosition {
                 seq: Self::sequence_from_sqlite(&device_id, seq)?,
-                commit_hash: hash
-                    .parse()
-                    .map_err(|error| DbError(format!("snapshot coverage hash: {error}")))?,
+                commit_hash: hash.parse().map_err(|error| {
+                    DbError::Message(format!("snapshot coverage hash: {error}"))
+                })?,
             };
             if frontier
                 .get(&device_id)
@@ -5667,7 +5765,7 @@ impl Database {
         .map_err(DbError::from)?
         .map(|hash| {
             hash.parse()
-                .map_err(|error| DbError(format!("materialized commit hash: {error}")))
+                .map_err(|error| DbError::Message(format!("materialized commit hash: {error}")))
         })
         .transpose()
     }
@@ -5699,9 +5797,9 @@ impl Database {
             .map(|(seq, hash)| {
                 Ok(CommitPosition {
                     seq: Self::sequence_from_sqlite(device_id, seq)?,
-                    commit_hash: hash
-                        .parse()
-                        .map_err(|error| DbError(format!("latest Store position hash: {error}")))?,
+                    commit_hash: hash.parse().map_err(|error| {
+                        DbError::Message(format!("latest Store position hash: {error}"))
+                    })?,
                 })
             })
             .collect::<Result<Vec<_>, DbError>>()?;
@@ -5709,7 +5807,7 @@ impl Database {
             && positions[0].seq == positions[1].seq
             && positions[0].commit_hash != positions[1].commit_hash
         {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "materialized ledger and snapshot coverage fork {device_id:?} at sequence {}",
                 positions[0].seq
             )));
@@ -5723,7 +5821,7 @@ impl Database {
         registrations: &[StoreDeviceRegistration],
     ) -> Result<(), DbError> {
         if registrations.len() != commit.device_registrations.len() {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "Store device registration activation count differs from the signed commit"
                     .to_string(),
             ));
@@ -5739,18 +5837,18 @@ impl Database {
                         && registration.revision == reference.revision
                 })
                 .ok_or_else(|| {
-                    DbError(format!(
+                    DbError::Message(format!(
                         "Store commit is missing registration bytes for {:?} revision {}",
                         reference.device_id, reference.revision
                     ))
                 })?;
             reference
                 .verify_registration(registration)
-                .map_err(|error| DbError(error.to_string()))?;
+                .map_err(|error| DbError::Message(error.to_string()))?;
             if registration.store_root_hash != commit.store_root_hash
                 || registration.author_pubkey != commit.author_pubkey
             {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "Store registration {:?} revision {} is not signed by its activating commit author",
                     registration.device_id, registration.revision
                 )));
@@ -5799,7 +5897,9 @@ impl Database {
             )) = existing
             {
                 let existing_revision = u64::try_from(existing_revision).map_err(|_| {
-                    DbError("activated Store device registration revision is negative".to_string())
+                    DbError::Message(
+                        "activated Store device registration revision is negative".to_string(),
+                    )
                 })?;
                 if existing_revision == registration.revision {
                     if existing_hash == reference.registration_hash.to_string()
@@ -5813,13 +5913,13 @@ impl Database {
                     {
                         continue;
                     }
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "Store device registration {:?} revision {} has a different activation",
                         registration.device_id, registration.revision
                     )));
                 }
                 let expected_revision = existing_revision.checked_add(1).ok_or_else(|| {
-                    DbError("Store device registration revision overflow".to_string())
+                    DbError::Message("Store device registration revision overflow".to_string())
                 })?;
                 if registration.revision != expected_revision
                     || previous_hash.as_deref() != Some(existing_hash.as_str())
@@ -5827,7 +5927,7 @@ impl Database {
                     || existing_state != "active"
                     || registration.state != StoreDeviceRegistrationState::Retired
                 {
-                    return Err(DbError(format!(
+                    return Err(DbError::Message(format!(
                         "Store device registration {:?} revision {} does not extend its activated chain",
                         registration.device_id, registration.revision
                     )));
@@ -5836,7 +5936,7 @@ impl Database {
                 || registration.previous_registration_hash.is_some()
                 || registration.state != StoreDeviceRegistrationState::Active
             {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "Store device registration {:?} must begin with revision 1 Active",
                     registration.device_id
                 )));
@@ -5848,7 +5948,7 @@ impl Database {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     registration.device_id,
-                    i64::try_from(registration.revision).map_err(|_| DbError(
+                    i64::try_from(registration.revision).map_err(|_| DbError::Message(
                         "Store device registration revision exceeds SQLite INTEGER".to_string()
                     ))?,
                     reference.registration_hash.to_string(),
@@ -5869,12 +5969,7 @@ impl Database {
     pub(crate) async fn activated_store_device_registrations(
         &self,
     ) -> Result<Vec<StoreDeviceRegistration>, DbError> {
-        let store_root_hash = self
-            .get_protocol_state(STORE_ROOT_HASH_STATE_KEY)
-            .await?
-            .ok_or_else(|| DbError("store root hash is absent".to_string()))?
-            .parse()
-            .map_err(|error| DbError(format!("store root hash: {error}")))?;
+        let store_root_hash = self.required_store_root_hash().await?;
         self.call(move |conn| {
             let mut statement = conn
                 .prepare(
@@ -5895,11 +5990,13 @@ impl Database {
             rows.map(|row| {
                 let (device_id, revision, bytes) = row.map_err(DbError::from)?;
                 let revision = u64::try_from(revision).map_err(|_| {
-                    DbError("activated Store device registration revision is negative".to_string())
+                    DbError::Message(
+                        "activated Store device registration revision is negative".to_string(),
+                    )
                 })?;
                 StoreDeviceRegistration::parse_at(&bytes, store_root_hash, &device_id, revision)
                     .map_err(|error| {
-                        DbError(format!(
+                        DbError::Message(format!(
                             "activated Store device registration {device_id:?}/{revision}: {error}"
                         ))
                     })
@@ -5935,12 +6032,12 @@ impl Database {
             .map_err(DbError::from)?
             .map(|hash| {
                 hash.parse()
-                    .map_err(|error| DbError(format!("snapshot coverage hash: {error}")))
+                    .map_err(|error| DbError::Message(format!("snapshot coverage hash: {error}")))
             })
             .transpose()?
         };
         if predecessor != commit.previous_commit_hash() {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "Store commit {}/{} names predecessor {:?}, durable predecessor is {:?}",
                 stream_id,
                 commit.seq(),
@@ -5965,13 +6062,14 @@ impl Database {
         key_generation: u64,
     ) -> Result<(), DbError> {
         if commit.policy() != WritePolicy::Serial {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "Serial membership state cannot accompany a MergeConcurrent commit".to_string(),
             ));
         }
         Self::record_materialized_commit_on(conn, commit)?;
-        let membership = serde_json::to_string(membership)
-            .map_err(|error| DbError(format!("serialize Serial membership state: {error}")))?;
+        let membership = serde_json::to_string(membership).map_err(|error| {
+            DbError::Message(format!("serialize Serial membership state: {error}"))
+        })?;
         conn.execute(
             "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -5993,7 +6091,7 @@ impl Database {
         };
         serde_json::from_str(&raw)
             .map(Some)
-            .map_err(|error| DbError(format!("parse Serial membership state: {error}")))
+            .map_err(|error| DbError::Message(format!("parse Serial membership state: {error}")))
     }
 
     pub async fn serial_key_generation(&self) -> Result<Option<u64>, DbError> {
@@ -6005,7 +6103,7 @@ impl Database {
         };
         raw.parse::<u64>()
             .map(Some)
-            .map_err(|error| DbError(format!("parse Serial key generation: {error}")))
+            .map_err(|error| DbError::Message(format!("parse Serial key generation: {error}")))
     }
 
     pub(crate) async fn install_serial_root_authorization(
@@ -6016,7 +6114,7 @@ impl Database {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             if Self::latest_position_for_device_on(&tx, SERIAL_STREAM_ID)?.is_some() {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "cannot install founder-only Serial authorization after a materialized commit"
                         .to_string(),
                 ));
@@ -6033,13 +6131,13 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             if existing_state != 0 {
-                return Err(DbError(
+                return Err(DbError::Message(
                     "cannot install founder-only Serial authorization over existing state"
                         .to_string(),
                 ));
             }
             let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
-                DbError(format!(
+                DbError::Message(format!(
                     "serialize Serial founder membership state: {error}"
                 ))
             })?;
@@ -6072,7 +6170,7 @@ impl Database {
         authorization_after: SerialAuthorizationState,
     ) -> Result<(), DbError> {
         if commit.control.is_none() || commit.store_package.is_some() {
-            return Err(DbError(
+            return Err(DbError::Message(
                 "Serial control materialization requires a control-only Store batch".to_string(),
             ));
         }
@@ -6098,12 +6196,12 @@ impl Database {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let actual = Self::latest_position_for_device_on(&tx, SERIAL_STREAM_ID)?;
             if actual.as_ref() != Some(&expected) {
-                return Err(DbError(format!(
+                return Err(DbError::Message(format!(
                     "cannot install Serial authorization at {expected:?}; durable position is {actual:?}"
                 )));
             }
             let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
-                DbError(format!("serialize Serial membership state: {error}"))
+                DbError::Message(format!("serialize Serial membership state: {error}"))
             })?;
             tx.execute(
                 "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
@@ -6132,7 +6230,7 @@ impl Database {
         store_root_hash: ObjectHash,
     ) -> Result<(), DbError> {
         if coverage.policy() != self.write_policy() {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "snapshot coverage uses {:?}, database uses {:?}",
                 coverage.policy(),
                 self.write_policy()
@@ -6175,12 +6273,12 @@ impl Database {
 
     fn sequence_from_sqlite(device_id: &str, value: i64) -> Result<u64, DbError> {
         let value = u64::try_from(value).map_err(|_| {
-            DbError(format!(
+            DbError::Message(format!(
                 "Store position for {device_id:?} contains negative sequence {value}"
             ))
         })?;
         if value == 0 {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "Store position for {device_id:?} contains sequence zero"
             )));
         }
@@ -6189,12 +6287,12 @@ impl Database {
 
     fn sequence_to_sqlite(device_id: &str, value: u64) -> Result<i64, DbError> {
         if value == 0 {
-            return Err(DbError(format!(
+            return Err(DbError::Message(format!(
                 "Store position for {device_id:?} cannot use sequence zero"
             )));
         }
         i64::try_from(value).map_err(|_| {
-            DbError(format!(
+            DbError::Message(format!(
                 "Store position for {device_id:?} exceeds SQLite INTEGER"
             ))
         })
@@ -6540,7 +6638,7 @@ impl Database {
         size: u64,
     ) -> Result<(), DbError> {
         let path = path.to_str().ok_or_else(|| {
-            DbError(format!(
+            DbError::Message(format!(
                 "external blob path for {blob_id} is not valid UTF-8: {path:?}"
             ))
         })?;
@@ -6717,7 +6815,7 @@ fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
 fn seed_from(hlc: &Hlc, value: Option<String>, context: &str) -> Result<(), DbError> {
     if let Some(stamp) = value {
         let floor = Timestamp::parse(&stamp)
-            .ok_or_else(|| DbError(format!("corrupt {context}: {stamp:?}")))?;
+            .ok_or_else(|| DbError::Message(format!("corrupt {context}: {stamp:?}")))?;
         hlc.seed(&floor);
     }
     Ok(())
@@ -6741,7 +6839,7 @@ fn scan_max_updated_at(
         let value: Option<String> = conn
             .query_row(&sql, [&seed_bound], |r| r.get::<_, Option<String>>(0))
             .map_err(|e| {
-                DbError(format!(
+                DbError::Message(format!(
                     "register-floor scan over synced table {}: {e}",
                     t.name()
                 ))
@@ -6763,10 +6861,10 @@ fn attach_session<'c>(
     synced_tables: &[SyncedTable],
 ) -> Result<rusqlite::session::Session<'c>, DbError> {
     let mut session = rusqlite::session::Session::new(conn)
-        .map_err(|e| DbError(format!("failed to create capture session: {e}")))?;
+        .map_err(|e| DbError::Message(format!("failed to create capture session: {e}")))?;
     for t in synced_tables {
         session.attach(Some(t.name())).map_err(|e| {
-            DbError(format!(
+            DbError::Message(format!(
                 "failed to attach synced table {} to session: {e}",
                 t.name()
             ))
@@ -6839,6 +6937,44 @@ mod tests {
 
     fn things_table(identity: crate::sync::session::RowIdentity) -> SyncedTable {
         SyncedTable::new("things", identity)
+    }
+
+    #[tokio::test]
+    async fn required_store_root_hash_rejects_missing_and_malformed_state() {
+        let (db, _) = Database::open(
+            Path::new(":memory:"),
+            vec![SyncedTable::new(
+                "notes",
+                crate::sync::session::RowIdentity::SharedKey,
+            )],
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
+            "required-store-root".to_string(),
+            &[notes_migration()],
+        )
+        .expect("open database");
+
+        let missing = db
+            .required_store_root_hash()
+            .await
+            .expect_err("missing Store root must fail");
+        assert!(missing.to_string().contains("absent"), "{missing}");
+
+        db.set_protocol_state(STORE_ROOT_HASH_STATE_KEY, "not-a-root-hash")
+            .await
+            .expect("write malformed Store root");
+        let malformed = db
+            .required_store_root_hash()
+            .await
+            .expect_err("malformed Store root must fail");
+        assert!(malformed.to_string().contains("invalid"), "{malformed}");
+
+        let expected = ObjectHash::digest(b"required Store root");
+        db.set_protocol_state(STORE_ROOT_HASH_STATE_KEY, &expected.to_string())
+            .await
+            .expect("write Store root");
+        assert_eq!(db.required_store_root_hash().await.unwrap(), expected);
     }
 
     #[test]
@@ -7547,7 +7683,8 @@ mod tests {
             let _ = job_db
                 .call(move |_conn| {
                     std::thread::sleep(Duration::from_millis(300));
-                    std::fs::write(&job_marker, b"landed").map_err(|e| DbError(e.to_string()))
+                    std::fs::write(&job_marker, b"landed")
+                        .map_err(|e| DbError::Message(e.to_string()))
                 })
                 .await;
         });
@@ -7620,7 +7757,8 @@ mod tests {
         Database::run_host_sql_on(&conn, || Ok::<_, DbError>(())).expect("successful host SQL");
         assert_guard_removed();
 
-        let error = Database::run_host_sql_on(&conn, || Err::<(), _>(DbError("host".into())));
+        let error =
+            Database::run_host_sql_on(&conn, || Err::<(), _>(DbError::Message("host".into())));
         assert!(error.is_err());
         assert_guard_removed();
 

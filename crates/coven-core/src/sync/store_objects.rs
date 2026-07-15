@@ -17,7 +17,10 @@ use super::store_commit::{
     parse_registration_copy_key, parse_snapshot_meta_copy_key, parse_store_protocol_root_copy_key,
     registration_slot_prefix, snapshot_image_semantic_prefix, CommitFrontier, CommitPosition,
     SnapshotMeta, StoreAck, StoreBatchCommit, StoreDeviceHead, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreDeviceRegistrationState, StoreProtocolRoot,
+    StoreDeviceRegistrationRef, StoreDeviceRegistrationState, StoreProtocolRoot, STORE_ACK_PREFIX,
+    STORE_DEVICE_REGISTRATION_PREFIX, STORE_HEAD_PREFIX, STORE_MEMBERSHIP_ENTRY_PREFIX,
+    STORE_MEMBERSHIP_HEAD_PREFIX, STORE_PACKAGE_PREFIX, STORE_PROTOCOL_ROOT_PREFIX,
+    STORE_SNAPSHOT_META_PREFIX,
 };
 use super::store_commit::{ObjectHash, StoreProtocolError};
 
@@ -191,7 +194,6 @@ pub async fn load_expected_store_protocol_root(
         storage,
         &ProtocolObjectContext::store(expected_hash, ProtocolObjectDomain::StoreProtocolRoot),
         &semantic_prefix,
-        ".json",
         expected_hash,
         |bytes| {
             StoreProtocolRoot::parse_expected(
@@ -218,7 +220,6 @@ pub async fn load_pinned_store_protocol_root(
         storage,
         &ProtocolObjectContext::store(expected_hash, ProtocolObjectDomain::StoreProtocolRoot),
         &semantic_prefix,
-        ".json",
         expected_hash,
         |bytes| {
             StoreProtocolRoot::parse_pinned(
@@ -241,7 +242,6 @@ pub async fn load_store_protocol_root_at_hash(
         storage,
         &ProtocolObjectContext::store(expected_hash, ProtocolObjectDomain::StoreProtocolRoot),
         &semantic_prefix,
-        ".json",
         expected_hash,
         |bytes| {
             let root = StoreProtocolRoot::parse(bytes)?;
@@ -264,14 +264,14 @@ pub async fn discover_store_protocol_root(
     expected_founder: Option<&str>,
 ) -> Result<VerifiedCopies<StoreProtocolRoot>, StoreObjectError> {
     let listing = storage
-        .list_protocol_objects("store-v1/store-protocol-root/")
+        .list_protocol_objects(STORE_PROTOCOL_ROOT_PREFIX)
         .await?;
     let mut groups: BTreeMap<ObjectHash, Vec<ProtocolObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
         let (hash, _) =
             parse_store_protocol_root_copy_key(object.logical_key()).map_err(|error| {
                 StoreObjectError::Collision {
-                    semantic_prefix: "store-v1/store-protocol-root".to_string(),
+                    semantic_prefix: STORE_PROTOCOL_ROOT_PREFIX.trim_end_matches('/').to_string(),
                     key: object.logical_key().to_string(),
                     reason: error.to_string(),
                 }
@@ -285,7 +285,6 @@ pub async fn discover_store_protocol_root(
             storage,
             &ProtocolObjectContext::store(hash, ProtocolObjectDomain::StoreProtocolRoot),
             &semantic_prefix,
-            ".json",
             hash,
             objects,
             listing.coverage,
@@ -322,10 +321,10 @@ pub async fn discover_store_protocol_root(
     match valid.len() {
         1 => Ok(valid.pop().expect("one Store protocol root exists")),
         0 => Err(StoreObjectError::Storage(StorageError::NotFound(
-            "store-v1/store-protocol-root".to_string(),
+            STORE_PROTOCOL_ROOT_PREFIX.trim_end_matches('/').to_string(),
         ))),
         _ => Err(StoreObjectError::SemanticFork {
-            slot: "store-v1/store-protocol-root".to_string(),
+            slot: STORE_PROTOCOL_ROOT_PREFIX.trim_end_matches('/').to_string(),
             hashes: valid
                 .iter()
                 .map(|store_protocol_root| store_protocol_root.semantic_hash)
@@ -364,7 +363,6 @@ pub async fn load_serial_commit_at_position(
         storage,
         &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
         &semantic_prefix,
-        ".json",
         position.commit_hash,
         |bytes| {
             let commit = StoreBatchCommit::parse_at(
@@ -398,7 +396,6 @@ async fn load_commit_slot_for_policy(
         storage,
         &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
         &slot,
-        ".json",
         |key| Ok(parse_commit_copy_key(key)?.semantic_hash),
         |semantic_hash, bytes| {
             let commit =
@@ -426,7 +423,6 @@ pub async fn load_head_slot(
         storage,
         &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead),
         &slot,
-        ".json",
         |key| Ok(parse_head_copy_key(key)?.semantic_hash),
         |semantic_hash, bytes| {
             let head = StoreDeviceHead::parse_at(bytes, store_root_hash, device_id, seq)?;
@@ -453,7 +449,6 @@ pub async fn load_ack_slot(
         storage,
         &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreAck),
         &slot,
-        ".json",
         |key| Ok(parse_ack_copy_key(key)?.semantic_hash),
         |semantic_hash, bytes| {
             let ack = StoreAck::parse_at(bytes, store_root_hash, device_id, revision)?;
@@ -485,7 +480,6 @@ pub async fn load_package(
         storage,
         &ProtocolObjectContext::store(commit.store_root_hash, ProtocolObjectDomain::StorePackage),
         &semantic_prefix,
-        ".pkg",
         package.content_hash,
         |bytes| {
             commit.verify_store_package(bytes)?;
@@ -496,11 +490,11 @@ pub async fn load_package(
 }
 
 fn membership_entry_slot_prefix(author: &str, grant: &OwnerGrantId, seq: u64) -> String {
-    format!("store-v1/membership/entries/{author}/{grant}/{seq}")
+    format!("{STORE_MEMBERSHIP_ENTRY_PREFIX}{author}/{grant}/{seq}")
 }
 
 fn membership_head_slot_prefix(author: &str, grant: &OwnerGrantId, seq: u64) -> String {
-    format!("store-v1/membership/heads/{author}/{grant}/{seq}")
+    format!("{STORE_MEMBERSHIP_HEAD_PREFIX}{author}/{grant}/{seq}")
 }
 
 fn parse_membership_entry_at(
@@ -659,7 +653,6 @@ pub async fn load_membership_entry_slot(
         storage,
         &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipEntry),
         &slot,
-        ".json",
         |key| Ok(parse_membership_entry_copy_key(key)?.semantic_hash),
         |hash, bytes| parse_membership_entry_at(hash, author, grant, seq, bytes),
     )
@@ -671,14 +664,16 @@ pub async fn list_membership_entry_objects(
     store_root_hash: ObjectHash,
 ) -> Result<VerifiedMembershipEntryListing, StoreObjectError> {
     let listing = storage
-        .list_protocol_objects("store-v1/membership/entries/")
+        .list_protocol_objects(STORE_MEMBERSHIP_ENTRY_PREFIX)
         .await?;
     let mut slots: BTreeMap<(String, OwnerGrantId, u64), Vec<ProtocolObjectLocator>> =
         BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_membership_entry_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
-                semantic_prefix: "store-v1/membership/entries".to_string(),
+                semantic_prefix: STORE_MEMBERSHIP_ENTRY_PREFIX
+                    .trim_end_matches('/')
+                    .to_string(),
                 key: object.logical_key().to_string(),
                 reason: error.to_string(),
             }
@@ -698,7 +693,6 @@ pub async fn list_membership_entry_objects(
                 ProtocolObjectDomain::StoreMembershipEntry,
             ),
             &slot,
-            ".json",
             objects,
             listing.coverage,
             |key| Ok(parse_membership_entry_copy_key(key)?.semantic_hash),
@@ -797,7 +791,6 @@ pub async fn load_membership_head_slot(
         storage,
         &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipHead),
         &slot,
-        ".json",
         |key| Ok(parse_membership_head_copy_key(key)?.semantic_hash),
         |hash, bytes| parse_membership_head_at(hash, author, grant, seq, bytes),
     )
@@ -809,14 +802,16 @@ pub async fn list_membership_head_objects(
     store_root_hash: ObjectHash,
 ) -> Result<VerifiedMembershipHeadListing, StoreObjectError> {
     let listing = storage
-        .list_protocol_objects("store-v1/membership/heads/")
+        .list_protocol_objects(STORE_MEMBERSHIP_HEAD_PREFIX)
         .await?;
     let mut slots: BTreeMap<(String, OwnerGrantId, u64), Vec<ProtocolObjectLocator>> =
         BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_membership_head_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
-                semantic_prefix: "store-v1/membership/heads".to_string(),
+                semantic_prefix: STORE_MEMBERSHIP_HEAD_PREFIX
+                    .trim_end_matches('/')
+                    .to_string(),
                 key: object.logical_key().to_string(),
                 reason: error.to_string(),
             }
@@ -836,7 +831,6 @@ pub async fn list_membership_head_objects(
                 ProtocolObjectDomain::StoreMembershipHead,
             ),
             &slot,
-            ".json",
             objects,
             listing.coverage,
             |key| Ok(parse_membership_head_copy_key(key)?.semantic_hash),
@@ -857,12 +851,14 @@ pub async fn list_snapshot_metas(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
 ) -> Result<VerifiedSnapshotListing, StoreObjectError> {
-    let listing = storage.list_protocol_objects("store-v1/snapshots/").await?;
+    let listing = storage
+        .list_protocol_objects(STORE_SNAPSHOT_META_PREFIX)
+        .await?;
     let mut groups: BTreeMap<(String, ObjectHash), Vec<ProtocolObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_snapshot_meta_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
-                semantic_prefix: "store-v1/snapshots".to_string(),
+                semantic_prefix: STORE_SNAPSHOT_META_PREFIX.trim_end_matches('/').to_string(),
                 key: object.logical_key().to_string(),
                 reason: error.to_string(),
             }
@@ -879,7 +875,6 @@ pub async fn list_snapshot_metas(
             storage,
             &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreSnapshotMeta),
             &semantic_prefix,
-            ".json",
             snapshot_hash,
             objects,
             listing.coverage,
@@ -907,7 +902,6 @@ pub async fn load_snapshot_image(
         storage,
         &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreSnapshotImage),
         &semantic_prefix,
-        ".db",
         image_hash,
         |bytes| {
             if ObjectHash::digest(bytes) != image_hash {
@@ -926,12 +920,12 @@ pub async fn list_visible_heads(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
 ) -> Result<VerifiedHeadListing, StoreObjectError> {
-    let listing = storage.list_protocol_objects("store-v1/heads/").await?;
+    let listing = storage.list_protocol_objects(STORE_HEAD_PREFIX).await?;
     let mut slots: BTreeMap<(String, u64), Vec<ProtocolObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_head_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
-                semantic_prefix: "store-v1/heads".to_string(),
+                semantic_prefix: STORE_HEAD_PREFIX.trim_end_matches('/').to_string(),
                 key: object.logical_key().to_string(),
                 reason: error.to_string(),
             }
@@ -959,7 +953,6 @@ pub async fn list_visible_heads(
             storage,
             &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead),
             &slot,
-            ".json",
             objects,
             listing.coverage,
             |key| Ok(parse_head_copy_key(key)?.semantic_hash),
@@ -997,12 +990,12 @@ pub async fn list_latest_ack_chains(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
 ) -> Result<VerifiedAckChains, StoreObjectError> {
-    let listing = storage.list_protocol_objects("store-v1/acks/").await?;
+    let listing = storage.list_protocol_objects(STORE_ACK_PREFIX).await?;
     let mut slots: BTreeMap<(String, u64), Vec<ProtocolObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_ack_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
-                semantic_prefix: "store-v1/acks".to_string(),
+                semantic_prefix: STORE_ACK_PREFIX.trim_end_matches('/').to_string(),
                 key: object.logical_key().to_string(),
                 reason: error.to_string(),
             }
@@ -1019,7 +1012,6 @@ pub async fn list_latest_ack_chains(
             storage,
             &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreAck),
             &slot,
-            ".json",
             objects,
             listing.coverage,
             |key| Ok(parse_ack_copy_key(key)?.semantic_hash),
@@ -1081,12 +1073,16 @@ pub async fn list_latest_registration_chains(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
 ) -> Result<VerifiedRegistrationChains, StoreObjectError> {
-    let listing = storage.list_protocol_objects("store-v1/devices/").await?;
+    let listing = storage
+        .list_protocol_objects(STORE_DEVICE_REGISTRATION_PREFIX)
+        .await?;
     let mut slots: BTreeMap<(String, u64), Vec<ProtocolObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_registration_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
-                semantic_prefix: "store-v1/devices".to_string(),
+                semantic_prefix: STORE_DEVICE_REGISTRATION_PREFIX
+                    .trim_end_matches('/')
+                    .to_string(),
                 key: object.logical_key().to_string(),
                 reason: error.to_string(),
             }
@@ -1107,7 +1103,6 @@ pub async fn list_latest_registration_chains(
                 ProtocolObjectDomain::StoreDeviceRegistration,
             ),
             &slot,
-            ".json",
             objects,
             listing.coverage,
             |key| Ok(parse_registration_copy_key(key)?.semantic_hash),
@@ -1217,7 +1212,6 @@ pub async fn load_registration_ref(
             ProtocolObjectDomain::StoreDeviceRegistration,
         ),
         &slot,
-        ".json",
         listing.objects,
         listing.coverage,
         |key| Ok(parse_registration_copy_key(key)?.semantic_hash),
@@ -1286,13 +1280,13 @@ pub async fn list_reclaimable_store_packages(
             authoritative_serial_commits.insert(expected.seq, commit);
         }
     }
-    let listing = storage.list_protocol_objects("store-v1/packages/").await?;
+    let listing = storage.list_protocol_objects(STORE_PACKAGE_PREFIX).await?;
     let mut groups: BTreeMap<(String, u64, ObjectHash), Vec<ProtocolObjectLocator>> =
         BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_package_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
-                semantic_prefix: "store-v1/packages".to_string(),
+                semantic_prefix: STORE_PACKAGE_PREFIX.trim_end_matches('/').to_string(),
                 key: object.logical_key().to_string(),
                 reason: error.to_string(),
             }
@@ -1377,7 +1371,6 @@ pub async fn list_reclaimable_store_packages(
             storage,
             &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StorePackage),
             &semantic_prefix,
-            ".pkg",
             package_hash,
             objects,
             listing.coverage,
@@ -1408,7 +1401,6 @@ pub async fn load_semantic_copies<T>(
     storage: &dyn SyncStorage,
     context: &ProtocolObjectContext,
     semantic_prefix: &str,
-    extension: &str,
     semantic_hash: ObjectHash,
     validate: impl Fn(&[u8]) -> Result<T, StoreProtocolError>,
 ) -> Result<Option<VerifiedCopies<T>>, StoreObjectError> {
@@ -1418,7 +1410,6 @@ pub async fn load_semantic_copies<T>(
         storage,
         context,
         semantic_prefix,
-        extension,
         semantic_hash,
         listing.objects,
         listing.coverage,
@@ -1431,17 +1422,21 @@ async fn load_semantic_candidates<T>(
     storage: &dyn SyncStorage,
     context: &ProtocolObjectContext,
     semantic_prefix: &str,
-    extension: &str,
     semantic_hash: ObjectHash,
     objects: Vec<ProtocolObjectLocator>,
     coverage: ListingCoverage,
     validate: impl Fn(&[u8]) -> Result<T, StoreProtocolError>,
 ) -> Result<Option<VerifiedCopies<T>>, StoreObjectError> {
-    let expected_copy_prefix = format!("{semantic_prefix}/copies/");
     let mut canonical: Option<(T, Vec<u8>)> = None;
     let mut copies = Vec::new();
     for object in objects {
-        validate_copy_key(&object, &expected_copy_prefix, extension, semantic_prefix)?;
+        context
+            .validate_locator(&object, semantic_prefix)
+            .map_err(|error| StoreObjectError::Collision {
+                semantic_prefix: semantic_prefix.to_string(),
+                key: object.logical_key().to_string(),
+                reason: error.to_string(),
+            })?;
         let bytes = storage
             .read_protocol_object(context, &object, semantic_prefix)
             .await
@@ -1485,7 +1480,6 @@ pub async fn load_singleton_slot<T>(
     storage: &dyn SyncStorage,
     context: &ProtocolObjectContext,
     slot_prefix: &str,
-    extension: &str,
     parse_hash: impl Fn(&str) -> Result<ObjectHash, StoreProtocolError>,
     validate: impl Fn(ObjectHash, &[u8]) -> Result<T, StoreProtocolError>,
 ) -> Result<Option<VerifiedCopies<T>>, StoreObjectError> {
@@ -1496,7 +1490,6 @@ pub async fn load_singleton_slot<T>(
         storage,
         context,
         slot_prefix,
-        extension,
         listing.objects,
         listing.coverage,
         parse_hash,
@@ -1509,7 +1502,6 @@ async fn load_singleton_candidates<T>(
     storage: &dyn SyncStorage,
     context: &ProtocolObjectContext,
     slot_prefix: &str,
-    extension: &str,
     objects: Vec<ProtocolObjectLocator>,
     coverage: ListingCoverage,
     parse_hash: impl Fn(&str) -> Result<ObjectHash, StoreProtocolError>,
@@ -1525,12 +1517,13 @@ async fn load_singleton_candidates<T>(
                 reason: error.to_string(),
             })?;
         let semantic_prefix = format!("{slot_prefix}/{semantic_hash}");
-        validate_copy_key(
-            &object,
-            &format!("{semantic_prefix}/copies/"),
-            extension,
-            &semantic_prefix,
-        )?;
+        context
+            .validate_locator(&object, &semantic_prefix)
+            .map_err(|error| StoreObjectError::Collision {
+                semantic_prefix: semantic_prefix.clone(),
+                key: object.logical_key().to_string(),
+                reason: error.to_string(),
+            })?;
         let bytes = storage
             .read_protocol_object(context, &object, &semantic_prefix)
             .await
@@ -1578,33 +1571,6 @@ async fn load_singleton_candidates<T>(
             copies,
             coverage,
         }))
-}
-
-fn validate_copy_key(
-    object: &ProtocolObjectLocator,
-    expected_prefix: &str,
-    extension: &str,
-    semantic_prefix: &str,
-) -> Result<(), StoreObjectError> {
-    let key = object.logical_key();
-    let Some(copy) = key
-        .strip_prefix(expected_prefix)
-        .and_then(|filename| filename.strip_suffix(extension))
-    else {
-        return Err(StoreObjectError::Collision {
-            semantic_prefix: semantic_prefix.to_string(),
-            key: key.to_string(),
-            reason: "candidate is not in the canonical copies path".to_string(),
-        });
-    };
-    if copy.contains('/') || copy.parse::<crate::storage::cloud::CopyId>().is_err() {
-        return Err(StoreObjectError::Collision {
-            semantic_prefix: semantic_prefix.to_string(),
-            key: key.to_string(),
-            reason: "candidate has a non-canonical copy id".to_string(),
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1656,13 +1622,12 @@ mod tests {
             .await
             .unwrap();
 
-        let loaded =
-            load_semantic_copies(&storage, &context, &prefix, ".json", hash, |candidate| {
-                validate_digest(hash, candidate)
-            })
-            .await
-            .unwrap()
-            .unwrap();
+        let loaded = load_semantic_copies(&storage, &context, &prefix, hash, |candidate| {
+            validate_digest(hash, candidate)
+        })
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(loaded.bytes, bytes);
         assert_eq!(loaded.copies.len(), 2);
     }
@@ -1684,7 +1649,7 @@ mod tests {
             b"different bytes".to_vec(),
         );
 
-        let error = load_semantic_copies(&storage, &context, &prefix, ".json", hash, |candidate| {
+        let error = load_semantic_copies(&storage, &context, &prefix, hash, |candidate| {
             validate_digest(hash, candidate)
         })
         .await
@@ -1718,7 +1683,6 @@ mod tests {
             &storage,
             &context,
             &slot,
-            ".json",
             |key| Ok(parse_commit_copy_key(key)?.semantic_hash),
             validate_digest,
         )
