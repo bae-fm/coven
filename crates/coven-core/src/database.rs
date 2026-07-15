@@ -156,7 +156,7 @@ struct DatabaseState {
     /// Serializes the full durable-intent to filesystem-deletion to intent-removal
     /// operation across every clone of this database.
     local_blob_cleanup: Arc<tokio::sync::Mutex<()>>,
-    write_ids: crate::id_provider::IdRef,
+    ids: crate::id_provider::IdRef,
     write_statuses:
         Arc<std::sync::Mutex<HashMap<WriteId, tokio::sync::watch::Sender<WriteStatus>>>>,
     #[cfg(any(test, feature = "test-utils"))]
@@ -652,7 +652,7 @@ impl DatabaseCore {
             membership_mutation: Arc::new(tokio::sync::Mutex::new(())),
             snapshot_publication: Arc::new(tokio::sync::Mutex::new(())),
             local_blob_cleanup: Arc::new(tokio::sync::Mutex::new(())),
-            write_ids: Arc::new(crate::id_provider::UuidProvider),
+            ids: Arc::new(crate::id_provider::UuidProvider),
             write_statuses: Arc::new(std::sync::Mutex::new(HashMap::new())),
             #[cfg(any(test, feature = "test-utils"))]
             test_pause_points: Arc::new(TestPausePoints::default()),
@@ -1233,10 +1233,42 @@ fn table_is_strict(conn: &Connection, table: &str) -> Result<Option<bool>, DbErr
     Ok(None)
 }
 
+struct PreparedCircleOperationRow {
+    operation_id: String,
+    circle_id: String,
+    status: String,
+    payload: Vec<u8>,
+}
+
+impl PreparedCircleOperationRow {
+    fn from_journal(
+        journal: crate::sync::circle_ops::CircleOperationJournal,
+    ) -> Result<Self, DbError> {
+        let operation_id = journal.operation_id.clone();
+        let circle_id = journal.circle_id().to_string();
+        let status = serde_json::to_string(&journal.status).map_err(|error| {
+            DbError::Message(format!("serialize circle operation status: {error}"))
+        })?;
+        let payload = serde_json::to_vec(&journal).map_err(|error| {
+            DbError::Message(format!("serialize circle operation journal: {error}"))
+        })?;
+        Ok(Self {
+            operation_id,
+            circle_id,
+            status,
+            payload,
+        })
+    }
+}
+
 impl Database {
+    pub(crate) fn id_provider(&self) -> &dyn crate::id_provider::IdProvider {
+        self.state.ids.as_ref()
+    }
+
     #[doc(hidden)]
     pub fn new_write_id(&self) -> WriteId {
-        WriteId::from_generated(self.state.write_ids.new_id())
+        WriteId::from_generated(self.state.ids.new_id())
     }
 
     fn notify_write_status_in(
@@ -5631,19 +5663,12 @@ impl Database {
         &self,
         journal: crate::sync::circle_ops::CircleOperationJournal,
     ) -> Result<(), DbError> {
-        let operation_id = journal.operation_id.clone();
-        let circle_id = journal.circle_id().to_string();
-        let status = serde_json::to_string(&journal.status).map_err(|error| {
-            DbError::Message(format!("serialize circle operation status: {error}"))
-        })?;
-        let payload = serde_json::to_vec(&journal).map_err(|error| {
-            DbError::Message(format!("serialize circle operation journal: {error}"))
-        })?;
+        let row = PreparedCircleOperationRow::from_journal(journal)?;
         self.call(move |conn| {
             conn.execute(
                 "INSERT INTO circle_operations (operation_id, circle_id, status, payload)
                  VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![operation_id, circle_id, status, payload],
+                rusqlite::params![row.operation_id, row.circle_id, row.status, row.payload],
             )
             .map(|_| ())
             .map_err(DbError::from)
@@ -5823,20 +5848,13 @@ impl Database {
         &self,
         journal: crate::sync::circle_ops::CircleOperationJournal,
     ) -> Result<(), DbError> {
-        let operation_id = journal.operation_id.clone();
-        let circle_id = journal.circle_id().to_string();
-        let status = serde_json::to_string(&journal.status).map_err(|error| {
-            DbError::Message(format!("serialize circle operation status: {error}"))
-        })?;
-        let payload = serde_json::to_vec(&journal).map_err(|error| {
-            DbError::Message(format!("serialize circle operation journal: {error}"))
-        })?;
+        let row = PreparedCircleOperationRow::from_journal(journal)?;
         self.call(move |conn| {
             let updated = conn
                 .execute(
                     "UPDATE circle_operations SET status = ?3, payload = ?4
                      WHERE operation_id = ?1 AND circle_id = ?2",
-                    rusqlite::params![operation_id, circle_id, status, payload],
+                    rusqlite::params![row.operation_id, row.circle_id, row.status, row.payload],
                 )
                 .map_err(DbError::from)?;
             if updated != 1 {

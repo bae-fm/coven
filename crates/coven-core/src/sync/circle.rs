@@ -6,7 +6,6 @@ use std::str::FromStr;
 
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-use rand::RngCore;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Sha256;
 
@@ -26,6 +25,10 @@ const METADATA_DOMAIN: &str = "coven.circle-metadata.v1";
 const ACCESS_DOMAIN: &str = "coven.circle-access-leaf.v1";
 const CONTROL_DOMAIN: &str = "coven.circle-control.v1";
 const ENVELOPE_DOMAIN: &str = "coven.circle-access-envelope.v1";
+const CIRCLE_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-id-generation.v1\0";
+const CIRCLE_EPOCH_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-epoch-id-generation.v1\0";
+const ACCESS_LEAF_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-access-leaf-id-generation.v1\0";
+const OWNER_GRANT_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-owner-grant-id-generation.v1\0";
 
 pub const CIRCLE_CONTROL_PREFIX: &str = "circle-control/";
 pub const CIRCLE_ROSTER_PREFIX: &str = "circles/";
@@ -33,15 +36,13 @@ pub const CIRCLE_METADATA_PREFIX: &str = "circles/";
 pub const CIRCLE_ACCESS_LEAF_PREFIX: &str = "circles/";
 pub const CIRCLE_ACCESS_ENVELOPE_PREFIX: &str = "circles/";
 
-/// A random 128-bit circle identity encoded as canonical lowercase base32.
+/// A generated 128-bit circle identity encoded as canonical lowercase base32.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CircleId([u8; 16]);
 
 impl CircleId {
-    pub fn generate() -> Self {
-        let mut bytes = [0_u8; 16];
-        rand::rng().fill_bytes(&mut bytes);
-        Self(bytes)
+    fn generate(ids: &dyn crate::id_provider::IdProvider) -> Self {
+        Self(generated_id_bytes(ids, CIRCLE_ID_GENERATION_DOMAIN))
     }
 
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
@@ -206,8 +207,8 @@ impl CircleControlCoord {
 #[error("circle control coordinate has an empty device/author or zero sequence/generation")]
 pub struct CircleControlCoordError;
 
-macro_rules! random_hex_id {
-    ($name:ident, $error:literal) => {
+macro_rules! generated_hex_id {
+    ($name:ident, $domain:ident) => {
         #[derive(
             Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
         )]
@@ -215,10 +216,8 @@ macro_rules! random_hex_id {
         pub struct $name([u8; 16]);
 
         impl $name {
-            pub fn generate() -> Self {
-                let mut bytes = [0_u8; 16];
-                rand::rng().fill_bytes(&mut bytes);
-                Self(bytes)
+            fn generate(ids: &dyn crate::id_provider::IdProvider) -> Self {
+                Self(generated_id_bytes(ids, $domain))
             }
         }
 
@@ -230,8 +229,22 @@ macro_rules! random_hex_id {
     };
 }
 
-random_hex_id!(CircleEpochId, "circle epoch id");
-random_hex_id!(AccessLeafId, "access leaf id");
+generated_hex_id!(CircleEpochId, CIRCLE_EPOCH_ID_GENERATION_DOMAIN);
+generated_hex_id!(AccessLeafId, ACCESS_LEAF_ID_GENERATION_DOMAIN);
+
+fn generated_id_digest(ids: &dyn crate::id_provider::IdProvider, domain: &[u8]) -> ObjectHash {
+    let id = ids.new_id();
+    let mut material = Vec::with_capacity(domain.len() + id.len());
+    material.extend_from_slice(domain);
+    material.extend_from_slice(id.as_bytes());
+    ObjectHash::digest(&material)
+}
+
+fn generated_id_bytes(ids: &dyn crate::id_provider::IdProvider, domain: &[u8]) -> [u8; 16] {
+    generated_id_digest(ids, domain).as_bytes()[..16]
+        .try_into()
+        .expect("SHA-256 digest prefix has fixed length")
+}
 
 /// The exact Store membership state whose identities require access dispositions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -897,6 +910,7 @@ impl CircleCreation {
         store_membership: StoreMembershipStateRef,
         membership_grant: Option<MembershipCoord>,
         mut store_members: Vec<(String, MemberRole)>,
+        ids: &dyn crate::id_provider::IdProvider,
         signer: &UserKeypair,
     ) -> Result<Self, CircleCreateError> {
         let author_pubkey = keys::public_key_hex(signer);
@@ -911,9 +925,9 @@ impl CircleCreation {
         {
             return Err(CircleCreateError::AuthorNotStoreWriter);
         }
-        let circle_id = CircleId::generate();
-        let epoch_id = CircleEpochId::generate();
-        let owner_grant = OwnerGrantId(ObjectHash::digest(uuid::Uuid::new_v4().as_bytes()));
+        let circle_id = CircleId::generate(ids);
+        let epoch_id = CircleEpochId::generate(ids);
+        let owner_grant = OwnerGrantId(generated_id_digest(ids, OWNER_GRANT_ID_GENERATION_DOMAIN));
         let keyring = MasterKeyring::generate();
         let encryption = EncryptionService::from(keyring.clone());
         let key_fingerprint = encryption.seal_key_fingerprint();
@@ -952,7 +966,7 @@ impl CircleCreation {
                 store_root_hash,
                 circle_id,
                 epoch_id,
-                leaf_id: AccessLeafId::generate(),
+                leaf_id: AccessLeafId::generate(ids),
                 owner_pubkey: author_pubkey.clone(),
                 recipient_pubkey: recipient_pubkey.clone(),
                 recipient_slot,
@@ -1058,8 +1072,8 @@ impl CircleCreation {
     }
 }
 
-pub fn circle_control_semantic_prefix(control: &PreparedCircleControl) -> String {
-    match &control.coord {
+pub fn circle_control_semantic_prefix(circle_id: CircleId, control: &CircleControlCoord) -> String {
+    match control {
         CircleControlCoord::MergeConcurrent {
             device_id,
             author_pubkey,
@@ -1068,7 +1082,7 @@ pub fn circle_control_semantic_prefix(control: &PreparedCircleControl) -> String
             control_hash,
         } => format!(
             "circle-control/{}/merge/entries/{author_pubkey}/{device_id}/{author_owner_grant}/{seq}/{control_hash}",
-            control.value.circle_id
+            circle_id
         ),
         CircleControlCoord::Serial {
             author_pubkey,
@@ -1076,7 +1090,7 @@ pub fn circle_control_semantic_prefix(control: &PreparedCircleControl) -> String
             control_hash,
         } => format!(
             "circle-control/{}/serial/{author_pubkey}/{generation}/{control_hash}",
-            control.value.circle_id
+            circle_id
         ),
     }
 }
@@ -1348,6 +1362,7 @@ mod tests {
                 StoreMembershipStateRef::MergeConcurrent { heads, .. } => Some(heads[0].clone()),
                 StoreMembershipStateRef::Serial { .. } => None,
             };
+            let ids = crate::id_provider::SequentialIdProvider::new("founder-circle");
             let creation = CircleCreation::founder(
                 ObjectHash::digest(b"store-root"),
                 "device-a",
@@ -1356,6 +1371,7 @@ mod tests {
                 membership,
                 membership_grant,
                 members.clone(),
+                &ids,
                 &owner,
             )
             .expect("construct founder circle");
@@ -1424,6 +1440,7 @@ mod tests {
             StoreMembershipStateRef::MergeConcurrent { heads, .. } => heads[0].clone(),
             StoreMembershipStateRef::Serial { .. } => unreachable!(),
         };
+        let ids = crate::id_provider::SequentialIdProvider::new("access-verification");
         let creation = CircleCreation::founder(
             ObjectHash::digest(b"store-root"),
             "device-a",
@@ -1432,6 +1449,7 @@ mod tests {
             membership,
             Some(grant),
             members.clone(),
+            &ids,
             &owner,
         )
         .expect("construct founder circle");

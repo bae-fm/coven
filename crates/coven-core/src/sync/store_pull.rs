@@ -443,20 +443,6 @@ pub async fn pull_store_commits_with_identity(
                     seq: commit.seq() - 1,
                     commit_hash,
                 });
-            if carries_circle_payload(&commit) && identity.is_none() {
-                held.push(held_commit(
-                    &commit.device_id,
-                    commit.position(),
-                    HeldStorePositionReason::InvalidObject(
-                        "circle payload cannot be materialized by Store pull".to_string(),
-                    ),
-                ));
-                let Some(predecessor) = predecessor else {
-                    break;
-                };
-                expected_position = predecessor;
-                continue;
-            }
             if commit
                 .store_package
                 .as_ref()
@@ -547,31 +533,15 @@ pub async fn pull_store_commits_with_identity(
                     continue;
                 }
             };
-            let circle_activations = if commit.circle_controls.is_empty() {
-                Vec::new()
-            } else {
-                let founder = db
-                    .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
-                    .await?
-                    .ok_or_else(|| {
-                        StorePullError::Database(
-                            "Store founder is absent while loading circle controls".to_string(),
-                        )
-                    })?;
-                match super::circle_ops::load_circle_activations(
-                    storage,
-                    &commit,
-                    identity.expect("circle payload identity checked"),
-                    &founder,
-                )
-                .await
-                {
+            let circle_activations =
+                match load_pull_circle_activations(db, storage, &commit, identity).await {
                     Ok(activations) => activations,
-                    Err(error) => {
+                    Err(PullCircleActivationError::Database(error)) => return Err(error.into()),
+                    Err(PullCircleActivationError::Invalid(error)) => {
                         held.push(held_commit(
                             &commit.device_id,
                             commit.position(),
-                            HeldStorePositionReason::InvalidObject(error.to_string()),
+                            HeldStorePositionReason::InvalidObject(error),
                         ));
                         let Some(predecessor) = predecessor else {
                             break;
@@ -579,8 +549,7 @@ pub async fn pull_store_commits_with_identity(
                         expected_position = predecessor;
                         continue;
                     }
-                }
-            };
+                };
             candidates.insert(
                 (commit.device_id.clone(), commit.seq()),
                 Candidate {
@@ -942,23 +911,14 @@ async fn pull_serial_store_commits(
     for authorized in authorized_chain.into_iter().skip(first_unmaterialized) {
         let commit = authorized.commit;
         let package = load_serial_store_package(db, storage, &commit).await?;
-        let circle_activations = if commit.circle_controls.is_empty() {
-            Vec::new()
-        } else {
-            let identity = identity.ok_or_else(|| {
-                StorePullError::Serial(format!(
-                    "commit {} carries circle controls but no device identity was supplied",
-                    commit.seq()
-                ))
-            })?;
-            let founder = db
-                .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
-                .await?
-                .ok_or_else(|| StorePullError::Serial("Store founder is absent".to_string()))?;
-            super::circle_ops::load_circle_activations(storage, &commit, identity, &founder)
-                .await
-                .map_err(|error| StorePullError::Serial(error.to_string()))?
-        };
+        let circle_activations =
+            match load_pull_circle_activations(db, storage, &commit, identity).await {
+                Ok(activations) => activations,
+                Err(PullCircleActivationError::Database(error)) => return Err(error.into()),
+                Err(PullCircleActivationError::Invalid(error)) => {
+                    return Err(StorePullError::Serial(error));
+                }
+            };
         candidates.push((
             Candidate {
                 commit,
@@ -1320,6 +1280,45 @@ async fn membership_authorizes(
 
 fn carries_circle_payload(commit: &StoreBatchCommit) -> bool {
     !commit.circle_controls.is_empty() || !commit.circle_packages.is_empty()
+}
+
+enum PullCircleActivationError {
+    Database(DbError),
+    Invalid(String),
+}
+
+async fn load_pull_circle_activations(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    commit: &StoreBatchCommit,
+    identity: Option<&crate::keys::UserKeypair>,
+) -> Result<Vec<super::circle_ops::VerifiedCircleActivation>, PullCircleActivationError> {
+    if !carries_circle_payload(commit) {
+        return Ok(Vec::new());
+    }
+    if !commit.circle_packages.is_empty() {
+        return Err(PullCircleActivationError::Invalid(
+            "circle row packages are not implemented".to_string(),
+        ));
+    }
+    let identity = identity.ok_or_else(|| {
+        PullCircleActivationError::Invalid(format!(
+            "commit {} carries circle controls but no device identity was supplied",
+            commit.seq()
+        ))
+    })?;
+    let founder = db
+        .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .await
+        .map_err(PullCircleActivationError::Database)?
+        .ok_or_else(|| {
+            PullCircleActivationError::Invalid(
+                "Store founder is absent while loading circle controls".to_string(),
+            )
+        })?;
+    super::circle_ops::load_circle_activations(storage, commit, identity, &founder)
+        .await
+        .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))
 }
 
 async fn load_serial_store_package(
@@ -1780,6 +1779,7 @@ mod tests {
 
     use super::*;
     use crate::database::StoreWriteBase;
+    use crate::encryption::KeyFingerprint;
     use crate::keys::UserKeypair;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{CloudHome, SequentialCopyIdGenerator};
@@ -1790,7 +1790,8 @@ mod tests {
     };
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::store_commit::{
-        store_protocol_root_semantic_prefix, CircleControlRef, StoreControl, StoreProtocolRoot,
+        store_protocol_root_semantic_prefix, CircleControlRef, CirclePackageInput, StoreControl,
+        StorePackageInput, StoreProtocolRoot,
     };
     use crate::sync::store_objects::append_and_verify;
     use crate::sync::store_outbound::{
@@ -2086,6 +2087,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merge_pull_holds_commit_with_only_a_circle_package() {
+        let home = InMemoryCloudHome::new();
+        let keypair = UserKeypair::generate();
+        let storage = storage(&home, &keypair, "merge-circle-package-only");
+        let source = open_test_db();
+        let store_id = "merge-circle-package-only";
+        let root = crate::sync::test_helpers::publish_test_store_protocol_root(
+            &source, &storage, store_id, "source", &keypair,
+        )
+        .await;
+        let founder = founder_entry(
+            store_id,
+            &keypair,
+            "0000000000001-0000-test-store-protocol-root",
+        );
+        let chain = MembershipChain::from_entries(vec![founder.clone()])
+            .expect("build founder membership chain");
+        crate::sync::store_objects::append_membership_entry_object(
+            &storage,
+            root,
+            &founder.coord(),
+            &founder,
+        )
+        .await
+        .expect("publish founder membership entry");
+        crate::sync::store_objects::append_membership_head_object(
+            &storage,
+            root,
+            &chain
+                .signed_head(&keypair)
+                .expect("founder membership head"),
+        )
+        .await
+        .expect("publish founder membership head");
+        let circle_id = CircleId::from_bytes([6; 16]);
+        let control = CircleControlCoord::MergeConcurrent {
+            device_id: "source".to_string(),
+            author_pubkey: crate::keys::public_key_hex(&keypair),
+            author_owner_grant: founder.author_owner_grant.clone(),
+            seq: 1,
+            control_hash: ObjectHash::digest(b"merge-package-only-control"),
+        };
+        let commit = StoreBatchCommit::signed_batch(
+            root,
+            crate::WriteId::from_generated("merge-circle-package-only".to_string()),
+            "source".to_string(),
+            crate::StoreCommitOrder::MergeConcurrent {
+                seq: 1,
+                previous_commit_hash: None,
+                dependencies: BTreeMap::new(),
+            },
+            Some(founder.coord()),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            &[CirclePackageInput {
+                circle_id,
+                control,
+                key_fingerprint: KeyFingerprint::from_bytes([4; 8]),
+                package: StorePackageInput {
+                    schema_version: source.schema_version(),
+                    bytes: b"unsupported circle package",
+                },
+            }],
+            &keypair,
+        )
+        .expect("sign package-only Merge commit");
+        let head = StoreDeviceHead::signed(
+            root,
+            "source".to_string(),
+            Some(commit.position()),
+            "2026-07-15T00:00:00Z".to_string(),
+            &keypair,
+        )
+        .expect("sign Merge head");
+        append_and_verify(
+            &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StoreCommit),
+            &crate::sync::store_commit::commit_semantic_prefix("source", 1, commit.commit_hash()),
+            ".json",
+            &commit.to_bytes(),
+        )
+        .await
+        .expect("publish Merge commit");
+        append_and_verify(
+            &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StoreHead),
+            &crate::sync::store_commit::head_semantic_prefix("source", 1, head.head_hash()),
+            ".json",
+            &head.to_bytes(),
+        )
+        .await
+        .expect("publish Merge head");
+        let peer = open_test_db();
+        bind_database(&peer, "peer", root).await;
+        peer.set_protocol_state(
+            crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+            &crate::keys::public_key_hex(&keypair),
+        )
+        .await
+        .expect("pin peer founder");
+        let (_temp, peer_dir) = temp_store_dir();
+
+        let result = pull_store_commits_with_identity(
+            &peer,
+            peer.synced_tables(),
+            &storage,
+            None,
+            root,
+            "peer",
+            &peer_dir,
+            None,
+            Some(&keypair),
+        )
+        .await
+        .expect("hold package-only Merge commit");
+
+        assert!(!result.frontier.contains_key("source"));
+        assert!(result.held_positions.iter().any(|held| {
+            matches!(
+                &held.reason,
+                HeldStorePositionReason::InvalidObject(message)
+                    if message.contains("circle row packages are not implemented")
+            )
+        }));
+    }
+
+    #[tokio::test]
     async fn merge_pull_holds_circle_bearing_commit_until_circle_objects_are_materialized() {
         let home = InMemoryCloudHome::new();
         let keypair = UserKeypair::generate();
@@ -2173,7 +2303,7 @@ mod tests {
             matches!(
                 &held.reason,
                 HeldStorePositionReason::InvalidObject(message)
-                    if message.contains("circle payload")
+                    if message.contains("no device identity was supplied")
             )
         }));
     }
@@ -2269,6 +2399,101 @@ mod tests {
             .await
             .expect("read remote circle activation");
         assert_eq!(activated, 1);
+    }
+
+    #[tokio::test]
+    async fn serial_pull_rejects_commit_with_only_a_circle_package() {
+        let home = InMemoryCloudHome::new();
+        let keypair = UserKeypair::generate();
+        let storage = serial_storage(
+            &home,
+            &keypair,
+            "serial-circle-package-only",
+            "serial-circle-package-only",
+        );
+        let source = open_serial_test_db();
+        let root = publish_test_serial_store_protocol_root(
+            &source,
+            &storage,
+            "serial-circle-package-only",
+            "source",
+            &keypair,
+        )
+        .await;
+        let commit = StoreBatchCommit::signed_batch(
+            root,
+            crate::WriteId::from_generated("serial-circle-package-only".to_string()),
+            "source".to_string(),
+            crate::StoreCommitOrder::Serial {
+                seq: 1,
+                previous_commit_hash: None,
+            },
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            &[CirclePackageInput {
+                circle_id: CircleId::from_bytes([8; 16]),
+                control: CircleControlCoord::Serial {
+                    author_pubkey: crate::keys::public_key_hex(&keypair),
+                    generation: 1,
+                    control_hash: ObjectHash::digest(b"serial-package-only-control"),
+                },
+                key_fingerprint: KeyFingerprint::from_bytes([5; 8]),
+                package: StorePackageInput {
+                    schema_version: source.schema_version(),
+                    bytes: b"unsupported circle package",
+                },
+            }],
+            &keypair,
+        )
+        .expect("sign package-only Serial commit");
+        append_serial_commit(&storage, &commit).await;
+        let head = StoreSerialHead::signed(
+            root,
+            Some(commit.position()),
+            Some(commit.write_id.clone()),
+            &keypair,
+        )
+        .expect("sign Serial head");
+        storage
+            .serial_coordination()
+            .expect("Serial coordination")
+            .create_head(serial_head_key(), &head.to_bytes())
+            .await
+            .expect("publish Serial head");
+        let peer = open_serial_test_db();
+        bind_database(&peer, "peer", root).await;
+        peer.set_protocol_state(
+            crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+            &crate::keys::public_key_hex(&keypair),
+        )
+        .await
+        .expect("pin peer founder");
+        let (_temp, peer_dir) = temp_store_dir();
+
+        let error = pull_store_commits_with_identity(
+            &peer,
+            peer.synced_tables(),
+            &storage,
+            Some(storage.serial_coordination().expect("Serial coordination")),
+            root,
+            "peer",
+            &peer_dir,
+            None,
+            Some(&keypair),
+        )
+        .await
+        .expect_err("reject package-only Serial commit");
+
+        assert!(
+            error
+                .to_string()
+                .contains("circle row packages are not implemented"),
+            "{error}"
+        );
+        assert!(peer.materialized_frontier().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -8,9 +8,8 @@ use super::circle::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     circle_control_semantic_prefix, circle_metadata_semantic_prefix, circle_roster_semantic_prefix,
     recipient_slot_with_peer, AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf,
-    CircleControl, CircleControlCoord, CircleControlOrder, CircleCreation, CircleId,
-    CircleMetadata, CircleRoster, PreparedAccessLeaf, PreparedCircleControl,
-    StoreMembershipStateRef,
+    CircleControl, CircleControlOrder, CircleCreation, CircleId, CircleMetadata, CircleRoster,
+    PreparedAccessLeaf, PreparedCircleControl, StoreMembershipStateRef,
 };
 use super::membership::SerialAuthorizationState;
 use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
@@ -153,14 +152,10 @@ pub(crate) async fn load_circle_activations(
     identity: &UserKeypair,
     founder_pubkey: &str,
 ) -> Result<Vec<VerifiedCircleActivation>, CircleOperationError> {
-    if !commit.circle_packages.is_empty() {
-        return Err(CircleOperationError::InvalidState(
-            "circle row packages are not implemented".to_string(),
-        ));
-    }
     let mut activations = Vec::with_capacity(commit.circle_controls.len());
     for reference in &commit.circle_controls {
-        let control_prefix = control_ref_semantic_prefix(reference);
+        let control_prefix =
+            circle_control_semantic_prefix(reference.circle_id, &reference.control);
         let loaded = super::store_objects::load_semantic_copies(
             storage,
             &ProtocolObjectContext::store(
@@ -510,29 +505,6 @@ async fn verify_control_membership(
     Ok(())
 }
 
-fn control_ref_semantic_prefix(reference: &super::store_commit::CircleControlRef) -> String {
-    match &reference.control {
-        CircleControlCoord::MergeConcurrent {
-            device_id,
-            author_pubkey,
-            author_owner_grant,
-            seq,
-            control_hash,
-        } => format!(
-            "circle-control/{}/merge/entries/{author_pubkey}/{device_id}/{author_owner_grant}/{seq}/{control_hash}",
-            reference.circle_id
-        ),
-        CircleControlCoord::Serial {
-            author_pubkey,
-            generation,
-            control_hash,
-        } => format!(
-            "circle-control/{}/serial/{author_pubkey}/{generation}/{control_hash}",
-            reference.circle_id
-        ),
-    }
-}
-
 async fn load_exact_slot_bytes(
     storage: &dyn SyncStorage,
     context: &ProtocolObjectContext,
@@ -615,6 +587,7 @@ async fn prepare_circle_operation(
                 StoreMembershipStateRef::merge_concurrent(heads, &members),
                 Some(membership_grant.clone()),
                 members,
+                db.id_provider(),
                 signer,
             )?;
             let base = db.latest_local_store_position().await?;
@@ -658,6 +631,7 @@ async fn prepare_circle_operation(
                 StoreMembershipStateRef::serial(base.clone(), &members),
                 None,
                 members,
+                db.id_provider(),
                 signer,
             )?;
             (
@@ -799,7 +773,7 @@ async fn publish_circle_operation(
         &mut journal,
         "control",
         &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::CircleControl),
-        &circle_control_semantic_prefix(&creation.control),
+        &circle_control_semantic_prefix(creation.circle_id, &creation.control.coord),
         ".json",
         &creation.control.bytes,
     )

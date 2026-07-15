@@ -13,8 +13,7 @@ use uuid::Uuid;
 
 /// Identifier source. Yields a fresh unique id per call.
 pub trait IdProvider: Send + Sync {
-    /// A fresh unique identifier as a string (matches every call site, which
-    /// does `Uuid::new_v4().to_string()` today).
+    /// A fresh unique identifier as a string.
     fn new_id(&self) -> String;
 }
 
