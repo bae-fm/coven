@@ -567,7 +567,7 @@ fn session_error(operation: String) -> impl FnOnce(rusqlite::Error) -> GateError
 }
 
 /// Whether `row`'s effective gate is true (it should be kept/shared).
-unsafe fn effective_gate(
+pub(super) fn effective_gate(
     conn: &Connection,
     gates: &Gates,
     row: &ChangeRow,
@@ -830,7 +830,7 @@ enum ChildParentResolution {
 
 /// The parent id for a child changeset row. The changeset carries the FK when it
 /// changed; when it omits the FK, read the live row by primary key.
-unsafe fn changeset_child_parent_id(
+fn changeset_child_parent_id(
     conn: &Connection,
     row: &ChangeRow,
     fk_col: &GateColumn,
@@ -964,7 +964,7 @@ pub(super) fn query_column_text(
     query_row_optional(conn, &sql, [id], |row| row_value_to_string(row, 0)).map(|row| row.flatten())
 }
 
-fn row_id_for_column_value(
+pub(super) fn row_id_for_column_value(
     conn: &Connection,
     table: &str,
     column: &str,

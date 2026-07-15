@@ -7,8 +7,10 @@ use rusqlite::Connection;
 
 use super::ffi::{for_each_change, ChangeRow, Changegroup};
 use super::model::{rows_referencing, GateColumn, Gates, TableGate};
-use super::outbound::{full_state_diff, FullStateDirection};
-use super::{query_row_optional, row_value_to_string, GateError};
+use super::outbound::{
+    effective_gate, full_state_diff, query_column_text, row_id_for_column_value, FullStateDirection,
+};
+use super::{query_row_optional, GateError};
 use crate::sync::circle::{row_routing_id, Audience, CircleControlCoord, CircleId, RowRoutingKey};
 use crate::sync::session::quote_ident;
 use crate::WritePolicy;
@@ -409,7 +411,7 @@ fn scoped_materialization_rows(
             if parent != &table {
                 continue;
             }
-            let parent_key = query_text_value(conn, &table, &parent_col.name, "id", &row_id)?
+            let parent_key = query_column_text(conn, &table, &parent_col.name, &row_id)?
                 .ok_or_else(|| GateError::MissingAudienceRow {
                     table: table.clone(),
                     row_id: row_id.clone(),
@@ -438,7 +440,7 @@ fn table_is_scoped(gates: &Gates, table: &str) -> bool {
 }
 
 fn live_row_stamp(conn: &Connection, table: &str, row_id: &str) -> Result<String, GateError> {
-    query_text_value(conn, table, "_updated_at", "id", row_id)?.ok_or_else(|| {
+    query_column_text(conn, table, "_updated_at", row_id)?.ok_or_else(|| {
         GateError::MissingAudienceRow {
             table: table.to_string(),
             row_id: row_id.to_string(),
@@ -583,23 +585,15 @@ fn change_audience(
     gates: &Gates,
     row: &ChangeRow,
 ) -> Result<Audience, GateError> {
+    if !table_is_scoped(gates, &row.table) {
+        let kept = effective_gate(conn, gates, row)?;
+        return Ok(if kept {
+            Audience::Store
+        } else {
+            Audience::Local
+        });
+    }
     match gates.tables.get(&row.table) {
-        None | Some(TableGate::RemoteRoot) => Ok(Audience::Store),
-        Some(TableGate::Root { gate_col }) => {
-            let kept = match row.effective_truth(gate_col.index) {
-                Some(kept) => kept,
-                None => row
-                    .pk()
-                    .map(|id| gates.row_kept(conn, &row.table, id))
-                    .transpose()?
-                    .unwrap_or(false),
-            };
-            Ok(if kept {
-                Audience::Store
-            } else {
-                Audience::Local
-            })
-        }
         Some(TableGate::ScopedRoot { audience_col }) => {
             let value = match row.op {
                 op if op == ffi::SQLITE_INSERT => row
@@ -641,14 +635,16 @@ fn change_audience(
             })?;
             live_row_audience(conn, gates, parent, &parent_id)
         }
-        Some(TableGate::Parent { .. }) => {
-            let id = row
+        None
+        | Some(TableGate::Root { .. })
+        | Some(TableGate::RemoteRoot)
+        | Some(TableGate::Parent { .. }) => {
+            let row_id = row
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-            Ok(if gates.row_kept(conn, &row.table, id)? {
-                Audience::Store
-            } else {
-                Audience::Local
+            Err(GateError::MissingAudienceRow {
+                table: row.table.clone(),
+                row_id: row_id.to_string(),
             })
         }
     }
@@ -665,7 +661,7 @@ fn change_parent_key(
     let id = row
         .pk()
         .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-    query_text_value(conn, &row.table, &fk_col.name, "id", id)?.ok_or_else(|| {
+    query_column_text(conn, &row.table, &fk_col.name, id)?.ok_or_else(|| {
         GateError::MissingAudienceParent {
             table: row.table.clone(),
             row_id: Some(id.to_string()),
@@ -680,15 +676,25 @@ fn live_row_audience(
     table: &str,
     id: &str,
 ) -> Result<Audience, GateError> {
-    match gates.tables.get(table) {
-        None | Some(TableGate::RemoteRoot) => Ok(Audience::Store),
-        Some(TableGate::Root { .. }) | Some(TableGate::Parent { .. }) => {
-            Ok(if gates.row_kept(conn, table, id)? {
-                Audience::Store
-            } else {
-                Audience::Local
-            })
+    if !table_is_scoped(gates, table) {
+        if !gates.tables.contains_key(table) {
+            return Ok(Audience::Store);
         }
+        return gates
+            .root_kept_of(conn, table, id)?
+            .map(|kept| {
+                if kept {
+                    Audience::Store
+                } else {
+                    Audience::Local
+                }
+            })
+            .ok_or_else(|| GateError::MissingAudienceRow {
+                table: table.to_string(),
+                row_id: id.to_string(),
+            });
+    }
+    match gates.tables.get(table) {
         Some(TableGate::ScopedRoot { audience_col }) => {
             let sql = format!(
                 "SELECT {} FROM {} WHERE id = ?1",
@@ -713,7 +719,7 @@ fn live_row_audience(
             parent_col,
         }) => {
             let parent_key =
-                query_text_value(conn, table, &fk_col.name, "id", id)?.ok_or_else(|| {
+                query_column_text(conn, table, &fk_col.name, id)?.ok_or_else(|| {
                     GateError::MissingAudienceParent {
                         table: table.to_string(),
                         row_id: Some(id.to_string()),
@@ -728,33 +734,14 @@ fn live_row_audience(
             })?;
             live_row_audience(conn, gates, parent, &parent_id)
         }
+        None
+        | Some(TableGate::Root { .. })
+        | Some(TableGate::RemoteRoot)
+        | Some(TableGate::Parent { .. }) => Err(GateError::MissingAudienceRow {
+            table: table.to_string(),
+            row_id: id.to_string(),
+        }),
     }
-}
-
-fn query_text_value(
-    conn: &Connection,
-    table: &str,
-    selected: &str,
-    key_column: &str,
-    key: &str,
-) -> Result<Option<String>, GateError> {
-    let sql = format!(
-        "SELECT {} FROM {} WHERE {} = ?1",
-        quote_ident(selected),
-        quote_ident(table),
-        quote_ident(key_column)
-    );
-    query_row_optional(conn, &sql, [key], |row| row_value_to_string(row, 0))
-        .map(|value| value.flatten())
-}
-
-fn row_id_for_column_value(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    value: &str,
-) -> Result<Option<String>, GateError> {
-    query_text_value(conn, table, "id", column, value)
 }
 
 fn active_circle_control(
