@@ -1581,11 +1581,11 @@ mod tests {
         first_status.changed().await.expect("published status");
         assert!(matches!(
             &*first_status.borrow(),
-            coven_core::WriteStatus::Published(position) if position.position().seq == 1
+            coven_core::WriteStatus::Published(position) if position.position().seq == 2
         ));
         assert!(matches!(
             reopened.write_status(&write_ids[1]).await.expect("second status"),
-            coven_core::WriteStatus::Published(position) if position.position().seq == 2
+            coven_core::WriteStatus::Published(position) if position.position().seq == 3
         ));
         assert!(reopened
             .pending_writes()
@@ -1698,7 +1698,7 @@ mod tests {
                 .write_status(&receipt.write_id)
                 .await
                 .expect("published mixed write"),
-            coven_core::WriteStatus::Published(position) if position.position().seq == 1
+            coven_core::WriteStatus::Published(position) if position.position().seq == 2
         ));
 
         let (_peer_tmp, peer) = open_files_handle();
@@ -1820,7 +1820,7 @@ mod tests {
             &storage,
             storage.store_root_hash(),
             "device-test",
-            1,
+            2,
         )
         .await
         .expect("inspect Store commit slot after failed append")
@@ -1832,7 +1832,7 @@ mod tests {
                 &storage,
                 storage.store_root_hash(),
                 "device-test",
-                1,
+                2,
             )
             .await
             .expect("inspect Store commit slot after retry")
@@ -2472,11 +2472,11 @@ mod tests {
 
         assert!(matches!(
             handle.write_status(first_write).await.expect("first status"),
-            coven_core::WriteStatus::Published(position) if position.position().seq == 1
+            coven_core::WriteStatus::Published(position) if position.position().seq == 2
         ));
         assert!(matches!(
             handle.write_status(second_write).await.expect("second status"),
-            coven_core::WriteStatus::Published(position) if position.position().seq == 2
+            coven_core::WriteStatus::Published(position) if position.position().seq == 3
         ));
         assert!(storage
             .blob_exists("media-files", "ownedaaa", None)

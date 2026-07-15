@@ -578,7 +578,7 @@ async fn upload_source_path(db: &Database, id: &str) -> Option<String> {
 async fn re_enqueue_updates_the_pending_upload_pin() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_store_dir();
@@ -644,7 +644,7 @@ async fn re_enqueue_updates_the_pending_upload_pin() {
 async fn re_enqueue_updates_the_pending_upload_source_path() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_store_dir();
@@ -757,7 +757,7 @@ async fn queue_stuck_upload(db: &Database, file_id: &str, cloud_key: &str) {
 async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let (_tmp, lib) = temp_store_dir();
@@ -860,7 +860,7 @@ async fn inline_intent_consumption_survives_a_failed_cycle_then_records_the_pin(
 async fn cancel_make_remote_after_completion_enqueues_no_deletes() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_store_dir();
@@ -1227,7 +1227,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
 async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_intent() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp_a = UserKeypair::generate();
+    let kp_a = storage.protocol_founder_keypair();
     let hlc_a = Hlc::new("A".to_string());
     let db_a = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let (_tmp_a, lib_a) = temp_store_dir();
@@ -1349,7 +1349,7 @@ async fn host_provided_only_make_remote_flips_gate_and_consumes_durable_pin_inte
 async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_lazy_decl());
     let (_tmp, lib) = temp_store_dir();
@@ -1490,7 +1490,7 @@ async fn host_provided_make_remote_disposition_survives_crash_before_drain() {
 async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db();
     let (_tmp, lib) = temp_store_dir();
@@ -1529,7 +1529,7 @@ async fn drain_clears_a_pin_disposition_already_applied_before_its_intent() {
 async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db();
     let (_tmp, lib) = temp_store_dir();
@@ -1569,7 +1569,7 @@ async fn drain_clears_a_cache_disposition_already_applied_before_its_intent() {
 async fn drain_keeps_a_disposition_whose_blob_is_genuinely_lost() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db();
     let (_tmp, lib) = temp_store_dir();
@@ -2460,7 +2460,7 @@ async fn make_local_abort_then_retry_converges() {
 async fn round_trip_make_remote_make_local_make_remote() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_blob(photo_decl());
     let (tmp, lib) = temp_store_dir();
@@ -2659,7 +2659,7 @@ async fn tombstoned_host_cover(
 async fn inline_reshare_cancels_the_tombstone_of_a_blob_it_skips_uploading() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let (_tmp, lib) = temp_store_dir();
@@ -2707,7 +2707,7 @@ async fn inline_reshare_cancels_the_tombstone_of_a_blob_it_skips_uploading() {
 async fn inline_reshare_cancels_tombstone_on_the_fresh_upload_arm() {
     let storage = MockSyncStorage::new();
     let enc = plaintext();
-    let kp = UserKeypair::generate();
+    let kp = storage.protocol_founder_keypair();
     let hlc = Hlc::new("A".to_string());
     let db = open_test_db_with_user_and_host_blobs(photo_decl(), cover_decl());
     let (_tmp, lib) = temp_store_dir();

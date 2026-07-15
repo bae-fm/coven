@@ -245,13 +245,8 @@ pub(crate) async fn drain_store_writes_with_coordination(
             validate_outbound(&batch, store_root_hash, &device_id)?;
             let commit = &batch.commit.value;
             let head = &batch.head.value;
-            append_and_verify(
-                storage,
-                &commit.package.object_key,
-                ".pkg",
-                &batch.package_bytes,
-            )
-            .await?;
+            let package = required_store_package(commit)?;
+            append_and_verify(storage, &package.object_key, ".pkg", &batch.package_bytes).await?;
             append_and_verify(
                 storage,
                 &commit_semantic_prefix(&device_id, commit.seq(), commit.commit_hash()),
@@ -389,36 +384,51 @@ pub(crate) async fn activate_serial_control(
     coordination: &dyn CoordinationStorage,
     prepared: &PreparedSerialControl,
 ) -> Result<(), StoreOutboundError> {
-    append_and_verify(storage, &prepared.commit.package.object_key, ".pkg", &[]).await?;
+    activate_serial_commit_head(
+        db,
+        storage,
+        coordination,
+        prepared.base.clone(),
+        &prepared.commit,
+        &prepared.head,
+    )
+    .await?;
+    db.materialize_serial_control_commit(
+        prepared.commit.clone(),
+        prepared.authorization_after.clone(),
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn activate_serial_commit_head(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    base: Option<crate::sync::store_commit::CommitPosition>,
+    commit: &StoreBatchCommit,
+    head: &StoreSerialHead,
+) -> Result<(), StoreOutboundError> {
     append_and_verify(
         storage,
-        &commit_semantic_prefix(
-            SERIAL_STREAM_ID,
-            prepared.commit.seq(),
-            prepared.commit.commit_hash(),
-        ),
+        &commit_semantic_prefix(SERIAL_STREAM_ID, commit.seq(), commit.commit_hash()),
         ".json",
-        &prepared.commit.to_bytes(),
+        &commit.to_bytes(),
     )
     .await?;
     let observed = observe_serial_head(db, coordination).await?;
-    if observed.head() == Some(&prepared.head) {
-        db.materialize_serial_control_commit(
-            prepared.commit.clone(),
-            prepared.authorization_after.clone(),
-        )
-        .await?;
+    if observed.head() == Some(head) {
         return Ok(());
     }
-    if observed.position() != prepared.base {
+    if observed.position() != base {
         return Err(StoreOutboundError::SerialControlConflict {
-            expected: prepared.base.clone(),
+            expected: base.clone(),
             current: observed.position(),
         });
     }
     let activation = match observed.version() {
         None => coordination
-            .create_head(serial_head_key(), &prepared.head.to_bytes())
+            .create_head(serial_head_key(), &head.to_bytes())
             .await
             .map_err(|error| match error {
                 CreateHeadError::AlreadyExists => None,
@@ -427,7 +437,7 @@ pub(crate) async fn activate_serial_control(
                 }
             }),
         Some(version) => coordination
-            .replace_head(serial_head_key(), version, &prepared.head.to_bytes())
+            .replace_head(serial_head_key(), version, &head.to_bytes())
             .await
             .map_err(|error| match error {
                 ReplaceHeadError::VersionMismatch => None,
@@ -438,29 +448,19 @@ pub(crate) async fn activate_serial_control(
     };
     if activation
         .as_ref()
-        .is_ok_and(|activated| activated.bytes == prepared.head.to_bytes())
+        .is_ok_and(|activated| activated.bytes == head.to_bytes())
     {
-        db.materialize_serial_control_commit(
-            prepared.commit.clone(),
-            prepared.authorization_after.clone(),
-        )
-        .await?;
         return Ok(());
     }
     let after = observe_serial_head(db, coordination).await?;
-    if after.head() == Some(&prepared.head) {
-        db.materialize_serial_control_commit(
-            prepared.commit.clone(),
-            prepared.authorization_after.clone(),
-        )
-        .await?;
+    if after.head() == Some(head) {
         return Ok(());
     }
     if let Err(Some(error)) = activation {
         return Err(error);
     }
     Err(StoreOutboundError::SerialControlConflict {
-        expected: prepared.base.clone(),
+        expected: base,
         current: after.position(),
     })
 }
@@ -707,15 +707,10 @@ async fn drain_serial_store_branch(
             ));
         }
         commit
-            .verify_package(&write.package_bytes)
+            .verify_store_package(&write.package_bytes)
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        append_and_verify(
-            storage,
-            &commit.package.object_key,
-            ".pkg",
-            &write.package_bytes,
-        )
-        .await?;
+        let package = required_store_package(&commit)?;
+        append_and_verify(storage, &package.object_key, ".pkg", &write.package_bytes).await?;
         append_and_verify(
             storage,
             &commit_semantic_prefix(SERIAL_STREAM_ID, commit.seq(), commit.commit_hash()),
@@ -884,7 +879,7 @@ fn validate_outbound(
         ));
     }
     commit
-        .verify_package(&batch.package_bytes)
+        .verify_store_package(&batch.package_bytes)
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let head =
         StoreDeviceHead::parse_at(&batch.head.bytes, store_root_hash, device_id, commit.seq())
@@ -895,6 +890,14 @@ fn validate_outbound(
         ));
     }
     Ok(())
+}
+
+fn required_store_package(
+    commit: &StoreBatchCommit,
+) -> Result<&super::store_commit::StorePackageRef, StoreOutboundError> {
+    commit.store_package.as_ref().ok_or_else(|| {
+        StoreOutboundError::InvalidOutbound("prepared row write has no Store package".to_string())
+    })
 }
 
 async fn validate_manifest(
@@ -1128,6 +1131,7 @@ mod tests {
         marker: &str,
     ) -> StoreSerialHead {
         let write_id = crate::WriteId::from_generated(format!("competitor-{marker}"));
+        let package_bytes = marker.as_bytes();
         let commit = StoreBatchCommit::signed(
             root,
             write_id.clone(),
@@ -1138,15 +1142,16 @@ mod tests {
             },
             None,
             1,
-            &[],
+            package_bytes,
             signer,
         )
         .expect("sign competing Serial commit");
+        let package = commit.store_package.as_ref().expect("Store package");
         crate::sync::store_objects::append_and_verify(
             storage,
-            &commit.package.object_key,
+            &package.object_key,
             ".pkg",
-            &[],
+            package_bytes,
         )
         .await
         .expect("publish competing Serial package");

@@ -178,7 +178,28 @@ macro_rules! coven_tables {
     previous_registration_hash TEXT,
     state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
     registration_bytes BLOB NOT NULL,
-    published INTEGER NOT NULL CHECK (published IN (0, 1))
+    activation_commit_bytes BLOB,
+    activation_head_bytes BLOB,
+    published INTEGER NOT NULL CHECK (published IN (0, 1)),
+    CHECK ((activation_commit_bytes IS NULL) = (activation_head_bytes IS NULL))
+"
+        );
+        $visit!(
+            store_device_registration_activations,
+            "
+    device_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    registration_hash TEXT NOT NULL CHECK (length(registration_hash) = 64),
+    previous_registration_hash TEXT,
+    state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+    author_pubkey TEXT NOT NULL,
+    registration_bytes BLOB NOT NULL,
+    stream_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    commit_hash TEXT NOT NULL CHECK (length(commit_hash) = 64),
+    PRIMARY KEY (device_id, revision),
+    UNIQUE (device_id, registration_hash),
+    UNIQUE (stream_id, seq, device_id)
 "
         );
         $visit!(
@@ -199,13 +220,97 @@ macro_rules! coven_tables {
     PRIMARY KEY (namespace, blob_id)
 "
         );
+        $visit!(
+            circle_control_activations,
+            "
+    circle_id TEXT NOT NULL,
+    control_coord TEXT NOT NULL CHECK (json_valid(control_coord)),
+    stream_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    commit_hash TEXT NOT NULL CHECK (length(commit_hash) = 64),
+    control_bytes BLOB NOT NULL,
+    PRIMARY KEY (circle_id, control_coord),
+    UNIQUE (circle_id, stream_id, seq)
+"
+        );
+        $visit!(
+            circle_access_cache,
+            "
+    circle_id TEXT NOT NULL,
+    control_coord TEXT NOT NULL CHECK (json_valid(control_coord)),
+    owner_pubkey TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK (disposition IN ('active', 'inactive')),
+    access_bytes BLOB NOT NULL,
+    PRIMARY KEY (circle_id, control_coord, owner_pubkey),
+    FOREIGN KEY (circle_id, control_coord)
+        REFERENCES circle_control_activations(circle_id, control_coord)
+"
+        );
+        $visit!(
+            circle_roster_cache,
+            "
+    circle_id TEXT NOT NULL,
+    control_coord TEXT NOT NULL CHECK (json_valid(control_coord)),
+    roster_bytes BLOB NOT NULL,
+    PRIMARY KEY (circle_id, control_coord),
+    FOREIGN KEY (circle_id, control_coord)
+        REFERENCES circle_control_activations(circle_id, control_coord)
+"
+        );
+        $visit!(
+            circle_snapshot_coverage,
+            "
+    circle_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    commit_hash TEXT NOT NULL CHECK (length(commit_hash) = 64),
+    snapshot_hash TEXT NOT NULL CHECK (length(snapshot_hash) = 64),
+    PRIMARY KEY (circle_id, device_id)
+"
+        );
+        $visit!(
+            circle_acks,
+            "
+    circle_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    ack_hash TEXT NOT NULL CHECK (length(ack_hash) = 64),
+    ack_bytes BLOB NOT NULL,
+    published INTEGER NOT NULL CHECK (published IN (0, 1)),
+    PRIMARY KEY (circle_id, device_id, revision),
+    UNIQUE (circle_id, ack_hash)
+"
+        );
     };
 }
 
-/// Creates coven's bookkeeping tables before the host's own migrations.
-/// Idempotent (`IF NOT EXISTS`). STRICT: every column here is already
-/// TEXT/INTEGER/BLOB, so STRICT only forecloses a future column drifting off
-/// its declared affinity.
+macro_rules! coven_routing_tables {
+    ($visit:ident) => {
+        $visit!(
+            _coven_audience,
+            "
+    routing_id TEXT PRIMARY KEY,
+    circle_id TEXT,
+    _updated_at TEXT NOT NULL
+"
+        );
+        $visit!(
+            _coven_row_routes,
+            "
+    routing_id TEXT PRIMARY KEY,
+    table_name TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    _updated_at TEXT NOT NULL,
+    UNIQUE (table_name, row_id)
+"
+        );
+    };
+}
+
+/// Creates Coven's bookkeeping tables after the fresh host schema has passed
+/// sync-routing validation, inside the same open transaction. Idempotent (`IF
+/// NOT EXISTS`). STRICT: every column here is already TEXT/INTEGER/BLOB, so
+/// STRICT only forecloses a future column drifting off its declared affinity.
 pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     macro_rules! apply_table {
         ($name:ident, $columns:literal) => {
@@ -223,6 +328,25 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
     Ok(())
 }
 
+/// Create the MergeConcurrent audience mirror and private route map. The
+/// initializer calls this only when the routing contract has a scoped graph.
+pub(crate) fn apply_coven_routing_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    macro_rules! apply_table {
+        ($name:ident, $columns:literal) => {
+            conn.execute_batch(concat!(
+                "CREATE TABLE ",
+                stringify!($name),
+                " (",
+                $columns,
+                ") STRICT, WITHOUT ROWID;"
+            ))?;
+        };
+    }
+
+    coven_routing_tables!(apply_table);
+    Ok(())
+}
+
 /// Whether `name` is a table coven owns for sync bookkeeping. Hosts may not
 /// declare these as synced tables.
 pub(crate) fn is_reserved_table_name(name: &str) -> bool {
@@ -235,6 +359,7 @@ pub(crate) fn is_reserved_table_name(name: &str) -> bool {
     }
 
     coven_tables!(matches_table);
+    coven_routing_tables!(matches_table);
     false
 }
 
@@ -276,6 +401,22 @@ mod tests {
                 .query_row([], |row| row.get(5))
                 .unwrap_or_else(|e| panic!("PRAGMA table_list({name}): {e}"));
             assert_eq!(strict, 1, "{name} must be STRICT");
+        }
+    }
+
+    #[test]
+    fn routing_tables_are_strict_without_rowid() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        apply_coven_routing_schema(&conn).expect("apply routing schema");
+        for name in ["_coven_audience", "_coven_row_routes"] {
+            let sql = format!(
+                "PRAGMA table_list({})",
+                crate::sync::session::quote_ident(name)
+            );
+            let (wr, strict): (i64, i64) = conn
+                .query_row(&sql, [], |row| Ok((row.get(4)?, row.get(5)?)))
+                .expect("table_list");
+            assert_eq!((wr, strict), (1, 1), "{name}");
         }
     }
 }

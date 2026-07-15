@@ -57,30 +57,73 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     let storage = MockSyncStorage::new();
 
     // A's wall clock reads far ahead of B's (A in the "future").
-    let a_hlc = Hlc::with_wall_clock("dev-a".into(), || 9_000);
+    let a_hlc = Arc::new(Hlc::with_wall_clock("dev-a".into(), || 9_000));
     let b_hlc = Arc::new(Hlc::with_wall_clock("dev-b".into(), || 1_000));
 
-    // A stamps and publishes an edit of n1.
+    // A stamps and publishes an edit of n1 through the real cycle so its
+    // registration, commit, and local materialized frontier advance together.
     let a_stamp = a_hlc.now().to_string();
-    let db_a = open_test_db();
-    let cs_a = capture_bytes(
+    let db_a = open_test_db_with_hlc(a_hlc.clone(), |_conn| Ok(()));
+    let (_a_temp, a_store_dir) = temp_store_dir();
+    let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [3u8; 32],
+    )));
+    let keypair = storage.protocol_founder_keypair();
+    bind_mock_store_protocol(&db_a, &storage, "dev-a").await;
+    db_a.set_protocol_state(
+        crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
+        &crate::sync::store_commit::ObjectHash::digest(b"existing-hlc-register-snapshot")
+            .to_string(),
+    )
+    .await
+    .expect("seed existing Store snapshot");
+    crate::sync::cycle::ensure_owner_anchored_chain(
+        &storage,
         &db_a,
-        &[&format!(
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-             VALUES ('n1', 'A wrote this', NULL, '{a_stamp}', '2026-01-01')"
-        )],
+        &storage.store_protocol_root(),
+        &keypair,
+    )
+    .await
+    .expect("initialize A's MergeConcurrent test membership");
+    host_exec(
+        &db_a,
+        &format!(
+            "INSERT INTO notes (id, title, body, _updated_at, created_at, shared) \
+             VALUES ('n1', 'A wrote this', NULL, '{a_stamp}', '2026-01-01', 1)"
+        ),
     )
     .await;
-    storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
+    assert_eq!(
+        db_a.pending_writes().await.unwrap().len(),
+        1,
+        "A's shared insert must enter the Store outbox"
+    );
+    run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "dev-a",
+        &a_hlc,
+        &SystemClock,
+        &db_a,
+        &encryption,
+        &PendingRotation::none(),
+        &keypair,
+        None,
+        &a_store_dir,
+        None,
+        None,
+    )
+    .await
+    .expect("A publishes its initial edit");
+    assert!(
+        db_a.pending_writes().await.unwrap().is_empty(),
+        "A's real cycle must finish publishing its initial edit"
+    );
 
     // B runs a real sync cycle over its own Database (clock = b_hlc): it pulls A's
     // edit and advances b_hlc from the applied row's `_updated_at`.
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
     let (_t, ld) = temp_store_dir();
-    let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [3u8; 32],
-    )));
-    let keypair = UserKeypair::generate();
     bind_mock_store_protocol(&db_b, &storage, "dev-b").await;
     crate::sync::cycle::ensure_owner_anchored_chain(
         &storage,
@@ -109,7 +152,10 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     .await
     .expect("B's sync cycle completes");
 
-    assert_eq!(result.changesets_applied, 1, "B must apply A's changeset");
+    assert_eq!(
+        result.changesets_applied, 2,
+        "B must apply A's registration and data commits"
+    );
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
         "A wrote this",
@@ -126,15 +172,31 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     );
 
     // And LWW agrees: applying B's edit replaces A's row.
-    let cs_b = capture_bytes(
+    host_exec(
         &db_b,
-        &[&format!(
+        &format!(
             "UPDATE notes SET title = 'B wrote this', _updated_at = '{b_stamp}' \
              WHERE id = 'n1'"
-        )],
+        ),
     )
     .await;
-    storage.store_changeset("dev-b", 1, &cs_b, SCHEMA_VERSION);
+    run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "dev-b",
+        &b_hlc,
+        &SystemClock,
+        &db_b,
+        &encryption,
+        &PendingRotation::none(),
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    .expect("B publishes its post-pull edit");
 
     // A pulls B's edit; B wins on LWW because b_stamp > a_stamp.
     pull_into(&db_a, &storage, "dev-a", &temp_store_dir().1).await;
@@ -383,14 +445,35 @@ async fn register_seeds_from_persisted_high_water() {
     // A high-water mark far ahead of any plausible wall millis. No synced rows on
     // disk, so the high-water mark is the only floor.
     let high = "9999999999000-0007-dev-a";
-    let db = open_test_db_with_hlc(Arc::new(Hlc::new("dev-a".into())), move |conn| {
-        conn.execute(
-            "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
-            (HIGHWATER_STATE_KEY, high),
-        )
-        .map(|_| ())
-        .map_err(crate::database::DbError::from)
-    });
+    let temp = tempfile::tempdir().expect("create register restart directory");
+    let path = temp.path().join("register.sqlite");
+    let migrations = test_migrations();
+    let (before_restart, _stamper) = crate::database::Database::open(
+        &path,
+        test_synced_tables(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::MergeConcurrent,
+        "dev-a".to_string(),
+        &migrations,
+    )
+    .expect("open register database before restart");
+    before_restart
+        .set_protocol_state(HIGHWATER_STATE_KEY, high)
+        .await
+        .expect("persist high-water before restart");
+    drop(before_restart);
+
+    let (db, _stamper) = crate::database::Database::open_with_hlc(
+        &path,
+        test_synced_tables(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::MergeConcurrent,
+        Arc::new(Hlc::new("dev-a".into())),
+        &migrations,
+    )
+    .expect("reopen register database with persisted high-water");
 
     let stamp = db.hlc().now().to_string();
     assert!(
@@ -673,24 +756,16 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
 /// holds any change a failed cycle didn't manage to push — so there is no
 /// cross-call capture state a mid-cycle abort could strand.
 ///
-/// We force the failure by blocking every `INSERT` into `protocol_state` with a
-/// trigger that `RAISE(ABORT)`s. The cycle's top-of-cycle reads (plain `SELECT`s)
-/// still succeed, but the first bookkeeping persist fails, so the cycle returns
-/// `Err`. A subsequent host write must still journal into the next drained
-/// changeset.
+/// We force the failure after open by blocking every `INSERT` into
+/// `protocol_state` with a trigger that `RAISE(ABORT)`s. The cycle's top-of-cycle
+/// reads (plain `SELECT`s) still succeed, but the first bookkeeping persist fails,
+/// so the cycle returns `Err`. A subsequent host write must still journal into the
+/// next drained changeset.
 #[tokio::test]
 async fn cycle_error_mid_cycle_still_captures_host_writes() {
-    // A db whose `protocol_state` rejects every INSERT, so a `set_protocol_state` inside
-    // the cycle fails. Reads (the seed scan, the cycle's top-of-cycle loads) are
-    // SELECTs and remain fine.
-    let migrations = vec![crate::migration::Migration::run(1, "test-schema", |conn| {
-        create_synced_schema(conn)?;
-        conn.execute_batch(
-            "CREATE TRIGGER block_protocol_state_insert BEFORE INSERT ON protocol_state \
-             BEGIN SELECT RAISE(ABORT, 'forced set_protocol_state failure'); END;",
-        )
-        .map_err(crate::database::DbError::from)
-    })];
+    // Open normally, then make `protocol_state` reject every INSERT so a
+    // `set_protocol_state` inside the cycle fails. Reads remain available.
+    let migrations = test_migrations();
     let (db, _stamper) = crate::database::Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
@@ -700,7 +775,13 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         "dev-self".to_string(),
         &migrations,
     )
-    .expect("open db with protocol_state-blocking trigger");
+    .expect("open database before installing protocol_state fault");
+    exec(
+        &db,
+        "CREATE TRIGGER block_protocol_state_insert BEFORE INSERT ON protocol_state \
+         BEGIN SELECT RAISE(ABORT, 'forced set_protocol_state failure'); END;",
+    )
+    .await;
 
     // A local insert gives the cycle a pending Store write. The trigger also blocks
     // the unconditional HLC high-water persist, so the cycle fails after the write
@@ -717,7 +798,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [7u8; 32],
     )));
-    let keypair = UserKeypair::generate();
+    let keypair = storage.protocol_founder_keypair();
     let hlc = db.hlc();
 
     let result = run_single_sync_cycle(

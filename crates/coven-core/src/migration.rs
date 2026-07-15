@@ -7,11 +7,11 @@
 //! Bumping the schema is therefore adding a migration — a device cannot stamp a
 //! version it has not migrated to.
 //!
-//! This is the host's *synced* schema only. coven's own bookkeeping tables are
-//! reconciled declaratively, every open, by `db::apply_coven_schema`; their rows
-//! are stripped on snapshot but their schemas ride from the writer's binary, so a
-//! versioned ledger cannot track them. They are deliberately NOT part of this
-//! ladder.
+//! This is the host's *synced* schema only. On a fresh database, the complete
+//! host ladder, sync-routing validation, and Coven bookkeeping initialization
+//! commit in one transaction. On an initialized database, pending host steps
+//! commit only when their final routing contract exactly matches the pinned
+//! contract. Coven's bookkeeping tables are not part of this ladder.
 
 use std::borrow::Cow;
 
@@ -44,10 +44,9 @@ pub enum MigrationStep {
     /// `.sql` file.
     Sql(Cow<'static, str>),
     /// Table rebuilds and backfills that DDL alone cannot express. Invoked at most
-    /// once (only when its version is above the on-disk one). A failed open re-runs
-    /// it from the same point, so the closure author owns its idempotency — it must
-    /// be safe to re-run against a partially-migrated db (the prior attempt's
-    /// transaction rolled back, but the author still writes it defensively).
+    /// once (only when its version is above the on-disk one). All pending steps
+    /// share the open transaction, so a failed step or routing validation rolls
+    /// the full ladder back with `user_version`.
     Run(MigrationFn),
 }
 
@@ -146,29 +145,7 @@ pub enum MigrationError {
 /// error. If the on-disk version exceeds `N` the binary refuses rather than apply a
 /// schema it does not know.
 pub fn run_migrations(conn: &Connection, migrations: &[Migration]) -> Result<u32, MigrationError> {
-    // Validate the registered set before touching the db: versions must be exactly
-    // 1, 2, …, N in order. This one check rejects a gap, a duplicate, a non-ascending
-    // pair, and a set that does not start at 1, all at once.
-    for (i, m) in migrations.iter().enumerate() {
-        let expected = i as u32 + 1;
-        if m.version != expected {
-            return Err(MigrationError::NotContiguous {
-                position: i,
-                found: m.version,
-                expected,
-            });
-        }
-    }
-    let top = supported_version(migrations);
-
-    let current = read_user_version(conn)?;
-
-    if current > top {
-        return Err(MigrationError::SchemaTooNew {
-            current,
-            supported: top,
-        });
-    }
+    let current = validate_registered_migrations(conn, migrations)?;
 
     for m in migrations.iter().filter(|m| m.version > current) {
         conn.execute_batch("BEGIN")
@@ -195,6 +172,63 @@ pub fn run_migrations(conn: &Connection, migrations: &[Migration]) -> Result<u32
     }
 
     read_user_version(conn)
+}
+
+/// Apply every pending migration on a transaction the caller already owns.
+///
+/// The database initializer uses this form so the whole pending ladder, its
+/// `user_version` advances, final routing-contract validation, and fresh Coven
+/// metadata either commit together or roll back together. This function never
+/// begins or commits a transaction; returning an error requires its caller to
+/// roll back the enclosing transaction.
+pub(crate) fn run_migrations_in_transaction(
+    conn: &Connection,
+    migrations: &[Migration],
+) -> Result<u32, MigrationError> {
+    let current = validate_registered_migrations(conn, migrations)?;
+    for migration in migrations
+        .iter()
+        .filter(|migration| migration.version > current)
+    {
+        if let Err(source) = apply_step(conn, &migration.up) {
+            return Err(MigrationError::Failed {
+                version: migration.version,
+                name: migration.name.clone(),
+                source,
+            });
+        }
+        conn.pragma_update(None, "user_version", migration.version)
+            .map_err(|error| MigrationError::Ledger(DbError::from(error)))?;
+    }
+    read_user_version(conn)
+}
+
+fn validate_registered_migrations(
+    conn: &Connection,
+    migrations: &[Migration],
+) -> Result<u32, MigrationError> {
+    // Validate the registered set before touching the db: versions must be exactly
+    // 1, 2, …, N in order. This one check rejects a gap, a duplicate, a non-ascending
+    // pair, and a set that does not start at 1, all at once.
+    for (position, migration) in migrations.iter().enumerate() {
+        let expected = position as u32 + 1;
+        if migration.version != expected {
+            return Err(MigrationError::NotContiguous {
+                position,
+                found: migration.version,
+                expected,
+            });
+        }
+    }
+    let current = read_user_version(conn)?;
+    let top = supported_version(migrations);
+    if current > top {
+        return Err(MigrationError::SchemaTooNew {
+            current,
+            supported: top,
+        });
+    }
+    Ok(current)
 }
 
 /// Validate the ladder and check the on-disk schema is one this binary supports,

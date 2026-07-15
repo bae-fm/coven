@@ -553,6 +553,7 @@ pub async fn join_from_invite_code(
             cloud.home,
             cloud.coordination,
             custom_s3_serial,
+            clock,
             ids.as_ref(),
             &on_status,
             cancel,
@@ -608,6 +609,7 @@ pub(crate) async fn join_store(
         Arc::from(cloud_home),
         None,
         None,
+        Arc::new(crate::clock::SystemClock),
         ids,
         on_status,
         cancel,
@@ -627,6 +629,7 @@ pub(crate) async fn join_store_with_coordination(
     cloud_home: Arc<dyn CloudHome>,
     coordination: Option<CoordinationClients>,
     custom_s3_serial: Option<crate::CustomS3Serial>,
+    clock: crate::clock::ClockRef,
     ids: &dyn crate::id_provider::IdProvider,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
@@ -762,6 +765,7 @@ pub(crate) async fn join_store_with_coordination(
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
+            clock.as_ref(),
             &on_status,
             cancel,
         )
@@ -816,6 +820,7 @@ pub(crate) async fn bootstrap_and_save_store(
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
     identity_custody: &dyn DeviceIdentityCustody,
+    clock: &dyn crate::clock::Clock,
     on_status: &impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
@@ -849,17 +854,20 @@ pub(crate) async fn bootstrap_and_save_store(
         bootstrap_result.coverage_count()
     );
 
-    let committed = async {
-        // Pull Store commits beyond the snapshot coverage.
-        error_if_cancelled(cancel)?;
-        on_status("Applying recent changes...");
-        let coordination = if bootstrap_result.write_policy() == crate::WritePolicy::Serial {
+    let published_at = clock.now().to_rfc3339();
+    let coordination =
+        if bootstrap_result.write_policy() == crate::WritePolicy::Serial {
             Some(storage.serial_coordination().map_err(|error| {
                 BootstrapError::Membership(format!("Serial coordination: {error}"))
             })?)
         } else {
             None
         };
+
+    let committed = async {
+        // Pull Store commits beyond the snapshot coverage.
+        error_if_cancelled(cancel)?;
+        on_status("Applying recent changes...");
         let changesets_applied = open_db_and_pull(
             store_id,
             &db_path,
@@ -871,6 +879,7 @@ pub(crate) async fn bootstrap_and_save_store(
             membership_floor,
             storage,
             coordination,
+            Some(&published_at),
             bootstrap_result,
             store_dir,
             cancel,
@@ -929,7 +938,9 @@ pub(crate) async fn bootstrap_and_save_store(
                 membership_floor.write_policy(),
                 device_id,
                 storage,
+                coordination,
                 context.keypair(),
+                &published_at,
             )
             .await
             {
@@ -950,7 +961,9 @@ pub(crate) async fn finish_failed_bootstrap_registration_rollback(
     write_policy: crate::WritePolicy,
     device_id: &str,
     storage: &dyn SyncStorage,
+    coordination: Option<&dyn crate::sync::storage::CoordinationStorage>,
     signer: &UserKeypair,
+    published_at: &str,
 ) -> Result<(), String> {
     if !db_path.exists() {
         return Ok(());
@@ -965,10 +978,25 @@ pub(crate) async fn finish_failed_bootstrap_registration_rollback(
         migrations,
     )
     .map_err(|error| format!("open durable registration rollback outbox: {error}"))?;
-    crate::sync::store_registration::retire_registration(&db, storage, signer)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    let membership = match write_policy {
+        crate::WritePolicy::MergeConcurrent => Some(
+            crate::sync::pull::load_cycle_membership(storage, &db)
+                .await
+                .map_err(|error| format!("load registration rollback membership: {error}"))?,
+        ),
+        crate::WritePolicy::Serial => None,
+    };
+    crate::sync::store_registration::retire_registration_with_coordination(
+        &db,
+        storage,
+        coordination,
+        signer,
+        membership.as_ref().and_then(|loaded| loaded.chain.as_ref()),
+        published_at,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 /// Open a [`crate::database::Database`] over the bootstrapped db file and pull changesets since
@@ -987,6 +1015,7 @@ pub(crate) async fn open_db_and_pull(
     membership_floor: &MembershipFloor,
     storage: &dyn SyncStorage,
     coordination: Option<&dyn crate::sync::storage::CoordinationStorage>,
+    registration_published_at: Option<&str>,
     bootstrap: BootstrapResult,
     store_dir: &StoreDir,
     cancel: &watch::Receiver<bool>,
@@ -1096,6 +1125,11 @@ pub(crate) async fn open_db_and_pull(
     .await?;
 
     if let Some(signer) = registration_signer {
+        let published_at = registration_published_at.ok_or_else(|| {
+            BootstrapError::Database(
+                "registration signer has no registration publication timestamp".to_string(),
+            )
+        })?;
         let signer_pubkey = crate::keys::public_key_hex(signer);
         let authorized = match membership_floor {
             MembershipFloor::MergeConcurrent(_) => membership
@@ -1135,7 +1169,15 @@ pub(crate) async fn open_db_and_pull(
                 "Store device registration author {signer_pubkey} is not an active member at the invite floor"
             )));
         }
-        crate::sync::store_registration::ensure_active_registration(&db, storage, signer).await?;
+        crate::sync::store_registration::ensure_active_registration_with_coordination(
+            &db,
+            storage,
+            coordination,
+            signer,
+            membership.as_ref().and_then(|loaded| loaded.chain.as_ref()),
+            published_at,
+        )
+        .await?;
     }
 
     // Bootstrap installed the snapshot's position vector before pulling anything

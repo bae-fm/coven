@@ -114,7 +114,7 @@ impl CloudHome for GrantingCloudHome {
 }
 
 #[tokio::test]
-async fn public_serial_invite_activates_one_exact_empty_package_control_commit() {
+async fn public_serial_invite_activates_one_control_only_commit() {
     let home = InMemoryCloudHome::new();
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
@@ -172,12 +172,11 @@ async fn public_serial_invite_activates_one_exact_empty_package_control_commit()
         commit.control.as_ref(),
         Some(crate::sync::store_commit::StoreControl::SerialMembership { .. })
     ));
-    let package = crate::sync::store_objects::load_package(&storage, &commit)
+    assert!(crate::sync::store_objects::load_package(&storage, &commit)
         .await
         .unwrap()
-        .unwrap();
-    assert!(package.value.is_empty());
-    assert_eq!(commit.package.changeset_size, 0);
+        .is_none());
+    assert!(commit.store_package.is_none());
     assert!(db
         .serial_membership_state()
         .await
@@ -245,9 +244,7 @@ async fn public_serial_invite_activates_one_exact_empty_package_control_commit()
     assert!(crate::sync::store_objects::load_package(&storage, &removal)
         .await
         .unwrap()
-        .unwrap()
-        .value
-        .is_empty());
+        .is_none());
 }
 
 async fn insert_shareable_row(db: &crate::database::Database, id: &str, stamp: &str) {

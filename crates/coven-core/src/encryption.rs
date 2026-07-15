@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fmt;
+use std::str::FromStr;
 
 use crate::keys::KeyError;
 use chacha20poly1305::aead::generic_array::GenericArray;
@@ -33,6 +35,76 @@ pub const APP_DATA_SEAL_VERSION: u8 = 1;
 /// ciphertext: the version byte, then the sealing key's 8-byte fingerprint.
 const APP_DATA_FINGERPRINT_SIZE: usize = 8;
 const APP_DATA_HEADER_SIZE: usize = 1 + APP_DATA_FINGERPRINT_SIZE;
+
+/// Stable wire identity of one 32-byte encryption key: the first eight bytes
+/// of its SHA-256 digest, serialized as exactly sixteen lowercase hex digits.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KeyFingerprint([u8; 8]);
+
+impl KeyFingerprint {
+    pub fn from_bytes(bytes: [u8; 8]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for KeyFingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl fmt::Display for KeyFingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&hex::encode(self.0))
+    }
+}
+
+impl FromStr for KeyFingerprint {
+    type Err = KeyFingerprintParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() != 16
+            || value
+                .bytes()
+                .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+        {
+            return Err(KeyFingerprintParseError(value.to_string()));
+        }
+        let bytes: [u8; 8] = hex::decode(value)
+            .map_err(|_| KeyFingerprintParseError(value.to_string()))?
+            .try_into()
+            .map_err(|_| KeyFingerprintParseError(value.to_string()))?;
+        Ok(Self(bytes))
+    }
+}
+
+impl serde::Serialize for KeyFingerprint {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for KeyFingerprint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        <String as serde::Deserialize>::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("key fingerprint must be exactly sixteen lowercase hexadecimal characters: {0:?}")]
+pub struct KeyFingerprintParseError(String);
 
 /// Generate a random 32-byte key.
 pub fn generate_random_key() -> [u8; 32] {
@@ -439,6 +511,10 @@ impl EncryptionService {
     /// later read resolves the exact key, whatever the keyring has become since.
     pub fn seal_fingerprint(&self) -> [u8; 8] {
         *self.seal_entry().0
+    }
+
+    pub fn seal_key_fingerprint(&self) -> KeyFingerprint {
+        KeyFingerprint::from_bytes(self.seal_fingerprint())
     }
 
     /// Return the raw 32-byte seal key.
@@ -1397,6 +1473,21 @@ mod tests {
         let service1 = EncryptionService::from_key([0u8; 32]);
         let service2 = EncryptionService::from_key([1u8; 32]);
         assert_ne!(service1.fingerprint(), service2.fingerprint());
+    }
+
+    #[test]
+    fn key_fingerprint_wire_form_is_strict_lowercase_hex() {
+        let fingerprint = create_test_service().seal_key_fingerprint();
+        let serialized = serde_json::to_string(&fingerprint).expect("serialize fingerprint");
+        assert_eq!(
+            serde_json::from_str::<KeyFingerprint>(&serialized).unwrap(),
+            fingerprint
+        );
+        assert!(fingerprint
+            .to_string()
+            .to_uppercase()
+            .parse::<KeyFingerprint>()
+            .is_err());
     }
 
     #[test]

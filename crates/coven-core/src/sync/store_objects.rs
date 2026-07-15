@@ -15,7 +15,7 @@ use super::store_commit::{
     parse_registration_copy_key, parse_snapshot_meta_copy_key, parse_store_protocol_root_copy_key,
     registration_slot_prefix, snapshot_image_semantic_prefix, CommitFrontier, CommitPosition,
     SnapshotMeta, StoreAck, StoreBatchCommit, StoreDeviceHead, StoreDeviceRegistration,
-    StoreDeviceRegistrationState, StoreProtocolRoot,
+    StoreDeviceRegistrationRef, StoreDeviceRegistrationState, StoreProtocolRoot,
 };
 use super::store_commit::{ObjectHash, StoreProtocolError};
 
@@ -181,6 +181,7 @@ pub async fn load_expected_store_protocol_root(
     expected_store_id: &str,
     expected_founder: &str,
     expected_policy: crate::WritePolicy,
+    expected_sync_routing_hash: ObjectHash,
 ) -> Result<Option<VerifiedCopies<StoreProtocolRoot>>, StoreObjectError> {
     let semantic_prefix = super::store_commit::store_protocol_root_semantic_prefix(expected_hash);
     load_semantic_copies(storage, &semantic_prefix, ".json", expected_hash, |bytes| {
@@ -190,6 +191,7 @@ pub async fn load_expected_store_protocol_root(
             expected_store_id,
             expected_founder,
             expected_policy,
+            expected_sync_routing_hash,
         )
     })
     .await
@@ -437,18 +439,21 @@ pub async fn load_package(
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
 ) -> Result<Option<VerifiedCopies<Vec<u8>>>, StoreObjectError> {
+    let Some(package) = commit.store_package.as_ref() else {
+        return Ok(None);
+    };
     let semantic_prefix = package_semantic_prefix(
         commit.order.stream_id(&commit.device_id),
         commit.seq(),
-        commit.package.content_hash,
+        package.content_hash,
     );
     load_semantic_copies(
         storage,
         &semantic_prefix,
         ".pkg",
-        commit.package.content_hash,
+        package.content_hash,
         |bytes| {
-            commit.verify_package(bytes)?;
+            commit.verify_store_package(bytes)?;
             Ok(bytes.to_vec())
         },
     )
@@ -1116,6 +1121,58 @@ pub async fn list_latest_registration_chains(
     })
 }
 
+pub async fn load_registration_ref(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    reference: &StoreDeviceRegistrationRef,
+) -> Result<Option<VerifiedCopies<StoreDeviceRegistration>>, StoreObjectError> {
+    let slot = registration_slot_prefix(&reference.device_id, reference.revision);
+    let listing = storage.list_protocol_objects(&format!("{slot}/")).await?;
+    let registration = load_singleton_candidates(
+        storage,
+        &slot,
+        ".json",
+        listing.objects,
+        listing.coverage,
+        |key| Ok(parse_registration_copy_key(key)?.semantic_hash),
+        |semantic_hash, bytes| {
+            let registration = StoreDeviceRegistration::parse_at(
+                bytes,
+                store_root_hash,
+                &reference.device_id,
+                reference.revision,
+            )?;
+            if registration.registration_hash() != semantic_hash {
+                return Err(StoreProtocolError::ObjectHashMismatch {
+                    expected: semantic_hash,
+                    actual: registration.registration_hash(),
+                });
+            }
+            Ok(registration)
+        },
+    )
+    .await?;
+    match registration {
+        Some(registration) if registration.semantic_hash == reference.registration_hash => {
+            Ok(Some(registration))
+        }
+        Some(registration) => Err(StoreObjectError::InvalidCandidate {
+            semantic_prefix: slot,
+            key: registration.copies.first().map_or_else(
+                || "registration copy".to_string(),
+                |copy| copy.logical_key().to_string(),
+            ),
+            source: Box::new(StoreProtocolError::DeviceRegistrationRefMismatch {
+                device_id: reference.device_id.clone(),
+                revision: reference.revision,
+                expected: reference.registration_hash,
+                actual: registration.semantic_hash,
+            }),
+        }),
+        None => Ok(None),
+    }
+}
+
 pub async fn list_reclaimable_store_packages(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
@@ -1183,12 +1240,21 @@ pub async fn list_reclaimable_store_packages(
                     );
                     continue;
                 };
-                if commit.value.package.content_hash != package_hash {
+                let Some(authoritative_package) = commit.value.store_package.as_ref() else {
                     tracing::debug!(
                         device_id,
                         seq,
                         package_hash = %package_hash,
-                        authoritative_package_hash = %commit.value.package.content_hash,
+                        "ignoring Serial Store package not named by its authoritative commit"
+                    );
+                    continue;
+                };
+                if authoritative_package.content_hash != package_hash {
+                    tracing::debug!(
+                        device_id,
+                        seq,
+                        package_hash = %package_hash,
+                        authoritative_package_hash = %authoritative_package.content_hash,
                         "ignoring Serial package outside the authoritative commit ancestry"
                     );
                     continue;
@@ -1203,13 +1269,20 @@ pub async fn list_reclaimable_store_packages(
                 });
             }
         };
-        if commit.value.package.content_hash != package_hash {
+        let Some(authoritative_package) = commit.value.store_package.as_ref() else {
+            return Err(StoreObjectError::Collision {
+                semantic_prefix: package_semantic_prefix(&device_id, seq, package_hash),
+                key: package_semantic_prefix(&device_id, seq, package_hash),
+                reason: "commit names no Store package".to_string(),
+            });
+        };
+        if authoritative_package.content_hash != package_hash {
             return Err(StoreObjectError::Collision {
                 semantic_prefix: package_semantic_prefix(&device_id, seq, package_hash),
                 key: package_semantic_prefix(&device_id, seq, package_hash),
                 reason: format!(
                     "commit names package hash {}, path names {package_hash}",
-                    commit.value.package.content_hash
+                    authoritative_package.content_hash
                 ),
             });
         }
@@ -1222,7 +1295,7 @@ pub async fn list_reclaimable_store_packages(
             objects,
             listing.coverage,
             |bytes| {
-                commit.value.verify_package(bytes)?;
+                commit.value.verify_store_package(bytes)?;
                 Ok(bytes.to_vec())
             },
         )

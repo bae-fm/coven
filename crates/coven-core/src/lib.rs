@@ -161,10 +161,13 @@ pub use keys::{CloudHomeCredentials, KeyError, MasterKeyCustody, UserKeypair};
 // is the master-key custody value type; `EncryptionService` is the cipher coven
 // builds from it internally. `SealError` is what the handle's app-data sealing
 // returns.
-pub use encryption::{EncryptionError, EncryptionService, MasterKeyring, SealError, CHUNK_SIZE};
+pub use encryption::{
+    EncryptionError, EncryptionService, KeyFingerprint, MasterKeyring, SealError, CHUNK_SIZE,
+};
 pub use store_dir::{StoreDir, StoreLayout};
 
 // Sync vocabulary exposed through the public handle.
+pub use sync::circle::{Audience, CircleId, CircleRole};
 pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};
 pub use sync::membership::{MemberInfo, MemberRole};
 

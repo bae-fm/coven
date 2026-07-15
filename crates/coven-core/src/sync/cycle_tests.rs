@@ -166,6 +166,15 @@ async fn store_package_exists(storage: &MockSyncStorage, device_id: &str, seq: u
         .is_some()
 }
 
+async fn retain_store_packages_for_assertion(db: &Database, marker: &[u8]) {
+    db.set_protocol_state(
+        crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
+        &crate::sync::store_commit::ObjectHash::digest(marker).to_string(),
+    )
+    .await
+    .expect("seed existing Store snapshot");
+}
+
 async fn store_snapshot_metas(storage: &MockSyncStorage) -> Vec<SnapshotMeta> {
     crate::sync::store_objects::list_snapshot_metas(storage, storage.store_root_hash())
         .await
@@ -341,7 +350,7 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
     // The changeset pushes despite the pending upload — no global deferral.
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        store_package_exists(&storage, "M", 1).await,
+        store_package_exists(&storage, "M", 2).await,
         "a gated-true changeset must push even while an unrelated upload is pending",
     );
 
@@ -1321,11 +1330,15 @@ async fn serial_cycle_publishes_a_suffix_rebased_by_its_initial_drain() {
     .await
     .expect("run cycle after a write joined the publishing branch");
 
-    assert!(matches!(
-        db.write_status(&suffix).await.unwrap(),
-        crate::WriteStatus::Published(crate::PublishedPosition::Serial { position })
-            if position.seq == 2
-    ));
+    let suffix_status = db.write_status(&suffix).await.unwrap();
+    assert!(
+        matches!(
+        &suffix_status,
+            crate::WriteStatus::Published(crate::PublishedPosition::Serial { position })
+                if position.seq == 3
+        ),
+        "unexpected suffix status: {suffix_status:?}"
+    );
 }
 
 #[tokio::test]
@@ -1349,6 +1362,7 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
         "test-lib".to_string(),
         founder.clone(),
         db.schema_version(),
+        db.sync_routing_hash(),
         crate::WritePolicy::MergeConcurrent,
         &owner,
     )
@@ -1482,6 +1496,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
         "test-lib".to_string(),
         founder.clone(),
         db.schema_version(),
+        db.sync_routing_hash(),
         crate::WritePolicy::MergeConcurrent,
         &owner,
     )
@@ -1975,11 +1990,21 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
         "M applied A's changeset",
     );
 
-    // Cycle 2 has no host write. The applied row must not create an M commit because
-    // apply bypasses the host write ledger.
+    // Cycle 2 has no host write. The only M commit is the registration activation;
+    // the applied row must not create a data commit because apply bypasses the host
+    // write ledger.
     run_cycle_m(&storage, &db_m, &enc, &keypair, &hlc, &ld).await;
+    let registration =
+        crate::sync::store_objects::load_commit_slot(&storage, storage.store_root_hash(), "M", 1)
+            .await
+            .expect("load M registration commit")
+            .expect("M registration activation is committed");
     assert!(
-        crate::sync::store_objects::load_commit_slot(&storage, storage.store_root_hash(), "M", 1,)
+        registration.value.store_package.is_none(),
+        "the registration activation is control-only",
+    );
+    assert!(
+        crate::sync::store_objects::load_commit_slot(&storage, storage.store_root_hash(), "M", 2,)
             .await
             .expect("load M Store commit slot")
             .is_none(),
@@ -2072,11 +2097,12 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [24u8; 32],
     )));
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db_with_blob(
         BlobDecl::new("photos", Provenance::HostProvided, CacheFill::CacheLazy)
             .with_id_column("blob_id"),
     );
+    retain_store_packages_for_assertion(&db, b"each-host-write-blob-facts").await;
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -2112,7 +2138,7 @@ async fn each_host_write_publishes_the_blob_facts_from_its_own_commit() {
         .await
         .expect("second blob exists"));
     let mut published_blob_ids = Vec::new();
-    for seq in [1, 2] {
+    for seq in [2, 3] {
         let commit = crate::sync::store_objects::load_commit_slot(
             &storage,
             storage.store_root_hash(),
@@ -2159,7 +2185,7 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [8u8; 32],
     )));
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -2241,7 +2267,7 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [9u8; 32],
     )));
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
@@ -2413,12 +2439,13 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [18u8; 32],
     )));
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
         CacheFill::CacheLazy,
     ));
+    retain_store_packages_for_assertion(&db, b"captured-changeset-blob-retry").await;
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -2483,7 +2510,7 @@ async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_f
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        store_package_exists(&storage, "M", 1).await,
+        store_package_exists(&storage, "M", 2).await,
         "the retry publishes instead of wedging on the first blob's missing local copy"
     );
 }
@@ -2496,12 +2523,13 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [19u8; 32],
     )));
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
         CacheFill::CacheLazy,
     ));
+    retain_store_packages_for_assertion(&db, b"already-uploaded-host-blob").await;
     storage
         .put_blob(
             "photos",
@@ -2528,7 +2556,7 @@ async fn already_uploaded_host_blob_publishes_without_local_copy_or_reupload() {
     storage.fail_next_blob_puts(1);
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        store_package_exists(&storage, "M", 1).await,
+        store_package_exists(&storage, "M", 2).await,
         "an already-durable cloud blob publishes without reading a local copy"
     );
 }
@@ -2541,12 +2569,13 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [20u8; 32],
     )));
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db_with_blob(BlobDecl::new(
         "photos",
         Provenance::HostProvided,
         CacheFill::CacheLazy,
     ));
+    retain_store_packages_for_assertion(&db, b"fresh-push-retry").await;
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -2572,7 +2601,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         "cycle surfaces the Store package append failure: {error}",
     );
     assert!(
-        !store_package_exists(&storage, "M", 1).await,
+        !store_package_exists(&storage, "M", 2).await,
         "the first push attempt does not publish the Store package"
     );
     assert!(
@@ -2592,7 +2621,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        store_package_exists(&storage, "M", 1).await,
+        store_package_exists(&storage, "M", 2).await,
         "the prepared write retry publishes the Store package"
     );
     assert!(
@@ -2637,8 +2666,9 @@ async fn push_cycle_writes_rfc3339_head_timestamps() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [21u8; 32],
     )));
-    let keypair = UserKeypair::generate();
+    let keypair = storage.protocol_founder_keypair();
     let hlc = Hlc::new("M".to_string());
+    retain_store_packages_for_assertion(&db, b"push-cycle-head-timestamp").await;
 
     host_exec(
         &db,
@@ -2649,7 +2679,7 @@ async fn push_cycle_writes_rfc3339_head_timestamps() {
 
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        store_package_exists(&storage, "M", 1).await,
+        store_package_exists(&storage, "M", 2).await,
         "the cycle pushed a Store package and its immutable head",
     );
     assert_own_head_timestamps_are_rfc3339(&storage, "M").await;
@@ -2691,8 +2721,9 @@ async fn prepared_write_retry_writes_rfc3339_head_timestamp() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [23u8; 32],
     )));
-    let keypair = UserKeypair::generate();
+    let keypair = storage.protocol_founder_keypair();
     let hlc = Hlc::new("M".to_string());
+    retain_store_packages_for_assertion(&db, b"prepared-retry-head-timestamp").await;
 
     host_exec(
         &db,
@@ -2718,7 +2749,7 @@ async fn prepared_write_retry_writes_rfc3339_head_timestamp() {
     // The next cycle retries the prepared write.
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        store_package_exists(&storage, "M", 1).await,
+        store_package_exists(&storage, "M", 2).await,
         "the prepared write retry publishes the Store package",
     );
     assert_own_head_timestamps_are_rfc3339(&storage, "M").await;
@@ -2732,7 +2763,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [10u8; 32],
     )));
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db_with_blob(BlobDecl::new(
         "audio",
         Provenance::UserProvided,
@@ -2773,7 +2804,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         .commit
         .value
         .write_id;
-    assert!(!store_package_exists(&storage, "M", 1).await);
+    assert!(!store_package_exists(&storage, "M", 2).await);
 
     storage.delete_blob_object("audio", "audio1").await;
     let retry = run_single_sync_cycle(
@@ -2810,7 +2841,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         crate::WriteStatus::Published(crate::PublishedPosition::MergeConcurrent {
             position,
             ..
-        }) if position.seq == 1
+        }) if position.seq == 2
     ));
     let pending = db.pending_writes().await.expect("read pending writes");
     assert_eq!(pending.len(), 1);
@@ -2821,7 +2852,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
     });
     assert_eq!(pending[0].status, blocked);
     assert!(
-        !store_package_exists(&storage, "M", 2).await,
+        !store_package_exists(&storage, "M", 3).await,
         "the blocked write has no package or head",
     );
 
@@ -2843,7 +2874,7 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         blocked,
         "a semantic block is not retried by reconnect",
     );
-    assert!(!store_package_exists(&storage, "M", 2).await);
+    assert!(!store_package_exists(&storage, "M", 3).await);
 }
 
 #[tokio::test]
@@ -2854,8 +2885,9 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [9u8; 32],
     )));
-    let storage = MockSyncStorage::new();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db();
+    retain_store_packages_for_assertion(&db, b"outgoing-preparation-retry").await;
     host_exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
@@ -2904,7 +2936,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
         1,
         "the pending write remains queued when outgoing preparation fails"
     );
-    assert!(!store_package_exists(&storage, "M", 1).await);
+    assert!(!store_package_exists(&storage, "M", 2).await);
 
     db.call(|conn| {
         conn.execute_batch("DROP TRIGGER fail_outbound_preparation")
@@ -2914,7 +2946,7 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
     .expect("remove Store preparation fault");
     run_cycle_m(&storage, &db, &enc, &keypair, &hlc, &ld).await;
     assert!(
-        store_package_exists(&storage, "M", 1).await,
+        store_package_exists(&storage, "M", 2).await,
         "the same pending write publishes after preparation succeeds"
     );
     assert_eq!(
@@ -3166,7 +3198,7 @@ async fn member_device_does_not_create_a_snapshot() {
 
     // The Member's row reached the cloud as an immutable Store package.
     assert!(
-        store_package_exists(&storage, "M", 1).await,
+        store_package_exists(&storage, "M", 2).await,
         "the member's rows still propagate via the Store commit",
     );
     // No catalog snapshot metadata was authored.

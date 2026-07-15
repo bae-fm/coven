@@ -792,13 +792,6 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
         resume_drain_promptly = true;
     }
 
-    if rotation_pending.is_none() {
-        super::store_registration::ensure_active_registration(db, storage, user_keypair)
-            .await
-            .map_err(|error| {
-                SyncCycleFailure::operation("publish Store device registration", error)
-            })?;
-    }
     let store_pull = super::store_pull::pull_store_commits_with_coordination(
         db,
         tables,
@@ -820,6 +813,23 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
                 .ok_or_else(|| "materialized Serial membership is absent".to_string())?,
         ),
     };
+
+    // A Serial registration appends to the exact global predecessor. Materialize
+    // the selected global prefix first so the registration commit and its durable
+    // predecessor enter one continuous local chain. The same pull also installs
+    // the membership state that decides whether this active member may register.
+    if rotation_pending.is_none() {
+        super::store_registration::ensure_active_registration_with_coordination(
+            db,
+            storage,
+            serial_coordination,
+            user_keypair,
+            merge_chain,
+            &sync_time,
+        )
+        .await
+        .map_err(|error| SyncCycleFailure::operation("publish Store device registration", error))?;
+    }
 
     let staged_store_batch = if rotation_pending.is_none() {
         let mut staged_any = false;

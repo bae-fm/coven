@@ -647,7 +647,12 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     .await
     .expect("load Store commit")
     .expect("Store commit exists");
-    remove_protocol_prefix(&storage, &format!("{}/", commit.value.package.object_key)).await;
+    let package = commit
+        .value
+        .store_package
+        .as_ref()
+        .expect("Store commit carries a Store package");
+    remove_protocol_prefix(&storage, &format!("{}/", package.object_key)).await;
 
     let db2 = open_test_db();
     let (_tmp, ld) = temp_store_dir();
@@ -1087,7 +1092,12 @@ async fn push_stamps_the_dbs_schema_version() {
     .expect("load Store commit")
     .expect("Store commit slot");
     assert_eq!(
-        commit.value.package.schema_version,
+        commit
+            .value
+            .store_package
+            .as_ref()
+            .expect("outgoing Store commit carries a Store package")
+            .schema_version,
         db1.schema_version(),
         "the outgoing Store package is stamped with the database schema version",
     );
@@ -1228,13 +1238,14 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     .await
     .unwrap()
     .unwrap();
-    remove_protocol_prefix(&storage, &format!("{}/", commit.value.package.object_key)).await;
+    let package = commit
+        .value
+        .store_package
+        .as_ref()
+        .expect("Store commit carries a Store package");
+    remove_protocol_prefix(&storage, &format!("{}/", package.object_key)).await;
     storage
-        .append_protocol_object(
-            &commit.value.package.object_key,
-            ".pkg",
-            cs[..cs.len() - 1].to_vec(),
-        )
+        .append_protocol_object(&package.object_key, ".pkg", cs[..cs.len() - 1].to_vec())
         .await
         .unwrap();
 
@@ -1253,7 +1264,7 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
             },
             reason: HeldStorePositionReason::InvalidObject(detail),
         } if device_id == "dev1"
-            && *package_hash == commit.value.package.content_hash
+            && *package_hash == package.content_hash
             && detail.contains("Store package length")
     ));
     assert!(
@@ -1580,7 +1591,15 @@ async fn repaired_store_slot_resumes_the_held_device() {
     remove_protocol_prefix(&storage, "store-v1/commits/dev1/1/").await;
     remove_protocol_prefix(
         &storage,
-        &format!("{}/", bad_commit.value.package.object_key),
+        &format!(
+            "{}/",
+            bad_commit
+                .value
+                .store_package
+                .as_ref()
+                .expect("Store commit carries a Store package")
+                .object_key
+        ),
     )
     .await;
 

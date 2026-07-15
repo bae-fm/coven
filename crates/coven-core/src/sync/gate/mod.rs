@@ -142,6 +142,11 @@ pub enum GateError {
     },
     MissingGateColumn(String, String),
     MissingFkColumn(String, String),
+    ForeignKeySchema(String),
+    CompositeGateForeignKey {
+        table: String,
+        parent: String,
+    },
     /// A `gated_by_descendants` ancestor (the table) has no inferred gated
     /// descendant — no synced table has a foreign key into it after the
     /// join-table back-edge is excluded. The keep would be vacuously false, so
@@ -174,6 +179,11 @@ impl std::fmt::Display for GateError {
             GateError::MissingFkColumn(tbl, col) => {
                 write!(f, "table {tbl} has no FK column {col}")
             }
+            GateError::ForeignKeySchema(error) => write!(f, "foreign-key schema: {error}"),
+            GateError::CompositeGateForeignKey { table, parent } => write!(
+                f,
+                "table {table} inherits its gate through a composite foreign key to {parent}, but gate inheritance requires one child column"
+            ),
             GateError::NoGatedDescendants(tbl) => {
                 write!(
                     f,
@@ -957,6 +967,51 @@ mod tests {
             downward_parent(&gates, "album_artists"),
             ("albums".to_string(), "album_id".to_string()),
         );
+    }
+
+    #[test]
+    fn downward_parent_tie_uses_complete_foreign_key_shape() {
+        fn selected_child_column(foreign_keys: &str) -> String {
+            let c = conn();
+            exec(
+                &c,
+                "CREATE TABLE roots (
+                    id TEXT PRIMARY KEY,
+                    shared INTEGER NOT NULL,
+                    _updated_at TEXT NOT NULL
+                ) STRICT;",
+            );
+            exec(
+                &c,
+                &format!(
+                    "CREATE TABLE children (
+                        id TEXT PRIMARY KEY,
+                        a_root_id TEXT NOT NULL,
+                        z_root_id TEXT NOT NULL,
+                        _updated_at TEXT NOT NULL,
+                        {foreign_keys}
+                    ) STRICT;"
+                ),
+            );
+            let tables = vec![
+                SyncedTable::new("roots", crate::sync::session::RowIdentity::SharedKey)
+                    .gated_by("shared"),
+                SyncedTable::new("children", crate::sync::session::RowIdentity::SharedKey),
+            ];
+            downward_parent(&Gates::from_tables(&c, &tables).expect("gates"), "children").1
+        }
+
+        let a_then_z = selected_child_column(
+            "FOREIGN KEY (a_root_id) REFERENCES roots (id),
+             FOREIGN KEY (z_root_id) REFERENCES roots (id)",
+        );
+        let z_then_a = selected_child_column(
+            "FOREIGN KEY (z_root_id) REFERENCES roots (id),
+             FOREIGN KEY (a_root_id) REFERENCES roots (id)",
+        );
+
+        assert_eq!(a_then_z, "a_root_id");
+        assert_eq!(z_then_a, a_then_z);
     }
 
     #[test]

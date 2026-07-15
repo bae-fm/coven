@@ -1059,7 +1059,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .value
-            .package
+            .store_package
+            .expect("Serial row commit has a Store package")
             .object_key;
         let loser_package = b"orphan loser package";
         let loser = StoreBatchCommit::signed(
@@ -1076,9 +1077,18 @@ mod tests {
             &owner,
         )
         .unwrap();
-        append_and_verify(&storage, &loser.package.object_key, ".pkg", loser_package)
-            .await
-            .unwrap();
+        append_and_verify(
+            &storage,
+            &loser
+                .store_package
+                .as_ref()
+                .expect("orphan row commit has a Store package")
+                .object_key,
+            ".pkg",
+            loser_package,
+        )
+        .await
+        .unwrap();
         append_and_verify(
             &storage,
             &super::super::store_commit::commit_semantic_prefix(
@@ -1179,10 +1189,13 @@ mod tests {
                 .count(),
             1
         );
-        assert!(home
-            .appended_keys()
-            .iter()
-            .any(|key| key.starts_with(&loser.package.object_key)));
+        assert!(home.appended_keys().iter().any(|key| key.starts_with(
+            &loser
+                .store_package
+                .as_ref()
+                .expect("orphan row commit has a Store package")
+                .object_key
+        )));
         assert!(!home
             .appended_keys()
             .iter()
@@ -1361,7 +1374,12 @@ mod tests {
             .unwrap();
         append_and_verify(
             &setup.storage,
-            &commit.value.package.object_key,
+            &commit
+                .value
+                .store_package
+                .as_ref()
+                .expect("covered row commit has a Store package")
+                .object_key,
             ".pkg",
             &package.value,
         )

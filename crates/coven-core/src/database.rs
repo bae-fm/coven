@@ -21,15 +21,16 @@ use crate::blob::{BlobRef, Provenance};
 use crate::db::{
     apply_coven_schema, is_reserved_table_name, ExternalBlob, OutboxEntry, OutboxOperation,
 };
-use crate::migration::{run_migrations, Migration, MigrationError};
+use crate::migration::{run_migrations_in_transaction, Migration, MigrationError};
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
 use crate::sync::membership::{SerialAuthorizationState, SerialMembershipState};
+use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::SyncedTable;
 use crate::sync::store_commit::{
     CommitFrontier, CommitPosition, ObjectHash, SnapshotMeta, StoreAck, StoreBatchCommit,
-    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationState, StoreProtocolRoot,
-    StoreSerialHead, SERIAL_STREAM_ID,
+    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StoreDeviceRegistrationState, StoreProtocolRoot, StoreSerialHead, SERIAL_STREAM_ID,
 };
 use crate::write::{
     AffectedRow, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition, WriteId,
@@ -39,6 +40,8 @@ use crate::WritePolicy;
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
 pub const WRITE_POLICY_STATE_KEY: &str = "write_policy";
+const SYNC_ROUTING_CONTRACT_STATE_KEY: &str = "sync_routing_contract";
+pub const SYNC_ROUTING_HASH_STATE_KEY: &str = "sync_routing_hash";
 const COVEN_INITIALIZED_STATE_KEY: &str = "coven_initialized";
 const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
 pub const STORE_ROOT_HASH_STATE_KEY: &str = "store_root_hash";
@@ -102,6 +105,7 @@ struct DatabaseState {
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
     schema_version: u32,
+    sync_routing_hash: ObjectHash,
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
     /// The host's blob-tombstone convergence window, read by the tombstone GC to
@@ -245,6 +249,7 @@ struct DatabaseCore {
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
     schema_version: u32,
+    sync_routing_hash: ObjectHash,
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
@@ -306,44 +311,100 @@ fn has_coven_initialization_marker(conn: &Connection) -> Result<bool, DbError> {
     }
 }
 
-fn initialize_coven_metadata(
-    conn: &mut Connection,
+fn initialize_coven_metadata_on(
+    conn: &Connection,
     write_policy: WritePolicy,
+    sync_routing_contract: &SyncRoutingContract,
+    install_routing_schema: bool,
 ) -> Result<(), DbError> {
-    let tx = conn.transaction().map_err(DbError::from)?;
-    apply_coven_schema(&tx).map_err(DbError::from)?;
-    initialize_write_policy(&tx, write_policy)?;
-    tx.execute(
+    apply_coven_schema(conn).map_err(DbError::from)?;
+    if install_routing_schema {
+        crate::db::apply_coven_routing_schema(conn).map_err(DbError::from)?;
+    }
+    initialize_write_policy(conn, write_policy)?;
+    let contract_json = String::from_utf8(sync_routing_contract.bytes().to_vec())
+        .map_err(|error| DbError(format!("encode sync-routing contract metadata: {error}")))?;
+    conn.execute(
+        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
+        (SYNC_ROUTING_CONTRACT_STATE_KEY, contract_json),
+    )
+    .map_err(DbError::from)?;
+    conn.execute(
+        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
+        (
+            SYNC_ROUTING_HASH_STATE_KEY,
+            sync_routing_contract.hash().to_string(),
+        ),
+    )
+    .map_err(DbError::from)?;
+    conn.execute(
         "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
         (COVEN_INITIALIZED_STATE_KEY, COVEN_INITIALIZED_STATE_VALUE),
     )
-    .map_err(DbError::from)?;
-    tx.commit().map_err(DbError::from)
+    .map(|_| ())
+    .map_err(DbError::from)
 }
 
-fn initialize_or_validate_coven_metadata(
-    conn: &mut Connection,
+fn load_coven_metadata(
+    conn: &Connection,
     write_policy: WritePolicy,
-    metadata_open: CovenMetadataOpen,
-) -> Result<(), DbError> {
-    match metadata_open {
-        CovenMetadataOpen::InitializeVerifiedSnapshot => {
-            initialize_coven_metadata(conn, write_policy)
-        }
-        CovenMetadataOpen::Detect if has_coven_initialization_marker(conn)? => {
-            validate_write_policy(conn, write_policy)
-        }
-        CovenMetadataOpen::Detect => initialize_coven_metadata(conn, write_policy),
-    }
-}
-
-fn validate_coven_metadata(conn: &Connection, write_policy: WritePolicy) -> Result<(), DbError> {
+) -> Result<SyncRoutingContract, DbError> {
     if !has_coven_initialization_marker(conn)? {
         return Err(DbError(
             "Store database is missing required Coven initialization metadata".to_string(),
         ));
     }
-    validate_write_policy(conn, write_policy)
+    validate_write_policy(conn, write_policy)?;
+    let contract_bytes = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [SYNC_ROUTING_CONTRACT_STATE_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .ok_or_else(|| {
+            DbError("Store database is missing required sync_routing_contract metadata".to_string())
+        })?;
+    let contract = SyncRoutingContract::from_bytes(contract_bytes.as_bytes())
+        .map_err(|error| DbError(format!("Store sync-routing contract is invalid: {error}")))?;
+    let stored_hash = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [SYNC_ROUTING_HASH_STATE_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .ok_or_else(|| {
+            DbError("Store database is missing required sync_routing_hash metadata".to_string())
+        })?;
+    let stored_hash: ObjectHash = stored_hash.parse().map_err(|error| {
+        DbError(format!(
+            "Store sync_routing_hash metadata is invalid: {error}"
+        ))
+    })?;
+    if stored_hash != contract.hash() {
+        return Err(DbError(format!(
+            "Store sync-routing contract hashes to {}, but metadata records {stored_hash}",
+            contract.hash(),
+        )));
+    }
+    Ok(contract)
+}
+
+fn validate_sync_routing_contract(
+    pinned: &SyncRoutingContract,
+    resolved: &SyncRoutingContract,
+) -> Result<(), DbError> {
+    if pinned.bytes() != resolved.bytes() || pinned.hash() != resolved.hash() {
+        return Err(DbError(format!(
+            "Store sync-routing hash is {}, but open resolved {}",
+            pinned.hash(),
+            resolved.hash(),
+        )));
+    }
+    Ok(())
 }
 
 fn validate_write_policy(conn: &Connection, requested: WritePolicy) -> Result<(), DbError> {
@@ -383,26 +444,51 @@ impl DatabaseCore {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
 
-        // A committed marker is the authority that coven's bookkeeping schema and
-        // immutable write policy were created together. Without it, create the
-        // complete internal schema, policy, and marker in one transaction. With it,
-        // validate the policy and never rerun DDL to conceal a damaged store.
-        initialize_or_validate_coven_metadata(&mut conn, write_policy, metadata_open)?;
+        let initialized = match metadata_open {
+            CovenMetadataOpen::InitializeVerifiedSnapshot => false,
+            CovenMetadataOpen::Detect => has_coven_initialization_marker(&conn)?,
+        };
+        let pinned_routing_contract = initialized
+            .then(|| load_coven_metadata(&conn, write_policy))
+            .transpose()?;
+        let (schema_version, sync_routing_contract) = {
+            let tx = conn.transaction().map_err(DbError::from)?;
+            let outcome = (|| -> Result<(u32, SyncRoutingContract), OpenError> {
+                let schema_version = run_migrations_in_transaction(&tx, migrations)?;
+
+                // The host ladder and routing validation share this transaction.
+                // A pending migration that changes confidentiality topology cannot
+                // leave either its DDL or `user_version` advance committed.
+                validate_host_synced_tables(&tx, &synced_tables)?;
+                let resolved = SyncRoutingContract::from_connection(&tx, &synced_tables)
+                    .map_err(|error| DbError(error.to_string()))?;
+                if let Some(pinned) = &pinned_routing_contract {
+                    validate_sync_routing_contract(pinned, &resolved)?;
+                } else {
+                    initialize_coven_metadata_on(
+                        &tx,
+                        write_policy,
+                        &resolved,
+                        write_policy == WritePolicy::MergeConcurrent && resolved.has_scoped_graph(),
+                    )?;
+                }
+                Ok((schema_version, resolved))
+            })();
+            match outcome {
+                Ok(initialized) => {
+                    tx.commit().map_err(DbError::from)?;
+                    initialized
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let sync_routing_hash = sync_routing_contract.hash();
         conn.execute(
             "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (LOCAL_DEVICE_ID_STATE_KEY, hlc.device_id()),
         )
         .map_err(DbError::from)?;
-        let schema_version = run_migrations(&conn, migrations)?;
-
-        // Enforce the synced-table contract against the live host schema: each
-        // host table must present the pk shape and `_updated_at` the
-        // capture/gate/apply paths assume. Validating here — after the migration
-        // ladder built the tables, on the integrator's own device — turns a wrong
-        // shape into an open error naming the table, rather than a peer's
-        // materialized position holding forever at pull time.
-        validate_host_synced_tables(&conn, &synced_tables)?;
 
         // Seed the register clock so a restart cannot mint a stamp behind a value
         // already on disk. Floor = max(persisted high-water, max synced-row
@@ -439,6 +525,7 @@ impl DatabaseCore {
             hlc,
             synced_tables,
             schema_version,
+            sync_routing_hash,
             gates,
             blob_decls,
             blob_tombstone_grace,
@@ -471,8 +558,6 @@ impl DatabaseCore {
         // writer's relational view. A read never inserts, so it enforces nothing new.
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
-        validate_coven_metadata(&conn, write_policy)?;
-
         // Open against the on-disk schema exactly as the writer left it: run no
         // migration ladder (that writes), but refuse a schema newer than this binary
         // knows — the same policy `run_migrations` applies — because the gate and blob
@@ -483,6 +568,11 @@ impl DatabaseCore {
         // still present the synced-table contract, so a wrong schema fails loud at
         // open rather than mid-read.
         validate_host_synced_tables(&conn, &synced_tables)?;
+        let pinned_routing_contract = load_coven_metadata(&conn, write_policy)?;
+        let sync_routing_contract = SyncRoutingContract::from_connection(&conn, &synced_tables)
+            .map_err(|error| DbError(error.to_string()))?;
+        validate_sync_routing_contract(&pinned_routing_contract, &sync_routing_contract)?;
+        let sync_routing_hash = sync_routing_contract.hash();
 
         let synced_tables = Arc::new(synced_tables);
 
@@ -499,6 +589,7 @@ impl DatabaseCore {
             hlc,
             synced_tables,
             schema_version,
+            sync_routing_hash,
             gates,
             blob_decls,
             blob_tombstone_grace,
@@ -515,6 +606,7 @@ impl DatabaseCore {
             hlc: self.hlc.clone(),
             synced_tables: self.synced_tables.clone(),
             schema_version: self.schema_version,
+            sync_routing_hash: self.sync_routing_hash,
             gates: self.gates.clone(),
             blob_decls: self.blob_decls.clone(),
             blob_tombstone_grace: self.blob_tombstone_grace,
@@ -743,7 +835,16 @@ pub(crate) struct DurableDeviceRegistration {
     pub previous_registration_hash: Option<ObjectHash>,
     pub state: StoreDeviceRegistrationState,
     pub registration_bytes: Vec<u8>,
+    pub activation_commit_bytes: Option<Vec<u8>>,
+    pub activation_head_bytes: Option<Vec<u8>>,
     pub published: bool,
+}
+
+struct StoredDeviceRegistrationActivation {
+    registration_bytes: Vec<u8>,
+    commit_bytes: Option<Vec<u8>>,
+    head_bytes: Option<Vec<u8>>,
+    published: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -1649,10 +1750,12 @@ impl Database {
 
     /// Open and own the connection at `path`.
     ///
-    /// Runs coven's bookkeeping migration, then the host's synced-schema migration
-    /// ladder (`migrations`) over `PRAGMA user_version`, and seeds the register
-    /// clock off the on-disk rows. Returns the handle plus the non-optional
-    /// `_updated_at` stamper the host binds into every synced-row write.
+    /// Runs the host migration ladder and validates its final sync-routing
+    /// contract in one transaction. A fresh database creates Coven metadata in
+    /// that transaction; an initialized database commits only when the final
+    /// contract exactly matches its pinned bytes. Then seeds the register clock
+    /// from on-disk rows. Returns the handle plus the non-optional `_updated_at`
+    /// stamper the host binds into every synced-row write.
     ///
     pub fn open(
         path: &Path,
@@ -1863,6 +1966,12 @@ impl Database {
     /// fixed for the handle's life.
     pub fn schema_version(&self) -> u32 {
         self.state.schema_version
+    }
+
+    /// Hash of the declarations and live schema shape that decide row routing
+    /// and confidentiality for this Store.
+    pub fn sync_routing_hash(&self) -> ObjectHash {
+        self.state.sync_routing_hash
     }
 
     /// The shared register clock. coven's sync layer records pulled rows as its
@@ -2550,7 +2659,7 @@ impl Database {
                 .map_err(|error| DbError(format!("verify prepared Store commit: {error}")))?;
             stage
                 .commit
-                .verify_package(&stage.package_bytes)
+                .verify_store_package(&stage.package_bytes)
                 .map_err(|error| DbError(format!("verify prepared Store package: {error}")))?;
             if stage.commit.write_id != stage.write_id {
                 return Err(DbError(
@@ -2760,7 +2869,7 @@ impl Database {
                     .map_err(|error| DbError(format!("verify prepared Serial commit: {error}")))?;
                 write
                     .commit
-                    .verify_package(&write.package_bytes)
+                    .verify_store_package(&write.package_bytes)
                     .map_err(|error| DbError(format!("verify prepared Serial package: {error}")))?;
                 if write.commit.previous_commit_hash() != expected_hash {
                     return Err(DbError(format!(
@@ -2860,6 +2969,94 @@ impl Database {
             }
         }
         Ok(write_ids)
+    }
+
+    fn rebase_unprepared_serial_branch_on(
+        tx: &rusqlite::Transaction<'_>,
+        predecessor: Option<CommitPosition>,
+        activated: CommitPosition,
+    ) -> Result<(), DbError> {
+        let mut statement = tx
+            .prepare(
+                "SELECT write_id, status, base, prepared FROM store_writes
+                 WHERE status != '\"local_only\"'
+                   AND json_extract(status, '$.published') IS NULL
+                   AND json_extract(status, '$.resolved') IS NULL
+                   AND json_type(base, '$.serial') IS NOT NULL
+                 ORDER BY ordinal",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(DbError::from)?;
+        let mut branch_base = None;
+        let mut branch_len = 0_usize;
+        for row in rows {
+            let (write_id, raw_status, raw_base, prepared) = row.map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError(format!("Serial branch status: {error}")))?;
+            let base: StoreWriteBase = serde_json::from_str(&raw_base)
+                .map_err(|error| DbError(format!("Serial branch base: {error}")))?;
+            if branch_base.as_ref().is_some_and(|stored| stored != &base) {
+                return Err(DbError(
+                    "Serial database contains more than one unresolved branch".to_string(),
+                ));
+            }
+            branch_base.get_or_insert(base);
+            if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_))
+                || prepared.is_some()
+            {
+                return Err(DbError(format!(
+                    "Serial branch write {write_id} cannot be rebased during registration activation"
+                )));
+            }
+            branch_len = branch_len
+                .checked_add(1)
+                .ok_or_else(|| DbError("Serial branch length exceeds usize".to_string()))?;
+        }
+        drop(statement);
+        let Some(StoreWriteBase::Serial { branch_id, base }) = branch_base else {
+            return Ok(());
+        };
+        if base != predecessor {
+            return Ok(());
+        }
+        let old_base = StoreWriteBase::Serial {
+            branch_id: branch_id.clone(),
+            base,
+        };
+        let rebased = StoreWriteBase::Serial {
+            branch_id,
+            base: Some(activated),
+        };
+        let updated = tx
+            .execute(
+                "UPDATE store_writes SET base = ?2
+                 WHERE base = ?1 AND prepared IS NULL
+                   AND (status = '\"pending\"' OR json_extract(status, '$.blocked') IS NOT NULL)",
+                rusqlite::params![
+                    serde_json::to_string(&old_base).map_err(|error| DbError(format!(
+                        "serialize prior Serial branch base: {error}"
+                    )))?,
+                    serde_json::to_string(&rebased).map_err(|error| DbError(format!(
+                        "serialize rebased Serial branch: {error}"
+                    )))?,
+                ],
+            )
+            .map_err(DbError::from)?;
+        if updated != branch_len {
+            return Err(DbError(
+                "Serial branch changed during registration activation".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) async fn release_serial_store_branch_reservation(
@@ -3635,23 +3832,33 @@ impl Database {
                     resolution.commit.seq()
                 )));
             }
-            let changeset =
-                crate::sync::apply::ValidatedChangeset::new(resolution.package, schema.clone())
+            if let Some(package) = resolution.package {
+                let changeset =
+                    crate::sync::apply::ValidatedChangeset::new(package, schema.clone()).map_err(
+                        |error| DbError(format!("invalid Serial resolution changeset: {error}")),
+                    )?;
+                crate::sync::apply::apply_changeset_strict_on(tx, changeset, &resolution.uploads)
                     .map_err(|error| {
-                        DbError(format!("invalid Serial resolution changeset: {error}"))
-                    })?;
-            crate::sync::apply::apply_changeset_strict_on(tx, changeset, &resolution.uploads)
-                .map_err(|error| {
                     DbError(format!(
                         "apply Serial resolution commit {}: {error}",
                         resolution.commit.seq()
                     ))
                 })?;
-            let blob_decls = BlobDecls::from_tables(tx, synced_tables)
-                .map_err(|error| DbError(error.to_string()))?;
-            for intent in resolution.cleanup {
-                crate::blob::local_cleanup::record_if_unreferenced_on(tx, &blob_decls, &intent)?;
+                let blob_decls = BlobDecls::from_tables(tx, synced_tables)
+                    .map_err(|error| DbError(error.to_string()))?;
+                for intent in resolution.cleanup {
+                    crate::blob::local_cleanup::record_if_unreferenced_on(
+                        tx,
+                        &blob_decls,
+                        &intent,
+                    )?;
+                }
             }
+            Self::record_activated_store_device_registrations_on(
+                tx,
+                &resolution.commit,
+                &resolution.registrations,
+            )?;
             Self::record_materialized_serial_commit_on(
                 tx,
                 &resolution.commit,
@@ -4405,7 +4612,7 @@ impl Database {
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
         self.read_local_store_device_registration(
             "SELECT revision, registration_hash, previous_registration_hash, state, \
-                    registration_bytes, published \
+                    registration_bytes, activation_commit_bytes, activation_head_bytes, published \
              FROM local_store_device_registration ORDER BY revision DESC LIMIT 1",
         )
         .await
@@ -4416,7 +4623,7 @@ impl Database {
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
         self.read_local_store_device_registration(
             "SELECT revision, registration_hash, previous_registration_hash, state, \
-                    registration_bytes, published \
+                    registration_bytes, activation_commit_bytes, activation_head_bytes, published \
              FROM local_store_device_registration WHERE published = 0 \
              ORDER BY revision LIMIT 1",
         )
@@ -4435,57 +4642,72 @@ impl Database {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(6)?,
+                    row.get::<_, i64>(7)?,
                 ))
             })
             .optional()
             .map_err(DbError::from)?
-            .map(|(revision, hash, previous_hash, state, bytes, published)| {
-                let revision = u64::try_from(revision).map_err(|_| {
-                    DbError(format!(
-                        "local Store device registration has invalid revision {revision}"
-                    ))
-                })?;
-                if revision == 0 {
-                    return Err(DbError(
-                        "local Store device registration has revision zero".to_string(),
-                    ));
-                }
-                Ok(DurableDeviceRegistration {
+            .map(
+                |(
                     revision,
-                    registration_hash: hash.parse().map_err(|error| {
-                        DbError(format!("local Store device registration hash: {error}"))
-                    })?,
-                    previous_registration_hash: previous_hash
-                        .map(|hash| {
-                            hash.parse().map_err(|error| {
-                                DbError(format!(
-                                    "local Store device previous registration hash: {error}"
-                                ))
+                    hash,
+                    previous_hash,
+                    state,
+                    bytes,
+                    activation_commit_bytes,
+                    activation_head_bytes,
+                    published,
+                )| {
+                    let revision = u64::try_from(revision).map_err(|_| {
+                        DbError(format!(
+                            "local Store device registration has invalid revision {revision}"
+                        ))
+                    })?;
+                    if revision == 0 {
+                        return Err(DbError(
+                            "local Store device registration has revision zero".to_string(),
+                        ));
+                    }
+                    Ok(DurableDeviceRegistration {
+                        revision,
+                        registration_hash: hash.parse().map_err(|error| {
+                            DbError(format!("local Store device registration hash: {error}"))
+                        })?,
+                        previous_registration_hash: previous_hash
+                            .map(|hash| {
+                                hash.parse().map_err(|error| {
+                                    DbError(format!(
+                                        "local Store device previous registration hash: {error}"
+                                    ))
+                                })
                             })
-                        })
-                        .transpose()?,
-                    state: match state.as_str() {
-                        "active" => StoreDeviceRegistrationState::Active,
-                        "retired" => StoreDeviceRegistrationState::Retired,
-                        _ => {
-                            return Err(DbError(format!(
-                                "local Store device registration has invalid state {state:?}"
-                            )))
-                        }
-                    },
-                    registration_bytes: bytes,
-                    published: match published {
-                        0 => false,
-                        1 => true,
-                        value => {
-                            return Err(DbError(format!(
+                            .transpose()?,
+                        state: match state.as_str() {
+                            "active" => StoreDeviceRegistrationState::Active,
+                            "retired" => StoreDeviceRegistrationState::Retired,
+                            _ => {
+                                return Err(DbError(format!(
+                                    "local Store device registration has invalid state {state:?}"
+                                )))
+                            }
+                        },
+                        registration_bytes: bytes,
+                        activation_commit_bytes,
+                        activation_head_bytes,
+                        published: match published {
+                            0 => false,
+                            1 => true,
+                            value => {
+                                return Err(DbError(format!(
                             "local Store device registration has invalid published value {value}"
                         )))
-                        }
-                    },
-                })
-            })
+                            }
+                        },
+                    })
+                },
+            )
             .transpose()
         })
         .await
@@ -4610,7 +4832,8 @@ impl Database {
             conn.execute(
                 "INSERT INTO local_store_device_registration \
                  (revision, registration_hash, previous_registration_hash, state, \
-                  registration_bytes, published) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                  registration_bytes, activation_commit_bytes, activation_head_bytes, published) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, 0)",
                 (
                     revision,
                     hash.to_string(),
@@ -4627,30 +4850,251 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn complete_store_device_registration(
+    pub(crate) async fn stage_merge_store_device_registration_activation(
         &self,
         revision: u64,
         registration_hash: ObjectHash,
+        commit: StoreBatchCommit,
+        head: StoreDeviceHead,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
-            let revision = i64::try_from(revision).map_err(|_| {
-                DbError("Store device registration revision exceeds SQLite INTEGER".to_string())
-            })?;
-            let updated = conn
-                .execute(
-                    "UPDATE local_store_device_registration SET published = 1 \
-                     WHERE revision = ?1 AND registration_hash = ?2",
-                    (revision, registration_hash.to_string()),
-                )
-                .map_err(DbError::from)?;
-            if updated != 1 {
+            if commit.policy() != WritePolicy::MergeConcurrent
+                || head.position.as_ref() != Some(&commit.position())
+            {
                 return Err(DbError(
-                    "local Store device registration ownership row is absent".to_string(),
+                    "Merge Store device registration activation has an invalid commit/head"
+                        .to_string(),
                 ));
             }
-            Ok(())
+            Self::stage_store_device_registration_activation_on(
+                conn,
+                revision,
+                registration_hash,
+                &commit,
+                &head.to_bytes(),
+            )
         })
         .await
+    }
+
+    pub(crate) async fn stage_serial_store_device_registration_activation(
+        &self,
+        revision: u64,
+        registration_hash: ObjectHash,
+        commit: StoreBatchCommit,
+        head: StoreSerialHead,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            if commit.policy() != WritePolicy::Serial
+                || head.commit.as_ref() != Some(&commit.position())
+            {
+                return Err(DbError(
+                    "Serial Store device registration activation has an invalid commit/head"
+                        .to_string(),
+                ));
+            }
+            Self::stage_store_device_registration_activation_on(
+                conn,
+                revision,
+                registration_hash,
+                &commit,
+                &head.to_bytes(),
+            )
+        })
+        .await
+    }
+
+    fn stage_store_device_registration_activation_on(
+        conn: &Connection,
+        revision: u64,
+        registration_hash: ObjectHash,
+        commit: &StoreBatchCommit,
+        head_bytes: &[u8],
+    ) -> Result<(), DbError> {
+        let revision = i64::try_from(revision).map_err(|_| {
+            DbError("Store device registration revision exceeds SQLite INTEGER".to_string())
+        })?;
+        let stored = conn
+            .query_row(
+                "SELECT registration_bytes, activation_commit_bytes, activation_head_bytes, published \
+                 FROM local_store_device_registration \
+                 WHERE revision = ?1 AND registration_hash = ?2",
+                (revision, registration_hash.to_string()),
+                |row| {
+                    Ok(StoredDeviceRegistrationActivation {
+                        registration_bytes: row.get(0)?,
+                        commit_bytes: row.get(1)?,
+                        head_bytes: row.get(2)?,
+                        published: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(DbError::from)?;
+        let registration = StoreDeviceRegistration::parse_at(
+            &stored.registration_bytes,
+            commit.store_root_hash,
+            &commit.device_id,
+            revision as u64,
+        )
+        .map_err(|error| DbError(format!("verify local Store device registration: {error}")))?;
+        let reference = StoreDeviceRegistrationRef::from_registration(&registration);
+        if commit.device_registrations.as_slice() != [reference]
+            || commit.author_pubkey != registration.author_pubkey
+            || commit.control.is_some()
+            || !commit.circle_controls.is_empty()
+            || commit.store_package.is_some()
+            || !commit.circle_packages.is_empty()
+        {
+            return Err(DbError(
+                "Store device registration activation is not an exact control-only batch"
+                    .to_string(),
+            ));
+        }
+        let commit_bytes = commit.to_bytes();
+        match (stored.commit_bytes, stored.head_bytes, stored.published) {
+            (None, None, 0) => {
+                conn.execute(
+                    "UPDATE local_store_device_registration \
+                     SET activation_commit_bytes = ?3, activation_head_bytes = ?4 \
+                     WHERE revision = ?1 AND registration_hash = ?2 AND published = 0",
+                    rusqlite::params![
+                        revision,
+                        registration_hash.to_string(),
+                        commit_bytes,
+                        head_bytes,
+                    ],
+                )
+                .map_err(DbError::from)?;
+                Ok(())
+            }
+            (Some(existing_commit), Some(existing_head), 0)
+                if existing_commit == commit_bytes && existing_head == head_bytes =>
+            {
+                Ok(())
+            }
+            (Some(existing_commit), Some(existing_head), 1)
+                if existing_commit == commit_bytes && existing_head == head_bytes =>
+            {
+                Ok(())
+            }
+            _ => Err(DbError(
+                "Store device registration owns different activation bytes".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) async fn complete_merge_store_device_registration_activation(
+        &self,
+        revision: u64,
+        registration_hash: ObjectHash,
+        commit: StoreBatchCommit,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let registration = Self::owned_registration_for_activation_on(
+                &tx,
+                revision,
+                registration_hash,
+                &commit,
+            )?;
+            Self::record_activated_store_device_registrations_on(&tx, &commit, &[registration])?;
+            Self::record_materialized_commit_on(&tx, &commit)?;
+            Self::mark_store_device_registration_published_on(&tx, revision, registration_hash)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_serial_store_device_registration_activation(
+        &self,
+        revision: u64,
+        registration_hash: ObjectHash,
+        commit: StoreBatchCommit,
+        authorization: SerialAuthorizationState,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let registration = Self::owned_registration_for_activation_on(
+                &tx,
+                revision,
+                registration_hash,
+                &commit,
+            )?;
+            Self::record_activated_store_device_registrations_on(&tx, &commit, &[registration])?;
+            Self::record_materialized_serial_commit_on(
+                &tx,
+                &commit,
+                &authorization.membership,
+                authorization.key_generation,
+            )?;
+            let predecessor = commit
+                .previous_commit_hash()
+                .map(|commit_hash| CommitPosition {
+                    seq: commit.seq() - 1,
+                    commit_hash,
+                });
+            Self::rebase_unprepared_serial_branch_on(&tx, predecessor, commit.position())?;
+            Self::mark_store_device_registration_published_on(&tx, revision, registration_hash)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    fn owned_registration_for_activation_on(
+        tx: &rusqlite::Transaction<'_>,
+        revision: u64,
+        registration_hash: ObjectHash,
+        commit: &StoreBatchCommit,
+    ) -> Result<StoreDeviceRegistration, DbError> {
+        let revision_sql = i64::try_from(revision).map_err(|_| {
+            DbError("Store device registration revision exceeds SQLite INTEGER".to_string())
+        })?;
+        let (registration_bytes, activation_commit_bytes): (Vec<u8>, Vec<u8>) = tx
+            .query_row(
+                "SELECT registration_bytes, activation_commit_bytes \
+                 FROM local_store_device_registration \
+                 WHERE revision = ?1 AND registration_hash = ?2 AND published = 0",
+                (revision_sql, registration_hash.to_string()),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DbError::from)?;
+        if activation_commit_bytes != commit.to_bytes() {
+            return Err(DbError(
+                "Store device registration activation commit differs from durable bytes"
+                    .to_string(),
+            ));
+        }
+        StoreDeviceRegistration::parse_at(
+            &registration_bytes,
+            commit.store_root_hash,
+            &commit.device_id,
+            revision,
+        )
+        .map_err(|error| DbError(format!("verify owned Store device registration: {error}")))
+    }
+
+    fn mark_store_device_registration_published_on(
+        tx: &rusqlite::Transaction<'_>,
+        revision: u64,
+        registration_hash: ObjectHash,
+    ) -> Result<(), DbError> {
+        let revision = i64::try_from(revision).map_err(|_| {
+            DbError("Store device registration revision exceeds SQLite INTEGER".to_string())
+        })?;
+        let updated = tx
+            .execute(
+                "UPDATE local_store_device_registration SET published = 1 \
+                 WHERE revision = ?1 AND registration_hash = ?2 AND published = 0 \
+                   AND activation_commit_bytes IS NOT NULL AND activation_head_bytes IS NOT NULL",
+                (revision, registration_hash.to_string()),
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError(
+                "local Store device registration activation row is absent".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     // ---- Bookkeeping: protocol_state ----
@@ -4976,6 +5420,198 @@ impl Database {
         Ok(positions.into_iter().max_by_key(|position| position.seq))
     }
 
+    pub(crate) fn record_activated_store_device_registrations_on(
+        conn: &Connection,
+        commit: &StoreBatchCommit,
+        registrations: &[StoreDeviceRegistration],
+    ) -> Result<(), DbError> {
+        if registrations.len() != commit.device_registrations.len() {
+            return Err(DbError(
+                "Store device registration activation count differs from the signed commit"
+                    .to_string(),
+            ));
+        }
+        let stream_id = commit.order.stream_id(&commit.device_id);
+        let seq = Self::sequence_to_sqlite(stream_id, commit.seq())?;
+        let commit_hash = commit.commit_hash().to_string();
+        for reference in &commit.device_registrations {
+            let registration = registrations
+                .iter()
+                .find(|registration| {
+                    registration.device_id == reference.device_id
+                        && registration.revision == reference.revision
+                })
+                .ok_or_else(|| {
+                    DbError(format!(
+                        "Store commit is missing registration bytes for {:?} revision {}",
+                        reference.device_id, reference.revision
+                    ))
+                })?;
+            reference
+                .verify_registration(registration)
+                .map_err(|error| DbError(error.to_string()))?;
+            if registration.store_root_hash != commit.store_root_hash
+                || registration.author_pubkey != commit.author_pubkey
+            {
+                return Err(DbError(format!(
+                    "Store registration {:?} revision {} is not signed by its activating commit author",
+                    registration.device_id, registration.revision
+                )));
+            }
+            let existing = conn
+                .query_row(
+                    "SELECT revision, registration_hash, previous_registration_hash, state, \
+                            author_pubkey, registration_bytes, stream_id, seq, commit_hash \
+                     FROM store_device_registration_activations \
+                     WHERE device_id = ?1 ORDER BY revision DESC LIMIT 1",
+                    [&registration.device_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Vec<u8>>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, i64>(7)?,
+                            row.get::<_, String>(8)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let registration_bytes = registration.to_bytes();
+            let state = match registration.state {
+                StoreDeviceRegistrationState::Active => "active",
+                StoreDeviceRegistrationState::Retired => "retired",
+            };
+            let previous_hash = registration
+                .previous_registration_hash
+                .map(|hash| hash.to_string());
+            if let Some((
+                existing_revision,
+                existing_hash,
+                existing_previous,
+                existing_state,
+                existing_author,
+                existing_bytes,
+                existing_stream,
+                existing_seq,
+                existing_commit,
+            )) = existing
+            {
+                let existing_revision = u64::try_from(existing_revision).map_err(|_| {
+                    DbError("activated Store device registration revision is negative".to_string())
+                })?;
+                if existing_revision == registration.revision {
+                    if existing_hash == reference.registration_hash.to_string()
+                        && existing_previous == previous_hash
+                        && existing_state == state
+                        && existing_author == registration.author_pubkey
+                        && existing_bytes == registration_bytes
+                        && existing_stream == stream_id
+                        && existing_seq == seq
+                        && existing_commit == commit_hash
+                    {
+                        continue;
+                    }
+                    return Err(DbError(format!(
+                        "Store device registration {:?} revision {} has a different activation",
+                        registration.device_id, registration.revision
+                    )));
+                }
+                let expected_revision = existing_revision.checked_add(1).ok_or_else(|| {
+                    DbError("Store device registration revision overflow".to_string())
+                })?;
+                if registration.revision != expected_revision
+                    || previous_hash.as_deref() != Some(existing_hash.as_str())
+                    || registration.author_pubkey != existing_author
+                    || existing_state != "active"
+                    || registration.state != StoreDeviceRegistrationState::Retired
+                {
+                    return Err(DbError(format!(
+                        "Store device registration {:?} revision {} does not extend its activated chain",
+                        registration.device_id, registration.revision
+                    )));
+                }
+            } else if registration.revision != 1
+                || registration.previous_registration_hash.is_some()
+                || registration.state != StoreDeviceRegistrationState::Active
+            {
+                return Err(DbError(format!(
+                    "Store device registration {:?} must begin with revision 1 Active",
+                    registration.device_id
+                )));
+            }
+            conn.execute(
+                "INSERT INTO store_device_registration_activations \
+                 (device_id, revision, registration_hash, previous_registration_hash, state, \
+                  author_pubkey, registration_bytes, stream_id, seq, commit_hash) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    registration.device_id,
+                    i64::try_from(registration.revision).map_err(|_| DbError(
+                        "Store device registration revision exceeds SQLite INTEGER".to_string()
+                    ))?,
+                    reference.registration_hash.to_string(),
+                    previous_hash,
+                    state,
+                    registration.author_pubkey,
+                    registration_bytes,
+                    stream_id,
+                    seq,
+                    commit_hash,
+                ],
+            )
+            .map_err(DbError::from)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn activated_store_device_registrations(
+        &self,
+    ) -> Result<Vec<StoreDeviceRegistration>, DbError> {
+        let store_root_hash = self
+            .get_protocol_state(STORE_ROOT_HASH_STATE_KEY)
+            .await?
+            .ok_or_else(|| DbError("store root hash is absent".to_string()))?
+            .parse()
+            .map_err(|error| DbError(format!("store root hash: {error}")))?;
+        self.call(move |conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT device_id, revision, registration_bytes \
+                     FROM store_device_registration_activations \
+                     ORDER BY device_id, revision",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            rows.map(|row| {
+                let (device_id, revision, bytes) = row.map_err(DbError::from)?;
+                let revision = u64::try_from(revision).map_err(|_| {
+                    DbError("activated Store device registration revision is negative".to_string())
+                })?;
+                StoreDeviceRegistration::parse_at(&bytes, store_root_hash, &device_id, revision)
+                    .map_err(|error| {
+                        DbError(format!(
+                            "activated Store device registration {device_id:?}/{revision}: {error}"
+                        ))
+                    })
+            })
+            .collect()
+        })
+        .await
+    }
+
     pub(crate) fn record_materialized_commit_on(
         conn: &Connection,
         commit: &StoreBatchCommit,
@@ -5138,10 +5774,9 @@ impl Database {
         commit: StoreBatchCommit,
         authorization_after: SerialAuthorizationState,
     ) -> Result<(), DbError> {
-        if commit.control.is_none() || commit.package.changeset_size != 0 {
+        if commit.control.is_none() || commit.store_package.is_some() {
             return Err(DbError(
-                "Serial control materialization requires an exact empty control package"
-                    .to_string(),
+                "Serial control materialization requires a control-only Store batch".to_string(),
             ));
         }
         self.call(move |conn| {
@@ -5907,6 +6542,178 @@ mod tests {
 
     fn things_table(identity: crate::sync::session::RowIdentity) -> SyncedTable {
         SyncedTable::new("things", identity)
+    }
+
+    #[test]
+    fn fresh_open_rolls_back_host_schema_and_coven_metadata_when_routing_is_invalid() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("fresh-routing-failure.sqlite");
+        let result = Database::open(
+            &path,
+            vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
+            "fresh-routing-failure".to_string(),
+            &[Migration::sql(
+                1,
+                "invalid routing",
+                "CREATE TABLE local_parents (id TEXT PRIMARY KEY) STRICT;
+                 CREATE TABLE things (
+                    id TEXT PRIMARY KEY,
+                    local_parent_id TEXT NOT NULL REFERENCES local_parents(id),
+                    _updated_at TEXT NOT NULL
+                 ) STRICT;",
+            )],
+        );
+        let error = match result {
+            Ok(_) => panic!("fresh open must reject a synced-to-local foreign key"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("local_parents"), "{error}");
+
+        let conn = Connection::open(&path).expect("inspect rolled-back database");
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user version");
+        let durable_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("durable tables");
+        assert_eq!(user_version, 0);
+        assert_eq!(durable_tables, 0);
+    }
+
+    #[test]
+    fn initialized_open_commits_ordinary_migration_without_changing_routing_contract() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("ordinary-migration.sqlite");
+        let migrations = [things_migration()];
+        let (database, _) = Database::open(
+            &path,
+            vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
+            "ordinary-first-open".to_string(),
+            &migrations,
+        )
+        .expect("initial open");
+        let pinned_hash = database.sync_routing_hash();
+        drop(database);
+
+        let migrations = [
+            things_migration(),
+            Migration::sql(
+                2,
+                "ordinary column and index",
+                "ALTER TABLE things ADD COLUMN ordinary TEXT DEFAULT 'ordinary';
+                 CREATE INDEX things_ordinary ON things(ordinary);",
+            ),
+        ];
+        let (database, _) = Database::open(
+            &path,
+            vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
+            "ordinary-second-open".to_string(),
+            &migrations,
+        )
+        .expect("ordinary migration open");
+        assert_eq!(database.schema_version(), 2);
+        assert_eq!(database.sync_routing_hash(), pinned_hash);
+        drop(database);
+
+        let conn = Connection::open(&path).expect("inspect migrated database");
+        let ordinary_ordinal: i64 = conn
+            .query_row(
+                "SELECT cid FROM pragma_table_info('things') WHERE name = 'ordinary'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("ordinary column");
+        assert_eq!(ordinary_ordinal, 3);
+    }
+
+    #[test]
+    fn initialized_open_rolls_back_routing_migration_and_user_version() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("routing-migration.sqlite");
+        let v1 = || {
+            Migration::sql(
+                1,
+                "scoped things",
+                "CREATE TABLE things (
+                    id TEXT PRIMARY KEY,
+                    audience TEXT COLLATE BINARY NOT NULL,
+                    _updated_at TEXT NOT NULL
+                 ) STRICT;",
+            )
+        };
+        let table = || {
+            SyncedTable::new("things", crate::sync::session::RowIdentity::SharedKey)
+                .scoped_by("audience")
+        };
+        let (database, _) = Database::open(
+            &path,
+            vec![table()],
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
+            "routing-first-open".to_string(),
+            &[v1()],
+        )
+        .expect("initial open");
+        drop(database);
+
+        let v2 = Migration::sql(
+            2,
+            "change audience collation",
+            "CREATE TABLE things_next (
+                id TEXT PRIMARY KEY,
+                audience TEXT COLLATE NOCASE NOT NULL,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             INSERT INTO things_next SELECT * FROM things;
+             DROP TABLE things;
+             ALTER TABLE things_next RENAME TO things;",
+        );
+        let result = Database::open(
+            &path,
+            vec![table()],
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
+            "routing-second-open".to_string(),
+            &[v1(), v2],
+        );
+        let error = match result {
+            Ok(_) => panic!("routing migration must not commit"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("sync-routing hash"), "{error}");
+
+        let conn = Connection::open(&path).expect("inspect rolled-back migration");
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user version");
+        let things_next: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'things_next'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("things_next presence");
+        let (_, collation, _, _, _) = conn
+            .column_metadata(None::<&str>, "things", "audience")
+            .expect("audience metadata");
+        assert_eq!(user_version, 1);
+        assert_eq!(things_next, 0);
+        assert_eq!(collation.unwrap().to_bytes(), b"BINARY");
     }
 
     #[test]

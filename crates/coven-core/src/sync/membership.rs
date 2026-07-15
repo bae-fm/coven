@@ -10,7 +10,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::store_commit::{ObjectHash, StoreBatchCommit, StoreControl, STORE_PROTOCOL_VERSION};
+use super::store_commit::{
+    ObjectHash, StoreBatchCommit, StoreControl, StoreDeviceRegistration, STORE_PROTOCOL_VERSION,
+};
 use crate::keys::{self, UserKeypair};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -127,10 +129,20 @@ impl SerialAuthorizationState {
         &self,
         commit: &StoreBatchCommit,
     ) -> Result<Self, SerialMembershipError> {
+        self.authorize_and_apply_with_registrations(commit, &[])
+    }
+
+    pub(crate) fn authorize_and_apply_with_registrations(
+        &self,
+        commit: &StoreBatchCommit,
+        registrations: &[StoreDeviceRegistration],
+    ) -> Result<Self, SerialMembershipError> {
         if commit.membership_grant.is_some() {
             return Err(SerialMembershipError::CausalGrant);
         }
-        if !self.membership.can_write(&commit.author_pubkey) {
+        if !self.membership.can_write(&commit.author_pubkey)
+            && !self.authorizes_self_registration(commit, registrations)
+        {
             return Err(SerialMembershipError::AuthorIsNotWriter(
                 commit.author_pubkey.clone(),
             ));
@@ -164,6 +176,30 @@ impl SerialAuthorizationState {
             membership,
             key_generation,
         })
+    }
+
+    fn authorizes_self_registration(
+        &self,
+        commit: &StoreBatchCommit,
+        registrations: &[StoreDeviceRegistration],
+    ) -> bool {
+        let [reference] = commit.device_registrations.as_slice() else {
+            return false;
+        };
+        let [registration] = registrations else {
+            return false;
+        };
+        self.membership.contains(&commit.author_pubkey)
+            && commit.control.is_none()
+            && commit.store_package.is_none()
+            && commit.circle_controls.is_empty()
+            && commit.circle_packages.is_empty()
+            && registration.store_root_hash == commit.store_root_hash
+            && registration.device_id == commit.device_id
+            && registration.author_pubkey == commit.author_pubkey
+            && reference.device_id == registration.device_id
+            && reference.revision == registration.revision
+            && reference.registration_hash == registration.registration_hash()
     }
 }
 
@@ -238,6 +274,10 @@ impl SerialMembershipState {
         self.members
             .get(pubkey)
             .is_some_and(|member| member.role.can_write())
+    }
+
+    fn contains(&self, pubkey: &str) -> bool {
+        self.members.contains_key(pubkey)
     }
 
     pub fn is_owner(&self, pubkey: &str) -> bool {
@@ -1591,6 +1631,9 @@ impl AuthorHead {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::store_commit::{
+        StoreCommitOrder, StoreDeviceRegistrationRef, StoreDeviceRegistrationState,
+    };
 
     fn key() -> UserKeypair {
         UserKeypair::generate()
@@ -1598,6 +1641,155 @@ mod tests {
 
     fn founded(store_id: &str, owner: &UserKeypair) -> MembershipChain {
         MembershipChain::from_entries(vec![founder_entry(store_id, owner, "founder")]).unwrap()
+    }
+
+    fn serial_authorization_with_follower(
+        root: ObjectHash,
+        owner: &UserKeypair,
+        follower: &UserKeypair,
+    ) -> SerialAuthorizationState {
+        let founder = founder_entry("serial-registration", owner, "founder");
+        let authorization = SerialAuthorizationState::from_founder(root, &founder).unwrap();
+        let add = authorization
+            .membership
+            .signed_set_member(
+                owner,
+                keys::public_key_hex(follower),
+                None,
+                MemberRole::Follower,
+                "add follower".to_string(),
+            )
+            .unwrap();
+        SerialAuthorizationState {
+            membership: authorization.membership.apply(&add).unwrap(),
+            key_generation: authorization.key_generation,
+        }
+    }
+
+    fn registration_commit(
+        root: ObjectHash,
+        seq: u64,
+        previous_commit_hash: Option<ObjectHash>,
+        registration: &StoreDeviceRegistration,
+        signer: &UserKeypair,
+    ) -> StoreBatchCommit {
+        StoreBatchCommit::signed_with_registrations(
+            root,
+            crate::WriteId::from_generated(format!("registration-{seq}")),
+            registration.device_id.clone(),
+            StoreCommitOrder::Serial {
+                seq,
+                previous_commit_hash,
+            },
+            None,
+            vec![StoreDeviceRegistrationRef::from_registration(registration)],
+            signer,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn serial_follower_can_activate_and_retire_its_exact_registration() {
+        let root = ObjectHash::digest(b"follower registration root");
+        let owner = key();
+        let follower = key();
+        let authorization = serial_authorization_with_follower(root, &owner, &follower);
+        let active = StoreDeviceRegistration::signed(
+            root,
+            "follower-device".to_string(),
+            1,
+            None,
+            StoreDeviceRegistrationState::Active,
+            &follower,
+        )
+        .unwrap();
+        let active_commit = registration_commit(root, 1, None, &active, &follower);
+        authorization
+            .authorize_and_apply_with_registrations(&active_commit, std::slice::from_ref(&active))
+            .expect("active self-registration");
+
+        let retired = StoreDeviceRegistration::signed(
+            root,
+            "follower-device".to_string(),
+            2,
+            Some(active.registration_hash()),
+            StoreDeviceRegistrationState::Retired,
+            &follower,
+        )
+        .unwrap();
+        let retirement_commit = registration_commit(
+            root,
+            2,
+            Some(active_commit.commit_hash()),
+            &retired,
+            &follower,
+        );
+        authorization
+            .authorize_and_apply_with_registrations(
+                &retirement_commit,
+                std::slice::from_ref(&retired),
+            )
+            .expect("self-signed retirement");
+    }
+
+    #[test]
+    fn serial_follower_cannot_activate_another_identity_or_mixed_payload() {
+        let root = ObjectHash::digest(b"follower registration negatives");
+        let owner = key();
+        let follower = key();
+        let outsider = key();
+        let authorization = serial_authorization_with_follower(root, &owner, &follower);
+        let another_identity = StoreDeviceRegistration::signed(
+            root,
+            "follower-device".to_string(),
+            1,
+            None,
+            StoreDeviceRegistrationState::Active,
+            &outsider,
+        )
+        .unwrap();
+        let another_identity_commit =
+            registration_commit(root, 1, None, &another_identity, &follower);
+        assert!(matches!(
+            authorization.authorize_and_apply_with_registrations(
+                &another_identity_commit,
+                std::slice::from_ref(&another_identity),
+            ),
+            Err(SerialMembershipError::AuthorIsNotWriter(_))
+        ));
+
+        let own = StoreDeviceRegistration::signed(
+            root,
+            "follower-device".to_string(),
+            1,
+            None,
+            StoreDeviceRegistrationState::Active,
+            &follower,
+        )
+        .unwrap();
+        let mixed = StoreBatchCommit::signed_batch(
+            root,
+            crate::WriteId::from_generated("mixed-registration".to_string()),
+            own.device_id.clone(),
+            StoreCommitOrder::Serial {
+                seq: 1,
+                previous_commit_hash: None,
+            },
+            None,
+            None,
+            vec![StoreDeviceRegistrationRef::from_registration(&own)],
+            Vec::new(),
+            1,
+            Some(b"row payload"),
+            &[],
+            &follower,
+        )
+        .unwrap();
+        assert!(matches!(
+            authorization
+                .authorize_and_apply_with_registrations(&mixed, std::slice::from_ref(&own)),
+            Err(SerialMembershipError::AuthorIsNotWriter(_))
+        ));
     }
 
     #[test]

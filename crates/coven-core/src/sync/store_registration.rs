@@ -3,9 +3,12 @@
 use crate::database::Database;
 use crate::keys::UserKeypair;
 
-use super::storage::SyncStorage;
+use super::membership::MembershipChain;
+use super::storage::{CoordinationStorage, SyncStorage};
 use super::store_commit::{
-    registration_semantic_prefix, ObjectHash, StoreDeviceRegistration, StoreDeviceRegistrationState,
+    commit_semantic_prefix, head_semantic_prefix, registration_semantic_prefix, ObjectHash,
+    StoreBatchCommit, StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreDeviceRegistrationState, StoreSerialHead,
 };
 use super::store_objects::{append_and_verify, StoreObjectError};
 
@@ -21,14 +24,36 @@ pub enum StoreRegistrationError {
     Invalid(String),
     #[error("retired Store device {device_id:?} cannot become active again")]
     RetiredDevice { device_id: String },
+    #[error("Store device registration activation: {0}")]
+    Outbound(#[from] super::store_outbound::StoreOutboundError),
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn ensure_active_registration(
     db: &Database,
     storage: &dyn SyncStorage,
     signer: &UserKeypair,
 ) -> Result<(), StoreRegistrationError> {
-    drain_registration_outbox(db, storage).await?;
+    ensure_active_registration_with_coordination(
+        db,
+        storage,
+        None,
+        signer,
+        None,
+        "1970-01-01T00:00:00Z",
+    )
+    .await
+}
+
+pub async fn ensure_active_registration_with_coordination(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    signer: &UserKeypair,
+    membership: Option<&MembershipChain>,
+    published_at: &str,
+) -> Result<(), StoreRegistrationError> {
+    drain_registration_outbox(db, storage, coordination, signer, membership, published_at).await?;
     match db
         .latest_local_store_device_registration()
         .await
@@ -38,7 +63,8 @@ pub async fn ensure_active_registration(
             if registration.state == StoreDeviceRegistrationState::Active
                 && registration.published =>
         {
-            return Ok(())
+            require_activated_registration(db, &registration).await?;
+            return Ok(());
         }
         Some(registration) if registration.state == StoreDeviceRegistrationState::Active => {
             return Err(StoreRegistrationError::Database(format!(
@@ -65,15 +91,30 @@ pub async fn ensure_active_registration(
     db.stage_store_device_registration(registration)
         .await
         .map_err(database_error)?;
-    drain_registration_outbox(db, storage).await.map(|_| ())
+    drain_registration_outbox(db, storage, coordination, signer, membership, published_at)
+        .await
+        .map(|_| ())
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn retire_registration(
     db: &Database,
     storage: &dyn SyncStorage,
     signer: &UserKeypair,
 ) -> Result<bool, StoreRegistrationError> {
-    drain_registration_outbox(db, storage).await?;
+    retire_registration_with_coordination(db, storage, None, signer, None, "1970-01-01T00:00:00Z")
+        .await
+}
+
+pub async fn retire_registration_with_coordination(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    signer: &UserKeypair,
+    membership: Option<&MembershipChain>,
+    published_at: &str,
+) -> Result<bool, StoreRegistrationError> {
+    drain_registration_outbox(db, storage, coordination, signer, membership, published_at).await?;
     let Some(latest) = db
         .latest_local_store_device_registration()
         .await
@@ -82,6 +123,7 @@ pub async fn retire_registration(
         return Ok(false);
     };
     if latest.state == StoreDeviceRegistrationState::Retired && latest.published {
+        require_activated_registration(db, &latest).await?;
         return Ok(true);
     }
     if latest.state == StoreDeviceRegistrationState::Retired {
@@ -102,13 +144,17 @@ pub async fn retire_registration(
     db.stage_store_device_registration(registration)
         .await
         .map_err(database_error)?;
-    drain_registration_outbox(db, storage).await?;
+    drain_registration_outbox(db, storage, coordination, signer, membership, published_at).await?;
     Ok(true)
 }
 
 pub async fn drain_registration_outbox(
     db: &Database,
     storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    signer: &UserKeypair,
+    membership: Option<&MembershipChain>,
+    published_at: &str,
 ) -> Result<u64, StoreRegistrationError> {
     let store_root_hash = protocol_hash(db).await?;
     let device_id = protocol_value(db, crate::database::LOCAL_DEVICE_ID_STATE_KEY).await?;
@@ -144,14 +190,267 @@ pub async fn drain_registration_outbox(
             &outbound.registration_bytes,
         )
         .await?;
-        db.complete_store_device_registration(outbound.revision, outbound.registration_hash)
+        if outbound.activation_commit_bytes.is_none() {
+            prepare_registration_activation(
+                db,
+                storage,
+                coordination,
+                signer,
+                membership,
+                published_at,
+                &registration,
+            )
+            .await?;
+        }
+        let prepared = db
+            .oldest_unpublished_store_device_registration()
             .await
-            .map_err(database_error)?;
+            .map_err(database_error)?
+            .ok_or_else(|| {
+                StoreRegistrationError::Database(
+                    "prepared Store registration activation disappeared".to_string(),
+                )
+            })?;
+        if prepared.revision != outbound.revision
+            || prepared.registration_hash != outbound.registration_hash
+        {
+            return Err(StoreRegistrationError::Database(
+                "prepared Store registration activation changed ownership".to_string(),
+            ));
+        }
+        publish_registration_activation(db, storage, coordination, &registration, &prepared)
+            .await?;
         published = published.checked_add(1).ok_or_else(|| {
             StoreRegistrationError::Database("registration publish count exceeded u64".to_string())
         })?;
     }
     Ok(published)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_registration_activation(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    signer: &UserKeypair,
+    membership: Option<&MembershipChain>,
+    published_at: &str,
+    registration: &StoreDeviceRegistration,
+) -> Result<(), StoreRegistrationError> {
+    let reference = StoreDeviceRegistrationRef::from_registration(registration);
+    match db.write_policy() {
+        crate::WritePolicy::MergeConcurrent => {
+            let previous = db
+                .latest_local_store_position()
+                .await
+                .map_err(database_error)?;
+            let mut dependencies = db.materialized_frontier().await.map_err(database_error)?;
+            dependencies.remove(&registration.device_id);
+            let membership_grant = match membership {
+                Some(chain) => chain
+                    .write_grant_coord(&crate::keys::public_key_hex(signer))
+                    .ok_or_else(|| {
+                        StoreRegistrationError::Invalid(
+                            "local identity has no active Store write grant".to_string(),
+                        )
+                    })
+                    .map(Some)?,
+                None => None,
+            };
+            let commit = StoreBatchCommit::signed_with_registrations(
+                registration.store_root_hash,
+                db.new_write_id(),
+                registration.device_id.clone(),
+                StoreCommitOrder::MergeConcurrent {
+                    seq: previous.as_ref().map_or(1, |position| position.seq + 1),
+                    previous_commit_hash: previous.map(|position| position.commit_hash),
+                    dependencies,
+                },
+                membership_grant,
+                vec![reference],
+                signer,
+            )
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            let head = StoreDeviceHead::signed(
+                registration.store_root_hash,
+                registration.device_id.clone(),
+                Some(commit.position()),
+                published_at.to_string(),
+                signer,
+            )
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            db.stage_merge_store_device_registration_activation(
+                registration.revision,
+                registration.registration_hash(),
+                commit,
+                head,
+            )
+            .await
+            .map_err(database_error)
+        }
+        crate::WritePolicy::Serial => {
+            let coordination = coordination.ok_or_else(|| {
+                StoreRegistrationError::Invalid(
+                    "Serial registration activation requires coordination".to_string(),
+                )
+            })?;
+            let base =
+                super::store_outbound::current_serial_head_position(db, coordination).await?;
+            let authorization =
+                super::store_outbound::current_serial_authorization(db, storage, coordination)
+                    .await?;
+            let commit = StoreBatchCommit::signed_with_registrations(
+                registration.store_root_hash,
+                db.new_write_id(),
+                registration.device_id.clone(),
+                StoreCommitOrder::Serial {
+                    seq: base.as_ref().map_or(1, |position| position.seq + 1),
+                    previous_commit_hash: base.as_ref().map(|position| position.commit_hash),
+                },
+                None,
+                vec![reference],
+                signer,
+            )
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            authorization
+                .authorize_and_apply_with_registrations(&commit, std::slice::from_ref(registration))
+                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            let head = StoreSerialHead::signed(
+                registration.store_root_hash,
+                Some(commit.position()),
+                Some(commit.write_id.clone()),
+                signer,
+            )
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            db.stage_serial_store_device_registration_activation(
+                registration.revision,
+                registration.registration_hash(),
+                commit,
+                head,
+            )
+            .await
+            .map_err(database_error)
+        }
+    }
+}
+
+async fn publish_registration_activation(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: Option<&dyn CoordinationStorage>,
+    registration: &StoreDeviceRegistration,
+    prepared: &crate::database::DurableDeviceRegistration,
+) -> Result<(), StoreRegistrationError> {
+    let commit_bytes = prepared.activation_commit_bytes.as_ref().ok_or_else(|| {
+        StoreRegistrationError::Invalid(
+            "Store registration activation has no durable commit bytes".to_string(),
+        )
+    })?;
+    let unverified: StoreBatchCommit = serde_json::from_slice(commit_bytes)
+        .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+    let stream_id = unverified.order.stream_id(&unverified.device_id);
+    let commit = StoreBatchCommit::parse_at(
+        commit_bytes,
+        registration.store_root_hash,
+        db.write_policy(),
+        stream_id,
+        unverified.seq(),
+    )
+    .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+    if commit != unverified
+        || commit.device_registrations.as_slice()
+            != [StoreDeviceRegistrationRef::from_registration(registration)]
+    {
+        return Err(StoreRegistrationError::Invalid(
+            "durable Store registration activation differs from its signed bytes".to_string(),
+        ));
+    }
+    let head_bytes = prepared.activation_head_bytes.as_ref().ok_or_else(|| {
+        StoreRegistrationError::Invalid(
+            "Store registration activation has no durable head bytes".to_string(),
+        )
+    })?;
+    match db.write_policy() {
+        crate::WritePolicy::MergeConcurrent => {
+            let head = StoreDeviceHead::parse_at(
+                head_bytes,
+                registration.store_root_hash,
+                &registration.device_id,
+                commit.seq(),
+            )
+            .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            if head.position.as_ref() != Some(&commit.position()) {
+                return Err(StoreRegistrationError::Invalid(
+                    "Store registration head does not activate its commit".to_string(),
+                ));
+            }
+            append_and_verify(
+                storage,
+                &commit_semantic_prefix(
+                    &registration.device_id,
+                    commit.seq(),
+                    commit.commit_hash(),
+                ),
+                ".json",
+                commit_bytes,
+            )
+            .await?;
+            append_and_verify(
+                storage,
+                &head_semantic_prefix(&registration.device_id, commit.seq(), head.head_hash()),
+                ".json",
+                head_bytes,
+            )
+            .await?;
+            db.complete_merge_store_device_registration_activation(
+                registration.revision,
+                registration.registration_hash(),
+                commit,
+            )
+            .await
+            .map_err(database_error)
+        }
+        crate::WritePolicy::Serial => {
+            let coordination = coordination.ok_or_else(|| {
+                StoreRegistrationError::Invalid(
+                    "Serial registration activation requires coordination".to_string(),
+                )
+            })?;
+            let head = StoreSerialHead::parse(head_bytes, registration.store_root_hash)
+                .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            if head.commit.as_ref() != Some(&commit.position()) {
+                return Err(StoreRegistrationError::Invalid(
+                    "Serial registration head does not activate its commit".to_string(),
+                ));
+            }
+            let base = commit.previous_commit_hash().map(|commit_hash| {
+                super::store_commit::CommitPosition {
+                    seq: commit.seq() - 1,
+                    commit_hash,
+                }
+            });
+            super::store_outbound::activate_serial_commit_head(
+                db,
+                storage,
+                coordination,
+                base,
+                &commit,
+                &head,
+            )
+            .await?;
+            let authorization =
+                super::store_outbound::current_serial_authorization(db, storage, coordination)
+                    .await?;
+            db.complete_serial_store_device_registration_activation(
+                registration.revision,
+                registration.registration_hash(),
+                commit,
+                authorization,
+            )
+            .await
+            .map_err(database_error)
+        }
+    }
 }
 
 async fn protocol_hash(db: &Database) -> Result<ObjectHash, StoreRegistrationError> {
@@ -161,6 +460,28 @@ async fn protocol_hash(db: &Database) -> Result<ObjectHash, StoreRegistrationErr
         .map_err(|error| {
             StoreRegistrationError::Invalid(format!("store protocol root hash: {error}"))
         })
+}
+
+async fn require_activated_registration(
+    db: &Database,
+    durable: &crate::database::DurableDeviceRegistration,
+) -> Result<(), StoreRegistrationError> {
+    let activated = db
+        .activated_store_device_registrations()
+        .await
+        .map_err(database_error)?;
+    if activated.iter().any(|registration| {
+        registration.revision == durable.revision
+            && registration.registration_hash() == durable.registration_hash
+            && registration.state == durable.state
+    }) {
+        Ok(())
+    } else {
+        Err(StoreRegistrationError::Database(format!(
+            "published Store device registration revision {} has no activated Store commit",
+            durable.revision
+        )))
+    }
 }
 
 async fn protocol_value(
@@ -189,7 +510,9 @@ mod tests {
     use crate::sync::store_objects::{
         append_and_verify, list_latest_registration_chains, StoreObjectError,
     };
-    use crate::sync::test_helpers::{open_test_db, publish_test_store_protocol_root};
+    use crate::sync::test_helpers::{
+        open_test_db, publish_test_store_protocol_root, temp_store_dir,
+    };
 
     async fn initialized(
         source: &str,
@@ -237,6 +560,49 @@ mod tests {
         assert_eq!(latest.revision, 2);
         assert_eq!(latest.state, StoreDeviceRegistrationState::Retired);
         assert!(latest.previous_registration_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn peer_materializes_registration_only_through_its_activating_store_commit() {
+        let (_home, storage, source, signer, store_root_hash) =
+            initialized("registration-activation-round-trip").await;
+        ensure_active_registration(&source, &storage, &signer)
+            .await
+            .unwrap();
+
+        let peer = open_test_db();
+        let peer_root = publish_test_store_protocol_root(
+            &peer,
+            &storage,
+            "registration-store-test",
+            "dev-peer",
+            &signer,
+        )
+        .await;
+        assert_eq!(peer_root, store_root_hash);
+        assert!(peer
+            .activated_store_device_registrations()
+            .await
+            .unwrap()
+            .is_empty());
+
+        let (_temp, store_dir) = temp_store_dir();
+        super::super::store_pull::pull_store_commits(
+            &peer,
+            peer.synced_tables(),
+            &storage,
+            store_root_hash,
+            "dev-peer",
+            &store_dir,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let activated = peer.activated_store_device_registrations().await.unwrap();
+        assert_eq!(activated.len(), 1);
+        assert_eq!(activated[0].device_id, "dev-reader");
+        assert_eq!(activated[0].state, StoreDeviceRegistrationState::Active);
     }
 
     #[tokio::test]

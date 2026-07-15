@@ -790,6 +790,7 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         &store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,
     )
@@ -1147,6 +1148,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         &MembershipFloor::MergeConcurrent(chain.author_heads()),
         &storage,
         None,
+        None,
         boot,
         &lib_b,
         &tokio::sync::watch::channel(false).1,
@@ -1453,6 +1455,7 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         &store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &tokio::sync::watch::channel(false).1,
     )

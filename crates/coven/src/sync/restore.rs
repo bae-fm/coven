@@ -326,6 +326,7 @@ pub async fn restore_from_cloud(
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
+            clock.as_ref(),
             &on_status,
             cancel,
         )

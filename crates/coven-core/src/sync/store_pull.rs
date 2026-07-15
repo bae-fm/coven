@@ -16,11 +16,12 @@ use super::session::SyncedTable;
 use super::storage::{CoordinationError, CoordinationStorage, SyncStorage};
 use super::store_commit::{
     serial_head_key, CommitPosition, ObjectHash, StoreBatchCommit, StoreDeviceHead,
-    StoreProtocolError, StoreSerialHead, SERIAL_STREAM_ID,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolError, StoreSerialHead,
+    SERIAL_STREAM_ID,
 };
 use super::store_objects::{
-    list_visible_heads, load_commit_slot, load_package, load_serial_commit_at_position,
-    load_store_protocol_root_at_hash, StoreObjectError,
+    list_visible_heads, load_commit_slot, load_package, load_registration_ref,
+    load_serial_commit_at_position, load_store_protocol_root_at_hash, StoreObjectError,
 };
 use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
 use crate::changeset::RowChange;
@@ -31,6 +32,11 @@ use crate::store_dir::StoreDir;
 pub enum HeldStorePositionReason {
     MissingCommit,
     MissingPackage,
+    MissingDeviceRegistration {
+        device_id: String,
+        revision: u64,
+        registration_hash: ObjectHash,
+    },
     MissingPredecessor(CommitPosition),
     MissingDependency {
         device_id: String,
@@ -170,20 +176,43 @@ impl From<DbError> for StorePullError {
 #[derive(Clone)]
 struct Candidate {
     commit: StoreBatchCommit,
-    package: Vec<u8>,
+    package: Option<Vec<u8>>,
+    registrations: Vec<StoreDeviceRegistration>,
 }
 
 struct AuthorizedSerialCommit {
     commit: StoreBatchCommit,
+    registrations: Vec<StoreDeviceRegistration>,
     authorization_after: SerialAuthorizationState,
+}
+
+enum RegistrationLoadError {
+    Missing(StoreDeviceRegistrationRef),
+    Object(StoreObjectError),
+}
+
+async fn load_commit_registrations(
+    storage: &dyn SyncStorage,
+    commit: &StoreBatchCommit,
+) -> Result<Vec<StoreDeviceRegistration>, RegistrationLoadError> {
+    let mut registrations = Vec::with_capacity(commit.device_registrations.len());
+    for reference in &commit.device_registrations {
+        match load_registration_ref(storage, commit.store_root_hash, reference).await {
+            Ok(Some(registration)) => registrations.push(registration.value),
+            Ok(None) => return Err(RegistrationLoadError::Missing(reference.clone())),
+            Err(error) => return Err(RegistrationLoadError::Object(error)),
+        }
+    }
+    Ok(registrations)
 }
 
 #[doc(hidden)]
 pub struct SerialResolutionCommit {
     pub(crate) commit: StoreBatchCommit,
-    pub(crate) package: Vec<u8>,
+    pub(crate) package: Option<Vec<u8>>,
     pub(crate) uploads: Vec<(String, String, String)>,
     pub(crate) cleanup: Vec<LocalBlobCleanupIntent>,
+    pub(crate) registrations: Vec<StoreDeviceRegistration>,
     pub(crate) authorization_after: SerialAuthorizationState,
 }
 
@@ -398,13 +427,22 @@ pub async fn pull_store_commits_with_coordination(
                 expected_position = predecessor;
                 continue;
             }
-            if commit.package.schema_version > db.schema_version() {
+            if commit
+                .store_package
+                .as_ref()
+                .is_some_and(|package| package.schema_version > db.schema_version())
+            {
+                let required = commit
+                    .store_package
+                    .as_ref()
+                    .expect("checked Store package")
+                    .schema_version;
                 held.push(held_commit(
                     &commit.device_id,
                     commit.position(),
                     HeldStorePositionReason::NewerSchema {
                         local: db.schema_version(),
-                        required: commit.package.schema_version,
+                        required,
                     },
                 ));
                 let Some(predecessor) = predecessor else {
@@ -413,8 +451,40 @@ pub async fn pull_store_commits_with_coordination(
                 expected_position = predecessor;
                 continue;
             }
+            let registrations = match load_commit_registrations(storage, &commit).await {
+                Ok(registrations) => registrations,
+                Err(RegistrationLoadError::Missing(reference)) => {
+                    held.push(held_commit(
+                        &commit.device_id,
+                        commit.position(),
+                        HeldStorePositionReason::MissingDeviceRegistration {
+                            device_id: reference.device_id,
+                            revision: reference.revision,
+                            registration_hash: reference.registration_hash,
+                        },
+                    ));
+                    let Some(predecessor) = predecessor else {
+                        break;
+                    };
+                    expected_position = predecessor;
+                    continue;
+                }
+                Err(RegistrationLoadError::Object(error)) => {
+                    held.push(held_commit(
+                        &commit.device_id,
+                        commit.position(),
+                        held_object_error(error),
+                    ));
+                    let Some(predecessor) = predecessor else {
+                        break;
+                    };
+                    expected_position = predecessor;
+                    continue;
+                }
+            };
             let package = match load_package(storage, &commit).await {
-                Ok(Some(package)) => package,
+                Ok(Some(package)) => Some(package.value),
+                Ok(None) if commit.store_package.is_none() => None,
                 Ok(None) => {
                     held.push(held_package(
                         &commit,
@@ -439,7 +509,8 @@ pub async fn pull_store_commits_with_coordination(
                 (commit.device_id.clone(), commit.seq()),
                 Candidate {
                     commit,
-                    package: package.value,
+                    package,
+                    registrations,
                 },
             );
             let Some(predecessor) = predecessor else {
@@ -600,13 +671,26 @@ async fn load_authorized_serial_prefix(
         .map_err(|error| StorePullError::Serial(error.to_string()))?;
     let mut authorized = Vec::with_capacity(reverse.len());
     for commit in reverse {
+        let registrations = load_commit_registrations(storage, &commit)
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Missing(reference) => StorePullError::Serial(format!(
+                    "commit {} registration {:?}/{} ({}) is absent",
+                    commit.seq(),
+                    reference.device_id,
+                    reference.revision,
+                    reference.registration_hash,
+                )),
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+            })?;
         authorization = authorization
-            .authorize_and_apply(&commit)
+            .authorize_and_apply_with_registrations(&commit, &registrations)
             .map_err(|error| {
                 StorePullError::Serial(format!("commit {} authorization: {error}", commit.seq()))
             })?;
         authorized.push(AuthorizedSerialCommit {
             commit,
+            registrations,
             authorization_after: authorization.clone(),
         });
     }
@@ -779,21 +863,37 @@ async fn pull_serial_store_commits(
     let mut candidates = Vec::with_capacity(authorized_chain.len() - first_unmaterialized);
     for authorized in authorized_chain.into_iter().skip(first_unmaterialized) {
         let commit = authorized.commit;
-        if commit.package.schema_version > db.schema_version() {
+        if commit
+            .store_package
+            .as_ref()
+            .is_some_and(|package| package.schema_version > db.schema_version())
+        {
+            let package = commit
+                .store_package
+                .as_ref()
+                .expect("checked Store package");
             return Err(StorePullError::Serial(format!(
                 "commit {} requires schema {}, local schema is {}",
                 commit.seq(),
-                commit.package.schema_version,
+                package.schema_version,
                 db.schema_version()
             )));
         }
-        let package = load_package(storage, &commit).await?.ok_or_else(|| {
-            StorePullError::Serial(format!("commit {} package is absent", commit.seq()))
-        })?;
+        let package = match load_package(storage, &commit).await? {
+            Some(package) => Some(package.value),
+            None if commit.store_package.is_none() => None,
+            None => {
+                return Err(StorePullError::Serial(format!(
+                    "commit {} Store package is absent",
+                    commit.seq()
+                )))
+            }
+        };
         candidates.push((
             Candidate {
                 commit,
-                package: package.value,
+                package,
+                registrations: authorized.registrations,
             },
             authorized.authorization_after,
         ));
@@ -936,30 +1036,46 @@ pub async fn prepare_serial_resolution(
             })?;
         let commit = authorized.commit.clone();
         let authorization_after = authorized.authorization_after.clone();
-        if commit.package.schema_version > db.schema_version() {
+        if commit
+            .store_package
+            .as_ref()
+            .is_some_and(|package| package.schema_version > db.schema_version())
+        {
+            let package = commit
+                .store_package
+                .as_ref()
+                .expect("checked Store package");
             return Err(StorePullError::Serial(format!(
                 "resolution commit {} requires schema {}, local schema is {}",
                 commit.seq(),
-                commit.package.schema_version,
+                package.schema_version,
                 db.schema_version()
             )));
         }
-        let package = load_package(storage, &commit)
-            .await?
-            .ok_or_else(|| {
-                StorePullError::Serial(format!(
-                    "resolution commit {} package is absent",
+        let package = match load_package(storage, &commit).await? {
+            Some(package) => Some(package.value),
+            None if commit.store_package.is_none() => None,
+            None => {
+                return Err(StorePullError::Serial(format!(
+                    "resolution commit {} Store package is absent",
                     commit.seq()
-                ))
-            })?
-            .value;
+                )))
+            }
+        };
         expected = commit
             .previous_commit_hash()
             .map(|commit_hash| CommitPosition {
                 seq: commit.seq() - 1,
                 commit_hash,
             });
-        reverse.push((Candidate { commit, package }, authorization_after));
+        reverse.push((
+            Candidate {
+                commit,
+                package,
+                registrations: authorized.registrations.clone(),
+            },
+            authorization_after,
+        ));
     }
     reverse.reverse();
     let schema: Arc<TableSchema> = {
@@ -978,6 +1094,7 @@ pub async fn prepare_serial_resolution(
             package: candidate.package,
             uploads: prepared.uploads,
             cleanup: prepared.cleanup,
+            registrations: candidate.registrations,
             authorization_after,
         });
     }
@@ -992,6 +1109,24 @@ async fn apply_serial_candidate(
     candidate: &Candidate,
     authorization_after: &SerialAuthorizationState,
 ) -> Result<Vec<RowChange>, StorePullError> {
+    if candidate.package.is_none() {
+        let commit = candidate.commit.clone();
+        let registrations = candidate.registrations.clone();
+        let authorization_after = authorization_after.clone();
+        db.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
+            Database::record_materialized_serial_commit_on(
+                &tx,
+                &commit,
+                &authorization_after.membership,
+                authorization_after.key_generation,
+            )?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await?;
+        return Ok(Vec::new());
+    }
     let prepared = prepare_serial_candidate(db, storage, store_dir, schema, candidate).await?;
     let PreparedSerialCandidate {
         changeset,
@@ -1000,6 +1135,7 @@ async fn apply_serial_candidate(
         cleanup,
     } = prepared;
     let commit = candidate.commit.clone();
+    let registrations = candidate.registrations.clone();
     let authorization_after = authorization_after.clone();
     let returned_changes = changes.clone();
     let blob_decls = db.blob_decls();
@@ -1023,6 +1159,7 @@ async fn apply_serial_candidate(
         for intent in cleanup {
             local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
         }
+        Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
         Database::record_materialized_serial_commit_on(
             &tx,
             &commit,
@@ -1053,7 +1190,10 @@ async fn prepare_serial_candidate(
     schema: Arc<TableSchema>,
     candidate: &Candidate,
 ) -> Result<PreparedSerialCandidate, StorePullError> {
-    let changeset = ValidatedChangeset::new(candidate.package.clone(), schema)
+    let package = candidate.package.clone().ok_or_else(|| {
+        StorePullError::Serial("row preparation requires a Store package".to_string())
+    })?;
+    let changeset = ValidatedChangeset::new(package, schema)
         .map_err(|error| StorePullError::Serial(format!("invalid changeset: {error}")))?;
     let changes = crate::changeset::walk(changeset.bytes())
         .map_err(|error| StorePullError::Serial(format!("invalid changeset: {error}")))?;
@@ -1344,7 +1484,19 @@ async fn apply_candidate(
     schema: Arc<TableSchema>,
     candidate: &Candidate,
 ) -> Result<ApplyOutcome, StorePullError> {
-    let changeset = match ValidatedChangeset::new(candidate.package.clone(), schema) {
+    let Some(package) = candidate.package.clone() else {
+        let commit = candidate.commit.clone();
+        let registrations = candidate.registrations.clone();
+        db.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
+            Database::record_materialized_commit_on(&tx, &commit)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await?;
+        return Ok(ApplyOutcome::Applied(Vec::new()));
+    };
+    let changeset = match ValidatedChangeset::new(package, schema) {
         Ok(changeset) => changeset,
         Err(error) => {
             return Ok(ApplyOutcome::Held(match error {
@@ -1441,6 +1593,7 @@ async fn commit_candidate(
     cleanup: Vec<LocalBlobCleanupIntent>,
 ) -> Result<ApplyOutcome, StorePullError> {
     let commit = candidate.commit.clone();
+    let registrations = candidate.registrations.clone();
     let returned_changes = changes.clone();
     let receiver_wall_ms = db.receive_wall_ms();
     let blob_decls = db.blob_decls();
@@ -1476,6 +1629,7 @@ async fn commit_candidate(
             for intent in cleanup {
                 local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
             }
+            Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
             Database::record_materialized_commit_on(&tx, &commit)?;
             tx.commit().map_err(DbError::from)?;
             if let Some(max_applied) = changeset_max.as_ref() {
@@ -1502,11 +1656,15 @@ fn held_commit(
 }
 
 fn held_package(commit: &StoreBatchCommit, reason: HeldStorePositionReason) -> HeldStorePosition {
+    let package = commit
+        .store_package
+        .as_ref()
+        .expect("held Store package is named by the commit");
     HeldStorePosition {
         coordinate: HeldStoreCoordinate::Package {
             device_id: commit.device_id.clone(),
             seq: commit.seq(),
-            package_hash: commit.package.content_hash,
+            package_hash: package.content_hash,
         },
         reason,
     }
@@ -1697,7 +1855,8 @@ mod tests {
             &keypair,
         )
         .unwrap();
-        append_and_verify(&storage, &loser.package.object_key, ".pkg", &[])
+        let loser_package = loser.store_package.as_ref().expect("Store package");
+        append_and_verify(&storage, &loser_package.object_key, ".pkg", &[])
             .await
             .unwrap();
         append_and_verify(
@@ -1796,9 +1955,11 @@ mod tests {
     }
 
     async fn append_serial_commit(storage: &CloudSyncStorage, commit: &StoreBatchCommit) {
-        append_and_verify(storage, &commit.package.object_key, ".pkg", &[])
-            .await
-            .unwrap();
+        if let Some(package) = commit.store_package.as_ref() {
+            append_and_verify(storage, &package.object_key, ".pkg", &[])
+                .await
+                .unwrap();
+        }
         append_and_verify(
             storage,
             &crate::sync::store_commit::commit_semantic_prefix(
@@ -2367,7 +2528,8 @@ mod tests {
             &keypair,
         )
         .unwrap();
-        append_and_verify(&storage, &rogue.package.object_key, ".pkg", &[])
+        let rogue_package = rogue.store_package.as_ref().expect("Store package");
+        append_and_verify(&storage, &rogue_package.object_key, ".pkg", &[])
             .await
             .unwrap();
         append_and_verify(
@@ -2537,7 +2699,8 @@ mod tests {
         )
         .unwrap();
         for commit in [&winner, &loser] {
-            append_and_verify(&storage, &commit.package.object_key, ".pkg", &[])
+            let package = commit.store_package.as_ref().expect("Store package");
+            append_and_verify(&storage, &package.object_key, ".pkg", &[])
                 .await
                 .unwrap();
             append_and_verify(
@@ -3022,7 +3185,8 @@ mod tests {
             keypair,
         )
         .expect("sign Store head");
-        append_and_verify(storage, &commit.package.object_key, ".pkg", package)
+        let store_package = commit.store_package.as_ref().expect("Store package");
+        append_and_verify(storage, &store_package.object_key, ".pkg", package)
             .await
             .expect("publish package");
         append_and_verify(
@@ -3072,6 +3236,7 @@ mod tests {
             "causal-ordering-test".to_string(),
             founder,
             1,
+            crate::sync::test_helpers::test_sync_routing_hash(),
             crate::WritePolicy::MergeConcurrent,
             &identity,
         )
@@ -3250,6 +3415,7 @@ mod tests {
             "causal-ordering-test".to_string(),
             founder,
             1,
+            crate::sync::test_helpers::test_sync_routing_hash(),
             crate::WritePolicy::MergeConcurrent,
             &identity,
         )
@@ -3828,7 +3994,11 @@ mod tests {
         .expect("sign dependent head");
         append_and_verify(
             &receiver_storage,
-            &commit.package.object_key,
+            &commit
+                .store_package
+                .as_ref()
+                .expect("Store package")
+                .object_key,
             ".pkg",
             &package,
         )
@@ -4145,7 +4315,11 @@ mod tests {
                 &keypair,
             )
             .unwrap();
-            let candidate = Candidate { commit, package };
+            let candidate = Candidate {
+                commit,
+                package: Some(package),
+                registrations: Vec::new(),
+            };
             let storage = crate::sync::test_helpers::MockSyncStorage::new();
             storage
                 .put_blob(

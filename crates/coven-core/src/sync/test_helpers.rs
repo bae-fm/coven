@@ -327,6 +327,17 @@ pub fn create_synced_schema(conn: &Connection) -> Result<(), DbError> {
     .map_err(DbError::from)
 }
 
+pub fn test_sync_routing_hash() -> crate::sync::store_commit::ObjectHash {
+    let conn = Connection::open_in_memory().expect("open schema-contract database");
+    create_synced_schema(&conn).expect("create schema-contract tables");
+    crate::sync::routing_contract::SyncRoutingContract::from_connection(
+        &conn,
+        &test_synced_tables(),
+    )
+    .expect("resolve test sync-schema contract")
+    .hash()
+}
+
 /// Open a [`Database`] over a fresh in-memory connection with the synthetic test
 /// schema and the [`test_synced_tables`] synced set. The returned stamper is
 /// dropped (tests stamp `_updated_at` literally in their SQL).
@@ -371,8 +382,8 @@ fn open_test_db_with(tables: Vec<SyncedTable>) -> Database {
 
 /// Open a test [`Database`] over the synthetic schema with a caller-supplied
 /// register clock (so a test can control the wall clock), plus an extra `seed`
-/// step run after the schema is created (to plant `protocol_state` rows or seeded
-/// `notes` rows before `Database::open` reads its floor).
+/// step run after the host schema is created to plant host rows before
+/// `Database::open` reads its floor.
 ///
 /// Used only by the register-clock tests (`hlc_register_tests`).
 pub fn open_test_db_with_hlc(
@@ -704,6 +715,7 @@ impl MockSyncStorage {
             store_id.to_string(),
             founder,
             1,
+            test_sync_routing_hash(),
             crate::WritePolicy::MergeConcurrent,
             &keypair,
         )
@@ -1278,7 +1290,15 @@ impl MockSyncStorage {
             head_signer,
         )
         .expect("sign test Store head");
-        self.append_test_protocol(&commit.package.object_key, ".pkg", changeset_bytes.to_vec());
+        self.append_test_protocol(
+            &commit
+                .store_package
+                .as_ref()
+                .expect("test Store commit has a package")
+                .object_key,
+            ".pkg",
+            changeset_bytes.to_vec(),
+        );
         self.append_test_protocol(
             &crate::sync::store_commit::commit_semantic_prefix(
                 device_id,
@@ -1858,6 +1878,7 @@ pub async fn publish_test_store_protocol_root(
         store_id.to_string(),
         founder_entry,
         1,
+        db.sync_routing_hash(),
         crate::WritePolicy::MergeConcurrent,
         founder,
     )
@@ -1899,6 +1920,7 @@ pub async fn publish_test_serial_store_protocol_root(
         store_id.to_string(),
         founder_entry,
         1,
+        db.sync_routing_hash(),
         crate::WritePolicy::Serial,
         founder,
     )
@@ -1950,6 +1972,7 @@ pub async fn publish_test_protocol_roots(
         store_id.to_string(),
         founder_entry.clone(),
         1,
+        test_sync_routing_hash(),
         crate::WritePolicy::MergeConcurrent,
         founder,
     )

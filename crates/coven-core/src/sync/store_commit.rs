@@ -1,6 +1,7 @@
 //! Signed, hash-addressed Store commit protocol objects.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -13,6 +14,8 @@ use super::membership::{
 };
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::CopyId;
+use crate::sync::circle::{CircleControlCoord, CircleId};
+use crate::KeyFingerprint;
 use crate::{WriteId, WritePolicy};
 
 pub const STORE_PROTOCOL_VERSION: u32 = 1;
@@ -240,6 +243,65 @@ pub struct StorePackageRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CirclePackageRef {
+    pub circle_id: CircleId,
+    pub control: CircleControlCoord,
+    pub package: StorePackageRef,
+    pub key_fingerprint: KeyFingerprint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleControlRef {
+    pub circle_id: CircleId,
+    pub control: CircleControlCoord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreDeviceRegistrationRef {
+    pub device_id: String,
+    pub revision: u64,
+    pub registration_hash: ObjectHash,
+}
+
+impl StoreDeviceRegistrationRef {
+    pub fn from_registration(registration: &StoreDeviceRegistration) -> Self {
+        Self {
+            device_id: registration.device_id.clone(),
+            revision: registration.revision,
+            registration_hash: registration.registration_hash(),
+        }
+    }
+
+    pub fn verify_registration(
+        &self,
+        registration: &StoreDeviceRegistration,
+    ) -> Result<(), StoreProtocolError> {
+        if registration.device_id != self.device_id
+            || registration.revision != self.revision
+            || registration.registration_hash() != self.registration_hash
+        {
+            return Err(StoreProtocolError::DeviceRegistrationRefMismatch {
+                device_id: self.device_id.clone(),
+                revision: self.revision,
+                expected: self.registration_hash,
+                actual: registration.registration_hash(),
+            });
+        }
+        Ok(())
+    }
+}
+
+pub struct CirclePackageInput<'a> {
+    pub circle_id: CircleId,
+    pub control: CircleControlCoord,
+    pub key_fingerprint: KeyFingerprint,
+    pub package_bytes: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreControl {
     SerialMembership {
@@ -279,7 +341,11 @@ pub struct StoreBatchCommit {
     pub membership_grant: Option<MembershipCoord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<StoreControl>,
-    pub package: StorePackageRef,
+    pub device_registrations: Vec<StoreDeviceRegistrationRef>,
+    pub circle_controls: Vec<CircleControlRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_package: Option<StorePackageRef>,
+    pub circle_packages: Vec<CirclePackageRef>,
     pub signature: String,
 }
 
@@ -294,7 +360,11 @@ struct CommitSignedFields<'a> {
     membership_grant: Option<&'a MembershipCoord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     control: Option<&'a StoreControl>,
-    package: &'a StorePackageRef,
+    device_registrations: &'a [StoreDeviceRegistrationRef],
+    circle_controls: &'a [CircleControlRef],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    store_package: Option<&'a StorePackageRef>,
+    circle_packages: &'a [CirclePackageRef],
 }
 
 impl StoreBatchCommit {
@@ -333,15 +403,18 @@ impl StoreBatchCommit {
         package_bytes: &[u8],
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_with_control(
+        Self::signed_batch(
             store_root_hash,
             write_id,
             device_id,
             order,
             membership_grant,
             None,
+            Vec::new(),
+            Vec::new(),
             schema_version,
-            package_bytes,
+            Some(package_bytes),
+            &[],
             signer,
         )
     }
@@ -356,6 +429,64 @@ impl StoreBatchCommit {
         control: Option<StoreControl>,
         schema_version: u32,
         package_bytes: &[u8],
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        let store_package = (!package_bytes.is_empty()).then_some(package_bytes);
+        Self::signed_batch(
+            store_root_hash,
+            write_id,
+            device_id,
+            order,
+            membership_grant,
+            control,
+            Vec::new(),
+            Vec::new(),
+            schema_version,
+            store_package,
+            &[],
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_registrations(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        device_id: String,
+        order: StoreCommitOrder,
+        membership_grant: Option<MembershipCoord>,
+        device_registrations: Vec<StoreDeviceRegistrationRef>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::signed_batch(
+            store_root_hash,
+            write_id,
+            device_id,
+            order,
+            membership_grant,
+            None,
+            device_registrations,
+            Vec::new(),
+            0,
+            None,
+            &[],
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_batch(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        device_id: String,
+        order: StoreCommitOrder,
+        membership_grant: Option<MembershipCoord>,
+        control: Option<StoreControl>,
+        device_registrations: Vec<StoreDeviceRegistrationRef>,
+        circle_controls: Vec<CircleControlRef>,
+        schema_version: u32,
+        store_package_bytes: Option<&[u8]>,
+        circle_package_inputs: &[CirclePackageInput<'_>],
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         validate_device_id(&device_id)?;
@@ -382,21 +513,51 @@ impl StoreBatchCommit {
         let author_pubkey = keys::public_key_hex(signer);
         validate_control(
             order.policy(),
-            package_bytes.is_empty(),
             store_root_hash,
             &author_pubkey,
             control.as_ref(),
         )?;
-        let changeset_size =
-            u64::try_from(package_bytes.len()).map_err(|_| StoreProtocolError::PackageTooLarge)?;
-        let content_hash = ObjectHash::digest(package_bytes);
         let stream_id = order.stream_id(&device_id);
-        let package = StorePackageRef {
-            object_key: package_semantic_prefix(stream_id, seq, content_hash),
-            content_hash,
-            schema_version,
-            changeset_size,
-        };
+        let store_package = store_package_bytes
+            .map(|bytes| package_ref(stream_id, seq, schema_version, bytes))
+            .transpose()?;
+        validate_device_registration_refs(&device_registrations)?;
+        let mut seen_circles = BTreeSet::new();
+        let circle_packages = circle_package_inputs
+            .iter()
+            .map(|input| {
+                if !seen_circles.insert(input.circle_id) {
+                    return Err(StoreProtocolError::DuplicateCirclePackage(input.circle_id));
+                }
+                validate_circle_control_coord(order.policy(), &input.control)?;
+                let package = package_ref(stream_id, seq, schema_version, input.package_bytes)?;
+                Ok(CirclePackageRef {
+                    circle_id: input.circle_id,
+                    control: input.control.clone(),
+                    package: StorePackageRef {
+                        object_key: circle_package_semantic_prefix(
+                            input.circle_id,
+                            stream_id,
+                            seq,
+                            package.content_hash,
+                        ),
+                        ..package
+                    },
+                    key_fingerprint: input.key_fingerprint,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreProtocolError>>()?;
+        for control_ref in &circle_controls {
+            validate_circle_control_coord(order.policy(), &control_ref.control)?;
+        }
+        if control.is_none()
+            && device_registrations.is_empty()
+            && circle_controls.is_empty()
+            && store_package.is_none()
+            && circle_packages.is_empty()
+        {
+            return Err(StoreProtocolError::EmptyBatch);
+        }
         let mut commit = Self {
             version: STORE_PROTOCOL_VERSION,
             store_root_hash,
@@ -406,7 +567,10 @@ impl StoreBatchCommit {
             order,
             membership_grant,
             control,
-            package,
+            device_registrations,
+            circle_controls,
+            store_package,
+            circle_packages,
             signature: String::new(),
         };
         let (_, signature) = keys::sign_hex(signer, &commit.canonical_signed_bytes());
@@ -424,7 +588,10 @@ impl StoreBatchCommit {
             order: &self.order,
             membership_grant: self.membership_grant.as_ref(),
             control: self.control.as_ref(),
-            package: &self.package,
+            device_registrations: &self.device_registrations,
+            circle_controls: &self.circle_controls,
+            store_package: self.store_package.as_ref(),
+            circle_packages: &self.circle_packages,
         };
         domain_json(COMMIT_DOMAIN, &fields)
     }
@@ -490,17 +657,49 @@ impl StoreBatchCommit {
             });
         }
         validate_device_id(&self.device_id)?;
-        if self.package.object_key
-            != package_semantic_prefix(stream_id, self.order.seq(), self.package.content_hash)
+        if let Some(package) = &self.store_package {
+            let expected =
+                package_semantic_prefix(stream_id, self.order.seq(), package.content_hash);
+            if package.object_key != expected {
+                return Err(StoreProtocolError::RelocatedPackage {
+                    expected,
+                    actual: package.object_key.clone(),
+                });
+            }
+        }
+        let mut seen_circles = BTreeSet::new();
+        for circle_package in &self.circle_packages {
+            if !seen_circles.insert(circle_package.circle_id) {
+                return Err(StoreProtocolError::DuplicateCirclePackage(
+                    circle_package.circle_id,
+                ));
+            }
+            validate_circle_control_coord(self.policy(), &circle_package.control)?;
+            let expected = circle_package_semantic_prefix(
+                circle_package.circle_id,
+                stream_id,
+                self.seq(),
+                circle_package.package.content_hash,
+            );
+            if circle_package.package.object_key != expected {
+                return Err(StoreProtocolError::RelocatedCirclePackage {
+                    circle_id: circle_package.circle_id,
+                    expected,
+                    actual: circle_package.package.object_key.clone(),
+                });
+            }
+        }
+        for control_ref in &self.circle_controls {
+            validate_circle_control_coord(self.policy(), &control_ref.control)?;
+        }
+        validate_device_registration_refs(&self.device_registrations)?;
+        if self.control.is_none()
+            && self.device_registrations.is_empty()
+            && self.circle_controls.is_empty()
+            && self.store_package.is_none()
+            && self.circle_packages.is_empty()
         {
-            return Err(StoreProtocolError::RelocatedPackage {
-                expected: package_semantic_prefix(
-                    stream_id,
-                    self.order.seq(),
-                    self.package.content_hash,
-                ),
-                actual: self.package.object_key.clone(),
-            });
+            return Err(StoreProtocolError::EmptyBatch);
         }
         match (self.order.seq(), self.order.previous_commit_hash()) {
             (0, _) => return Err(StoreProtocolError::InvalidSequence(0)),
@@ -529,29 +728,69 @@ impl StoreBatchCommit {
         Ok(())
     }
 
-    pub fn verify_package(&self, package_bytes: &[u8]) -> Result<(), StoreProtocolError> {
-        let length =
-            u64::try_from(package_bytes.len()).map_err(|_| StoreProtocolError::PackageTooLarge)?;
-        if length != self.package.changeset_size {
-            return Err(StoreProtocolError::PackageLengthMismatch {
-                expected: self.package.changeset_size,
-                actual: length,
-            });
-        }
-        let actual = ObjectHash::digest(package_bytes);
-        if actual != self.package.content_hash {
-            return Err(StoreProtocolError::PackageHashMismatch {
-                expected: self.package.content_hash,
-                actual,
-            });
-        }
-        Ok(())
+    pub fn verify_store_package(&self, package_bytes: &[u8]) -> Result<(), StoreProtocolError> {
+        let package = self
+            .store_package
+            .as_ref()
+            .ok_or(StoreProtocolError::MissingStorePackage)?;
+        verify_package_ref(package, package_bytes)
     }
+
+    pub fn verify_circle_package(
+        &self,
+        circle_id: CircleId,
+        package_bytes: &[u8],
+    ) -> Result<(), StoreProtocolError> {
+        let package = self
+            .circle_packages
+            .iter()
+            .find(|package| package.circle_id == circle_id)
+            .ok_or(StoreProtocolError::MissingCirclePackage(circle_id))?;
+        verify_package_ref(&package.package, package_bytes)
+    }
+}
+
+fn package_ref(
+    stream_id: &str,
+    seq: u64,
+    schema_version: u32,
+    package_bytes: &[u8],
+) -> Result<StorePackageRef, StoreProtocolError> {
+    let changeset_size =
+        u64::try_from(package_bytes.len()).map_err(|_| StoreProtocolError::PackageTooLarge)?;
+    let content_hash = ObjectHash::digest(package_bytes);
+    Ok(StorePackageRef {
+        object_key: package_semantic_prefix(stream_id, seq, content_hash),
+        content_hash,
+        schema_version,
+        changeset_size,
+    })
+}
+
+fn verify_package_ref(
+    package: &StorePackageRef,
+    package_bytes: &[u8],
+) -> Result<(), StoreProtocolError> {
+    let length =
+        u64::try_from(package_bytes.len()).map_err(|_| StoreProtocolError::PackageTooLarge)?;
+    if length != package.changeset_size {
+        return Err(StoreProtocolError::PackageLengthMismatch {
+            expected: package.changeset_size,
+            actual: length,
+        });
+    }
+    let actual = ObjectHash::digest(package_bytes);
+    if actual != package.content_hash {
+        return Err(StoreProtocolError::PackageHashMismatch {
+            expected: package.content_hash,
+            actual,
+        });
+    }
+    Ok(())
 }
 
 fn validate_control(
     policy: WritePolicy,
-    package_is_empty: bool,
     store_root_hash: ObjectHash,
     author_pubkey: &str,
     control: Option<&StoreControl>,
@@ -561,9 +800,6 @@ fn validate_control(
     };
     if policy != WritePolicy::Serial {
         return Err(StoreProtocolError::ControlRequiresSerial);
-    }
-    if !package_is_empty {
-        return Err(StoreProtocolError::ControlPackageNotEmpty);
     }
     let entry = control.serial_membership_entry();
     if entry.store_root_hash != store_root_hash
@@ -581,12 +817,49 @@ fn validate_control(
 fn validate_parsed_control(commit: &StoreBatchCommit) -> Result<(), StoreProtocolError> {
     validate_control(
         commit.policy(),
-        commit.package.changeset_size == 0
-            && commit.package.content_hash == ObjectHash::digest(&[]),
         commit.store_root_hash,
         &commit.author_pubkey,
         commit.control.as_ref(),
     )
+}
+
+fn validate_circle_control_coord(
+    policy: WritePolicy,
+    coord: &CircleControlCoord,
+) -> Result<(), StoreProtocolError> {
+    coord
+        .validate()
+        .map_err(|_| StoreProtocolError::InvalidCircleControlCoord)?;
+    let actual = match coord {
+        CircleControlCoord::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
+        CircleControlCoord::Serial { .. } => WritePolicy::Serial,
+    };
+    if policy != actual {
+        return Err(StoreProtocolError::CircleControlPolicyMismatch {
+            expected: policy,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn validate_device_registration_refs(
+    registrations: &[StoreDeviceRegistrationRef],
+) -> Result<(), StoreProtocolError> {
+    let mut seen = BTreeSet::new();
+    for registration in registrations {
+        validate_device_id(&registration.device_id)?;
+        if registration.revision == 0 {
+            return Err(StoreProtocolError::InvalidRevision(0));
+        }
+        if !seen.insert((registration.device_id.as_str(), registration.revision)) {
+            return Err(StoreProtocolError::DuplicateDeviceRegistration {
+                device_id: registration.device_id.clone(),
+                revision: registration.revision,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1157,6 +1430,7 @@ pub struct StoreProtocolRoot {
     pub store_id: String,
     pub founder: MembershipEntry,
     pub schema_version: u32,
+    pub sync_routing_hash: ObjectHash,
     pub write_policy: WritePolicy,
     pub author_pubkey: String,
     pub signature: String,
@@ -1168,6 +1442,7 @@ struct StoreProtocolRootSignedFields<'a> {
     store_id: &'a str,
     founder: &'a MembershipEntry,
     schema_version: u32,
+    sync_routing_hash: ObjectHash,
     write_policy: WritePolicy,
     author_pubkey: &'a str,
 }
@@ -1177,6 +1452,7 @@ impl StoreProtocolRoot {
         store_id: String,
         founder: MembershipEntry,
         schema_version: u32,
+        sync_routing_hash: ObjectHash,
         write_policy: WritePolicy,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
@@ -1186,6 +1462,7 @@ impl StoreProtocolRoot {
             store_id,
             founder,
             schema_version,
+            sync_routing_hash,
             write_policy,
             author_pubkey,
             signature: String::new(),
@@ -1204,6 +1481,7 @@ impl StoreProtocolRoot {
                 store_id: &self.store_id,
                 founder: &self.founder,
                 schema_version: self.schema_version,
+                sync_routing_hash: self.sync_routing_hash,
                 write_policy: self.write_policy,
                 author_pubkey: &self.author_pubkey,
             },
@@ -1239,6 +1517,7 @@ impl StoreProtocolRoot {
         expected_store_id: &str,
         expected_founder: &str,
         expected_write_policy: WritePolicy,
+        expected_sync_routing_hash: ObjectHash,
     ) -> Result<Self, StoreProtocolError> {
         let store_protocol_root =
             Self::parse_pinned(bytes, expected_hash, expected_store_id, expected_founder)?;
@@ -1246,6 +1525,12 @@ impl StoreProtocolRoot {
             return Err(StoreProtocolError::WritePolicyMismatch {
                 expected: expected_write_policy,
                 actual: store_protocol_root.write_policy,
+            });
+        }
+        if store_protocol_root.sync_routing_hash != expected_sync_routing_hash {
+            return Err(StoreProtocolError::SyncRoutingMismatch {
+                expected: expected_sync_routing_hash,
+                actual: store_protocol_root.sync_routing_hash,
             });
         }
         Ok(store_protocol_root)
@@ -1336,12 +1621,47 @@ pub enum StoreProtocolError {
         expected: WritePolicy,
         actual: WritePolicy,
     },
+    #[error("Store sync-routing hash is {actual}, expected {expected}")]
+    SyncRoutingMismatch {
+        expected: ObjectHash,
+        actual: ObjectHash,
+    },
     #[error("Store controls require the Serial write policy")]
     ControlRequiresSerial,
-    #[error("Store control commit package must be empty")]
-    ControlPackageNotEmpty,
     #[error("Store Serial control is invalid or signed by a different commit author")]
     InvalidSerialControl,
+    #[error("Store batch has no Store package, circle package, or control")]
+    EmptyBatch,
+    #[error("Store batch has no Store package")]
+    MissingStorePackage,
+    #[error("Store batch repeats Store device registration {device_id:?} revision {revision}")]
+    DuplicateDeviceRegistration { device_id: String, revision: u64 },
+    #[error(
+        "Store device registration {device_id:?} revision {revision} has hash {actual}, expected {expected}"
+    )]
+    DeviceRegistrationRefMismatch {
+        device_id: String,
+        revision: u64,
+        expected: ObjectHash,
+        actual: ObjectHash,
+    },
+    #[error("Store batch has no package for circle {0}")]
+    MissingCirclePackage(CircleId),
+    #[error("Store batch has more than one package for circle {0}")]
+    DuplicateCirclePackage(CircleId),
+    #[error("circle control coordinate is invalid")]
+    InvalidCircleControlCoord,
+    #[error("circle control uses {actual:?}, expected Store policy {expected:?}")]
+    CircleControlPolicyMismatch {
+        expected: WritePolicy,
+        actual: WritePolicy,
+    },
+    #[error("circle {circle_id} package is at {actual:?}, expected {expected:?}")]
+    RelocatedCirclePackage {
+        circle_id: CircleId,
+        expected: String,
+        actual: String,
+    },
     #[error("Store key generation must be positive, got {0}")]
     InvalidKeyGeneration(u64),
     #[error("Serial head commit and tip write id must either both be present or both be absent")]
@@ -1604,6 +1924,15 @@ pub fn package_semantic_prefix(device_id: &str, seq: u64, package_hash: ObjectHa
     format!("store-v1/packages/{device_id}/{seq}/{package_hash}")
 }
 
+pub fn circle_package_semantic_prefix(
+    circle_id: CircleId,
+    device_id: &str,
+    seq: u64,
+    package_hash: ObjectHash,
+) -> String {
+    format!("circles/{circle_id}/packages/{device_id}/{seq}/{package_hash}")
+}
+
 pub fn package_copy_key(
     device_id: &str,
     seq: u64,
@@ -1837,6 +2166,10 @@ mod tests {
     use super::*;
     use crate::sync::membership::founder_entry;
 
+    fn routing_hash() -> ObjectHash {
+        ObjectHash::digest(b"test-sync-schema")
+    }
+
     fn fixture() -> (UserKeypair, StoreProtocolRoot, StoreBatchCommit, Vec<u8>) {
         let signer = UserKeypair::generate();
         let founder = founder_entry("store-a", &signer, "0000000001000-0000-device-a");
@@ -1844,6 +2177,7 @@ mod tests {
             "store-a".to_string(),
             founder,
             3,
+            routing_hash(),
             WritePolicy::MergeConcurrent,
             &signer,
         )
@@ -1905,7 +2239,9 @@ mod tests {
             1,
         )
         .expect("parse commit");
-        parsed.verify_package(&package).expect("verify package");
+        parsed
+            .verify_store_package(&package)
+            .expect("verify package");
         assert_eq!(parsed, commit);
         assert!(commit.canonical_signed_bytes().starts_with(COMMIT_DOMAIN));
     }
@@ -1929,7 +2265,11 @@ mod tests {
         ));
 
         let mut tampered = commit.clone();
-        tampered.package.content_hash = ObjectHash::digest(b"different");
+        tampered
+            .store_package
+            .as_mut()
+            .expect("fixture has Store package")
+            .content_hash = ObjectHash::digest(b"different");
         assert!(matches!(
             tampered.verify_at(
                 store_protocol_root.object_hash(),
@@ -1950,11 +2290,11 @@ mod tests {
             Err(StoreProtocolError::RelocatedSlot { .. })
         ));
         assert!(matches!(
-            commit.verify_package(b"different"),
+            commit.verify_store_package(b"different"),
             Err(StoreProtocolError::PackageLengthMismatch { .. })
                 | Err(StoreProtocolError::PackageHashMismatch { .. })
         ));
-        commit.verify_package(&package).unwrap();
+        commit.verify_store_package(&package).unwrap();
     }
 
     #[test]
@@ -1995,6 +2335,7 @@ mod tests {
             "store-a",
             &store_protocol_root.author_pubkey,
             WritePolicy::MergeConcurrent,
+            routing_hash(),
         )
         .expect("parse exact Store protocol root");
         assert_eq!(parsed, store_protocol_root);
@@ -2009,6 +2350,73 @@ mod tests {
             value.get("write_policy"),
             Some(&serde_json::json!("merge_concurrent"))
         );
+        assert!(
+            value.get("sync_routing_hash").is_some(),
+            "the signed Store root must bind the sync-routing contract"
+        );
+    }
+
+    #[test]
+    fn store_only_commit_uses_the_multi_audience_batch_shape() {
+        let (_, _, commit, _) = fixture();
+        let value = serde_json::to_value(commit).expect("serialize Store commit");
+
+        assert!(value.get("package").is_none());
+        assert!(value.get("store_package").is_some());
+        assert_eq!(
+            value.get("device_registrations"),
+            Some(&serde_json::json!([]))
+        );
+        assert_eq!(value.get("circle_controls"), Some(&serde_json::json!([])));
+        assert_eq!(value.get("circle_packages"), Some(&serde_json::json!([])));
+    }
+
+    #[test]
+    fn device_registration_activation_is_signed_into_a_control_only_commit() {
+        let (signer, root, _, _) = fixture();
+        let registration = StoreDeviceRegistration::signed(
+            root.object_hash(),
+            "device-a".to_string(),
+            1,
+            None,
+            StoreDeviceRegistrationState::Active,
+            &signer,
+        )
+        .unwrap();
+        let reference = StoreDeviceRegistrationRef::from_registration(&registration);
+        let commit = StoreBatchCommit::signed_with_registrations(
+            root.object_hash(),
+            WriteId::from_generated("register-device-a".to_string()),
+            "device-a".to_string(),
+            StoreCommitOrder::MergeConcurrent {
+                seq: 1,
+                previous_commit_hash: None,
+                dependencies: BTreeMap::new(),
+            },
+            Some(MembershipCoord {
+                author_pubkey: keys::public_key_hex(&signer),
+                author_owner_grant: root.founder.author_owner_grant.clone(),
+                seq: 1,
+                entry_hash: crate::sync::membership::entry_hash(&root.founder),
+            }),
+            vec![reference.clone()],
+            &signer,
+        )
+        .unwrap();
+
+        assert!(commit.store_package.is_none());
+        assert_eq!(commit.device_registrations, vec![reference]);
+        assert_eq!(
+            StoreBatchCommit::parse_at(
+                &commit.to_bytes(),
+                root.object_hash(),
+                WritePolicy::MergeConcurrent,
+                "device-a",
+                1,
+            )
+            .unwrap(),
+            commit,
+        );
     }
 
     #[test]
@@ -2020,6 +2428,7 @@ mod tests {
             "serial-control".to_string(),
             founder.clone(),
             1,
+            routing_hash(),
             WritePolicy::Serial,
             &owner,
         )

@@ -57,6 +57,7 @@ pub async fn create_store(
                 store_id.to_string(),
                 founder,
                 db.schema_version(),
+                db.sync_routing_hash(),
                 write_policy,
                 signer,
             )
@@ -80,6 +81,7 @@ pub async fn create_store(
         store_id,
         &crate::keys::public_key_hex(signer),
         write_policy,
+        db.sync_routing_hash(),
     )
     .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
     if store_protocol_root.schema_version > db.schema_version() {
@@ -95,6 +97,7 @@ pub async fn create_store(
         store_id,
         &store_protocol_root.author_pubkey,
         write_policy,
+        db.sync_routing_hash(),
     )
     .await?;
     if existing.is_none() && owned.published {
@@ -136,6 +139,7 @@ pub async fn open_store(
         store_id,
         expected_founder,
         write_policy,
+        db.sync_routing_hash(),
     )
     .await?
     .ok_or(StoreProtocolRootError::Missing(expected_hash))?;

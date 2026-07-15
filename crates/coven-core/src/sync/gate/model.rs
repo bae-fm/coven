@@ -11,7 +11,7 @@ use tracing::warn;
 
 use super::outbound::resolve_root;
 use super::{execute_batch, query_mapped_rows, query_row_optional, row_value_to_string, GateError};
-use crate::sync::session::{quote_ident, SyncedTable};
+use crate::sync::session::{foreign_key_edges, quote_ident, ForeignKeyEdge, SyncedTable};
 
 /// How a synced table relates to the gate.
 pub(super) enum TableGate {
@@ -661,32 +661,15 @@ pub(super) fn foreign_keys(
     conn: &Connection,
     table: &str,
 ) -> Result<Vec<(String, String)>, GateError> {
-    let sql = format!("PRAGMA foreign_key_list({})", quote_ident(table));
-    let rows = query_mapped_rows(conn, &sql, [], |row| {
-        Ok((
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(2)?,
-        ))
-    })?;
-    let mut fks = Vec::new();
-    for (from, parent) in rows {
-        let Some(from) = from else {
-            warn!(
-                table,
-                "gate: foreign_key_list row has no child column; skipping it"
-            );
-            continue;
-        };
-        let Some(parent) = parent else {
-            warn!(
-                table,
-                from, "gate: foreign_key_list row has no parent table; skipping it"
-            );
-            continue;
-        };
-        fks.push((from, parent));
-    }
-    Ok(fks)
+    Ok(foreign_key_edges(conn, table)
+        .map_err(|error| GateError::ForeignKeySchema(error.to_string()))?
+        .into_iter()
+        .flat_map(|edge| {
+            edge.columns
+                .into_iter()
+                .map(move |column| (column.child, edge.parent_table.clone()))
+        })
+        .collect())
 }
 /// The FK column in `child` that references `parent`, or `None` if `child` has
 /// no FK to `parent`. Used to wire an ancestor to a keep-child: the inference
@@ -726,9 +709,10 @@ fn select_parent_fk(
     ancestors: &HashSet<&str>,
 ) -> Result<Option<(String, String)>, GateError> {
     let synced: HashSet<&str> = tables.iter().map(|t| t.name()).collect();
-    let candidates: Vec<(String, String)> = foreign_keys(conn, table)?
+    let candidates: Vec<ForeignKeyEdge> = foreign_key_edges(conn, table)
+        .map_err(|error| GateError::ForeignKeySchema(error.to_string()))?
         .into_iter()
-        .filter(|(_, parent)| synced.contains(parent.as_str()))
+        .filter(|edge| synced.contains(edge.parent_table.as_str()))
         .collect();
     if candidates.is_empty() {
         return Ok(None);
@@ -752,10 +736,15 @@ fn select_parent_fk(
         tier: u8,
         specificity: isize,
         name: String,
+        columns: Vec<(String, String)>,
+        on_update: String,
+        on_delete: String,
+        match_clause: String,
     }
     let mut keyed = Vec::with_capacity(candidates.len());
-    for (fk, parent) in candidates {
-        let tier = if parent_reaches_root(conn, tables, ancestors, &parent, &mut HashSet::new())? {
+    for edge in candidates {
+        let parent = &edge.parent_table;
+        let tier = if parent_reaches_root(conn, tables, ancestors, parent, &mut HashSet::new())? {
             0u8
         } else if ancestors.contains(parent.as_str()) {
             1
@@ -763,7 +752,7 @@ fn select_parent_fk(
             2
         };
         let specificity = if tier == 1 {
-            -(ancestor_depth(conn, ancestors, &parent, &mut HashSet::new())? as isize)
+            -(ancestor_depth(conn, ancestors, parent, &mut HashSet::new())? as isize)
         } else {
             0
         };
@@ -771,11 +760,28 @@ fn select_parent_fk(
             tier,
             specificity,
             name: parent.clone(),
+            columns: edge
+                .columns
+                .iter()
+                .map(|column| (column.child.clone(), column.parent.clone()))
+                .collect(),
+            on_update: edge.on_update.clone(),
+            on_delete: edge.on_delete.clone(),
+            match_clause: edge.match_clause.clone(),
         };
-        keyed.push((rank, (fk, parent)));
+        keyed.push((rank, edge));
     }
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(keyed.into_iter().next().map(|(_, candidate)| candidate))
+    let Some((_, edge)) = keyed.into_iter().next() else {
+        return Ok(None);
+    };
+    let [column] = edge.columns.as_slice() else {
+        return Err(GateError::CompositeGateForeignKey {
+            table: table.to_string(),
+            parent: edge.parent_table,
+        });
+    };
+    Ok(Some((column.child.clone(), edge.parent_table)))
 }
 
 /// Whether `parent`'s own gate eventually reaches a locality root downward, so a

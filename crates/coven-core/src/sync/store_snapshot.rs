@@ -430,6 +430,7 @@ mod tests {
                 "0000000000001-0000-founder",
             ),
             1,
+            crate::sync::test_helpers::test_sync_routing_hash(),
             crate::WritePolicy::MergeConcurrent,
             &founder,
         )
@@ -507,6 +508,7 @@ mod tests {
                     &format!("000000000000{}-0000-founder", index + 1),
                 ),
                 1,
+                crate::sync::test_helpers::test_sync_routing_hash(),
                 crate::WritePolicy::MergeConcurrent,
                 &signer,
             )

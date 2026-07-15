@@ -34,7 +34,7 @@ bytes = "1.11"
 futures-util = "0.3"
 tracing = "0.1.41"
 tempfile = { version = "3.8", optional = true }
-rusqlite = { version = "0.40", default-features = false, features = ["session", "bundled", "hooks"] }
+rusqlite = { version = "0.40", default-features = false, features = ["session", "bundled", "hooks", "column_metadata"] }
 tokio = { version = "1.0", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 
 [dev-dependencies]

@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use crate::blob::{CacheFill, Provenance};
-use crate::clock::SystemClock;
+use crate::clock::{Clock, SystemClock};
 use crate::config::Config;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
@@ -205,7 +205,11 @@ async fn serial_join_receives_the_exact_invite_floor() {
     .unwrap();
     crate::sync::store_objects::append_and_verify(
         &owner_storage,
-        &loser.package.object_key,
+        &loser
+            .store_package
+            .as_ref()
+            .expect("losing row commit carries a Store package")
+            .object_key,
         ".pkg",
         &[],
     )
@@ -263,6 +267,7 @@ async fn serial_join_receives_the_exact_invite_floor() {
         Arc::new(home.clone()),
         Some((Arc::new(home.clone()), Arc::new(home))),
         None,
+        Arc::new(SystemClock),
         &ids,
         |_status| {},
         &never_cancelled(),
@@ -270,20 +275,41 @@ async fn serial_join_receives_the_exact_invite_floor() {
     .await
     .expect("join Serial store");
 
+    let joined_device_id = config.device_id.clone();
     let (joined, _stamper) = Database::open(
         &config.store_dir.db_path(),
         tables,
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
         crate::WritePolicy::Serial,
-        config.device_id,
+        joined_device_id.clone(),
         &test_migrations(),
     )
     .expect("open joined Serial database");
+    let activation_position = joined
+        .latest_outbound_store_position()
+        .await
+        .unwrap()
+        .expect("the joiner's registration is activated after the invite floor");
+    assert_eq!(activation_position.seq, floor.seq + 1);
+    let activation = crate::sync::store_objects::load_serial_commit_at_position(
+        &owner_storage,
+        store_root_hash,
+        &activation_position,
+    )
+    .await
+    .expect("load Serial registration activation")
+    .expect("Serial registration activation exists");
     assert_eq!(
-        joined.latest_outbound_store_position().await.unwrap(),
-        Some(floor)
+        activation.value.previous_commit_hash(),
+        Some(floor.commit_hash)
     );
+    assert_eq!(activation.value.device_registrations.len(), 1);
+    assert_eq!(
+        activation.value.device_registrations[0].device_id,
+        joined_device_id
+    );
+    assert!(activation.value.store_package.is_none());
     assert!(joined
         .serial_membership_state()
         .await
@@ -961,6 +987,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         &store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
     )
@@ -1101,6 +1128,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         &storage,
         None,
+        None,
         boot,
         &lib_b,
         &never_cancelled(),
@@ -1240,6 +1268,7 @@ async fn bootstrap_installs_snapshot_coverage_before_ordinary_pull() {
         None,
         &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         &storage,
+        None,
         None,
         boot,
         &lib_b,
@@ -1569,6 +1598,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
         &invite.membership_floor,
         &storage,
         None,
+        None,
         boot,
         &lib_b,
         &never_cancelled(),
@@ -1685,6 +1715,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         &storage,
         None,
+        None,
         boot,
         &lib_b,
         &never_cancelled(),
@@ -1787,6 +1818,7 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
         None,
         &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         &storage,
+        None,
         None,
         boot,
         &lib_b,
@@ -1892,6 +1924,7 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
         None,
         &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         &storage,
+        None,
         None,
         boot,
         &lib_b,
@@ -2068,9 +2101,9 @@ async fn joiner_fixture() -> JoinerFixture {
     }
 }
 
-/// Bootstrap publishes the joined device's Active registration before its live
-/// pull; its first cycle then publishes an exact acknowledgement. Commit heads
-/// remain absent until the device authors a commit.
+/// Bootstrap publishes the joined device's Active registration through a
+/// control-only commit before its live pull; its first cycle then publishes an
+/// exact acknowledgement.
 #[tokio::test]
 async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
     let f = joiner_fixture().await;
@@ -2099,6 +2132,7 @@ async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
         &f.store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
     )
@@ -2154,13 +2188,37 @@ async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
         crate::sync::store_objects::list_visible_heads(&f.joiner_storage, f.store_root_hash)
             .await
             .expect("list Store commit heads");
-    assert!(
-        heads
-            .heads
-            .iter()
-            .all(|head| head.value.device_id != "device-b"),
-        "an empty device registration must not invent a commit head",
+    let head = heads
+        .heads
+        .iter()
+        .find(|head| head.value.device_id == "device-b")
+        .expect("the registration activation publishes the joiner's head");
+    let position = head
+        .value
+        .position
+        .as_ref()
+        .expect("the registration head activates its control-only commit");
+    assert_eq!(position.seq, 1);
+    let activation = crate::sync::store_objects::load_commit_slot(
+        &f.joiner_storage,
+        f.store_root_hash,
+        "device-b",
+        position.seq,
+    )
+    .await
+    .expect("load registration activation commit")
+    .expect("registration activation commit exists");
+    assert_eq!(activation.value.commit_hash(), position.commit_hash);
+    assert_eq!(
+        activation.value.device_registrations,
+        vec![
+            crate::sync::store_commit::StoreDeviceRegistrationRef::from_registration(registration,)
+        ]
     );
+    assert!(activation.value.control.is_none());
+    assert!(activation.value.store_package.is_none());
+    assert!(activation.value.circle_controls.is_empty());
+    assert!(activation.value.circle_packages.is_empty());
 
     let acks =
         crate::sync::store_objects::list_latest_ack_chains(&f.joiner_storage, f.store_root_hash)
@@ -2209,6 +2267,7 @@ async fn bootstrap_establishes_the_joiners_identity_before_the_marker() {
         &f.store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
     )
@@ -2281,6 +2340,7 @@ async fn bootstrap_failure_publishes_a_retired_registration_successor() {
         &f.store_keys,
         &FailPersistCustody,
         identity_custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
     )
@@ -2337,7 +2397,7 @@ async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
 
     let identity_custody =
         crate::identity_custody::IdentityCustody::Keyring.resolve(&f.store_id, &f.store_dir);
-    f.home.fail_append_before_call(2);
+    f.home.fail_append_before_call(4);
     let result = crate::sync::join::bootstrap_and_save_store(
         &f.joiner_storage,
         &f.cipher,
@@ -2359,6 +2419,7 @@ async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
         &f.store_keys,
         &FailPersistCustody,
         identity_custody.as_ref(),
+        &SystemClock,
         &|_status: &str| {},
         &never_cancelled(),
     )
@@ -2399,6 +2460,7 @@ async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
     assert_eq!(pending, (2, "retired".to_string(), 0));
     drop(db);
 
+    let retry_published_at = SystemClock.now().to_rfc3339();
     crate::sync::join::finish_failed_bootstrap_registration_rollback(
         &f.store_dir.db_path(),
         &f.tables,
@@ -2406,7 +2468,9 @@ async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
         coven_core::WritePolicy::MergeConcurrent,
         "device-b",
         &f.joiner_storage,
+        None,
         &f.joiner_identity,
+        &retry_published_at,
     )
     .await
     .expect("retry publishes the owned retirement bytes");
