@@ -53,7 +53,9 @@ impl CloudProvider {
 ///   home, because it wraps and rotates the store key.
 /// - `Browsable`: every object is stored in the clear (no `.enc` suffix) and
 ///   blobs use the consumer-supplied readable path `{namespace}/{cloud_path}`, so
-///   anyone with bucket access can read the actual files by name.
+///   anyone with bucket access can read the actual files by name. Browsable
+///   storage cannot be combined with per-row audiences declared through
+///   [`crate::SyncedTable::scoped_by`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HomeStorage {

@@ -293,7 +293,8 @@ impl SyncedTable {
     }
 
     /// Make this an audience root whose TEXT column selects Store, Local, or
-    /// one committed circle for the row and its foreign-key descendants.
+    /// one committed circle for the row and its foreign-key descendants. A
+    /// store with an audience root requires [`crate::HomeStorage::Opaque`].
     pub fn scoped_by(mut self, column: impl Into<String>) -> Self {
         self.role = GateRole::ScopedRoot {
             audience_column: column.into(),

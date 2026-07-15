@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 use crate::blob::local_files::LocalBlobError;
 use crate::blob::{BlobRef, BlobTransitionObserver};
 use crate::clock::{ClockRef, SystemClock};
-use crate::config::Config;
+use crate::config::{Config, HomeStorage};
 use crate::custody::KeyCustody;
 use crate::database::{Database, DbError, OpenError};
 use crate::handle::CovenHandle;
@@ -54,6 +54,8 @@ pub enum CovenError {
     SerialResolution(String),
     #[error("blob_tombstone_grace must be a positive duration")]
     InvalidBlobTombstoneGrace,
+    #[error("browsable cloud storage cannot be used with scoped table {table:?}")]
+    BrowsableStorageWithScopedTable { table: String },
     #[error("blob {namespace}/{id} is still referenced by a row after the write")]
     BlobStillReferenced { namespace: String, id: String },
     #[error("blob {namespace}/{id} is already referenced by a row")]
@@ -318,6 +320,7 @@ impl CovenBuilder {
         let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
         let write_policy = self.write_policy.ok_or(CovenError::MissingWritePolicy)?;
+        validate_storage_scope(&config, &tables)?;
         if self.blob_tombstone_grace <= chrono::Duration::zero() {
             return Err(CovenError::InvalidBlobTombstoneGrace);
         }
@@ -396,6 +399,7 @@ impl CovenBuilder {
         let tables = self.synced_tables.ok_or(CovenError::MissingSyncedTables)?;
         let migrations = self.migrations.ok_or(CovenError::MissingMigrations)?;
         let write_policy = self.write_policy.ok_or(CovenError::MissingWritePolicy)?;
+        validate_storage_scope(&config, &tables)?;
         let db_path = config.store_dir.db_path();
         let provider = self.config.provider();
         let store_dir = config.store_dir.clone();
@@ -427,6 +431,20 @@ impl CovenBuilder {
             self.cloudkit_ops,
         ))
     }
+}
+
+fn validate_storage_scope(config: &Config, tables: &[SyncedTable]) -> CovenResult<()> {
+    if config.cloud_home.storage == HomeStorage::Browsable {
+        if let Some(table) = tables
+            .iter()
+            .find(|table| table.audience_column().is_some())
+        {
+            return Err(CovenError::BrowsableStorageWithScopedTable {
+                table: table.name().to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Host SQL inside one journaled write transaction.
