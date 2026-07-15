@@ -178,6 +178,7 @@ struct Candidate {
     commit: StoreBatchCommit,
     package: Option<Vec<u8>>,
     registrations: Vec<StoreDeviceRegistration>,
+    circle_activations: Vec<super::circle_ops::VerifiedCircleActivation>,
 }
 
 struct AuthorizedSerialCommit {
@@ -264,6 +265,32 @@ pub async fn pull_store_commits_with_coordination(
     store_dir: &StoreDir,
     membership: Option<&MembershipChain>,
 ) -> Result<StorePullResult, StorePullError> {
+    pull_store_commits_with_identity(
+        db,
+        tables,
+        storage,
+        serial_coordination,
+        store_root_hash,
+        our_device_id,
+        store_dir,
+        membership,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn pull_store_commits_with_identity(
+    db: &Database,
+    tables: &[SyncedTable],
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn CoordinationStorage>,
+    store_root_hash: ObjectHash,
+    our_device_id: &str,
+    store_dir: &StoreDir,
+    membership: Option<&MembershipChain>,
+    identity: Option<&crate::keys::UserKeypair>,
+) -> Result<StorePullResult, StorePullError> {
     if db.write_policy() == crate::WritePolicy::Serial {
         return pull_serial_store_commits(
             db,
@@ -274,6 +301,7 @@ pub async fn pull_store_commits_with_coordination(
             })?,
             store_root_hash,
             store_dir,
+            identity,
         )
         .await;
     }
@@ -415,7 +443,7 @@ pub async fn pull_store_commits_with_coordination(
                     seq: commit.seq() - 1,
                     commit_hash,
                 });
-            if carries_circle_payload(&commit) {
+            if carries_circle_payload(&commit) && identity.is_none() {
                 held.push(held_commit(
                     &commit.device_id,
                     commit.position(),
@@ -519,12 +547,47 @@ pub async fn pull_store_commits_with_coordination(
                     continue;
                 }
             };
+            let circle_activations = if commit.circle_controls.is_empty() {
+                Vec::new()
+            } else {
+                let founder = db
+                    .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+                    .await?
+                    .ok_or_else(|| {
+                        StorePullError::Database(
+                            "Store founder is absent while loading circle controls".to_string(),
+                        )
+                    })?;
+                match super::circle_ops::load_circle_activations(
+                    storage,
+                    &commit,
+                    identity.expect("circle payload identity checked"),
+                    &founder,
+                )
+                .await
+                {
+                    Ok(activations) => activations,
+                    Err(error) => {
+                        held.push(held_commit(
+                            &commit.device_id,
+                            commit.position(),
+                            HeldStorePositionReason::InvalidObject(error.to_string()),
+                        ));
+                        let Some(predecessor) = predecessor else {
+                            break;
+                        };
+                        expected_position = predecessor;
+                        continue;
+                    }
+                }
+            };
             candidates.insert(
                 (commit.device_id.clone(), commit.seq()),
                 Candidate {
                     commit,
                     package,
                     registrations,
+                    circle_activations,
                 },
             );
             let Some(predecessor) = predecessor else {
@@ -685,12 +748,6 @@ async fn load_authorized_serial_prefix(
         .map_err(|error| StorePullError::Serial(error.to_string()))?;
     let mut authorized = Vec::with_capacity(reverse.len());
     for commit in reverse {
-        if carries_circle_payload(&commit) {
-            return Err(StorePullError::Serial(format!(
-                "commit {} carries circle payload that Store pull cannot materialize",
-                commit.seq()
-            )));
-        }
         let registrations = load_commit_registrations(storage, &commit)
             .await
             .map_err(|error| match error {
@@ -814,6 +871,7 @@ async fn pull_serial_store_commits(
     coordination: &dyn CoordinationStorage,
     store_root_hash: ObjectHash,
     store_dir: &StoreDir,
+    identity: Option<&crate::keys::UserKeypair>,
 ) -> Result<StorePullResult, StorePullError> {
     let local = db.materialized_frontier().await?.remove(SERIAL_STREAM_ID);
     let head = match coordination.read_head(serial_head_key()).await {
@@ -884,11 +942,29 @@ async fn pull_serial_store_commits(
     for authorized in authorized_chain.into_iter().skip(first_unmaterialized) {
         let commit = authorized.commit;
         let package = load_serial_store_package(db, storage, &commit).await?;
+        let circle_activations = if commit.circle_controls.is_empty() {
+            Vec::new()
+        } else {
+            let identity = identity.ok_or_else(|| {
+                StorePullError::Serial(format!(
+                    "commit {} carries circle controls but no device identity was supplied",
+                    commit.seq()
+                ))
+            })?;
+            let founder = db
+                .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+                .await?
+                .ok_or_else(|| StorePullError::Serial("Store founder is absent".to_string()))?;
+            super::circle_ops::load_circle_activations(storage, &commit, identity, &founder)
+                .await
+                .map_err(|error| StorePullError::Serial(error.to_string()))?
+        };
         candidates.push((
             Candidate {
                 commit,
                 package,
                 registrations: authorized.registrations,
+                circle_activations,
             },
             authorized.authorization_after,
         ));
@@ -1043,6 +1119,7 @@ pub async fn prepare_serial_resolution(
                 commit,
                 package,
                 registrations: authorized.registrations.clone(),
+                circle_activations: Vec::new(),
             },
             authorization_after,
         ));
@@ -1082,10 +1159,12 @@ async fn apply_serial_candidate(
     if candidate.package.is_none() {
         let commit = candidate.commit.clone();
         let registrations = candidate.registrations.clone();
+        let circle_activations = candidate.circle_activations.clone();
         let authorization_after = authorization_after.clone();
         db.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
+            Database::record_verified_circle_activations_on(&tx, &commit, &circle_activations)?;
             Database::record_materialized_serial_commit_on(
                 &tx,
                 &commit,
@@ -1106,6 +1185,7 @@ async fn apply_serial_candidate(
     } = prepared;
     let commit = candidate.commit.clone();
     let registrations = candidate.registrations.clone();
+    let circle_activations = candidate.circle_activations.clone();
     let authorization_after = authorization_after.clone();
     let returned_changes = changes.clone();
     let blob_decls = db.blob_decls();
@@ -1130,6 +1210,7 @@ async fn apply_serial_candidate(
             local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
         }
         Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
+        Database::record_verified_circle_activations_on(&tx, &commit, &circle_activations)?;
         Database::record_materialized_serial_commit_on(
             &tx,
             &commit,
@@ -1489,9 +1570,11 @@ async fn apply_candidate(
     let Some(package) = candidate.package.clone() else {
         let commit = candidate.commit.clone();
         let registrations = candidate.registrations.clone();
+        let circle_activations = candidate.circle_activations.clone();
         db.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
+            Database::record_verified_circle_activations_on(&tx, &commit, &circle_activations)?;
             Database::record_materialized_commit_on(&tx, &commit)?;
             tx.commit().map_err(DbError::from)
         })
@@ -1596,6 +1679,7 @@ async fn commit_candidate(
 ) -> Result<ApplyOutcome, StorePullError> {
     let commit = candidate.commit.clone();
     let registrations = candidate.registrations.clone();
+    let circle_activations = candidate.circle_activations.clone();
     let returned_changes = changes.clone();
     let receiver_wall_ms = db.receive_wall_ms();
     let blob_decls = db.blob_decls();
@@ -1632,6 +1716,7 @@ async fn commit_candidate(
                 local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
             }
             Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
+            Database::record_verified_circle_activations_on(&tx, &commit, &circle_activations)?;
             Database::record_materialized_commit_on(&tx, &commit)?;
             tx.commit().map_err(DbError::from)?;
             if let Some(max_applied) = changeset_max.as_ref() {
@@ -1701,7 +1786,7 @@ mod tests {
     use crate::sync::circle::{CircleControlCoord, CircleId};
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::membership::{
-        founder_entry, MemberRole, OwnerGrantId, SerialAuthorizationState,
+        founder_entry, MemberRole, MembershipChain, OwnerGrantId, SerialAuthorizationState,
     };
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::store_commit::{
@@ -2094,7 +2179,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serial_pull_rejects_circle_bearing_commit_until_circle_objects_are_materialized() {
+    async fn merge_pull_materializes_a_verified_circle_creation_for_an_active_identity() {
+        let home = InMemoryCloudHome::new();
+        let keypair = UserKeypair::generate();
+        let storage = storage(&home, &keypair, "merge-circle-materialize");
+        let source = open_test_db();
+        let store_id = "merge-circle-materialize";
+        let root = crate::sync::test_helpers::publish_test_store_protocol_root(
+            &source, &storage, store_id, "source", &keypair,
+        )
+        .await;
+        let founder = founder_entry(
+            store_id,
+            &keypair,
+            "0000000000001-0000-test-store-protocol-root",
+        );
+        let chain = MembershipChain::from_entries(vec![founder.clone()])
+            .expect("build founder membership chain");
+        crate::sync::store_objects::append_membership_entry_object(
+            &storage,
+            root,
+            &founder.coord(),
+            &founder,
+        )
+        .await
+        .expect("publish founder membership entry");
+        crate::sync::store_objects::append_membership_head_object(
+            &storage,
+            root,
+            &chain
+                .signed_head(&keypair)
+                .expect("founder membership head"),
+        )
+        .await
+        .expect("publish founder membership head");
+        source
+            .set_protocol_state(
+                crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                &crate::keys::public_key_hex(&keypair),
+            )
+            .await
+            .expect("pin founder");
+        let circle_id = crate::sync::circle_ops::create_circle(
+            &source,
+            &storage,
+            None,
+            "source",
+            "0000000001000-0000-source",
+            "Household",
+            &keypair,
+        )
+        .await
+        .expect("publish circle creation");
+
+        let peer = open_test_db();
+        bind_database(&peer, "peer", root).await;
+        peer.set_protocol_state(
+            crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+            &crate::keys::public_key_hex(&keypair),
+        )
+        .await
+        .expect("pin peer founder");
+        let (_temp, peer_dir) = temp_store_dir();
+        let result = pull_store_commits_with_identity(
+            &peer,
+            peer.synced_tables(),
+            &storage,
+            None,
+            root,
+            "peer",
+            &peer_dir,
+            None,
+            Some(&keypair),
+        )
+        .await
+        .expect("pull verified circle creation");
+
+        assert!(result.frontier.contains_key("source"));
+        let circle = circle_id.to_string();
+        let activated: i64 = peer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                    [circle],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)
+            })
+            .await
+            .expect("read remote circle activation");
+        assert_eq!(activated, 1);
+    }
+
+    #[tokio::test]
+    async fn serial_pull_without_an_identity_rejects_circle_bearing_commit() {
         let home = InMemoryCloudHome::new();
         let keypair = UserKeypair::generate();
         let storage = serial_storage(
@@ -2159,8 +2337,83 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("circle payload"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("no device identity was supplied"),
+            "{error}"
+        );
         assert!(peer.materialized_frontier().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn serial_pull_materializes_a_verified_circle_creation_for_an_active_identity() {
+        let home = InMemoryCloudHome::new();
+        let keypair = UserKeypair::generate();
+        let storage = serial_storage(
+            &home,
+            &keypair,
+            "serial-circle-materialize",
+            "serial-circle-materialize",
+        );
+        let source = open_serial_test_db();
+        let root = publish_test_serial_store_protocol_root(
+            &source,
+            &storage,
+            "serial-circle-materialize",
+            "source",
+            &keypair,
+        )
+        .await;
+        let circle_id = crate::sync::circle_ops::create_circle(
+            &source,
+            &storage,
+            Some(storage.serial_coordination().expect("Serial coordination")),
+            "source",
+            "0000000001000-0000-source",
+            "Household",
+            &keypair,
+        )
+        .await
+        .expect("publish Serial circle creation");
+
+        let peer = open_serial_test_db();
+        bind_database(&peer, "peer", root).await;
+        peer.set_protocol_state(
+            crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+            &crate::keys::public_key_hex(&keypair),
+        )
+        .await
+        .expect("pin peer founder");
+        let (_temp, peer_dir) = temp_store_dir();
+        let result = pull_store_commits_with_identity(
+            &peer,
+            peer.synced_tables(),
+            &storage,
+            Some(storage.serial_coordination().expect("Serial coordination")),
+            root,
+            "peer",
+            &peer_dir,
+            None,
+            Some(&keypair),
+        )
+        .await
+        .expect("pull verified Serial circle creation");
+
+        assert!(result.frontier.contains_key(SERIAL_STREAM_ID));
+        let circle = circle_id.to_string();
+        let activated: i64 = peer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                    [circle],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)
+            })
+            .await
+            .expect("read remote Serial circle activation");
+        assert_eq!(activated, 1);
     }
 
     #[tokio::test]
@@ -4536,6 +4789,7 @@ mod tests {
                 commit,
                 package: Some(package),
                 registrations: Vec::new(),
+                circle_activations: Vec::new(),
             };
             let storage = crate::sync::test_helpers::MockSyncStorage::new();
             storage

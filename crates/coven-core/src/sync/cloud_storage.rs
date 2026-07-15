@@ -14,8 +14,8 @@ use tracing::warn;
 
 use super::storage::{
     CoordinationError, CoordinationStorage, CreateHeadError, ProtocolObjectContext,
-    ProtocolObjectListing, ProtocolObjectLocator, ReplaceHeadError, StorageError, SyncStorage,
-    VersionToken, VersionedObject,
+    ProtocolObjectListing, ProtocolObjectLocator, ProtocolObjectProtection, ReplaceHeadError,
+    StorageError, SyncStorage, VersionToken, VersionedObject,
 };
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
@@ -641,6 +641,29 @@ impl CloudSyncStorage {
         let cipher = self.cipher();
         self.pending_rotation.check(&cipher)?;
         Ok(cipher)
+    }
+
+    fn protocol_cipher_for_seal(
+        &self,
+        context: &ProtocolObjectContext,
+    ) -> Result<CloudCipher, StorageError> {
+        match context.protection() {
+            ProtocolObjectProtection::Store => self.cipher_for_seal(),
+            ProtocolObjectProtection::Circle(encryption) => {
+                Ok(CloudCipher::Encrypted(encryption.clone()))
+            }
+            ProtocolObjectProtection::RecipientSealed => Ok(CloudCipher::Plaintext),
+        }
+    }
+
+    fn protocol_cipher_for_open(&self, context: &ProtocolObjectContext) -> CloudCipher {
+        match context.protection() {
+            ProtocolObjectProtection::Store => self.cipher(),
+            ProtocolObjectProtection::Circle(encryption) => {
+                CloudCipher::Encrypted(encryption.clone())
+            }
+            ProtocolObjectProtection::RecipientSealed => CloudCipher::Plaintext,
+        }
     }
 
     fn aad_context(&self, key: &str) -> Vec<u8> {
@@ -1299,7 +1322,7 @@ impl SyncStorage for CloudSyncStorage {
         let logical_key = format!("{semantic_prefix}/copies/{copy_id}{extension}");
         let physical_key = format!("{logical_key}{}", self.suffix());
         let aad = protocol_object_aad_context(context, semantic_prefix);
-        let stored = self.cipher_for_seal()?.seal(data, &aad);
+        let stored = self.protocol_cipher_for_seal(context)?.seal(data, &aad);
         let physical = self
             .home
             .append_object(
@@ -1315,7 +1338,7 @@ impl SyncStorage for CloudSyncStorage {
         &self,
         prefix: &str,
     ) -> Result<ProtocolObjectListing, StorageError> {
-        if !prefix.starts_with(crate::sync::store_commit::protocol_prefix()) {
+        if !super::storage::is_protocol_listing_prefix(prefix) {
             return Err(StorageError::Parse(format!(
                 "invalid protocol listing prefix {prefix:?}"
             )));
@@ -1359,9 +1382,14 @@ impl SyncStorage for CloudSyncStorage {
         }
         let stored = self.home.read_appended(object.physical()).await?;
         let aad = protocol_object_aad_context(context, semantic_prefix);
-        self.cipher().open(stored, &aad).map_err(|error| {
-            StorageError::Decryption(format!("protocol object {}: {error}", object.logical_key()))
-        })
+        self.protocol_cipher_for_open(context)
+            .open(stored, &aad)
+            .map_err(|error| {
+                StorageError::Decryption(format!(
+                    "protocol object {}: {error}",
+                    object.logical_key()
+                ))
+            })
     }
 
     async fn delete_protocol_object(

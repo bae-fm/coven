@@ -5627,6 +5627,379 @@ impl Database {
 
     // ---- Materialized Store commit ledger ----
 
+    pub(crate) async fn insert_circle_operation(
+        &self,
+        journal: crate::sync::circle_ops::CircleOperationJournal,
+    ) -> Result<(), DbError> {
+        let operation_id = journal.operation_id.clone();
+        let circle_id = journal.circle_id().to_string();
+        let status = serde_json::to_string(&journal.status).map_err(|error| {
+            DbError::Message(format!("serialize circle operation status: {error}"))
+        })?;
+        let payload = serde_json::to_vec(&journal).map_err(|error| {
+            DbError::Message(format!("serialize circle operation journal: {error}"))
+        })?;
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO circle_operations (operation_id, circle_id, status, payload)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![operation_id, circle_id, status, payload],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn circle_operation(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+    ) -> Result<Option<crate::sync::circle_ops::CircleOperationJournal>, DbError> {
+        let circle_id = circle_id.to_string();
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT payload FROM circle_operations WHERE circle_id = ?1",
+                [circle_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|payload| {
+                serde_json::from_slice(&payload).map_err(|error| {
+                    DbError::Message(format!("parse circle operation journal: {error}"))
+                })
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn oldest_circle_operation(
+        &self,
+    ) -> Result<Option<crate::sync::circle_ops::CircleOperationJournal>, DbError> {
+        self.call(|conn| {
+            conn.query_row(
+                "SELECT payload FROM circle_operations ORDER BY rowid LIMIT 1",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|payload| {
+                serde_json::from_slice(&payload).map_err(|error| {
+                    DbError::Message(format!("parse circle operation journal: {error}"))
+                })
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    pub async fn get_circle_operations(
+        &self,
+    ) -> Result<Vec<crate::sync::circle::CircleOperationInfo>, DbError> {
+        self.call(|conn| {
+            let mut statement = conn
+                .prepare("SELECT payload FROM circle_operations ORDER BY rowid")
+                .map_err(DbError::from)?;
+            let operations = statement
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(DbError::from)?
+                .map(|payload| {
+                    let payload = payload.map_err(DbError::from)?;
+                    let journal: crate::sync::circle_ops::CircleOperationJournal =
+                        serde_json::from_slice(&payload).map_err(|error| {
+                            DbError::Message(format!("parse circle operation journal: {error}"))
+                        })?;
+                    let circle_id = journal.circle_id();
+                    let state = match journal.status {
+                        crate::sync::circle_ops::CircleOperationStatus::Pending => {
+                            crate::sync::circle::CircleOperationState::Pending
+                        }
+                        crate::sync::circle_ops::CircleOperationStatus::Blocked { reason } => {
+                            crate::sync::circle::CircleOperationState::Blocked { reason }
+                        }
+                    };
+                    Ok(crate::sync::circle::CircleOperationInfo {
+                        circle_id,
+                        name: journal.creation.metadata.name,
+                        state,
+                    })
+                })
+                .collect();
+            operations
+        })
+        .await
+    }
+
+    pub async fn get_circles(
+        &self,
+        identity_pubkey: &str,
+    ) -> Result<Vec<crate::sync::circle::CircleInfo>, DbError> {
+        let identity_pubkey = identity_pubkey.to_string();
+        self.call(move |conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT activation.circle_id, activation.control_bytes,
+                            metadata.metadata_bytes, roster.roster_bytes
+                     FROM circle_control_activations AS activation
+                     JOIN circle_access_cache AS access
+                       ON access.circle_id = activation.circle_id
+                      AND access.control_coord = activation.control_coord
+                     JOIN circle_metadata_cache AS metadata
+                       ON metadata.circle_id = activation.circle_id
+                      AND metadata.control_coord = activation.control_coord
+                     JOIN circle_roster_cache AS roster
+                       ON roster.circle_id = activation.circle_id
+                      AND roster.control_coord = activation.control_coord
+                     WHERE access.disposition = 'active'
+                     ORDER BY activation.circle_id, activation.seq",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            let mut circles = Vec::new();
+            for row in rows {
+                let (circle_id, control_bytes, metadata_bytes, roster_bytes) =
+                    row.map_err(DbError::from)?;
+                let circle_id: crate::sync::circle::CircleId =
+                    circle_id.parse().map_err(|error| {
+                        DbError::Message(format!("parse activated circle id: {error}"))
+                    })?;
+                let control: crate::sync::circle::CircleControl =
+                    serde_json::from_slice(&control_bytes).map_err(|error| {
+                        DbError::Message(format!("parse activated circle control: {error}"))
+                    })?;
+                let metadata: crate::sync::circle::CircleMetadata =
+                    serde_json::from_slice(&metadata_bytes).map_err(|error| {
+                        DbError::Message(format!("parse activated circle metadata: {error}"))
+                    })?;
+                let roster: crate::sync::circle::CircleRoster =
+                    serde_json::from_slice(&roster_bytes).map_err(|error| {
+                        DbError::Message(format!("parse activated circle roster: {error}"))
+                    })?;
+                if !control.verify()
+                    || !metadata.verify()
+                    || !roster.verify()
+                    || control.circle_id != circle_id
+                    || metadata.circle_id != circle_id
+                    || roster.circle_id != circle_id
+                    || control.metadata_hash != metadata.metadata_hash()
+                    || control.roster_hash != roster.roster_hash()
+                {
+                    return Err(DbError::Message(format!(
+                        "activated circle {circle_id} has inconsistent cached state"
+                    )));
+                }
+                let role = roster
+                    .members
+                    .get(&identity_pubkey)
+                    .copied()
+                    .ok_or_else(|| {
+                        DbError::Message(format!(
+                            "activated circle {circle_id} excludes the local identity"
+                        ))
+                    })?;
+                circles.push(crate::sync::circle::CircleInfo {
+                    id: circle_id,
+                    name: metadata.name,
+                    role,
+                });
+            }
+            Ok(circles)
+        })
+        .await
+    }
+
+    pub(crate) async fn update_circle_operation(
+        &self,
+        journal: crate::sync::circle_ops::CircleOperationJournal,
+    ) -> Result<(), DbError> {
+        let operation_id = journal.operation_id.clone();
+        let circle_id = journal.circle_id().to_string();
+        let status = serde_json::to_string(&journal.status).map_err(|error| {
+            DbError::Message(format!("serialize circle operation status: {error}"))
+        })?;
+        let payload = serde_json::to_vec(&journal).map_err(|error| {
+            DbError::Message(format!("serialize circle operation journal: {error}"))
+        })?;
+        self.call(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE circle_operations SET status = ?3, payload = ?4
+                     WHERE operation_id = ?1 AND circle_id = ?2",
+                    rusqlite::params![operation_id, circle_id, status, payload],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "circle operation disappeared during publication".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn block_circle_operation(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        reason: String,
+    ) -> Result<(), DbError> {
+        let mut journal = self
+            .circle_operation(circle_id)
+            .await?
+            .ok_or_else(|| DbError::Message(format!("circle operation {circle_id} is absent")))?;
+        journal.status = crate::sync::circle_ops::CircleOperationStatus::Blocked { reason };
+        self.update_circle_operation(journal).await
+    }
+
+    pub(crate) async fn activate_circle_operation(
+        &self,
+        journal: crate::sync::circle_ops::CircleOperationJournal,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            if !matches!(
+                journal.status,
+                crate::sync::circle_ops::CircleOperationStatus::Pending
+            ) {
+                return Err(DbError::Message(
+                    "blocked circle operation cannot activate".to_string(),
+                ));
+            }
+            let creation = &journal.creation;
+            if !creation.control.verify()
+                || !creation.metadata.verify()
+                || !creation.roster.verify()
+            {
+                return Err(DbError::Message(
+                    "circle operation contains invalid signed objects".to_string(),
+                ));
+            }
+            let policy = match journal.head {
+                crate::sync::circle_ops::CircleActivationHead::MergeConcurrent(_) => {
+                    WritePolicy::MergeConcurrent
+                }
+                crate::sync::circle_ops::CircleActivationHead::Serial(_) => WritePolicy::Serial,
+            };
+            let stream_id = match policy {
+                WritePolicy::MergeConcurrent => match &journal.head {
+                    crate::sync::circle_ops::CircleActivationHead::MergeConcurrent(head) => {
+                        head.device_id.as_str()
+                    }
+                    crate::sync::circle_ops::CircleActivationHead::Serial(_) => unreachable!(),
+                },
+                WritePolicy::Serial => SERIAL_STREAM_ID,
+            };
+            let commit: StoreBatchCommit = serde_json::from_slice(&journal.commit_bytes)
+                .map_err(|error| DbError::Message(format!("parse circle Store commit: {error}")))?;
+            let commit = StoreBatchCommit::parse_at(
+                &journal.commit_bytes,
+                creation.control.value.store_root_hash,
+                policy,
+                stream_id,
+                commit.seq(),
+            )
+            .map_err(|error| DbError::Message(format!("verify circle Store commit: {error}")))?;
+            let expected_ref = crate::sync::store_commit::CircleControlRef {
+                circle_id: creation.circle_id,
+                control: creation.control.coord.clone(),
+            };
+            if commit.circle_controls.as_slice() != [expected_ref]
+                || commit.store_package.is_some()
+                || !commit.circle_packages.is_empty()
+                || commit.control.is_some()
+                || !commit.device_registrations.is_empty()
+            {
+                return Err(DbError::Message(
+                    "circle creation Store commit is not an exact control-only batch".to_string(),
+                ));
+            }
+            match &journal.head {
+                crate::sync::circle_ops::CircleActivationHead::MergeConcurrent(head) => {
+                    let parsed = StoreDeviceHead::parse_at(
+                        &head.to_bytes(),
+                        commit.store_root_hash,
+                        &commit.device_id,
+                        commit.seq(),
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!("verify circle activation head: {error}"))
+                    })?;
+                    if parsed.position.as_ref() != Some(&commit.position()) {
+                        return Err(DbError::Message(
+                            "circle activation head names a different commit".to_string(),
+                        ));
+                    }
+                    Self::record_materialized_commit_on(&tx, &commit)?;
+                }
+                crate::sync::circle_ops::CircleActivationHead::Serial(head) => {
+                    let parsed = StoreSerialHead::parse(&head.to_bytes(), commit.store_root_hash)
+                        .map_err(|error| {
+                        DbError::Message(format!("verify circle Serial head: {error}"))
+                    })?;
+                    if parsed.commit.as_ref() != Some(&commit.position()) {
+                        return Err(DbError::Message(
+                            "circle Serial head names a different commit".to_string(),
+                        ));
+                    }
+                    let authorization = journal.serial_authorization.as_ref().ok_or_else(|| {
+                        DbError::Message(
+                            "circle Serial operation lacks exact authorization state".to_string(),
+                        )
+                    })?;
+                    Self::record_materialized_serial_commit_on(
+                        &tx,
+                        &commit,
+                        &authorization.membership,
+                        authorization.key_generation,
+                    )?;
+                }
+            }
+            let own_access = creation
+                .access
+                .iter()
+                .find(|access| access.recipient_pubkey == commit.author_pubkey)
+                .ok_or_else(|| {
+                    DbError::Message("circle creator has no access disposition".to_string())
+                })?;
+            Self::record_verified_circle_activations_on(
+                &tx,
+                &commit,
+                &[crate::sync::circle_ops::VerifiedCircleActivation {
+                    circle_id: creation.circle_id,
+                    control: creation.control.clone(),
+                    access_bytes: own_access.leaf.bytes.clone(),
+                    disposition: own_access.disposition.clone(),
+                    roster: Some(creation.roster.clone()),
+                    metadata: Some(creation.metadata.clone()),
+                }],
+            )?;
+            let deleted = tx
+                .execute(
+                    "DELETE FROM circle_operations WHERE operation_id = ?1 AND circle_id = ?2",
+                    rusqlite::params![journal.operation_id, creation.circle_id.to_string()],
+                )
+                .map_err(DbError::from)?;
+            if deleted != 1 {
+                return Err(DbError::Message(
+                    "circle operation disappeared during activation".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
     pub(crate) async fn materialized_frontier(
         &self,
     ) -> Result<BTreeMap<String, CommitPosition>, DbError> {
@@ -6054,6 +6427,89 @@ impl Database {
         )
         .map(|_| ())
         .map_err(DbError::from)
+    }
+
+    pub(crate) fn record_verified_circle_activations_on(
+        conn: &Connection,
+        commit: &StoreBatchCommit,
+        activations: &[crate::sync::circle_ops::VerifiedCircleActivation],
+    ) -> Result<(), DbError> {
+        if activations.len() != commit.circle_controls.len() {
+            return Err(DbError::Message(
+                "verified circle activations do not cover every control reference".to_string(),
+            ));
+        }
+        let stream_id = commit.order.stream_id(&commit.device_id);
+        let seq = Self::sequence_to_sqlite(stream_id, commit.seq())?;
+        for activation in activations {
+            let expected = crate::sync::store_commit::CircleControlRef {
+                circle_id: activation.circle_id,
+                control: activation.control.coord.clone(),
+            };
+            if !commit.circle_controls.contains(&expected) || !activation.control.verify() {
+                return Err(DbError::Message(
+                    "verified circle activation differs from Store control reference".to_string(),
+                ));
+            }
+            let control_coord =
+                serde_json::to_string(&activation.control.coord).map_err(|error| {
+                    DbError::Message(format!("serialize circle control coordinate: {error}"))
+                })?;
+            conn.execute(
+                "INSERT INTO circle_control_activations
+                 (circle_id, control_coord, stream_id, seq, commit_hash, control_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    activation.circle_id.to_string(),
+                    &control_coord,
+                    stream_id,
+                    seq,
+                    commit.commit_hash().to_string(),
+                    &activation.control.bytes,
+                ],
+            )
+            .map_err(DbError::from)?;
+            let disposition = match activation.disposition {
+                crate::sync::circle::CircleAccessDisposition::Active { .. } => "active",
+                crate::sync::circle::CircleAccessDisposition::Inactive => "inactive",
+            };
+            conn.execute(
+                "INSERT INTO circle_access_cache
+                 (circle_id, control_coord, owner_pubkey, disposition, access_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    activation.circle_id.to_string(),
+                    &control_coord,
+                    &activation.control.value.author_pubkey,
+                    disposition,
+                    &activation.access_bytes,
+                ],
+            )
+            .map_err(DbError::from)?;
+            if let Some(roster) = &activation.roster {
+                let bytes = serde_json::to_vec(roster).map_err(|error| {
+                    DbError::Message(format!("serialize activated circle roster: {error}"))
+                })?;
+                conn.execute(
+                    "INSERT INTO circle_roster_cache (circle_id, control_coord, roster_bytes)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![activation.circle_id.to_string(), &control_coord, bytes,],
+                )
+                .map_err(DbError::from)?;
+            }
+            if let Some(metadata) = &activation.metadata {
+                let bytes = serde_json::to_vec(metadata).map_err(|error| {
+                    DbError::Message(format!("serialize activated circle metadata: {error}"))
+                })?;
+                conn.execute(
+                    "INSERT INTO circle_metadata_cache
+                     (circle_id, control_coord, metadata_bytes) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![activation.circle_id.to_string(), &control_coord, bytes,],
+                )
+                .map_err(DbError::from)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn record_materialized_serial_commit_on(

@@ -250,6 +250,15 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            circle_operations,
+            "
+    operation_id TEXT PRIMARY KEY,
+    circle_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (json_valid(status)),
+    payload BLOB NOT NULL
+"
+        );
+        $visit!(
             circle_access_cache,
             "
     circle_id TEXT NOT NULL,
@@ -268,6 +277,17 @@ macro_rules! coven_tables {
     circle_id TEXT NOT NULL,
     control_coord TEXT NOT NULL CHECK (json_valid(control_coord)),
     roster_bytes BLOB NOT NULL,
+    PRIMARY KEY (circle_id, control_coord),
+    FOREIGN KEY (circle_id, control_coord)
+        REFERENCES circle_control_activations(circle_id, control_coord)
+"
+        );
+        $visit!(
+            circle_metadata_cache,
+            "
+    circle_id TEXT NOT NULL,
+    control_coord TEXT NOT NULL CHECK (json_valid(control_coord)),
+    metadata_bytes BLOB NOT NULL,
     PRIMARY KEY (circle_id, control_coord),
     FOREIGN KEY (circle_id, control_coord)
         REFERENCES circle_control_activations(circle_id, control_coord)

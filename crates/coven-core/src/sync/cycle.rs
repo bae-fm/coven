@@ -793,7 +793,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
         resume_drain_promptly = true;
     }
 
-    let store_pull = super::store_pull::pull_store_commits_with_coordination(
+    let store_pull = super::store_pull::pull_store_commits_with_identity(
         db,
         tables,
         storage,
@@ -802,6 +802,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
         device_id,
         store_dir,
         merge_chain,
+        Some(user_keypair),
     )
     .await
     .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
@@ -1835,6 +1836,32 @@ impl SyncComponents {
         )
     }
 
+    pub async fn create_circle(
+        &self,
+        name: &str,
+    ) -> Result<super::circle::CircleId, super::circle_ops::CircleOperationError> {
+        let coordination = match self.db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => None,
+            crate::WritePolicy::Serial => {
+                Some(self.storage.serial_coordination().map_err(|error| {
+                    super::circle_ops::CircleOperationError::InvalidState(format!(
+                        "Serial coordination: {error}"
+                    ))
+                })?)
+            }
+        };
+        super::circle_ops::create_circle(
+            &self.db,
+            &*self.storage,
+            coordination,
+            &self.device_id,
+            &self.hlc.now().to_string(),
+            name,
+            &self.user_keypair,
+        )
+        .await
+    }
+
     pub async fn run_cycle(
         &self,
         clock: &dyn crate::clock::Clock,
@@ -1850,6 +1877,9 @@ impl SyncComponents {
                 })?)
             }
         };
+        super::circle_ops::resume_circle_operations(&self.db, &*self.storage, serial_coordination)
+            .await
+            .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))?;
         run_single_sync_cycle_with_coordination(
             &*self.storage,
             serial_coordination,

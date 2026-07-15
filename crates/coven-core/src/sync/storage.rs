@@ -64,12 +64,18 @@ pub enum ProtocolObjectDomain {
     StoreMembershipEntry,
     StoreMembershipHead,
     StorePackage,
+    CircleControl,
+    CircleRoster,
+    CircleMetadata,
+    CircleAccessLeaf,
+    CircleAccessEnvelope,
 }
 
 #[derive(Clone, Copy)]
 struct ProtocolObjectMetadata {
     aad_label: &'static [u8],
     path_prefix: &'static str,
+    path_segment: Option<&'static str>,
     extension: &'static str,
 }
 
@@ -79,62 +85,98 @@ impl ProtocolObjectDomain {
             Self::StoreProtocolRoot => ProtocolObjectMetadata {
                 aad_label: b"store-protocol-root",
                 path_prefix: STORE_PROTOCOL_ROOT_PREFIX,
+                path_segment: None,
                 extension: ".json",
             },
             Self::StoreCommit => ProtocolObjectMetadata {
                 aad_label: b"store-commit",
                 path_prefix: STORE_COMMIT_PREFIX,
+                path_segment: None,
                 extension: ".json",
             },
             Self::StoreHead => ProtocolObjectMetadata {
                 aad_label: b"store-head",
                 path_prefix: STORE_HEAD_PREFIX,
+                path_segment: None,
                 extension: ".json",
             },
             Self::StoreAck => ProtocolObjectMetadata {
                 aad_label: b"store-ack",
                 path_prefix: STORE_ACK_PREFIX,
+                path_segment: None,
                 extension: ".json",
             },
             Self::StoreDeviceRegistration => ProtocolObjectMetadata {
                 aad_label: b"store-device-registration",
                 path_prefix: STORE_DEVICE_REGISTRATION_PREFIX,
+                path_segment: None,
                 extension: ".json",
             },
             Self::StoreSnapshotMeta => ProtocolObjectMetadata {
                 aad_label: b"store-snapshot-meta",
                 path_prefix: STORE_SNAPSHOT_META_PREFIX,
+                path_segment: None,
                 extension: ".json",
             },
             Self::StoreSnapshotImage => ProtocolObjectMetadata {
                 aad_label: b"store-snapshot-image",
                 path_prefix: STORE_SNAPSHOT_IMAGE_PREFIX,
+                path_segment: None,
                 extension: ".db",
             },
             Self::StoreMembershipEntry => ProtocolObjectMetadata {
                 aad_label: b"store-membership-entry",
                 path_prefix: STORE_MEMBERSHIP_ENTRY_PREFIX,
+                path_segment: None,
                 extension: ".json",
             },
             Self::StoreMembershipHead => ProtocolObjectMetadata {
                 aad_label: b"store-membership-head",
                 path_prefix: STORE_MEMBERSHIP_HEAD_PREFIX,
+                path_segment: None,
                 extension: ".json",
             },
             Self::StorePackage => ProtocolObjectMetadata {
                 aad_label: b"store-package",
                 path_prefix: STORE_PACKAGE_PREFIX,
+                path_segment: None,
                 extension: ".pkg",
+            },
+            Self::CircleControl => ProtocolObjectMetadata {
+                aad_label: b"circle-control",
+                path_prefix: crate::sync::circle::CIRCLE_CONTROL_PREFIX,
+                path_segment: None,
+                extension: ".json",
+            },
+            Self::CircleRoster => ProtocolObjectMetadata {
+                aad_label: b"circle-roster",
+                path_prefix: crate::sync::circle::CIRCLE_ROSTER_PREFIX,
+                path_segment: Some("/roster/"),
+                extension: ".json",
+            },
+            Self::CircleMetadata => ProtocolObjectMetadata {
+                aad_label: b"circle-metadata",
+                path_prefix: crate::sync::circle::CIRCLE_METADATA_PREFIX,
+                path_segment: Some("/metadata/"),
+                extension: ".json",
+            },
+            Self::CircleAccessLeaf => ProtocolObjectMetadata {
+                aad_label: b"circle-access-leaf",
+                path_prefix: crate::sync::circle::CIRCLE_ACCESS_LEAF_PREFIX,
+                path_segment: Some("/access-leaves/"),
+                extension: "",
+            },
+            Self::CircleAccessEnvelope => ProtocolObjectMetadata {
+                aad_label: b"circle-access-envelope",
+                path_prefix: crate::sync::circle::CIRCLE_ACCESS_ENVELOPE_PREFIX,
+                path_segment: Some("/access-envelopes/"),
+                extension: ".json",
             },
         }
     }
 
     pub(crate) fn aad_label(self) -> &'static [u8] {
         self.metadata().aad_label
-    }
-
-    pub(crate) fn path_prefix(self) -> &'static str {
-        self.metadata().path_prefix
     }
 
     pub(crate) fn extension(self) -> &'static str {
@@ -146,6 +188,14 @@ impl ProtocolObjectDomain {
 pub struct ProtocolObjectContext {
     store_root_hash: ObjectHash,
     domain: ProtocolObjectDomain,
+    protection: ProtocolObjectProtection,
+}
+
+#[derive(Clone)]
+pub(crate) enum ProtocolObjectProtection {
+    Store,
+    Circle(crate::encryption::EncryptionService),
+    RecipientSealed,
 }
 
 impl ProtocolObjectContext {
@@ -153,6 +203,27 @@ impl ProtocolObjectContext {
         Self {
             store_root_hash,
             domain,
+            protection: ProtocolObjectProtection::Store,
+        }
+    }
+
+    pub fn circle(
+        store_root_hash: ObjectHash,
+        domain: ProtocolObjectDomain,
+        encryption: crate::encryption::EncryptionService,
+    ) -> Self {
+        Self {
+            store_root_hash,
+            domain,
+            protection: ProtocolObjectProtection::Circle(encryption),
+        }
+    }
+
+    pub fn recipient_sealed(store_root_hash: ObjectHash) -> Self {
+        Self {
+            store_root_hash,
+            domain: ProtocolObjectDomain::CircleAccessLeaf,
+            protection: ProtocolObjectProtection::RecipientSealed,
         }
     }
 
@@ -164,9 +235,17 @@ impl ProtocolObjectContext {
         self.domain
     }
 
+    pub(crate) fn protection(&self) -> &ProtocolObjectProtection {
+        &self.protection
+    }
+
     pub fn validate_path(&self, semantic_prefix: &str) -> Result<(), StorageError> {
+        let metadata = self.domain.metadata();
         if semantic_prefix.contains("/copies/")
-            || !semantic_prefix.starts_with(self.domain.path_prefix())
+            || !semantic_prefix.starts_with(metadata.path_prefix)
+            || metadata
+                .path_segment
+                .is_some_and(|segment| !semantic_prefix.contains(segment))
         {
             return Err(StorageError::Parse(format!(
                 "object domain {:?} does not accept semantic path {semantic_prefix:?}",
@@ -220,6 +299,12 @@ impl ProtocolObjectContext {
         })?;
         Ok(())
     }
+}
+
+pub(crate) fn is_protocol_listing_prefix(prefix: &str) -> bool {
+    prefix.starts_with(crate::sync::store_commit::protocol_prefix())
+        || prefix.starts_with(crate::sync::circle::CIRCLE_CONTROL_PREFIX)
+        || prefix.starts_with(crate::sync::circle::CIRCLE_ROSTER_PREFIX)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

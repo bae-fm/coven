@@ -6,6 +6,7 @@ mod blob_content_hash_tests;
 // so the formula is `pub(crate)`.
 pub mod backoff;
 pub mod circle;
+pub mod circle_ops;
 pub mod cloud_storage;
 pub mod conflict;
 pub mod cycle;

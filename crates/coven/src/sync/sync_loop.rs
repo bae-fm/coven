@@ -97,6 +97,8 @@ pub(crate) struct SyncLoopHandle {
     store_dir: StoreDir,
     trigger_tx: tokio::sync::mpsc::Sender<()>,
     trigger_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>,
+    command_tx: tokio::sync::mpsc::Sender<SyncCommand>,
+    command_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<SyncCommand>>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
     stop_rx: std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     /// The current status value, owned by the [`CovenHandle`] and cloned into each
@@ -120,6 +122,15 @@ struct SyncLoopInner {
     _open_guard: Arc<StoreOpenGuard>,
 }
 
+enum SyncCommand {
+    CreateCircle {
+        name: String,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::CircleId, crate::sync::circle_ops::CircleOperationError>,
+        >,
+    },
+}
+
 impl SyncLoopHandle {
     pub(crate) fn new(
         components: SyncComponents,
@@ -131,6 +142,7 @@ impl SyncLoopHandle {
         status_tx: tokio::sync::watch::Sender<SyncLoopStatus>,
     ) -> Self {
         let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(1);
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel(16);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let store_dir = config.store_dir.clone();
 
@@ -146,6 +158,8 @@ impl SyncLoopHandle {
             store_dir,
             trigger_tx,
             trigger_rx: std::sync::Mutex::new(Some(trigger_rx)),
+            command_tx,
+            command_rx: std::sync::Mutex::new(Some(command_rx)),
             stop_tx,
             stop_rx: std::sync::Mutex::new(Some(stop_rx)),
             status_tx,
@@ -178,6 +192,13 @@ impl SyncLoopHandle {
             }
         };
         let mut stop_rx = match self.stop_rx.lock().unwrap().take() {
+            Some(rx) => rx,
+            None => {
+                self.running.store(false, Ordering::Release);
+                return Err(SyncLoopError::NotRestartable);
+            }
+        };
+        let mut command_rx = match self.command_rx.lock().unwrap().take() {
             Some(rx) => rx,
             None => {
                 self.running.store(false, Ordering::Release);
@@ -217,12 +238,23 @@ impl SyncLoopHandle {
 
                 rt.block_on(async move {
                     // Short delay to avoid racing with app startup.
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(3)) => {}
-                        changed = stop_rx.changed() => {
-                            if changed.is_err() || *stop_rx.borrow() {
-                                info!("Sync loop stopped before first cycle");
-                                return;
+                    let startup_delay = tokio::time::sleep(Duration::from_secs(3));
+                    tokio::pin!(startup_delay);
+                    loop {
+                        tokio::select! {
+                            _ = &mut startup_delay => break,
+                            changed = stop_rx.changed() => {
+                                if changed.is_err() || *stop_rx.borrow() {
+                                    info!("Sync loop stopped before first cycle");
+                                    return;
+                                }
+                            }
+                            command = command_rx.recv() => {
+                                let Some(command) = command else {
+                                    info!("Sync command channel closed before first cycle");
+                                    return;
+                                };
+                                execute_command(&inner, command).await;
                             }
                         }
                     }
@@ -304,6 +336,13 @@ impl SyncLoopHandle {
                                     info!("Sync trigger channel closed, stopping sync loop");
                                     break;
                                 }
+                            }
+                            command = command_rx.recv() => {
+                                let Some(command) = command else {
+                                    info!("Sync command channel closed, stopping sync loop");
+                                    break;
+                                };
+                                execute_command(&inner, command).await;
                             }
                         }
                     }
@@ -439,6 +478,34 @@ impl SyncLoopHandle {
                 self.inner.observer.as_deref(),
             )
             .await
+    }
+
+    pub(crate) async fn create_circle(
+        &self,
+        name: &str,
+    ) -> Result<crate::CircleId, crate::sync::circle_ops::CircleOperationError> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.command_tx
+            .send(SyncCommand::CreateCircle {
+                name: name.to_string(),
+                reply,
+            })
+            .await
+            .map_err(|_| crate::sync::circle_ops::CircleOperationError::CommandChannelClosed)?;
+        response
+            .await
+            .map_err(|_| crate::sync::circle_ops::CircleOperationError::ReplyChannelClosed)?
+    }
+}
+
+async fn execute_command(inner: &SyncLoopInner, command: SyncCommand) {
+    match command {
+        SyncCommand::CreateCircle { name, reply } => {
+            let result = inner.components.create_circle(&name).await;
+            if reply.send(result).is_err() {
+                debug!("create_circle caller dropped its reply receiver");
+            }
+        }
     }
 }
 

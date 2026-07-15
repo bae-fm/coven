@@ -26,6 +26,7 @@ hkdf = "0.12"
 chacha20poly1305 = "0.10"
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 crypto_box = { version = "0.9", features = ["seal"] }
+x25519-dalek = "3.0.0"
 rand = "0.9"
 uuid = { version = "1.0", features = ["v4"] }
 urlencoding = "2.1"

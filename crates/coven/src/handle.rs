@@ -487,6 +487,23 @@ impl CovenHandle {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn connect_sync_with_test_home_and_coordination(
+        &self,
+        home: Arc<dyn CloudHome>,
+        coordination: Arc<dyn crate::storage::cloud::CloudHeadStorage>,
+        cipher: CloudCipher,
+    ) -> Result<(), SyncError> {
+        self.build_and_install_sync(self.cloudkit_ops.clone(), move |manager| async move {
+            manager
+                .start_sync_with_home_and_coordination(home, coordination, cipher)
+                .await
+        })
+        .await?;
+        info!("coven handle: sync manager connected over an injected coordinated test home");
+        Ok(())
+    }
+
     /// Test-only: connect over an injected [`CloudHome`] while resolving the
     /// at-rest cipher from custody the way production
     /// [`connect_sync`](Self::connect_sync) does, instead of taking an explicit
@@ -1011,6 +1028,33 @@ impl CovenHandle {
     pub async fn remove_member(&self, public_key_hex: &str) -> Result<String, SyncError> {
         let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         manager.remove_member(public_key_hex).await
+    }
+
+    /// Create and activate a circle whose founder is this Store identity.
+    /// Returns only after the signed roster, metadata, access set, control,
+    /// Store commit, activation head, and local materialization are durable.
+    pub async fn create_circle(&self, name: &str) -> Result<crate::CircleId, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
+        manager.create_circle(name).await
+    }
+
+    /// Return circles with a locally verified active access record.
+    pub async fn get_circles(&self) -> Result<Vec<crate::CircleInfo>, SyncError> {
+        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        self.db
+            .get_circles(&crate::keys::public_key_hex(&identity))
+            .await
+            .map_err(SyncError::from)
+    }
+
+    /// Return durable circle commands that have not activated.
+    pub async fn get_circle_operations(
+        &self,
+    ) -> Result<Vec<crate::CircleOperationInfo>, SyncError> {
+        self.db
+            .get_circle_operations()
+            .await
+            .map_err(SyncError::from)
     }
 }
 
@@ -2105,6 +2149,120 @@ mod tests {
 
         assert!(matches!(invite, Err(SyncError::NotEncryptedHome)));
         assert!(matches!(remove, Err(SyncError::NotEncryptedHome)));
+    }
+
+    #[tokio::test]
+    async fn create_circle_returns_after_merge_activation_is_materialized() {
+        test_keyring::install();
+
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let keyring = crate::encryption::MasterKeyring::generate();
+        let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
+            .resolve("lib-create-circle-merge", &store_dir);
+        let handle =
+            test_handle_with_custody("lib-create-circle-merge", store_dir, db.clone(), custody);
+        handle
+            .connect_sync_with_test_home(
+                Arc::new(InMemoryCloudHome::new()),
+                CloudCipher::Encrypted(EncryptionService::from(keyring)),
+            )
+            .await
+            .expect("connect encrypted Merge home");
+
+        let circle_id = handle
+            .create_circle("Household")
+            .await
+            .expect("create and activate circle");
+
+        assert_eq!(
+            handle.get_circles().await.expect("read active circles"),
+            vec![crate::CircleInfo {
+                id: circle_id,
+                name: "Household".to_string(),
+                role: crate::CircleRole::Owner,
+            }]
+        );
+        assert!(handle
+            .get_circle_operations()
+            .await
+            .expect("read completed circle operations")
+            .is_empty());
+
+        let circle = circle_id.to_string();
+        db.call(move |conn| {
+            let activated: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                [&circle],
+                |row| row.get(0),
+            )?;
+            let active_access: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM circle_access_cache
+                 WHERE circle_id = ?1 AND disposition = 'active'",
+                [&circle],
+                |row| row.get(0),
+            )?;
+            let pending: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM circle_operations WHERE circle_id = ?1",
+                [&circle],
+                |row| row.get(0),
+            )?;
+            assert_eq!((activated, active_access, pending), (1, 1, 0));
+            Ok::<_, crate::DbError>(())
+        })
+        .await
+        .expect("read activated circle state");
+    }
+
+    #[tokio::test]
+    async fn create_circle_returns_after_serial_activation_is_materialized() {
+        test_keyring::install();
+
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = crate::sync::test_helpers::open_serial_test_db();
+        let keyring = crate::encryption::MasterKeyring::generate();
+        let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
+            .resolve("lib-create-circle-serial", &store_dir);
+        let handle =
+            test_handle_with_custody("lib-create-circle-serial", store_dir, db.clone(), custody);
+        let home = Arc::new(InMemoryCloudHome::new());
+        handle
+            .connect_sync_with_test_home_and_coordination(
+                home.clone(),
+                home,
+                CloudCipher::Encrypted(EncryptionService::from(keyring)),
+            )
+            .await
+            .expect("connect encrypted Serial home");
+
+        let circle_id = handle
+            .create_circle("Household")
+            .await
+            .expect("create and activate Serial circle");
+
+        let circle = circle_id.to_string();
+        db.call(move |conn| {
+            let activated: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                [&circle],
+                |row| row.get(0),
+            )?;
+            let pending: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM circle_operations WHERE circle_id = ?1",
+                [&circle],
+                |row| row.get(0),
+            )?;
+            let serial_positions: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM materialized_commits WHERE device_id = 'serial'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!((activated, pending), (1, 0));
+            assert!(serial_positions >= 1);
+            Ok::<_, crate::DbError>(())
+        })
+        .await
+        .expect("read activated Serial circle state");
     }
 
     #[tokio::test]

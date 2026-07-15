@@ -1479,6 +1479,66 @@ pub(crate) async fn load_anchored_chain_at_floor(
         })
 }
 
+/// Load exactly the signed head coordinates named by a circle control. Unlike a
+/// bootstrap floor, a circle membership-state reference is a closed cut: a newer
+/// visible head must not change which identities require access dispositions.
+pub(crate) async fn load_anchored_chain_at_exact_heads(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    owner_pubkey: &str,
+    exact_heads: &[MembershipCoord],
+) -> Result<MembershipChain, AnchoredChainError> {
+    let by_grant =
+        membership_floor_by_grant(exact_heads).map_err(AnchoredChainError::LoadFailed)?;
+    let mut heads = Vec::with_capacity(by_grant.len());
+    for coord in by_grant.values() {
+        let loaded = load_membership_head_slot(
+            storage,
+            store_root_hash,
+            &coord.author_pubkey,
+            &coord.author_owner_grant,
+            coord.seq,
+        )
+        .await
+        .map_err(map_membership_object_error)?
+        .ok_or_else(|| {
+            AnchoredChainError::LoadFailed(format!(
+                "membership head {}/{}/{} is missing",
+                coord.author_pubkey, coord.author_owner_grant, coord.seq
+            ))
+        })?;
+        let head = loaded.value;
+        if head.author_pubkey != coord.author_pubkey
+            || head.author_owner_grant != coord.author_owner_grant
+            || head.seq != coord.seq
+            || head.tip_hash != coord.entry_hash
+            || !head.verify()
+        {
+            return Err(AnchoredChainError::LoadFailed(format!(
+                "membership head {}/{}/{} does not certify exact tip {}",
+                coord.author_pubkey, coord.author_owner_grant, coord.seq, coord.entry_hash
+            )));
+        }
+        heads.push(head);
+    }
+    let chain = download_committed_chain(storage, store_root_hash, &heads).await?;
+    if !chain.is_founded_by(owner_pubkey) {
+        return Err(AnchoredChainError::LoadFailed(format!(
+            "membership chain is not founded by pinned owner {owner_pubkey}"
+        )));
+    }
+    let mut actual = chain.author_heads();
+    actual.sort();
+    let mut expected = exact_heads.to_vec();
+    expected.sort();
+    if actual != expected {
+        return Err(AnchoredChainError::LoadFailed(
+            "membership chain does not resolve to the exact requested heads".to_string(),
+        ));
+    }
+    Ok(chain)
+}
+
 pub(crate) fn membership_floor_by_grant(
     floor: &[MembershipCoord],
 ) -> Result<BTreeMap<OwnerGrantId, MembershipCoord>, String> {

@@ -572,9 +572,7 @@ impl StoreBatchCommit {
                 })
             })
             .collect::<Result<Vec<_>, StoreProtocolError>>()?;
-        for control_ref in &circle_controls {
-            validate_circle_control_coord(order.policy(), &control_ref.control)?;
-        }
+        validate_circle_control_refs(order.policy(), &circle_controls)?;
         if control.is_none()
             && device_registrations.is_empty()
             && circle_controls.is_empty()
@@ -714,9 +712,7 @@ impl StoreBatchCommit {
                 });
             }
         }
-        for control_ref in &self.circle_controls {
-            validate_circle_control_coord(self.policy(), &control_ref.control)?;
-        }
+        validate_circle_control_refs(self.policy(), &self.circle_controls)?;
         validate_device_registration_refs(&self.device_registrations)?;
         if self.control.is_none()
             && self.device_registrations.is_empty()
@@ -864,6 +860,22 @@ fn validate_circle_control_coord(
             expected: policy,
             actual,
         });
+    }
+    Ok(())
+}
+
+fn validate_circle_control_refs(
+    policy: WritePolicy,
+    controls: &[CircleControlRef],
+) -> Result<(), StoreProtocolError> {
+    let mut seen = BTreeSet::new();
+    for control_ref in controls {
+        if !seen.insert(control_ref.circle_id) {
+            return Err(StoreProtocolError::DuplicateCircleControl(
+                control_ref.circle_id,
+            ));
+        }
+        validate_circle_control_coord(policy, &control_ref.control)?;
     }
     Ok(())
 }
@@ -1674,6 +1686,8 @@ pub enum StoreProtocolError {
     MissingCirclePackage(CircleId),
     #[error("Store batch has more than one package for circle {0}")]
     DuplicateCirclePackage(CircleId),
+    #[error("Store batch has more than one control for circle {0}")]
+    DuplicateCircleControl(CircleId),
     #[error("circle control coordinate is invalid")]
     InvalidCircleControlCoord,
     #[error("circle control uses {actual:?}, expected Store policy {expected:?}")]
@@ -2391,6 +2405,47 @@ mod tests {
         );
         assert_eq!(value.get("circle_controls"), Some(&serde_json::json!([])));
         assert_eq!(value.get("circle_packages"), Some(&serde_json::json!([])));
+    }
+
+    #[test]
+    fn batch_rejects_two_control_refs_for_one_circle() {
+        let (signer, root, _, _) = fixture();
+        let circle_id = CircleId::from_bytes([3; 16]);
+        let control = CircleControlRef {
+            circle_id,
+            control: CircleControlCoord::MergeConcurrent {
+                device_id: "device-a".to_string(),
+                author_pubkey: keys::public_key_hex(&signer),
+                author_owner_grant: root.founder.author_owner_grant.clone(),
+                seq: 1,
+                control_hash: ObjectHash::digest(b"circle-control"),
+            },
+        };
+        assert!(matches!(
+            StoreBatchCommit::signed_batch(
+                root.object_hash(),
+                WriteId::from_generated("duplicate-circle-control".to_string()),
+                "device-a".to_string(),
+                StoreCommitOrder::MergeConcurrent {
+                    seq: 1,
+                    previous_commit_hash: None,
+                    dependencies: BTreeMap::new(),
+                },
+                Some(MembershipCoord {
+                    author_pubkey: keys::public_key_hex(&signer),
+                    author_owner_grant: root.founder.author_owner_grant.clone(),
+                    seq: 1,
+                    entry_hash: crate::sync::membership::entry_hash(&root.founder),
+                }),
+                None,
+                Vec::new(),
+                vec![control.clone(), control],
+                None,
+                &[],
+                &signer,
+            ),
+            Err(StoreProtocolError::DuplicateCircleControl(id)) if id == circle_id
+        ));
     }
 
     #[test]

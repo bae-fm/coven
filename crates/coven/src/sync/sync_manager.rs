@@ -65,6 +65,8 @@ pub enum SyncError {
     Setup(#[from] SetupError),
     #[error("membership error: {0}")]
     Membership(crate::sync::membership_ops::MembershipOpsError),
+    #[error("circle operation: {0}")]
+    Circle(#[from] crate::sync::circle_ops::CircleOperationError),
     #[error("{0}")]
     Database(#[from] DbError),
     #[error("blob upload drain failed: {0}")]
@@ -397,6 +399,27 @@ impl SyncManager {
         home: std::sync::Arc<dyn CloudHome>,
         cipher: CloudCipher,
     ) -> Result<(), SyncError> {
+        self.start_sync_with_home_parts(home, cipher, None).await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) async fn start_sync_with_home_and_coordination(
+        &self,
+        home: std::sync::Arc<dyn CloudHome>,
+        coordination: std::sync::Arc<dyn crate::storage::cloud::CloudHeadStorage>,
+        cipher: CloudCipher,
+    ) -> Result<(), SyncError> {
+        self.start_sync_with_home_parts(home, cipher, Some(coordination))
+            .await
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn start_sync_with_home_parts(
+        &self,
+        home: std::sync::Arc<dyn CloudHome>,
+        cipher: CloudCipher,
+        coordination: Option<std::sync::Arc<dyn crate::storage::cloud::CloudHeadStorage>>,
+    ) -> Result<(), SyncError> {
         let config = (self.config_provider)();
         let routing_encryption = self.routing_encryption()?;
         self.stop_current_connection()?;
@@ -407,7 +430,7 @@ impl SyncManager {
         } else {
             BlobPathScheme::Hashed
         };
-        let storage = CloudSyncStorage::new(
+        let mut storage = CloudSyncStorage::new(
             home.clone(),
             cipher.clone(),
             blob_paths,
@@ -415,6 +438,9 @@ impl SyncManager {
             keypair,
         )
         .with_copy_ids(Arc::new(crate::storage::cloud::RandomCopyIdGenerator));
+        if let Some(coordination) = coordination {
+            storage = storage.with_test_serial_coordination(coordination);
+        }
 
         let initialization = self.store_initialization().await?;
         let components = crate::sync::cycle::init_sync_over_storage(
@@ -809,6 +835,11 @@ impl SyncManager {
 
         let fingerprint = outcome.map_err(SyncError::Membership)?;
         Ok(fingerprint)
+    }
+
+    pub(crate) async fn create_circle(&self, name: &str) -> Result<crate::CircleId, SyncError> {
+        let sync_loop = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
+        sync_loop.create_circle(name).await.map_err(SyncError::from)
     }
 }
 

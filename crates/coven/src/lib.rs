@@ -624,6 +624,9 @@ pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};
 // membership floor made of them; a host driving that free function directly
 // (bypassing `CovenHandle`) must be able to name the type.
 pub use coven_core::sync::membership::MembershipCoord;
+pub use coven_core::{
+    Audience, CircleId, CircleInfo, CircleOperationInfo, CircleOperationState, CircleRole,
+};
 pub use coven_core::{MemberInfo, MemberRole};
 
 // Clock / id abstractions the host injects, plus the deterministic test fakes.

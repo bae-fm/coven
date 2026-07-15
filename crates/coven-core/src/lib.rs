@@ -167,7 +167,9 @@ pub use encryption::{
 pub use store_dir::{StoreDir, StoreLayout};
 
 // Sync vocabulary exposed through the public handle.
-pub use sync::circle::{Audience, CircleId, CircleRole};
+pub use sync::circle::{
+    Audience, CircleId, CircleInfo, CircleOperationInfo, CircleOperationState, CircleRole,
+};
 pub use sync::hlc::{Hlc, Timestamp, UpdatedAtStamper};
 pub use sync::membership::{MemberInfo, MemberRole};
 
