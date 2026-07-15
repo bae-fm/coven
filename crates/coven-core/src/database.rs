@@ -5747,17 +5747,17 @@ impl Database {
                 tx.commit().map_err(DbError::from)?;
                 return Ok(());
             };
-            let status: crate::sync::circle_ops::CircleOperationStatus =
-                serde_json::from_str(&status).map_err(|error| {
+            let status = serde_json::from_str::<crate::sync::circle::CircleOperationState>(&status)
+                .map_err(|error| {
                     DbError::Message(format!("parse circle operation status: {error}"))
                 })?;
             match status {
-                crate::sync::circle_ops::CircleOperationStatus::Pending => {
+                crate::sync::circle::CircleOperationState::Pending => {
                     return Err(DbError::Message(format!(
                         "pending circle operation {circle_id} cannot be discarded"
                     )));
                 }
-                crate::sync::circle_ops::CircleOperationStatus::Blocked { .. } => {}
+                crate::sync::circle::CircleOperationState::Blocked { .. } => {}
             }
             let deleted = tx
                 .execute(
@@ -5792,18 +5792,10 @@ impl Database {
                             DbError::Message(format!("parse circle operation journal: {error}"))
                         })?;
                     let circle_id = journal.circle_id();
-                    let state = match journal.status {
-                        crate::sync::circle_ops::CircleOperationStatus::Pending => {
-                            crate::sync::circle::CircleOperationState::Pending
-                        }
-                        crate::sync::circle_ops::CircleOperationStatus::Blocked { reason } => {
-                            crate::sync::circle::CircleOperationState::Blocked { reason }
-                        }
-                    };
                     Ok(crate::sync::circle::CircleOperationInfo {
                         circle_id,
                         name: journal.creation.metadata.name,
-                        state,
+                        state: journal.status,
                     })
                 })
                 .collect();
@@ -5931,7 +5923,7 @@ impl Database {
             .circle_operation(circle_id)
             .await?
             .ok_or_else(|| DbError::Message(format!("circle operation {circle_id} is absent")))?;
-        journal.status = crate::sync::circle_ops::CircleOperationStatus::Blocked { reason };
+        journal.status = crate::sync::circle::CircleOperationState::Blocked { reason };
         self.update_circle_operation(journal).await
     }
 
@@ -5943,7 +5935,7 @@ impl Database {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             if !matches!(
                 journal.status,
-                crate::sync::circle_ops::CircleOperationStatus::Pending
+                crate::sync::circle::CircleOperationState::Pending
             ) {
                 return Err(DbError::Message(
                     "blocked circle operation cannot activate".to_string(),
@@ -6511,18 +6503,19 @@ impl Database {
             }
             let circle_id = activation.circle_id.to_string();
             if let Some(access) = &activation.local_access {
+                let leaf = &access.leaf.value;
                 if activation
                     .control
                     .value
                     .owners
-                    .binary_search(&access.owner_pubkey)
+                    .binary_search(&leaf.owner_pubkey)
                     .is_err()
                 {
                     return Err(DbError::Message(format!(
                         "circle {circle_id} local access signer is not a control Owner"
                     )));
                 }
-                match (&access.disposition, &access.active) {
+                match (&leaf.disposition, &access.active) {
                     (crate::sync::circle::CircleAccessDisposition::Active { .. }, Some(_))
                     | (crate::sync::circle::CircleAccessDisposition::Inactive, None) => {}
                     _ => {
@@ -6605,7 +6598,7 @@ impl Database {
             let Some(access) = &activation.local_access else {
                 continue;
             };
-            let disposition = match access.disposition {
+            let disposition = match access.leaf.value.disposition {
                 crate::sync::circle::CircleAccessDisposition::Active { .. } => "active",
                 crate::sync::circle::CircleAccessDisposition::Inactive => "inactive",
             };
@@ -6616,9 +6609,9 @@ impl Database {
                 rusqlite::params![
                     &circle_id,
                     &control_coord,
-                    &access.owner_pubkey,
+                    &access.leaf.value.owner_pubkey,
                     disposition,
-                    &access.access_bytes,
+                    &access.leaf.bytes,
                 ],
             )
             .map_err(DbError::from)?;

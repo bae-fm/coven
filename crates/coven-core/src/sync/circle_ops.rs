@@ -8,8 +8,9 @@ use super::circle::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     circle_control_semantic_prefix, circle_metadata_semantic_prefix, circle_roster_semantic_prefix,
     recipient_slot_with_peer, AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf,
-    CircleControl, CircleControlOrder, CircleCreation, CircleId, CircleMetadata, CircleRole,
-    CircleRoster, PreparedAccessLeaf, PreparedCircleControl, StoreMembershipStateRef,
+    CircleControl, CircleControlOrder, CircleCreation, CircleId, CircleMetadata,
+    CircleOperationState, CircleRole, CircleRoster, PreparedAccessLeaf, PreparedCircleControl,
+    StoreMembershipStateRef,
 };
 use super::membership::SerialAuthorizationState;
 use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
@@ -25,13 +26,6 @@ use crate::keys::{self, UserKeypair};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum CircleOperationStatus {
-    Pending,
-    Blocked { reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CircleActivationHead {
     MergeConcurrent(StoreDeviceHead),
     Serial(StoreSerialHead),
@@ -41,7 +35,7 @@ pub(crate) enum CircleActivationHead {
 #[serde(deny_unknown_fields)]
 pub(crate) struct CircleOperationJournal {
     pub operation_id: String,
-    pub status: CircleOperationStatus,
+    pub status: CircleOperationState,
     pub creation: CircleCreation,
     pub store_base: Option<CommitPosition>,
     pub commit_bytes: Vec<u8>,
@@ -59,9 +53,7 @@ pub(crate) struct VerifiedCircleReference {
 
 #[derive(Debug, Clone)]
 pub(crate) struct VerifiedCircleAccess {
-    pub owner_pubkey: String,
-    pub access_bytes: Vec<u8>,
-    pub disposition: CircleAccessDisposition,
+    pub leaf: PreparedAccessLeaf,
     pub active: Option<VerifiedCircleActive>,
 }
 
@@ -156,7 +148,7 @@ pub(crate) async fn resume_circle_operations(
     coordination: Option<&dyn super::storage::CoordinationStorage>,
 ) -> Result<(), CircleOperationError> {
     while let Some(journal) = db.oldest_pending_circle_operation().await? {
-        if !matches!(journal.status, CircleOperationStatus::Pending) {
+        if !matches!(journal.status, CircleOperationState::Pending) {
             return Err(CircleOperationError::Journal(format!(
                 "pending circle operation {} contains a blocked payload",
                 journal.circle_id()
@@ -303,10 +295,11 @@ pub(crate) async fn load_circle_activations(
             CircleOperationError::InvalidState(format!("parse circle access leaf: {error}"))
         })?;
         let prepared_leaf = PreparedAccessLeaf {
-            bytes: loaded_leaf.bytes.clone(),
-            value: leaf.clone(),
+            bytes: loaded_leaf.bytes,
+            value: leaf,
             leaf_hash: envelope.leaf_hash,
         };
+        let leaf = &prepared_leaf.value;
         if leaf.owner_pubkey != owner.0
             || leaf.recipient_pubkey != own_pubkey
             || leaf.recipient_slot != owner.1
@@ -472,9 +465,7 @@ pub(crate) async fn load_circle_activations(
             circle_id: reference.circle_id,
             control,
             local_access: Some(VerifiedCircleAccess {
-                owner_pubkey: leaf.owner_pubkey,
-                access_bytes: loaded_leaf.bytes,
-                disposition: leaf.disposition,
+                leaf: prepared_leaf,
                 active,
             }),
         });
@@ -653,7 +644,7 @@ pub(crate) fn verify_local_circle_activation(
     let own_access = creation
         .access
         .iter()
-        .find(|access| access.recipient_pubkey == commit.author_pubkey)
+        .find(|access| access.leaf.value.recipient_pubkey == commit.author_pubkey)
         .ok_or_else(|| {
             CircleOperationError::InvalidState(
                 "circle creator has no access disposition".to_string(),
@@ -661,9 +652,7 @@ pub(crate) fn verify_local_circle_activation(
         })?;
     let leaf = &own_access.leaf.value;
     let envelope = &own_access.envelope;
-    if own_access.disposition != leaf.disposition
-        || own_access.recipient_pubkey != leaf.recipient_pubkey
-        || leaf.recipient_pubkey != commit.author_pubkey
+    if leaf.recipient_pubkey != commit.author_pubkey
         || leaf.owner_pubkey != control.value.author_pubkey
         || leaf.store_membership != control.value.store_membership
         || envelope.owner_pubkey != control.value.author_pubkey
@@ -677,7 +666,7 @@ pub(crate) fn verify_local_circle_activation(
         key_fingerprint,
         roster_hash,
         ..
-    } = &own_access.disposition
+    } = &leaf.disposition
     else {
         return Err(CircleOperationError::InvalidState(
             "circle creator access is inactive".to_string(),
@@ -713,9 +702,7 @@ pub(crate) fn verify_local_circle_activation(
         circle_id: creation.circle_id,
         control: control.clone(),
         local_access: Some(VerifiedCircleAccess {
-            owner_pubkey: leaf.owner_pubkey.clone(),
-            access_bytes: own_access.leaf.bytes.clone(),
-            disposition: own_access.disposition.clone(),
+            leaf: own_access.leaf.clone(),
             active: Some(VerifiedCircleActive {
                 roster: creation.roster.clone(),
                 metadata: creation.metadata.clone(),
@@ -905,7 +892,7 @@ async fn prepare_circle_operation(
     };
     Ok(CircleOperationJournal {
         operation_id: operation_id.as_str().to_string(),
-        status: CircleOperationStatus::Pending,
+        status: CircleOperationState::Pending,
         creation,
         store_base: base,
         commit_bytes: commit.to_bytes(),
@@ -925,7 +912,7 @@ async fn publish_circle_operation(
         .circle_operation(circle_id)
         .await?
         .ok_or_else(|| CircleOperationError::Journal(format!("circle {circle_id} is absent")))?;
-    if let CircleOperationStatus::Blocked { reason } = &journal.status {
+    if let CircleOperationState::Blocked { reason } = &journal.status {
         return Err(CircleOperationError::Blocked {
             circle_id,
             reason: reason.clone(),
@@ -1294,7 +1281,7 @@ mod tests {
                     .expect("read interrupted operation")
                     .expect("interrupted operation remains durable");
                 assert_exact_operation(&expected, &persisted);
-                assert_eq!(persisted.status, CircleOperationStatus::Pending);
+                assert_eq!(persisted.status, CircleOperationState::Pending);
                 assert_eq!(activation_count(&db, expected.circle_id()).await, 0);
 
                 resume_circle_operations(&db, &storage, None)
@@ -1362,7 +1349,7 @@ mod tests {
             .expect("read reopened circle operation")
             .expect("circle operation survives restart");
         assert_exact_operation(&expected, &persisted);
-        assert_eq!(persisted.status, CircleOperationStatus::Pending);
+        assert_eq!(persisted.status, CircleOperationState::Pending);
 
         resume_circle_operations(&reopened, &storage, None)
             .await
@@ -1443,7 +1430,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_activation_rejects_a_journal_disposition_that_differs_from_its_leaf() {
+    async fn local_activation_rejects_a_tampered_leaf_disposition() {
         let db = open_test_db();
         let (_home, storage, signer, mut journal) =
             persist_merge_operation(&db, "circle-tampered-local-access").await;
@@ -1452,13 +1439,13 @@ mod tests {
             .creation
             .access
             .iter_mut()
-            .find(|access| access.recipient_pubkey == author)
+            .find(|access| access.leaf.value.recipient_pubkey == author)
             .expect("founder access");
         assert!(matches!(
-            own_access.disposition,
+            own_access.leaf.value.disposition,
             CircleAccessDisposition::Active { .. }
         ));
-        own_access.disposition = CircleAccessDisposition::Inactive;
+        own_access.leaf.value.disposition = CircleAccessDisposition::Inactive;
         db.update_circle_operation(journal.clone())
             .await
             .expect("persist tampered journal");
@@ -1578,7 +1565,7 @@ mod tests {
         assert_exact_operation(&expected, &blocked);
         assert!(matches!(
             blocked.status,
-            CircleOperationStatus::Blocked { .. }
+            CircleOperationState::Blocked { .. }
         ));
         let operations = db
             .get_circle_operations()

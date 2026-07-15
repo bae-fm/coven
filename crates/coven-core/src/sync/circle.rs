@@ -139,7 +139,8 @@ pub struct CircleInfo {
     pub role: CircleRole,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleOperationState {
     Pending,
     Blocked { reason: String },
@@ -950,8 +951,6 @@ impl PreparedAccessLeaf {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedCircleAccess {
-    pub recipient_pubkey: String,
-    pub disposition: CircleAccessDisposition,
     pub leaf: PreparedAccessLeaf,
     pub envelope: AccessEnvelope,
 }
@@ -1038,7 +1037,7 @@ impl CircleCreation {
                 owner_pubkey: author_pubkey.clone(),
                 recipient_pubkey: recipient_pubkey.clone(),
                 recipient_slot,
-                disposition: disposition.clone(),
+                disposition,
                 store_membership: store_membership.clone(),
                 signature: String::new(),
             };
@@ -1053,7 +1052,7 @@ impl CircleCreation {
                 serde_json::to_vec(&value).expect("circle access serialization cannot fail");
             let bytes = keys::seal_box_encrypt(&plaintext, &recipient_x25519);
             let leaf_hash = ObjectHash::digest(&bytes);
-            leaves.push((value, bytes, leaf_hash, disposition));
+            leaves.push((value, bytes, leaf_hash));
         }
         let leaf_hashes = leaves.iter().map(|leaf| leaf.2).collect::<Vec<_>>();
         let (access_root, proofs) = merkle_root_and_proofs(&leaf_hashes);
@@ -1102,7 +1101,7 @@ impl CircleCreation {
         let access = leaves
             .into_iter()
             .zip(proofs)
-            .map(|((value, bytes, leaf_hash, disposition), proof)| {
+            .map(|((value, bytes, leaf_hash), proof)| {
                 let mut envelope = AccessEnvelope {
                     version: STORE_PROTOCOL_VERSION,
                     store_root_hash,
@@ -1117,8 +1116,6 @@ impl CircleCreation {
                 };
                 envelope.signature = keys::sign_hex(signer, &envelope.canonical_bytes()).1;
                 PreparedCircleAccess {
-                    recipient_pubkey: value.recipient_pubkey.clone(),
-                    disposition,
                     leaf: PreparedAccessLeaf {
                         bytes,
                         value,
@@ -1479,8 +1476,10 @@ mod tests {
                 creation
                     .access
                     .iter()
-                    .find(|access| access.recipient_pubkey == owner_pubkey)
+                    .find(|access| access.leaf.value.recipient_pubkey == owner_pubkey)
                     .unwrap()
+                    .leaf
+                    .value
                     .disposition,
                 CircleAccessDisposition::Active { .. }
             ));
@@ -1488,8 +1487,10 @@ mod tests {
                 creation
                     .access
                     .iter()
-                    .find(|access| access.recipient_pubkey == peer_pubkey)
+                    .find(|access| access.leaf.value.recipient_pubkey == peer_pubkey)
                     .unwrap()
+                    .leaf
+                    .value
                     .disposition,
                 CircleAccessDisposition::Inactive
             ));
@@ -1748,15 +1749,13 @@ mod tests {
         let own_access = creation
             .access
             .iter()
-            .find(|access| access.recipient_pubkey == author_pubkey)
+            .find(|access| access.leaf.value.recipient_pubkey == author_pubkey)
             .expect("author access");
         let verified = super::super::circle_ops::VerifiedCircleReference {
             circle_id: creation.circle_id,
             control: control.clone(),
             local_access: Some(super::super::circle_ops::VerifiedCircleAccess {
-                owner_pubkey: author_pubkey.clone(),
-                access_bytes: own_access.leaf.bytes.clone(),
-                disposition: own_access.disposition.clone(),
+                leaf: own_access.leaf.clone(),
                 active: Some(super::super::circle_ops::VerifiedCircleActive {
                     roster: creation.roster.clone(),
                     metadata: creation.metadata.clone(),
