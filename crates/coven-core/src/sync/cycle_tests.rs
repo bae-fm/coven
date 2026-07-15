@@ -71,6 +71,14 @@ async fn run_cycle_m_result(
     ld: &StoreDir,
 ) -> Result<(), String> {
     bind_mock_store_protocol(db, storage, "M").await;
+    cycle::ensure_owner_anchored_chain(
+        storage,
+        db,
+        &storage.store_protocol_root(),
+        &storage.protocol_founder_keypair(),
+    )
+    .await
+    .expect("initialize MergeConcurrent test membership");
     run_single_sync_cycle(
         storage,
         "test-lib",
@@ -88,6 +96,57 @@ async fn run_cycle_m_result(
     )
     .await
     .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+#[tokio::test]
+async fn tombstone_maintenance_provider_failure_does_not_override_cycle_success() {
+    let storage = MockSyncStorage::new();
+    let db = open_test_db();
+    bind_mock_store_protocol(&db, &storage, "M").await;
+    cycle::ensure_owner_anchored_chain(
+        &storage,
+        &db,
+        &storage.store_protocol_root(),
+        &storage.protocol_founder_keypair(),
+    )
+    .await
+    .expect("initialize MergeConcurrent membership");
+    db.enqueue_delete("photos/maintenance", T0)
+        .await
+        .expect("queue maintenance tombstone");
+    let home = InMemoryCloudHome::new();
+    home.arm_write_failures();
+    let (_temp, store_dir) = temp_store_dir();
+    let cipher = RwLock::new(CloudCipher::Plaintext);
+    let keypair = storage.protocol_founder_keypair();
+
+    let result = run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &Hlc::new("M".to_string()),
+        &SystemClock,
+        &db,
+        &cipher,
+        &PendingRotation::none(),
+        &keypair,
+        None,
+        &store_dir,
+        Some(&home),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "tombstone publication and reclamation are maintenance warnings: {result:?}"
+    );
+    assert_eq!(
+        db.get_pending_cloud_deletes().await.unwrap().len(),
+        1,
+        "failed maintenance remains queued"
+    );
 }
 
 async fn store_package_exists(storage: &MockSyncStorage, device_id: &str, seq: u64) -> bool {
@@ -188,7 +247,7 @@ async fn append_store_ack(
         device_id.to_string(),
         1,
         None,
-        frontier,
+        crate::sync::store_commit::CommitFrontier::MergeConcurrent(frontier),
         T0.to_string(),
         signer,
     )
@@ -256,6 +315,13 @@ async fn pending_upload_does_not_hold_back_a_gated_true_changeset() {
 
     // A slow/stuck upload for some OTHER unit is pending the whole time.
     seed_pending_upload(&db).await;
+    db.set_protocol_state(
+        crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
+        &crate::sync::store_commit::ObjectHash::digest(b"existing-pending-upload-snapshot")
+            .to_string(),
+    )
+    .await
+    .expect("seed existing Store snapshot");
 
     // One shareable note (its blobs are up → gate on) and one still-private note
     // (its blobs aren't up yet → gate off; the host hasn't flipped it).
@@ -349,13 +415,13 @@ async fn gated_false_row_propagates_once_its_gate_flips() {
 /// is the blob-before-row guarantee at snapshot granularity.
 #[tokio::test]
 async fn snapshot_is_not_withheld_by_pending_uploads() {
-    let storage = MockSyncStorage::new();
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db();
     let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [9u8; 32],
     )));
-    let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
     // local_seq past 0 with no snapshot yet → the snapshot policy fires this cycle.
@@ -374,7 +440,8 @@ async fn snapshot_is_not_withheld_by_pending_uploads() {
 
 #[tokio::test]
 async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
-    let storage = MockSyncStorage::new();
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db_schema(
         vec![
             SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
@@ -392,7 +459,6 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [11u8; 32],
     )));
-    let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
     host_exec(
@@ -428,7 +494,8 @@ async fn initial_snapshot_uploads_remote_root_host_blobs_before_publish() {
 
 #[tokio::test]
 async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
-    let storage = MockSyncStorage::new();
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db_schema(
         vec![
             SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey).remote_root(),
@@ -446,16 +513,15 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [12u8; 32],
     )));
-    let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
-    host_exec(
+    exec(
         &db,
         "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
          VALUES ('n1', 'Existing', NULL, 0, '0000000001000-0000-M', '2026-01-01')",
     )
     .await;
-    host_exec(
+    exec(
         &db,
         "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
          VALUES ('cover1', 'n1', 'cover', 5, '0000000001000-0000-M', '2026-01-01')",
@@ -464,11 +530,17 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     crate::blob::local_files::store(&ld, "photos", "cover1", b"cover")
         .await
         .expect("store host-provided blob");
-    // Remove the seed writes so the cycle takes the initial-snapshot path; the rows
-    // reach the cloud through the snapshot.
-    let _ = capture_bytes(&db, &[]).await;
+    assert_eq!(pending_write_count(&db).await, 0);
     storage.fail_next_blob_puts(1);
     bind_mock_store_protocol(&db, &storage, "M").await;
+    cycle::ensure_owner_anchored_chain(
+        &storage,
+        &db,
+        &storage.store_protocol_root(),
+        &storage.protocol_founder_keypair(),
+    )
+    .await
+    .expect("initialize MergeConcurrent test membership");
 
     let failed = match run_single_sync_cycle(
         &storage,
@@ -494,6 +566,14 @@ async fn initial_snapshot_does_not_publish_when_host_blob_upload_fails() {
     assert!(
         failed.contains("forced blob upload failure"),
         "cycle surfaces the blob upload failure: {failed}",
+    );
+    assert!(
+        failed.is_offline(),
+        "snapshot host-blob provider transport is offline: {failed}",
+    );
+    assert!(
+        !storage.exists("photos/cover1").await.expect("exists check"),
+        "the injected failure occurs while uploading the snapshot host blob",
     );
     assert!(
         store_snapshot_metas(&storage).await.is_empty(),
@@ -790,6 +870,465 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
 }
 
 #[tokio::test]
+async fn initializing_serial_storage_uses_only_the_root_authorization_state() {
+    use crate::sync::membership::MemberRole;
+    use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
+
+    let home = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let owner_pk = pubkey_hex(&owner);
+    let db = open_serial_test_db();
+    let storage = cycle_cloud_storage(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        "test-lib",
+        owner,
+    )
+    .with_test_serial_coordination(Arc::new(home.clone()));
+
+    let components =
+        cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
+            .await
+            .expect("initialize Serial storage");
+    let (_temp, store_dir) = temp_store_dir();
+    components
+        .run_cycle(&SystemClock, None, &store_dir, None)
+        .await
+        .expect("run Serial cycle");
+
+    assert!(home
+        .appended_keys()
+        .iter()
+        .all(|key| !key.starts_with("store-v1/membership/")));
+    assert_eq!(
+        db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
+        Some(owner_pk.clone()),
+    );
+    assert_eq!(
+        db.serial_membership_state()
+            .await
+            .unwrap()
+            .expect("Serial root membership")
+            .current_members(),
+        vec![(owner_pk, MemberRole::Owner)],
+    );
+    assert_eq!(
+        db.serial_key_generation().await.unwrap(),
+        Some(crate::encryption::INITIAL_KEY_GENERATION),
+    );
+    let causal_floor_count = db
+        .call(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM protocol_state WHERE key LIKE 'membership_head_seq/%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .unwrap();
+    assert_eq!(causal_floor_count, 0);
+}
+
+#[tokio::test]
+async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_work() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::sync::membership::MemberRole;
+    use crate::sync::storage::{
+        CoordinationError, CoordinationStorage, CreateHeadError, ReplaceHeadError, VersionToken,
+        VersionedObject,
+    };
+    use crate::sync::store_commit::StoreControl;
+
+    struct HeadAppearsAfterInitialAuthorization<'a> {
+        inner: &'a dyn CoordinationStorage,
+        reads: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CoordinationStorage for HeadAppearsAfterInitialAuthorization<'_> {
+        async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(CoordinationError::NotFound(key.to_string()));
+            }
+            self.inner.read_head(key).await
+        }
+
+        async fn create_head(
+            &self,
+            key: &str,
+            bytes: &[u8],
+        ) -> Result<VersionedObject, CreateHeadError> {
+            self.inner.create_head(key, bytes).await
+        }
+
+        async fn replace_head(
+            &self,
+            key: &str,
+            expected: &VersionToken,
+            bytes: &[u8],
+        ) -> Result<VersionedObject, ReplaceHeadError> {
+            self.inner.replace_head(key, expected, bytes).await
+        }
+
+        async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError> {
+            self.inner.delete_probe_head(key).await
+        }
+    }
+
+    let store_id = "serial-post-pull-authorization";
+    let home = InMemoryCloudHome::new();
+    let founder = UserKeypair::generate();
+    let successor = UserKeypair::generate();
+    let storage = cycle_cloud_storage(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        store_id,
+        founder.clone(),
+    )
+    .with_test_serial_coordination(Arc::new(home.clone()));
+    let remote = open_serial_test_db();
+    let root = publish_test_serial_store_protocol_root(
+        &remote,
+        &storage,
+        store_id,
+        "remote-owner-device",
+        &founder,
+    )
+    .await;
+    let coordination = storage.serial_coordination().unwrap();
+    let authorization =
+        crate::sync::store_outbound::current_serial_authorization(&remote, &storage, coordination)
+            .await
+            .unwrap();
+    let add_successor = authorization
+        .membership
+        .signed_set_member(
+            &founder,
+            pubkey_hex(&successor),
+            None,
+            MemberRole::Owner,
+            "0000000000002-0000-founder".to_string(),
+        )
+        .unwrap();
+    let prepared = crate::sync::store_outbound::prepare_serial_control(
+        &remote,
+        &storage,
+        coordination,
+        "remote-owner-device",
+        StoreControl::SerialMembership {
+            entry: add_successor,
+        },
+        &founder,
+    )
+    .await
+    .unwrap();
+    crate::sync::store_outbound::activate_serial_control(
+        &remote,
+        &storage,
+        coordination,
+        &prepared,
+    )
+    .await
+    .unwrap();
+    let authorization =
+        crate::sync::store_outbound::current_serial_authorization(&remote, &storage, coordination)
+            .await
+            .unwrap();
+    let demote_founder = authorization
+        .membership
+        .signed_set_member(
+            &founder,
+            pubkey_hex(&founder),
+            None,
+            MemberRole::Follower,
+            "0000000000003-0000-founder".to_string(),
+        )
+        .unwrap();
+    let prepared = crate::sync::store_outbound::prepare_serial_control(
+        &remote,
+        &storage,
+        coordination,
+        "remote-owner-device",
+        StoreControl::SerialMembership {
+            entry: demote_founder,
+        },
+        &founder,
+    )
+    .await
+    .unwrap();
+    crate::sync::store_outbound::activate_serial_control(
+        &remote,
+        &storage,
+        coordination,
+        &prepared,
+    )
+    .await
+    .unwrap();
+
+    let local = open_serial_test_db();
+    let local_root = publish_test_serial_store_protocol_root(
+        &local,
+        &storage,
+        store_id,
+        "local-founder-device",
+        &founder,
+    )
+    .await;
+    assert_eq!(local_root, root);
+    let delayed = HeadAppearsAfterInitialAuthorization {
+        inner: coordination,
+        reads: AtomicUsize::new(0),
+    };
+    let (_temp, store_dir) = temp_store_dir();
+    let cipher = storage.cipher_state().clone();
+    let pending_rotation = storage.shared_pending_rotation();
+    cycle::run_single_sync_cycle_with_coordination(
+        &storage,
+        Some(&delayed),
+        store_id,
+        "local-founder-device",
+        &Hlc::new("local-founder-device".to_string()),
+        &SystemClock,
+        &local,
+        cipher.as_ref(),
+        pending_rotation.as_ref(),
+        &founder,
+        None,
+        &store_dir,
+        Some(&home),
+        None,
+    )
+    .await
+    .expect("run cycle across a newly visible Serial control chain");
+
+    let mut expected_members = vec![
+        (pubkey_hex(&founder), MemberRole::Follower),
+        (pubkey_hex(&successor), MemberRole::Owner),
+    ];
+    expected_members.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        local
+            .serial_membership_state()
+            .await
+            .unwrap()
+            .unwrap()
+            .current_members(),
+        expected_members,
+    );
+    assert!(!home
+        .appended_keys()
+        .iter()
+        .any(|key| key.starts_with("store-v1/snapshots/")));
+}
+
+#[tokio::test]
+async fn serial_cycle_marks_a_stale_provisional_branch_before_materializing_remote_commits() {
+    let store_id = "serial-conflict-before-pull";
+    let home = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let storage = cycle_cloud_storage(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        store_id,
+        owner.clone(),
+    )
+    .with_test_serial_coordination(Arc::new(home.clone()));
+    let remote = open_serial_test_db();
+    let root = publish_test_serial_store_protocol_root(
+        &remote,
+        &storage,
+        store_id,
+        "remote-owner-device",
+        &owner,
+    )
+    .await;
+    host_exec(
+        &remote,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('remote-row', 'remote', NULL, 1, '0000000001000-0000-remote', '2026-01-01')",
+    )
+    .await;
+    let (_remote_temp, remote_store_dir) = temp_store_dir();
+    assert!(
+        crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+            &remote,
+            &storage,
+            Some(storage.serial_coordination().unwrap()),
+            "remote-owner-device",
+            "2026-01-01T00:00:00Z",
+            &owner,
+            &remote_store_dir,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        crate::sync::store_outbound::drain_store_writes_with_coordination(
+            &remote,
+            &storage,
+            Some(storage.serial_coordination().unwrap()),
+        )
+        .await
+        .unwrap(),
+        1
+    );
+
+    let local = open_serial_test_db();
+    assert_eq!(
+        publish_test_serial_store_protocol_root(
+            &local,
+            &storage,
+            store_id,
+            "local-owner-device",
+            &owner,
+        )
+        .await,
+        root
+    );
+    local
+        .set_protocol_state(
+            crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
+            &crate::sync::store_commit::ObjectHash::digest(b"existing-snapshot").to_string(),
+        )
+        .await
+        .unwrap();
+    host_exec(
+        &local,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('local-row', 'local', NULL, 1, '0000000001000-0000-local', '2026-01-01')",
+    )
+    .await;
+    let local_write = local.pending_writes().await.unwrap().remove(0).write_id;
+    let (_local_temp, local_store_dir) = temp_store_dir();
+    cycle::run_single_sync_cycle_with_coordination(
+        &storage,
+        Some(storage.serial_coordination().unwrap()),
+        store_id,
+        "local-owner-device",
+        &Hlc::new("local-owner-device".to_string()),
+        &SystemClock,
+        &local,
+        storage.cipher_state().as_ref(),
+        storage.shared_pending_rotation().as_ref(),
+        &owner,
+        None,
+        &local_store_dir,
+        Some(&home),
+        None,
+    )
+    .await
+    .expect("record the stale provisional branch without applying its successor");
+
+    assert!(matches!(
+        local.write_status(&local_write).await.unwrap(),
+        crate::WriteStatus::Conflict(_)
+    ));
+    assert_eq!(
+        local
+            .exact_materialized_hash(crate::sync::store_commit::SERIAL_STREAM_ID, 1)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        query_text(
+            &local,
+            "SELECT CAST(COUNT(*) AS TEXT) FROM notes WHERE id = 'remote-row'"
+        )
+        .await,
+        "0"
+    );
+    assert_eq!(
+        query_text(&local, "SELECT title FROM notes WHERE id = 'local-row'").await,
+        "local"
+    );
+}
+
+#[tokio::test]
+async fn serial_cycle_publishes_a_suffix_rebased_by_its_initial_drain() {
+    let store_id = "serial-cycle-rebased-suffix";
+    let home = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let storage = cycle_cloud_storage(
+        Arc::new(home.clone()),
+        CloudCipher::Plaintext,
+        BlobPathScheme::Plain,
+        store_id,
+        owner.clone(),
+    )
+    .with_test_serial_coordination(Arc::new(home.clone()));
+    let db = open_serial_test_db();
+    publish_test_serial_store_protocol_root(&db, &storage, store_id, "owner-device", &owner).await;
+    db.set_protocol_state(
+        crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
+        &crate::sync::store_commit::ObjectHash::digest(b"existing-snapshot").to_string(),
+    )
+    .await
+    .unwrap();
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('serial-first', 'first', NULL, 1, '0000000001000-0000-owner', '2026-01-01')",
+    )
+    .await;
+    let (_temp, store_dir) = temp_store_dir();
+    assert!(
+        crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().unwrap()),
+            "owner-device",
+            "2026-01-01T00:00:00Z",
+            &owner,
+            &store_dir,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+    );
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('serial-suffix', 'suffix', NULL, 1, '0000000001001-0000-owner', '2026-01-01')",
+    )
+    .await;
+    let suffix = db.pending_writes().await.unwrap().pop().unwrap().write_id;
+
+    cycle::run_single_sync_cycle_with_coordination(
+        &storage,
+        Some(storage.serial_coordination().unwrap()),
+        store_id,
+        "owner-device",
+        &Hlc::new("owner-device".to_string()),
+        &SystemClock,
+        &db,
+        storage.cipher_state().as_ref(),
+        storage.shared_pending_rotation().as_ref(),
+        &owner,
+        None,
+        &store_dir,
+        Some(&home),
+        None,
+    )
+    .await
+    .expect("run cycle after a write joined the publishing branch");
+
+    assert!(matches!(
+        db.write_status(&suffix).await.unwrap(),
+        crate::WriteStatus::Published(crate::PublishedPosition::Serial { position })
+            if position.seq == 2
+    ));
+}
+
+#[tokio::test]
 async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root() {
     use crate::sync::membership::founder_entry;
     use crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY;
@@ -810,6 +1349,7 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
         "test-lib".to_string(),
         founder.clone(),
         db.schema_version(),
+        crate::WritePolicy::MergeConcurrent,
         &owner,
     )
     .expect("sign interrupted store protocol root");
@@ -942,6 +1482,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
         "test-lib".to_string(),
         founder.clone(),
         db.schema_version(),
+        crate::WritePolicy::MergeConcurrent,
         &owner,
     )
     .expect("sign store protocol root");
@@ -1361,6 +1902,12 @@ async fn host_write_during_pull_lands_in_next_outgoing_changeset() {
     // M's database. The injector runs this INSERT into M at the package-read
     // await, mid-pull.
     let db_m = open_test_db();
+    db_m.set_protocol_state(
+        crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
+        &crate::sync::store_commit::ObjectHash::digest(b"existing-host-write-snapshot").to_string(),
+    )
+    .await
+    .expect("seed existing Store snapshot");
     let storage = HostWriteInjector::new(
         inner,
         db_m.clone(),
@@ -1789,6 +2336,76 @@ async fn rotation_pending_defers_a_ready_make_remote_intent_until_adoption() {
 }
 
 #[tokio::test]
+async fn ready_make_remote_provider_transport_is_offline() {
+    let keypair = UserKeypair::generate();
+    let hlc = Hlc::new("M".to_string());
+    let (_tmp, ld) = temp_store_dir();
+    let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
+        [23u8; 32],
+    )));
+    let storage = MockSyncStorage::new();
+    let db = open_test_db_with_blob(BlobDecl::new(
+        "photos",
+        Provenance::HostProvided,
+        CacheFill::CacheEager,
+    ));
+    host_exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('transport-root', 'Root', NULL, 0, \
+                 '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    host_exec(
+        &db,
+        "INSERT INTO note_photos (id, note_id, kind, size, _updated_at, created_at) \
+         VALUES ('transport-blob', 'transport-root', 'cover', 5, \
+                 '0000000001000-0000-M', '2026-01-01')",
+    )
+    .await;
+    crate::blob::local_files::store(&ld, "photos", "transport-blob", b"cover")
+        .await
+        .expect("store host-provided blob");
+    crate::blob::transition::make_remote(
+        &db,
+        BlobPathScheme::Hashed,
+        "self-uploader",
+        &hlc,
+        "notes",
+        "transport-root",
+        false,
+    )
+    .await
+    .expect("queue make_remote intent");
+    storage.fail_next_blob_puts(1);
+    bind_mock_store_protocol(&db, &storage, "M").await;
+
+    let failed = run_single_sync_cycle(
+        &storage,
+        "test-lib",
+        "M",
+        &hlc,
+        &SystemClock,
+        &db,
+        &enc,
+        &PendingRotation::none(),
+        &keypair,
+        None,
+        &ld,
+        None,
+        None,
+    )
+    .await
+    .expect_err("provider transport prevents make_remote completion");
+
+    assert!(failed.contains("forced blob upload failure"));
+    assert!(
+        failed.is_offline(),
+        "make_remote transport is offline: {failed}"
+    );
+}
+
+#[tokio::test]
 async fn captured_changeset_retry_recognizes_first_blob_uploaded_before_second_failed() {
     let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
@@ -2041,13 +2658,13 @@ async fn push_cycle_writes_rfc3339_head_timestamps() {
 /// Snapshot metadata records its creation time as RFC 3339.
 #[tokio::test]
 async fn snapshot_cycle_writes_rfc3339_metadata_timestamp() {
-    let storage = MockSyncStorage::new();
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
     let db = open_test_db();
     let (_tmp, ld) = temp_store_dir();
     let enc = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [22u8; 32],
     )));
-    let keypair = UserKeypair::generate();
     let hlc = Hlc::new("M".to_string());
 
     // local_seq past 0 with no snapshot yet → the snapshot policy fires this cycle.
@@ -2190,7 +2807,10 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         db.write_status(&first_write_id)
             .await
             .expect("read first write status"),
-        crate::WriteStatus::Published(position) if position.position.seq == 1
+        crate::WriteStatus::Published(crate::PublishedPosition::MergeConcurrent {
+            position,
+            ..
+        }) if position.seq == 1
     ));
     let pending = db.pending_writes().await.expect("read pending writes");
     assert_eq!(pending.len(), 1);
@@ -2316,6 +2936,14 @@ async fn run_cycle_m_storage(
     ld: &StoreDir,
 ) {
     bind_mock_store_protocol(db, &storage.inner, "M").await;
+    cycle::ensure_owner_anchored_chain(
+        &storage.inner,
+        db,
+        &storage.inner.store_protocol_root(),
+        &storage.inner.protocol_founder_keypair(),
+    )
+    .await
+    .expect("initialize MergeConcurrent test membership");
     run_single_sync_cycle(
         storage,
         "test-lib",

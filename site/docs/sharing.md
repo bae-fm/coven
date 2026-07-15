@@ -1,20 +1,23 @@
 # Sharing
 
-A store can have more than one writer. coven decides who may write by an
-append-only, Ed25519-signed log of membership changes, the membership chain.
-Pull verifies both each changeset's own signature and the chain itself, so the
-cloud provider never has to be trusted with who is allowed to write.
+A store can have more than one writer. coven decides who may write from the
+store's signed membership state. `MergeConcurrent` stores use causal owner
+streams; `Serial` stores put membership changes in the same globally ordered
+commit chain as row changes. Pull verifies each Store commit and the applicable
+membership state, so the cloud provider never decides who may write.
 
-Every initialized store has this chain, including a store with one writer and a
-browsable cloud home. Creation publishes a signed `StoreProtocolRoot` that binds
-the store id, founder membership entry, and schema version. Its
-`store_root_hash` is pinned locally and carried by every signed Store protocol
-object. Creation then publishes the founder's signed head before a sync runtime
-can start. "Browsable" describes cloud visibility and readable blob paths; it
-does not disable membership authorization.
+Every initialized store has signed founder membership, including a store with
+one writer and a browsable cloud home. Creation publishes a signed
+`StoreProtocolRoot` that binds the store id, founder membership entry, schema
+version, and write policy. Its `store_root_hash` is pinned locally and carried
+by every signed Store protocol object. `MergeConcurrent` then publishes the
+founder's causal membership head. `Serial` derives founder authorization
+directly from the root and creates no membership stream or head. "Browsable"
+describes cloud visibility and readable blob paths; it does not disable
+membership authorization.
 
 coven shares a store by **membership**: it grants the *whole store* to
-another *writer*, a peer with their own identity in the chain, by sealing the
+another *writer*, a peer with their own identity in membership, by sealing the
 store keyring to that member's keypair. The store is the unit of sharing —
 a different set of people is a different store.
 
@@ -37,26 +40,28 @@ key by
 so anyone holding a member's Ed25519 public key can derive the target to wrap
 the store keyring to (see [The store keyring](#the-store-keyring)).
 
-## The membership entry
+## Membership records
 
 Anyone who ever held bucket access can write bytes, so a correctly encrypted
 but forged changeset is always possible, and there is no server to refuse it.
-Each device must decide who may write from storage alone, with nothing but
-keys to trust. Membership changes are therefore themselves signed records in
-storage. A
+Each device decides who may write from storage alone, with nothing but keys to
+trust. Membership changes are therefore signed records. In a `MergeConcurrent`
+store, a
 [`MembershipEntry`](rustdoc:struct:coven::sync::membership::MembershipEntry)
 records one change:
 
 ```rust
 pub struct MembershipEntry {
-    pub action: MembershipAction,              // Add | Remove
-    pub user_pubkey: String,                   // member being added or removed
-    pub provider_account_email: Option<String>, // for folder-sharing providers
-    pub prev_hash: Option<String>,             // hash link to the author's previous entry
-    pub role: MemberRole,                      // Owner | Member | Follower
-    pub timestamp: String,                     // HLC stamp, for display and ordering only
-    pub author_pubkey: String,                 // who signed this change
-    pub signature: String,                     // Ed25519 over the canonical bytes
+    pub version: u32,
+    pub store_id: String,
+    pub author_pubkey: String,
+    pub author_owner_grant: OwnerGrantId,
+    pub seq: u64,
+    pub previous_hash: Option<ObjectHash>,
+    pub dependencies: BTreeMap<OwnerGrantId, MembershipCoord>,
+    pub created_at: String,
+    pub change: MembershipChange,
+    pub signature: String,
 }
 ```
 
@@ -67,11 +72,11 @@ fills in `author_pubkey` and `signature`;
 [`verify_membership_entry`](rustdoc:fn:coven::sync::membership::verify_membership_entry)
 checks them.
 
-The `timestamp` is an HLC string used for display ordering, not to authorize
+The `created_at` value is an HLC string used for display ordering, not to authorize
 anything. It is author-supplied and therefore spoofable, so no access decision
 reads it (see [Revocation](#revocation-is-key-rotation)).
 
-## Per-author commitment
+## MergeConcurrent: per-author commitment
 
 Two owners inviting people at the same moment must not be able to erase each
 other's work. Any design with one shared "latest" object has that failure
@@ -80,8 +85,8 @@ shared object anywhere in membership. Entries live in per-owner streams,
 exactly like changesets:
 
 ```
-membership/{author_pubkey}/{seq}.enc    one Add or Remove entry
-membership/{author_pubkey}/head.enc     that author's signed head
+store-v1/membership/entries/{author}/{owner_grant}/{seq}/…
+store-v1/membership/heads/{author}/{owner_grant}/{seq}/…
 ```
 
 Each owner appends entries only under its own prefix and hash-links them
@@ -128,7 +133,7 @@ committed prefix.
 <text class="sub" x="330" y="224" text-anchor="middle">1 an owner appends under its own prefix · 2 its signed head commits the prefix · 3 readers union the committed prefixes</text>
 </svg>
 
-Because every owner commits under its own prefix, concurrent owners never race
+Under `MergeConcurrent`, every owner commits under its own prefix, so concurrent owners never race
 each other: there is no shared last-writer-wins object one writer can overwrite
 over another's entry, and a failed publish leaves at most that one author's
 head behind its entries, never a wedged chain.
@@ -148,6 +153,19 @@ enforces, in order:
 
 Re-adding an existing pubkey with a different role overwrites the old role (a
 downgrade), so an owner can demote a member without removing them.
+
+## Serial: global membership commits
+
+`Serial` has no membership author streams or membership heads. A membership
+change is a signed `StoreControl` inside the next global Store commit. The entry
+names the exact hash of the membership state it changes, the commit author must
+be a current Owner, and the global commit author must be a current writer.
+
+Adding a member activates at that commit position. Removing a member and moving
+to the next key generation occupy one control commit, so readers cannot observe
+the removal without its key rotation. The signed global head activates the
+commit with an atomic conditional update; a stale owner receives a conflict and
+must rerun the operation against the current state.
 
 ## Roles
 
@@ -177,11 +195,11 @@ home](/docs/storage) — an owner writes only into its own prefix, which is what
 lets a reader trust that a wrap came from that owner. Only the holder of the
 matching private key can open it.
 
-Inviting a member writes two things, both under the inviting owner's prefix:
-the signed `Add` entry, and the keyring wrapped to that member at
+Inviting a member writes the keyring wrapped to that member at
 `keys/{owner_pubkey}/{recipient_pubkey}.enc`. The wrapped keyring names the
-membership entry that activates it, so a joiner
-unwraps it only once the entry granting them membership is visible. The new
+exact membership activation: a causal entry coordinate for `MergeConcurrent`,
+or a global commit position for `Serial`. A joiner unwraps it only once that
+activation is visible. The new
 member downloads and unwraps their copy when they join
 ([`unwrap_store_keyring`](rustdoc:fn:coven::sync::invite::unwrap_store_keyring)).
 
@@ -191,7 +209,7 @@ invite never leaves a member half-added or an existing member locked out.
 
 ## Pull verification
 
-Each signed Store commit names the exact
+In `MergeConcurrent`, each signed Store commit names the exact
 [`MembershipCoord`](rustdoc:struct:coven::sync::membership::MembershipCoord)
 that grants its author write access. Pull verifies the commit and device head
 signatures, requires their authors to agree, and checks that coordinate against
@@ -204,9 +222,15 @@ holds the exact Store position without applying rows. A valid commit whose
 author is no longer write-capable is rejected according to the membership state
 and cannot grant itself access.
 
-An initialized store never accepts an unsigned commit or one without a valid
-write grant. A missing, wiped, malformed, or differently founded membership
-chain prevents sync from opening authorization.
+In `Serial`, pull starts at the signed global head and verifies the complete
+prefix in sequence. Each commit must name its exact predecessor. Membership
+controls update authorization at their own commit positions; ordinary commits
+are checked against the state produced by the preceding prefix. A missing
+commit, package, signature, or predecessor stops the position without applying
+its rows.
+
+An initialized store never accepts an unsigned commit or a commit whose author
+is unauthorized under its write policy.
 
 ## Revocation is key rotation
 
@@ -221,11 +245,12 @@ this author allowed when they claim they wrote this?").
    where one holder of a shared key cannot be cut off alone, the backend
    reports the credential as unrevocable and removal proceeds, because the key
    rotation below, not credential withdrawal, is what protects new content.
-2. Signs and appends a `Remove` entry under the removing owner's prefix.
-3. Appends a **new key generation** to the store keyring.
-4. Re-wraps the updated keyring to every remaining member under the removing
+2. Commits the removal and the **new key generation** together. Under
+   `MergeConcurrent` this is the removing owner's causal entry plus its rotation
+   record; under `Serial` both facts are one global control commit.
+3. Re-wraps the updated keyring to every remaining member under the removing
    owner's own prefix, at `keys/{owner_pubkey}/{member_pubkey}.enc`.
-5. Deletes the removing owner's own wrap for the removed member, at
+4. Deletes the removing owner's own wrap for the removed member, at
    `keys/{owner_pubkey}/{revokee_pubkey}.enc` — a wrap another owner sealed for
    the revokee earlier holds a pre-rotation generation, so leaving it in place
    is harmless; that owner reclaims the slot when it next rotates.
@@ -295,16 +320,16 @@ code carrying its public key (and, for folder-sharing providers, the account
 email the owner should share to). They send it to the owner out of band.
 
 The owner calls `handle.invite_member(...)` with that public key and a role.
-Under it, coven:
+coven:
 
 1. grants the joiner cloud access,
 2. wraps the store keyring to their X25519 key,
-3. signs the `Add` entry and validates it against the committed chain,
-   *before* writing anything,
-4. uploads the wrapped keyring, the entry, and the owner's updated head.
+3. signs and validates the membership change against the committed state,
+4. activates the change through the owner's causal head or the Serial global
+   head.
 
 The cloud connection details come back packed with the store id, name, owner
-pubkey, and `store_root_hash` into an
+pubkey, wrapped-key author, `store_root_hash`, and policy-shaped membership floor into an
 [`InviteCode`](rustdoc:struct:coven::join_code::InviteCode). The owner sends
 that back.
 
@@ -322,6 +347,11 @@ which:
    — scoped to this store alone; a device's identity in any other store it
    belongs to is untouched,
 6. saves the new store config.
+
+The join call also receives the host's expected `WritePolicy`; a mismatch is
+refused before provider access or local writes. A custom S3 `Serial` join must
+add `Some(CustomS3Serial::ConditionalPutAndStrongReads)` so the local operator,
+not the invite, asserts that endpoint's conditional-write and read behavior.
 
 The device is now a writer. A join that fails partway never deletes a store
 that already existed on the device, and leaves the pending identity from
@@ -345,7 +375,7 @@ details. The
 JSON under that prefix.
 
 ```text
-coven:eyJ2IjoxLCJsaWQiOiI1NTBl…
+coven:eyJ2IjozLCJzaWQiOiI1NTBl…
 ```
 
 Restoring with the signing key keeps the same Ed25519 identity, so the
@@ -357,6 +387,10 @@ parses the string back, and on garbled input returns a
 [`RestoreCodeError`](rustdoc:enum:coven::sync::restore_code::RestoreCodeError)
 (missing prefix, truncated base64, malformed JSON, or a version made by a newer
 build) whose `Display` text the host can show verbatim.
+
+Restore likewise requires the expected `WritePolicy` and the custom-S3 Serial
+assertion when applicable; a code cannot silently select either on the host's
+behalf.
 
 A restore code deliberately omits OAuth tokens, since those expire; on a
 consumer cloud the user re-authenticates during restore.

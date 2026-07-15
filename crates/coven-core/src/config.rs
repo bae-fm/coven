@@ -20,6 +20,14 @@ pub enum CloudProvider {
     CloudKit,
 }
 
+/// Operator assertion required before a custom S3 endpoint may coordinate a
+/// serial Store. AWS S3 itself is selected by leaving `s3_endpoint` absent.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomS3Serial {
+    ConditionalPutAndStrongReads,
+}
+
 impl CloudProvider {
     /// Whether connecting, restoring, or joining on this provider requires
     /// running an OAuth flow first — true for the account-based consumer clouds
@@ -84,6 +92,8 @@ pub struct CloudHomeConfig {
     #[serde(default)]
     pub s3_key_prefix: Option<String>,
     #[serde(default)]
+    pub s3_serial: Option<CustomS3Serial>,
+    #[serde(default)]
     pub google_drive_folder_id: Option<String>,
     #[serde(default)]
     pub dropbox_folder_path: Option<String>,
@@ -109,6 +119,7 @@ impl Default for CloudHomeConfig {
             s3_region: None,
             s3_endpoint: None,
             s3_key_prefix: None,
+            s3_serial: None,
             google_drive_folder_id: None,
             dropbox_folder_path: None,
             onedrive_drive_id: None,

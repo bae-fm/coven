@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::keys::{self, UserKeypair};
 use crate::sync::membership::MembershipCoord;
+use crate::sync::store_commit::CommitPosition;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum WrappedKeyActivation {
+    MergeConcurrent(MembershipCoord),
+    Serial(CommitPosition),
+}
 
 /// Serialized form of `keys/{recipient_pubkey}{suffix}`: the store encryption
 /// key sealed to one member, plus the owner signature that authenticates it.
@@ -31,7 +39,7 @@ pub struct WrappedStoreKey {
     /// Membership entry that must be visible before an existing member adopts
     /// this keyring. Invitation keys have no activation coordinate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activation: Option<MembershipCoord>,
+    pub activation: Option<WrappedKeyActivation>,
     /// The keyring's current generation — the generation this wrap would adopt
     /// this recipient to — carried in the clear so a member can learn which
     /// committed generation an inactive wrap (one whose activation entry is not
@@ -54,7 +62,7 @@ struct WrappedKeyFields<'a> {
     store_id: &'a str,
     recipient_pubkey: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    activation: Option<&'a MembershipCoord>,
+    activation: Option<&'a WrappedKeyActivation>,
     generation: u64,
     author_pubkey: &'a str,
     sealed: &'a str,
@@ -88,7 +96,7 @@ impl WrappedStoreKey {
     pub fn signed(
         store_id: &str,
         recipient_pubkey: &str,
-        activation: Option<MembershipCoord>,
+        activation: Option<WrappedKeyActivation>,
         generation: u64,
         sealed: Vec<u8>,
         owner: &UserKeypair,
@@ -153,7 +161,7 @@ impl WrappedStoreKey {
 fn wrapped_key_signing_payload(
     store_id: &str,
     recipient_pubkey: &str,
-    activation: Option<&MembershipCoord>,
+    activation: Option<&WrappedKeyActivation>,
     generation: u64,
     author_pubkey: &str,
     sealed_hex: &str,

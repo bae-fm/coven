@@ -8,8 +8,8 @@
 //! tests pin that the id is refused the moment the code is decoded, so it never
 //! reaches the directory step: a decoded `RestoreCode` always carries a safe id.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::blob::{CacheFill, Provenance};
 use crate::clock::SystemClock;
@@ -17,8 +17,14 @@ use crate::config::HomeStorage;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::id_provider::SequentialIdProvider;
+use crate::join_code::MembershipFloor;
 use crate::keys::{StoreKeys, UserKeypair};
+use crate::storage::cloud::cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare};
 use crate::storage::cloud::CloudHomeJoinInfo;
+use crate::storage::cloud::{
+    CloudHeadCreateError, CloudHeadReplaceError, CloudHeadVersion, CloudHomeError,
+    CloudVersionedHead,
+};
 use crate::store_dir::StoreLayout;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage, PendingRotation};
 use crate::sync::hlc::Hlc;
@@ -41,15 +47,193 @@ use crate::sync::test_helpers::{
     test_synced_tables_with_blob, MockSyncStorage,
 };
 
-fn membership_floor(author_pubkey: String) -> Vec<crate::sync::membership::MembershipCoord> {
-    vec![crate::sync::membership::MembershipCoord {
+struct RestoreCloudKitOps {
+    records: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
+    versions: Mutex<HashMap<(CloudKitScope, String), u64>>,
+}
+
+impl RestoreCloudKitOps {
+    fn new() -> Self {
+        Self {
+            records: Mutex::new(HashMap::new()),
+            versions: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl CloudKitOps for RestoreCloudKitOps {
+    fn write_record(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Result<(), CloudHomeError> {
+        self.records
+            .lock()
+            .unwrap()
+            .insert((scope.clone(), key.to_string()), data);
+        Ok(())
+    }
+
+    fn read_record(&self, scope: &CloudKitScope, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        self.records
+            .lock()
+            .unwrap()
+            .get(&(scope.clone(), key.to_string()))
+            .cloned()
+            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
+    }
+
+    fn list_records(
+        &self,
+        scope: &CloudKitScope,
+        prefix: &str,
+    ) -> Result<Vec<String>, CloudHomeError> {
+        let mut keys: Vec<_> = self
+            .records
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|(record_scope, key)| record_scope == scope && key.starts_with(prefix))
+            .map(|(_, key)| key.clone())
+            .collect();
+        keys.sort();
+        Ok(keys)
+    }
+
+    fn delete_record(&self, scope: &CloudKitScope, key: &str) -> Result<(), CloudHomeError> {
+        self.records
+            .lock()
+            .unwrap()
+            .remove(&(scope.clone(), key.to_string()));
+        self.versions
+            .lock()
+            .unwrap()
+            .remove(&(scope.clone(), key.to_string()));
+        Ok(())
+    }
+
+    fn record_exists(&self, scope: &CloudKitScope, key: &str) -> Result<bool, CloudHomeError> {
+        Ok(self
+            .records
+            .lock()
+            .unwrap()
+            .contains_key(&(scope.clone(), key.to_string())))
+    }
+
+    fn read_versioned_record(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+    ) -> Result<CloudVersionedHead, CloudHomeError> {
+        let record = (scope.clone(), key.to_string());
+        let bytes = self
+            .records
+            .lock()
+            .unwrap()
+            .get(&record)
+            .cloned()
+            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
+        let version = self
+            .versions
+            .lock()
+            .unwrap()
+            .get(&record)
+            .copied()
+            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
+        Ok(CloudVersionedHead {
+            bytes,
+            version: CloudHeadVersion::from_provider(version.to_string())?,
+        })
+    }
+
+    fn create_record(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
+        let record = (scope.clone(), key.to_string());
+        let mut records = self.records.lock().unwrap();
+        if records.contains_key(&record) {
+            return Err(CloudHeadCreateError::AlreadyExists);
+        }
+        records.insert(record.clone(), data.clone());
+        self.versions.lock().unwrap().insert(record, 1);
+        Ok(CloudVersionedHead {
+            bytes: data,
+            version: CloudHeadVersion::from_provider("1".to_string())?,
+        })
+    }
+
+    fn replace_record(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+        expected: &CloudHeadVersion,
+        data: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
+        let record = (scope.clone(), key.to_string());
+        let mut versions = self.versions.lock().unwrap();
+        let current = versions
+            .get(&record)
+            .copied()
+            .ok_or(CloudHeadReplaceError::VersionMismatch)?;
+        if expected.as_provider() != current.to_string() {
+            return Err(CloudHeadReplaceError::VersionMismatch);
+        }
+        let next = current + 1;
+        self.records
+            .lock()
+            .unwrap()
+            .insert(record.clone(), data.clone());
+        versions.insert(record, next);
+        Ok(CloudVersionedHead {
+            bytes: data,
+            version: CloudHeadVersion::from_provider(next.to_string())?,
+        })
+    }
+
+    fn share_for_member(
+        &self,
+        _member_pubkey: &str,
+    ) -> Result<Option<CloudKitShare>, CloudHomeError> {
+        Ok(None)
+    }
+
+    fn grant_share(&self, _member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError> {
+        Err(CloudHomeError::Configuration(
+            "sharing is not used by restore tests".to_string(),
+        ))
+    }
+
+    fn revoke_share(&self, _member_pubkey: &str) -> Result<(), CloudHomeError> {
+        Ok(())
+    }
+
+    fn accept_share(&self, _share_url: &str) -> Result<CloudKitShare, CloudHomeError> {
+        Err(CloudHomeError::Configuration(
+            "shared zones are not used by restore tests".to_string(),
+        ))
+    }
+}
+
+fn membership_floor(author_pubkey: String) -> MembershipFloor {
+    MembershipFloor::MergeConcurrent(vec![crate::sync::membership::MembershipCoord {
         author_pubkey,
         author_owner_grant: crate::sync::membership::OwnerGrantId(
             crate::sync::store_commit::ObjectHash::digest(b"restore test owner grant"),
         ),
         seq: 1,
         entry_hash: crate::sync::store_commit::ObjectHash::digest(b"restore test founder entry"),
-    }]
+    }])
+}
+
+fn serialized_keyring(byte: u8) -> String {
+    crate::encryption::MasterKeyring::from(crate::encryption::EncryptionService::from_key(
+        [byte; 32],
+    ))
+    .to_serialized()
 }
 
 /// A restore code carrying the given `sid`. The provider points at a loopback
@@ -59,7 +243,7 @@ fn restore_code_with_sid(sid: &str) -> String {
     let code = RestoreCode {
         v: crate::sync::restore_code::RESTORE_CODE_VERSION,
         sid: sid.to_string(),
-        ek: Some("aa".repeat(32)),
+        ek: Some(serialized_keyring(0xaa)),
         name: "Evil".to_string(),
         provider: CloudHomeJoinInfo::S3 {
             bucket: "bucket".to_string(),
@@ -95,6 +279,8 @@ async fn restore_result_for(
         code_str,
         &test_synced_tables(),
         &test_migrations(),
+        crate::WritePolicy::MergeConcurrent,
+        None,
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
         None,
@@ -106,6 +292,87 @@ async fn restore_result_for(
         &tokio::sync::watch::channel(false).1,
     )
     .await
+}
+
+#[tokio::test]
+async fn restore_refuses_the_code_policy_before_any_provider_or_local_write() {
+    let code = restore_code_with_sid("restore-policy-mismatch");
+    let app = tempfile::tempdir().unwrap();
+    let result = restore_from_code(
+        &code,
+        &test_synced_tables(),
+        &test_migrations(),
+        crate::WritePolicy::Serial,
+        None,
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        None,
+        None,
+        &crate::store_dir::StoreLayout::new(app.path()),
+        Arc::new(SystemClock),
+        Arc::new(SequentialIdProvider::new("device")),
+        |_| {},
+        &tokio::sync::watch::channel(false).1,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(BootstrapError::WritePolicyMismatch {
+            expected: crate::WritePolicy::Serial,
+            actual: crate::WritePolicy::MergeConcurrent,
+        })
+    ));
+    assert!(!app.path().join("stores/restore-policy-mismatch").exists());
+}
+
+#[tokio::test]
+async fn restore_refuses_a_known_unsupported_serial_provider_before_any_provider_or_local_write() {
+    let code = encode_restore_code(&RestoreCode {
+        v: crate::sync::restore_code::RESTORE_CODE_VERSION,
+        sid: "restore-serial-google-drive".to_string(),
+        ek: Some(serialized_keyring(0xaa)),
+        name: "Serial Store".to_string(),
+        provider: CloudHomeJoinInfo::GoogleDrive {
+            folder_id: "never-read".to_string(),
+        },
+        sk: hex::encode(crate::keys::UserKeypair::generate().to_keypair_bytes()),
+        store_root_hash: crate::sync::store_commit::ObjectHash::digest(b"Serial restore root"),
+        founder_pubkey: hex::encode([0xAB_u8; 32]),
+        membership_floor: MembershipFloor::Serial(Some(
+            crate::sync::store_commit::CommitPosition {
+                seq: 1,
+                commit_hash: crate::sync::store_commit::ObjectHash::digest(b"Serial restore floor"),
+            },
+        )),
+    });
+    let app = tempfile::tempdir().unwrap();
+    let result = restore_from_code(
+        &code,
+        &test_synced_tables(),
+        &test_migrations(),
+        crate::WritePolicy::Serial,
+        None,
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        None,
+        None,
+        &crate::store_dir::StoreLayout::new(app.path()),
+        Arc::new(SystemClock),
+        Arc::new(SequentialIdProvider::new("device")),
+        |_| {},
+        &tokio::sync::watch::channel(false).1,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(BootstrapError::SerialCoordinationUnavailable {
+            provider: crate::CloudProvider::GoogleDrive,
+        })
+    ));
+    assert!(!app
+        .path()
+        .join("stores/restore-serial-google-drive")
+        .exists());
 }
 
 /// Every traversal-shaped `sid` is refused at the decode boundary:
@@ -275,6 +542,8 @@ async fn restore_with_cancel(
         code,
         &test_synced_tables(),
         &test_migrations(),
+        crate::WritePolicy::MergeConcurrent,
+        None,
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
         None,
@@ -497,8 +766,9 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
         key_prefix: None,
     };
 
-    let master_key = crate::encryption::MasterKeyring::from_serialized(&"bb".repeat(32))
-        .expect("parse the legacy raw-hex fixture key");
+    let master_key = crate::encryption::MasterKeyring::from(
+        crate::encryption::EncryptionService::from_key([0xbb; 32]),
+    );
     let result = bootstrap_and_save_store(
         &joiner_storage,
         &cipher,
@@ -511,11 +781,12 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
             founder_pubkey: &pubkey_hex(&owner_keypair),
             keypair: &joiner_keypair,
         },
-        &membership.author_heads(),
+        &MembershipFloor::MergeConcurrent(membership.author_heads()),
         &tables,
         &test_migrations(),
         &join_info,
         "Late Step Test",
+        None,
         &store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
@@ -614,7 +885,9 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
     crate::keys::test_keyring::install();
 
     let store_id = "restore-anti-clobber-test";
-    let cloud = crate::InMemoryCloudHome::new();
+    let cloudkit_ops = Arc::new(RestoreCloudKitOps::new());
+    let cloud =
+        crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops.clone());
     let cipher = CloudCipher::Plaintext;
     let blob_paths = BlobPathScheme::for_storage(HomeStorage::Browsable);
     let tables = test_synced_tables();
@@ -684,51 +957,43 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
             .map(|meta| meta.semantic_hash)
             .collect();
 
-    // Device B restores through the shared bootstrap entry, over its own
-    // CloudSyncStorage handle onto the same cloud.
-    let (_tmp_b, lib_b) = temp_store_dir();
+    // Device B restores through the public restore-code service over its own
+    // CloudKit home onto the same records.
+    let app = tempfile::tempdir().expect("restore app dir");
+    let layout = StoreLayout::new(app.path());
     let joiner_keypair = owner_keypair.clone();
-    let joiner_storage = CloudSyncStorage::new(
-        Arc::new(cloud) as Arc<dyn crate::storage::cloud::CloudHome>,
-        cipher.clone(),
-        blob_paths,
-        store_id.to_string(),
-        joiner_keypair.clone(),
-    )
-    .with_copy_ids(Arc::new(
-        crate::storage::cloud::SequentialCopyIdGenerator::new("restore-cycle-reader"),
-    ));
-    let store_keys = StoreKeys::new(store_id.to_string());
-    let custody = crate::custody::KeyCustody::Keyring.resolve(store_id, &lib_b);
-    let identity_custody =
-        crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &lib_b);
-    let join_info = CloudHomeJoinInfo::CloudKit;
-
-    bootstrap_and_save_store(
-        &joiner_storage,
-        &cipher,
-        None,
-        &lib_b,
-        store_id,
-        "device-b",
+    let restore_code = encode_restore_code(&RestoreCode {
+        v: crate::sync::restore_code::RESTORE_CODE_VERSION,
+        sid: store_id.to_string(),
+        ek: None,
+        name: "Restored Store".to_string(),
+        provider: CloudHomeJoinInfo::CloudKit,
+        sk: hex::encode(joiner_keypair.to_keypair_bytes()),
         store_root_hash,
-        BootstrapContext::Restore {
-            founder_pubkey: &pubkey_hex(&owner_keypair),
-            keypair: &joiner_keypair,
-        },
-        &membership.author_heads(),
+        founder_pubkey: pubkey_hex(&owner_keypair),
+        membership_floor: MembershipFloor::MergeConcurrent(membership.author_heads()),
+    });
+    let config = restore_from_code(
+        &restore_code,
         &tables,
         &test_migrations(),
-        &join_info,
-        "Restored Store",
-        &store_keys,
-        custody.as_ref(),
-        identity_custody.as_ref(),
-        &|_status: &str| {},
+        crate::WritePolicy::MergeConcurrent,
+        None,
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        None,
+        Some(cloudkit_ops.clone()),
+        &layout,
+        Arc::new(SystemClock),
+        Arc::new(SequentialIdProvider::new("device-b")),
+        |_status: &str| {},
         &tokio::sync::watch::channel(false).1,
     )
     .await
-    .expect("restore bootstrap");
+    .expect("restore through code service");
+    let lib_b = config.store_dir.clone();
+    let identity_custody =
+        crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &lib_b);
 
     // The config is saved, and a saved config implies the identity was imported
     // before it — the restored device's signing identity resolves in custody.
@@ -740,24 +1005,46 @@ async fn restore_first_cycle_does_not_clobber_the_shared_snapshot() {
         Some(joiner_keypair.public_key()),
         "a completed restore has its signing identity in custody",
     );
+    let other_identity_custody = crate::identity_custody::IdentityCustody::Keyring.resolve(
+        "restore-anti-clobber-other-store",
+        &layout.store_dir("restore-anti-clobber-other-store"),
+    );
+    assert!(
+        other_identity_custody
+            .unlock()
+            .expect("read unrelated store identity")
+            .is_none(),
+        "restoring one store establishes no identity for another store",
+    );
 
     let (db_b, _stamper) = Database::open(
         &lib_b.db_path(),
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
-        "device-b".to_string(),
+        coven_core::WritePolicy::MergeConcurrent,
+        config.device_id.clone(),
         &test_migrations(),
     )
     .expect("open B db");
 
     // B's first real sync cycle, with no local changes of its own.
     let enc_lock = RwLock::new(cipher.clone());
-    let b_hlc = Hlc::new("device-b".to_string());
+    let joiner_storage = CloudSyncStorage::new(
+        Arc::new(crate::storage::cloud::cloudkit::CloudKitCloudHome::new_private(cloudkit_ops)),
+        cipher.clone(),
+        blob_paths,
+        store_id.to_string(),
+        joiner_keypair.clone(),
+    )
+    .with_copy_ids(Arc::new(
+        crate::storage::cloud::SequentialCopyIdGenerator::new("restore-cycle-reader"),
+    ));
+    let b_hlc = Hlc::new(config.device_id.clone());
     run_test_cycle(
         &joiner_storage,
         store_id,
-        "device-b",
+        &config.device_id,
         &b_hlc,
         &SystemClock,
         &db_b,
@@ -843,7 +1130,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         "test-lib",
         storage.store_root_hash(),
         &owner_pk,
-        &chain.author_heads(),
+        &MembershipFloor::MergeConcurrent(chain.author_heads()),
         1,
         &lib_b.db_path(),
     )
@@ -857,8 +1144,9 @@ async fn restore_pins_the_chain_founder_as_owner() {
         "B",
         &owner_pk,
         None,
-        &chain.author_heads(),
+        &MembershipFloor::MergeConcurrent(chain.author_heads()),
         &storage,
+        None,
         boot,
         &lib_b,
         &tokio::sync::watch::channel(false).1,
@@ -871,6 +1159,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        coven_core::WritePolicy::MergeConcurrent,
         "B".to_string(),
         &test_migrations(),
     )
@@ -935,10 +1224,14 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
 
     // The restore code is minted right after the removal: its floor is the
     // current (post-removal) chain state.
-    let membership_floor = chain.author_heads();
+    let membership_floor = MembershipFloor::MergeConcurrent(chain.author_heads());
     assert_eq!(
         membership_floor,
-        vec![chain.entries().last().expect("removal entry").coord()],
+        MembershipFloor::MergeConcurrent(vec![chain
+            .entries()
+            .last()
+            .expect("removal entry")
+            .coord(),]),
     );
 
     let db_owner = open_test_db();
@@ -1151,11 +1444,12 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
             founder_pubkey: &pubkey_hex(&owner_keypair),
             keypair: &joiner_keypair,
         },
-        &membership.author_heads(),
+        &MembershipFloor::MergeConcurrent(membership.author_heads()),
         &tables,
         &test_migrations(),
         &join_info,
         "Restored Store",
+        None,
         &store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
@@ -1174,47 +1468,5 @@ async fn restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         std::fs::read(&expected_blob).expect("read backfilled blob"),
         b"cover-bytes",
         "the backfilled file must hold the blob's plaintext bytes",
-    );
-}
-
-/// A restore code for store A establishes an identity for A alone. This
-/// drives the exact step `restore_from_code` runs after `restore_from_cloud`
-/// succeeds — importing the code's signing key into the named store's own
-/// identity custody — and shows a different store on the same device, whose
-/// custody this restore never touched, is left with no identity established.
-#[tokio::test]
-async fn restore_establishes_no_identity_for_another_store() {
-    crate::keys::test_keyring::install();
-
-    let restored_identity = UserKeypair::generate();
-    let identity_custody_a = crate::identity_custody::IdentityCustody::Keyring.resolve(
-        "restore-scope-store-a",
-        &crate::store_dir::StoreDir::new("unused-restore-scope-a"),
-    );
-    let identity_custody_b = crate::identity_custody::IdentityCustody::Keyring.resolve(
-        "restore-scope-store-b",
-        &crate::store_dir::StoreDir::new("unused-restore-scope-b"),
-    );
-
-    crate::keys::import_identity(
-        identity_custody_a.as_ref(),
-        &restored_identity.to_keypair_bytes(),
-    )
-    .expect("import store a's restored identity");
-
-    assert_eq!(
-        identity_custody_a
-            .unlock()
-            .expect("read store a's identity")
-            .map(|kp| kp.public_key()),
-        Some(restored_identity.public_key()),
-        "store a now holds the restored identity",
-    );
-    assert!(
-        identity_custody_b
-            .unlock()
-            .expect("read store b's identity")
-            .is_none(),
-        "a restore for store a must establish no identity for store b",
     );
 }

@@ -90,6 +90,7 @@ shared root secret and never reused across stores.
 
 ```rust
 Coven::builder(config)
+    .write_policy(coven::WritePolicy::MergeConcurrent)
     .key_custody(coven::KeyCustody::Keyring)   // the default
     .synced_tables(tables)
     .migrations(migrations)
@@ -115,6 +116,7 @@ builder, with
 
 ```rust
 Coven::builder(config)
+    .write_policy(coven::WritePolicy::MergeConcurrent)
     .identity_custody(coven::IdentityCustody::Keyring)   // the default
     .synced_tables(tables)
     .migrations(migrations)

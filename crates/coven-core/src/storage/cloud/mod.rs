@@ -145,6 +145,69 @@ pub enum ListingCoverage {
     BestEffort,
 }
 
+/// Opaque provider revision returned by an authoritative coordination read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudHeadVersion(String);
+
+impl CloudHeadVersion {
+    pub fn from_provider(value: String) -> Result<Self, CloudHomeError> {
+        if value.is_empty() {
+            return Err(CloudHomeError::Configuration(
+                "coordination version token is empty".to_string(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_provider(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudVersionedHead {
+    pub bytes: Vec<u8>,
+    pub version: CloudHeadVersion,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CloudHeadCreateError {
+    #[error("coordination head already exists")]
+    AlreadyExists,
+    #[error(transparent)]
+    Storage(#[from] CloudHomeError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CloudHeadReplaceError {
+    #[error("coordination head version no longer matches")]
+    VersionMismatch,
+    #[error(transparent)]
+    Storage(#[from] CloudHomeError),
+}
+
+/// Provider-level atomic head operations. Only adapters backed by a documented
+/// conditional-write and strong-read contract implement this capability.
+#[async_trait]
+pub trait CloudHeadStorage: Send + Sync {
+    async fn read_head(&self, key: &str) -> Result<CloudVersionedHead, CloudHomeError>;
+
+    async fn create_head(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadCreateError>;
+
+    async fn replace_head(
+        &self,
+        key: &str,
+        expected: &CloudHeadVersion,
+        bytes: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadReplaceError>;
+
+    async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError>;
+}
+
 /// One physical object returned by an append or listing operation.
 ///
 /// The provider id is intentionally opaque. Protocol objects may retain this

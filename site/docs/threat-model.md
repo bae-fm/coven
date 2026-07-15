@@ -21,11 +21,11 @@ them:
   cipher is authenticated: a flipped byte fails to open. The associated data of
   each sealed object binds it to its `(store_id, cloud_key)` position, so an
   object copied to a different key fails to open there.
-- **The membership chain.** An append-only, Ed25519-signed log of who may write
-  (see [Sharing](/docs/sharing)). Each entry is signed by a then-current Owner;
-  the chain's founder is the store's root of authority. Control objects a device
-  publishes (its head, snapshot metadata, wrapped keys) are individually signed,
-  so the provider holding them cannot forge them.
+- **Signed membership.** `MergeConcurrent` uses causal, per-owner membership
+  streams. `Serial` puts exact-state membership changes into its global commit
+  chain. Both begin at the founder bound into the signed Store protocol root
+  (see [Sharing](/docs/sharing)). Heads, snapshot metadata, and wrapped keys are
+  signed, so the provider holding them cannot forge membership.
 
 ## Non-member with read access to the bucket
 
@@ -64,13 +64,13 @@ need them is the deployment's responsibility.
 
 ## Current member
 
-A device that is currently in the membership chain with a write-capable role.
+A device that is currently in signed membership with a write-capable role.
 
 **Defended by authorization.** A current Owner or Member may write changesets; a
-Follower is read-only. The puller judges every changeset against the chain: an
+Follower is read-only. The puller judges every Store commit against the applicable membership state: an
 author who is not a write-capable member at pull time is rejected, and the
 snapshot (a destructive, whole-catalog primitive) is authorized to Owners only.
-The chain itself is anchored to its founder, so a member cannot rewrite history
+Membership is anchored to its founder, so a member cannot rewrite history
 to grant themselves a role they were never given. What a current member *can* do
 — they hold the store key and a valid identity — is exactly what membership
 grants: write store data. Removing that capability is the next section.
@@ -119,14 +119,12 @@ the provider cannot read plaintext or forge a membership decision. What it
 retains is scheduling power over what it serves: it can withhold an object,
 serve an older version, or reorder what a reader sees.
 
-Rollback of *membership* is bounded. Each reader keeps a per-author head
-watermark — the greatest membership-head sequence it has accepted for each author
-— and refuses a head that regresses below it. A fresh joiner or restorer has no
-watermark yet, so the invite and restore codes carry a membership floor and the
-reader seeds its watermark from it before its first sync (see
-[Bootstrap](/docs/bootstrap)); a provider serving a pre-removal head to a
-just-joined device is refused as a regression rather than accepted for lack of
-prior state.
+Rollback of *membership* is bounded by the write policy. `MergeConcurrent`
+readers persist per-author head watermarks and refuse regressions. `Serial`
+readers verify the signed global head and its complete predecessor chain. Invite
+and restore codes carry the corresponding causal frontier or exact global
+position, so a fresh device refuses membership older than the code it received
+(see [Bootstrap](/docs/bootstrap)).
 
 Withholding is *not* defendable from inside the artifact. A provider that stops
 serving new objects presents a reader with a stale-but-internally-consistent
@@ -155,7 +153,7 @@ The out-of-band channel over which an owner sends an invite code to a joiner.
 
 **Assumed integrity-preserving. This is a hard trust assumption.** An invite code
 is unsigned — there is no prior key to sign it with — and it carries the store's
-`owner_pubkey`, which the joiner **pins** as the membership chain's founder and
+`owner_pubkey`, which the joiner **pins** as the signed membership founder and
 thereafter anchors every authorization decision against. Whoever controls
 delivery of the code chooses the founder key the joiner pins, and therefore the
 entire authority chain: an attacker who substitutes both the `owner_pubkey` and
@@ -179,7 +177,7 @@ belong to the same device.
 gets its own freshly generated Ed25519 keypair, established when that store is
 created, joined, or restored, never derived from a shared secret and never reused
 across stores (see [Keys](/docs/keys#no-silent-identity-minting)). No pubkey a
-device writes into one store's membership chain appears in another's, so a
+device writes into one store's membership state appears in another's, so a
 provider hosting two of a user's stores cannot tie them to one device by matching
 signing keys. A per-store restore code likewise carries authority scoped to the
 one store it names.
@@ -189,15 +187,12 @@ one store it names.
 Four positions are worth stating on their own, as deliberate scope decisions
 rather than gaps to close later.
 
-**Credential revocation runs before the removal commits.** Removing a member
-withdraws their provider credential (where the provider supports withdrawal at
-all) *before* the chain's Remove entry and the key rotation commit. A failure
-after the withdrawal leaves the member locked out of storage while the committed
-chain still lists them — visible as a contradiction until the removing owner
-retries, which converges. The ordering is deliberate: locked-out-but-listed is
-the safe direction (the alternative window, removed-but-credentialed, hands a
-just-revoked member live storage access), the failure is loud to the initiator,
-and retrying the removal is idempotent.
+**Removal either activates its complete state or restores the prior state.**
+Removing a member records the prior provider access and wrapped-key objects,
+then publishes the membership removal with its replacement key generation. If
+activation loses its expected head or another step fails, coven restores those
+exact prior objects and access grants and reports the failure. A `Serial`
+removal activates membership and generation in one global control commit.
 
 **A peer's tombstone GC can outrace a re-upload's cancel.** When a blob is
 re-uploaded to a cloud key whose deletion tombstone has already passed its grace
@@ -210,18 +205,6 @@ the failure is loud, never silent: the re-uploader's push refuses to publish a
 row whose blob is missing remotely and retries every cycle. Hosts that write new
 content at new (content-addressed or versioned) blob keys never re-enter a
 tombstoned key and avoid the race entirely.
-
-**The member list display is not anchored.**
-[`get_members`](rustdoc:fn:coven::CovenHandle::get_members) loads the chain
-without pinning a founder, so on a wiped-and-refounded chain it would render the
-refounded members rather than refusing the chain the way the sync path does. This
-is accepted as a display-only risk: nothing coven authorizes flows from that
-list. Every path that grants authority — the puller's write-grant check, invite,
-removal, snapshot authorization — independently anchors the chain against the
-pinned owner, so a tampered or refounded chain is refused there regardless of
-what the member list rendered. Anchoring the display call would, on a store whose
-owner is not yet locally pinned, fall back to the same unanchored load anyway,
-while turning a read for the UI into a failure — no authorization gap closed.
 
 **Withholding and local-state tampering are out of scope**, for the reasons in
 [the provider](#the-storage-provider-itself) and

@@ -13,7 +13,7 @@ use super::store_objects::{append_and_verify, StoreObjectError};
 pub enum StoreRegistrationError {
     #[error("Store device registration database state: {0}")]
     Database(String),
-    #[error(transparent)]
+    #[error("{0}")]
     Object(#[from] StoreObjectError),
     #[error("Store device registration is missing protocol state {key:?}")]
     MissingState { key: &'static str },

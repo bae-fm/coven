@@ -211,9 +211,7 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
         // transaction, so a committed blob-bearing row always carries its
         // uploader. The caller rolls these records back with the rows on any
         // rejected apply; a deferred retry re-records the same fact idempotently.
-        for (namespace, blob_id, uploader) in blob_uploads {
-            crate::database::Database::record_blob_uploader_on(conn, namespace, blob_id, uploader)?;
-        }
+        record_blob_uploaders(conn, blob_uploads)?;
     }
 
     let constraint_conflict_tables = constraint_conflict_tables
@@ -229,6 +227,32 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
         had_fk_violations,
         constraint_conflict_tables,
     })
+}
+
+pub(crate) fn apply_changeset_strict_on<B: AsRef<[u8]>>(
+    conn: &Connection,
+    changeset: ValidatedChangeset<B>,
+    blob_uploads: &[(String, String, String)],
+) -> Result<(), DbError> {
+    let bytes = changeset.bytes();
+    conn.apply_strm(
+        &mut &bytes[..],
+        None::<fn(&str) -> bool>,
+        |_conflict_type, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
+    )
+    .map_err(DbError::from)?;
+    record_blob_uploaders(conn, blob_uploads)?;
+    Ok(())
+}
+
+fn record_blob_uploaders(
+    conn: &Connection,
+    blob_uploads: &[(String, String, String)],
+) -> Result<(), DbError> {
+    for (namespace, blob_id, uploader) in blob_uploads {
+        crate::database::Database::record_blob_uploader_on(conn, namespace, blob_id, uploader)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

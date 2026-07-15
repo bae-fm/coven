@@ -10,7 +10,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use super::store_commit::{ObjectHash, STORE_PROTOCOL_VERSION};
+use super::store_commit::{ObjectHash, StoreBatchCommit, StoreControl, STORE_PROTOCOL_VERSION};
 use crate::keys::{self, UserKeypair};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -28,6 +28,385 @@ pub enum MemberRole {
     Owner,
     Member,
     Follower,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SerialMember {
+    pub role: MemberRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_account_email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SerialMembershipState {
+    store_root_hash: ObjectHash,
+    members: BTreeMap<String, SerialMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SerialAuthorizationState {
+    pub membership: SerialMembershipState,
+    pub key_generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SerialMembershipChange {
+    SetMember {
+        user_pubkey: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_account_email: Option<String>,
+        role: MemberRole,
+    },
+    RemoveMember {
+        user_pubkey: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SerialMembershipEntry {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub previous_state_hash: ObjectHash,
+    pub author_pubkey: String,
+    pub created_at: String,
+    pub change: SerialMembershipChange,
+    pub signature: String,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SerialMembershipError {
+    #[error("Serial membership founder does not match the Store protocol root founder")]
+    InvalidFounder,
+    #[error("Serial membership entry has unsupported version {0}")]
+    UnsupportedVersion(u32),
+    #[error("Serial membership entry belongs to root {actual}, expected {expected}")]
+    StoreRootMismatch {
+        expected: ObjectHash,
+        actual: ObjectHash,
+    },
+    #[error("Serial membership entry has an invalid signature")]
+    InvalidSignature,
+    #[error("Serial membership entry names state {actual}, expected {expected}")]
+    StaleState {
+        expected: ObjectHash,
+        actual: ObjectHash,
+    },
+    #[error("Serial membership author {0} is not a current Owner")]
+    AuthorIsNotOwner(String),
+    #[error("Serial membership member {0} is absent")]
+    NotAMember(String),
+    #[error("Serial membership removal would leave no Owner")]
+    LastOwner,
+    #[error("Serial commit carries a causal membership grant")]
+    CausalGrant,
+    #[error("Serial commit author {0} is not a current writer")]
+    AuthorIsNotWriter(String),
+    #[error("Serial key rotation is not paired with a membership removal")]
+    RotationWithoutRemoval,
+    #[error("Serial key rotation names generation {actual}, expected {expected}")]
+    KeyGeneration { expected: u64, actual: u64 },
+}
+
+impl SerialAuthorizationState {
+    pub fn from_founder(
+        store_root_hash: ObjectHash,
+        founder: &MembershipEntry,
+    ) -> Result<Self, SerialMembershipError> {
+        Ok(Self {
+            membership: SerialMembershipState::from_founder(store_root_hash, founder)?,
+            key_generation: crate::encryption::INITIAL_KEY_GENERATION,
+        })
+    }
+
+    pub fn authorize_and_apply(
+        &self,
+        commit: &StoreBatchCommit,
+    ) -> Result<Self, SerialMembershipError> {
+        if commit.membership_grant.is_some() {
+            return Err(SerialMembershipError::CausalGrant);
+        }
+        if !self.membership.can_write(&commit.author_pubkey) {
+            return Err(SerialMembershipError::AuthorIsNotWriter(
+                commit.author_pubkey.clone(),
+            ));
+        }
+        let Some(control) = commit.control.as_ref() else {
+            return Ok(self.clone());
+        };
+        let membership = self.membership.apply(control.serial_membership_entry())?;
+        let key_generation = match control {
+            StoreControl::SerialMembership { .. } => self.key_generation,
+            StoreControl::SerialMembershipAndKeyRotation { entry, generation } => {
+                if !entry.change.is_removal() {
+                    return Err(SerialMembershipError::RotationWithoutRemoval);
+                }
+                let expected = self.key_generation.checked_add(1).ok_or(
+                    SerialMembershipError::KeyGeneration {
+                        expected: self.key_generation,
+                        actual: *generation,
+                    },
+                )?;
+                if *generation != expected {
+                    return Err(SerialMembershipError::KeyGeneration {
+                        expected,
+                        actual: *generation,
+                    });
+                }
+                *generation
+            }
+        };
+        Ok(Self {
+            membership,
+            key_generation,
+        })
+    }
+}
+
+impl SerialMembershipState {
+    pub fn from_founder(
+        store_root_hash: ObjectHash,
+        founder: &MembershipEntry,
+    ) -> Result<Self, SerialMembershipError> {
+        let MembershipChange::Founder {
+            owner_pubkey,
+            owner_grant_id,
+        } = &founder.change
+        else {
+            return Err(SerialMembershipError::InvalidFounder);
+        };
+        if founder.author_pubkey != *owner_pubkey
+            || founder.author_owner_grant != *owner_grant_id
+            || founder.seq != 1
+            || founder.previous_hash.is_some()
+            || !founder.dependencies.is_empty()
+            || !verify_membership_entry(founder)
+        {
+            return Err(SerialMembershipError::InvalidFounder);
+        }
+        Ok(Self {
+            store_root_hash,
+            members: BTreeMap::from([(
+                owner_pubkey.clone(),
+                SerialMember {
+                    role: MemberRole::Owner,
+                    provider_account_email: None,
+                },
+            )]),
+        })
+    }
+
+    pub fn state_hash(&self) -> ObjectHash {
+        #[derive(Serialize)]
+        struct StateFields<'a> {
+            domain: &'static str,
+            store_root_hash: ObjectHash,
+            members: &'a BTreeMap<String, SerialMember>,
+        }
+        ObjectHash::digest(
+            &serde_json::to_vec(&StateFields {
+                domain: "coven.serial-membership-state.v1",
+                store_root_hash: self.store_root_hash,
+                members: &self.members,
+            })
+            .expect("Serial membership state serialization cannot fail"),
+        )
+    }
+
+    pub fn store_root_hash(&self) -> ObjectHash {
+        self.store_root_hash
+    }
+
+    pub fn current_members(&self) -> Vec<(String, MemberRole)> {
+        self.members
+            .iter()
+            .map(|(pubkey, member)| (pubkey.clone(), member.role.clone()))
+            .collect()
+    }
+
+    pub fn current_member_provider_email(&self, pubkey: &str) -> Option<&str> {
+        self.members
+            .get(pubkey)
+            .and_then(|member| member.provider_account_email.as_deref())
+    }
+
+    pub fn can_write(&self, pubkey: &str) -> bool {
+        self.members
+            .get(pubkey)
+            .is_some_and(|member| member.role.can_write())
+    }
+
+    pub fn is_owner(&self, pubkey: &str) -> bool {
+        self.members
+            .get(pubkey)
+            .is_some_and(|member| member.role == MemberRole::Owner)
+    }
+
+    pub fn signed_set_member(
+        &self,
+        signer: &UserKeypair,
+        user_pubkey: String,
+        provider_account_email: Option<String>,
+        role: MemberRole,
+        created_at: String,
+    ) -> Result<SerialMembershipEntry, SerialMembershipError> {
+        self.signed_change(
+            signer,
+            SerialMembershipChange::SetMember {
+                user_pubkey,
+                provider_account_email,
+                role,
+            },
+            created_at,
+        )
+    }
+
+    pub fn signed_remove_member(
+        &self,
+        signer: &UserKeypair,
+        user_pubkey: String,
+        created_at: String,
+    ) -> Result<SerialMembershipEntry, SerialMembershipError> {
+        if !self.members.contains_key(&user_pubkey) {
+            return Err(SerialMembershipError::NotAMember(user_pubkey));
+        }
+        self.signed_change(
+            signer,
+            SerialMembershipChange::RemoveMember { user_pubkey },
+            created_at,
+        )
+    }
+
+    fn signed_change(
+        &self,
+        signer: &UserKeypair,
+        change: SerialMembershipChange,
+        created_at: String,
+    ) -> Result<SerialMembershipEntry, SerialMembershipError> {
+        let author_pubkey = keys::public_key_hex(signer);
+        if !self.is_owner(&author_pubkey) {
+            return Err(SerialMembershipError::AuthorIsNotOwner(author_pubkey));
+        }
+        let mut entry = SerialMembershipEntry {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash: self.store_root_hash,
+            previous_state_hash: self.state_hash(),
+            author_pubkey,
+            created_at,
+            change,
+            signature: String::new(),
+        };
+        let (_, signature) = keys::sign_hex(signer, &entry.canonical_bytes());
+        entry.signature = signature;
+        Ok(entry)
+    }
+
+    pub fn apply(&self, entry: &SerialMembershipEntry) -> Result<Self, SerialMembershipError> {
+        if entry.version != STORE_PROTOCOL_VERSION {
+            return Err(SerialMembershipError::UnsupportedVersion(entry.version));
+        }
+        if entry.store_root_hash != self.store_root_hash {
+            return Err(SerialMembershipError::StoreRootMismatch {
+                expected: self.store_root_hash,
+                actual: entry.store_root_hash,
+            });
+        }
+        if !entry.verify() {
+            return Err(SerialMembershipError::InvalidSignature);
+        }
+        let expected = self.state_hash();
+        if entry.previous_state_hash != expected {
+            return Err(SerialMembershipError::StaleState {
+                expected,
+                actual: entry.previous_state_hash,
+            });
+        }
+        if !self.is_owner(&entry.author_pubkey) {
+            return Err(SerialMembershipError::AuthorIsNotOwner(
+                entry.author_pubkey.clone(),
+            ));
+        }
+        let mut next = self.clone();
+        match &entry.change {
+            SerialMembershipChange::SetMember {
+                user_pubkey,
+                provider_account_email,
+                role,
+            } => {
+                next.members.insert(
+                    user_pubkey.clone(),
+                    SerialMember {
+                        role: role.clone(),
+                        provider_account_email: provider_account_email.clone(),
+                    },
+                );
+            }
+            SerialMembershipChange::RemoveMember { user_pubkey } => {
+                let removed = next
+                    .members
+                    .remove(user_pubkey)
+                    .ok_or_else(|| SerialMembershipError::NotAMember(user_pubkey.clone()))?;
+                if removed.role == MemberRole::Owner
+                    && !next
+                        .members
+                        .values()
+                        .any(|member| member.role == MemberRole::Owner)
+                {
+                    return Err(SerialMembershipError::LastOwner);
+                }
+            }
+        }
+        Ok(next)
+    }
+}
+
+impl SerialMembershipChange {
+    pub fn user_pubkey(&self) -> &str {
+        match self {
+            Self::SetMember { user_pubkey, .. } | Self::RemoveMember { user_pubkey } => user_pubkey,
+        }
+    }
+
+    pub fn is_removal(&self) -> bool {
+        matches!(self, Self::RemoveMember { .. })
+    }
+}
+
+impl SerialMembershipEntry {
+    fn canonical_bytes(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Signed<'a> {
+            domain: &'static str,
+            version: u32,
+            store_root_hash: ObjectHash,
+            previous_state_hash: ObjectHash,
+            author_pubkey: &'a str,
+            created_at: &'a str,
+            change: &'a SerialMembershipChange,
+        }
+        serde_json::to_vec(&Signed {
+            domain: "coven.serial-membership-entry.v1",
+            version: self.version,
+            store_root_hash: self.store_root_hash,
+            previous_state_hash: self.previous_state_hash,
+            author_pubkey: &self.author_pubkey,
+            created_at: &self.created_at,
+            change: &self.change,
+        })
+        .expect("Serial membership entry serialization cannot fail")
+    }
+
+    pub fn verify(&self) -> bool {
+        keys::verify_signature_hex(
+            &self.author_pubkey,
+            &self.signature,
+            &self.canonical_bytes(),
+        )
+    }
 }
 
 impl MemberRole {
@@ -1488,5 +1867,56 @@ mod tests {
         let mut tampered = entry.clone();
         tampered.created_at = "other".to_string();
         assert!(!verify_membership_entry(&tampered));
+    }
+
+    #[test]
+    fn serial_membership_applies_only_against_its_exact_previous_state() {
+        let owner = key();
+        let first_member = key();
+        let second_member = key();
+        let root = ObjectHash::digest(b"Serial membership root");
+        let state = SerialMembershipState::from_founder(
+            root,
+            &founder_entry("serial-store", &owner, "founder"),
+        )
+        .unwrap();
+        let first = state
+            .signed_set_member(
+                &owner,
+                keys::public_key_hex(&first_member),
+                None,
+                MemberRole::Member,
+                "first".to_string(),
+            )
+            .unwrap();
+        let stale = state
+            .signed_set_member(
+                &owner,
+                keys::public_key_hex(&second_member),
+                None,
+                MemberRole::Member,
+                "stale".to_string(),
+            )
+            .unwrap();
+        let after_first = state.apply(&first).unwrap();
+        assert!(matches!(
+            after_first.apply(&stale),
+            Err(SerialMembershipError::StaleState { .. })
+        ));
+
+        let removal = after_first
+            .signed_remove_member(
+                &owner,
+                keys::public_key_hex(&first_member),
+                "remove".to_string(),
+            )
+            .unwrap();
+        let after_removal = after_first.apply(&removal).unwrap();
+        assert!(!after_removal.can_write(&keys::public_key_hex(&first_member)));
+        assert_eq!(
+            removal.previous_state_hash,
+            after_first.state_hash(),
+            "removal names the exact globally preceding membership state"
+        );
     }
 }

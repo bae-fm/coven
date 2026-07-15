@@ -96,7 +96,7 @@ pub async fn load_cycle_membership(
                 // than apply changesets unvalidated. Only an unpinned
                 // pre-initialization caller can proceed without a chain.
                 if pinned_owner.is_some() {
-                    return Err(PullError::MembershipTampered(e.to_string()));
+                    return Err(PullError::MembershipObject(e));
                 }
                 warn!("failed to list membership entries for validation: {e}");
                 return Ok(CycleMembership {
@@ -134,6 +134,9 @@ pub async fn load_cycle_membership(
     .await
     {
         Ok(loaded) => loaded,
+        Err(error @ super::membership_ops::AnchoredChainError::StorageUnavailable { .. }) => {
+            return Err(PullError::MembershipLoad(error));
+        }
         Err(error) => return Err(PullError::MembershipTampered(error.to_string())),
     };
     let chain = loaded.chain;
@@ -218,6 +221,77 @@ pub(crate) struct BlobDownload {
     size: BlobDownloadSize,
     hash: BlobDownloadHash,
     cloud_path: BlobDownloadCloudPath,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlobDownloadFailureCause {
+    Invalid(String),
+    Local(String),
+    Metadata(String),
+    Uploader(String),
+    Storage(super::storage::StorageError),
+}
+
+impl std::fmt::Display for BlobDownloadFailureCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(reason) => write!(formatter, "invalid blob: {reason}"),
+            Self::Local(reason) => write!(formatter, "local cache: {reason}"),
+            Self::Metadata(reason) => write!(formatter, "blob metadata: {reason}"),
+            Self::Uploader(reason) => write!(formatter, "blob uploader: {reason}"),
+            Self::Storage(error) => write!(formatter, "provider: {error}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobDownloadFailure {
+    pub namespace: String,
+    pub id: String,
+    pub cause: BlobDownloadFailureCause,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobDownloadFailures(Vec<BlobDownloadFailure>);
+
+impl BlobDownloadFailures {
+    pub fn failures(&self) -> &[BlobDownloadFailure] {
+        &self.0
+    }
+
+    pub fn has_transport_failure(&self) -> bool {
+        self.0.iter().any(|failure| {
+            matches!(
+                &failure.cause,
+                BlobDownloadFailureCause::Storage(error) if error.is_transport()
+            )
+        })
+    }
+}
+
+impl std::fmt::Display for BlobDownloadFailures {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} blob download(s) failed", self.0.len())?;
+        for failure in &self.0 {
+            write!(
+                formatter,
+                "; {}/{}: {}",
+                failure.namespace, failure.id, failure.cause
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BlobDownloadFailures {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.iter().find_map(|failure| match &failure.cause {
+            BlobDownloadFailureCause::Storage(error) if error.is_transport() => {
+                Some(error as &(dyn std::error::Error + 'static))
+            }
+            _ => None,
+        })
+    }
 }
 
 /// The row a change is about, named the way every change names it: its table and primary
@@ -547,8 +621,8 @@ pub(crate) async fn download_blobs(
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
     known_uploader: Option<&str>,
-) -> bool {
-    let mut all_ok = true;
+) -> Result<(), BlobDownloadFailures> {
+    let mut failures = Vec::new();
     for download in blobs {
         let BlobDownload {
             blob,
@@ -568,12 +642,20 @@ pub(crate) async fn download_blobs(
         // because that resolved value is the one the read keys with.
         if let Err(e) = crate::store_dir::validate_path_token(&blob.namespace) {
             error!(id = %blob.id, namespace = %blob.namespace, "blob namespace is not a safe path token ({e}); refusing");
-            all_ok = false;
+            failures.push(BlobDownloadFailure {
+                namespace: blob.namespace.clone(),
+                id: blob.id.clone(),
+                cause: BlobDownloadFailureCause::Invalid(e.to_string()),
+            });
             continue;
         }
         if let Err(e) = crate::store_dir::validate_path_token(&blob.id) {
             error!(id = %blob.id, namespace = %blob.namespace, "blob id is not a safe path token ({e}); refusing");
-            all_ok = false;
+            failures.push(BlobDownloadFailure {
+                namespace: blob.namespace.clone(),
+                id: blob.id.clone(),
+                cause: BlobDownloadFailureCause::Invalid(e.to_string()),
+            });
             continue;
         }
 
@@ -587,7 +669,11 @@ pub(crate) async fn download_blobs(
             Ok(p) => p,
             Err(e) => {
                 error!(id = %blob.id, "cannot build cache blob path ({e}); refusing");
-                all_ok = false;
+                failures.push(BlobDownloadFailure {
+                    namespace: blob.namespace.clone(),
+                    id: blob.id.clone(),
+                    cause: BlobDownloadFailureCause::Invalid(e.to_string()),
+                });
                 continue;
             }
         };
@@ -595,7 +681,11 @@ pub(crate) async fn download_blobs(
             Ok(p) => p,
             Err(e) => {
                 error!(id = %blob.id, "cannot build pinned blob path ({e}); refusing");
-                all_ok = false;
+                failures.push(BlobDownloadFailure {
+                    namespace: blob.namespace.clone(),
+                    id: blob.id.clone(),
+                    cause: BlobDownloadFailureCause::Invalid(e.to_string()),
+                });
                 continue;
             }
         };
@@ -609,7 +699,11 @@ pub(crate) async fn download_blobs(
             Ok(false) => {}
             Err(e) => {
                 error!(id = %blob.id, error = %e, "cannot check for local blob; holding");
-                all_ok = false;
+                failures.push(BlobDownloadFailure {
+                    namespace: blob.namespace.clone(),
+                    id: blob.id.clone(),
+                    cause: BlobDownloadFailureCause::Local(e),
+                });
                 continue;
             }
         }
@@ -618,7 +712,11 @@ pub(crate) async fn download_blobs(
             Ok(size) => size,
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob size, skipping download");
-                all_ok = false;
+                failures.push(BlobDownloadFailure {
+                    namespace: blob.namespace.clone(),
+                    id: blob.id.clone(),
+                    cause: BlobDownloadFailureCause::Metadata(e),
+                });
                 continue;
             }
         };
@@ -631,7 +729,11 @@ pub(crate) async fn download_blobs(
             Ok(hash) => hash,
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob content hash, skipping download");
-                all_ok = false;
+                failures.push(BlobDownloadFailure {
+                    namespace: blob.namespace.clone(),
+                    id: blob.id.clone(),
+                    cause: BlobDownloadFailureCause::Metadata(e),
+                });
                 continue;
             }
         };
@@ -644,14 +746,22 @@ pub(crate) async fn download_blobs(
             Ok(path) => path,
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob cloud path, skipping download");
-                all_ok = false;
+                failures.push(BlobDownloadFailure {
+                    namespace: blob.namespace.clone(),
+                    id: blob.id.clone(),
+                    cause: BlobDownloadFailureCause::Metadata(e),
+                });
                 continue;
             }
         };
         if let Some(path) = cloud_path.as_deref() {
             if let Err(e) = crate::store_dir::validate_cloud_path(path) {
                 error!(id = %blob.id, cloud_path = %path, "blob cloud_path escapes its prefix ({e}); refusing");
-                all_ok = false;
+                failures.push(BlobDownloadFailure {
+                    namespace: blob.namespace.clone(),
+                    id: blob.id.clone(),
+                    cause: BlobDownloadFailureCause::Invalid(e.to_string()),
+                });
                 continue;
             }
         }
@@ -662,9 +772,23 @@ pub(crate) async fn download_blobs(
             Some(uploader) => Some(uploader.to_string()),
             None => match crate::blob::cache::resolve_blob_uploader(db, storage, &blob).await {
                 Ok(uploader) => uploader,
-                Err(e) => {
-                    warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot resolve blob uploader, skipping download");
-                    all_ok = false;
+                Err(crate::blob::cache::BlobCacheError::Storage(source)) => {
+                    warn!(id = %blob.id, namespace = %blob.namespace, error = %source, "cannot resolve blob uploader, skipping download");
+                    failures.push(BlobDownloadFailure {
+                        namespace: blob.namespace.clone(),
+                        id: blob.id.clone(),
+                        cause: BlobDownloadFailureCause::Storage(source),
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    warn!(id = %blob.id, namespace = %blob.namespace, error = %message, "cannot resolve blob uploader, skipping download");
+                    failures.push(BlobDownloadFailure {
+                        namespace: blob.namespace.clone(),
+                        id: blob.id.clone(),
+                        cause: BlobDownloadFailureCause::Uploader(message),
+                    });
                     continue;
                 }
             },
@@ -686,11 +810,19 @@ pub(crate) async fn download_blobs(
             Ok(()) => {}
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "failed to download blob");
-                all_ok = false;
+                failures.push(BlobDownloadFailure {
+                    namespace: blob.namespace.clone(),
+                    id: blob.id.clone(),
+                    cause: BlobDownloadFailureCause::Storage(e),
+                });
             }
         }
     }
-    all_ok
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(BlobDownloadFailures(failures))
+    }
 }
 
 /// Whether a pulled blob is already on disk in either cache folder (`cache/` or
@@ -712,6 +844,8 @@ async fn cached_in_either_folder(
 #[derive(Debug)]
 pub enum PullError {
     Storage(super::storage::StorageError),
+    MembershipObject(super::store_objects::StoreObjectError),
+    MembershipLoad(super::membership_ops::AnchoredChainError),
     Apply(String),
     /// The sync storage requires a schema version newer than ours.
     /// The client must upgrade before syncing.
@@ -729,6 +863,10 @@ impl std::fmt::Display for PullError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PullError::Storage(e) => write!(f, "storage error: {e}"),
+            PullError::MembershipObject(e) => {
+                write!(f, "membership storage failed: {e}")
+            }
+            PullError::MembershipLoad(e) => write!(f, "membership chain failed: {e}"),
             PullError::Apply(e) => write!(f, "changeset apply failed: {e}"),
             PullError::SchemaVersionTooOld {
                 local_version,
@@ -742,4 +880,13 @@ impl std::fmt::Display for PullError {
     }
 }
 
-impl std::error::Error for PullError {}
+impl std::error::Error for PullError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage(error) => Some(error),
+            Self::MembershipObject(error) => Some(error),
+            Self::MembershipLoad(error) => Some(error),
+            Self::Apply(_) | Self::SchemaVersionTooOld { .. } | Self::MembershipTampered(_) => None,
+        }
+    }
+}

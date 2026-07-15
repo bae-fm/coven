@@ -6,6 +6,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::sync::store_commit::CommitPosition;
 
+/// Store-wide ordering policy selected by the application and signed into the
+/// Store protocol root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WritePolicy {
+    MergeConcurrent,
+    Serial,
+}
+
 /// Stable identity of one successfully committed host transaction.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -27,12 +36,49 @@ impl fmt::Display for WriteId {
     }
 }
 
-/// Exact MergeConcurrent position that made a write visible to peers.
+/// Exact policy-specific position that made a write visible to peers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PublishedPosition {
+    MergeConcurrent {
+        device_id: String,
+        position: CommitPosition,
+    },
+    Serial {
+        position: CommitPosition,
+    },
+}
+
+impl PublishedPosition {
+    pub fn position(&self) -> &CommitPosition {
+        match self {
+            Self::MergeConcurrent { position, .. } | Self::Serial { position } => position,
+        }
+    }
+}
+
+/// Stable identity of the one ordered provisional Serial branch.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PendingBranchId(WriteId);
+
+impl PendingBranchId {
+    pub(crate) fn from_first_write(write_id: WriteId) -> Self {
+        Self(write_id)
+    }
+
+    pub fn first_write_id(&self) -> &WriteId {
+        &self.0
+    }
+}
+
+/// A Serial branch ran against `base`, but storage now commits `current`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PublishedPosition {
-    pub device_id: String,
-    pub position: CommitPosition,
+pub struct SerializationConflict {
+    pub branch_id: PendingBranchId,
+    pub base: Option<CommitPosition>,
+    pub current: Option<CommitPosition>,
 }
 
 /// A semantic write fault. Retrying transport cannot change this result.
@@ -53,7 +99,16 @@ pub enum WriteStatus {
     Pending,
     Publishing,
     Published(PublishedPosition),
+    Conflict(SerializationConflict),
     Blocked(WriteBlock),
+    Resolved(WriteResolution),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum WriteResolution {
+    Discarded,
+    Replaced { replacement: WriteId },
 }
 
 /// One table/primary-key identity affected by the shared part of a write.
@@ -70,6 +125,14 @@ pub struct PendingWrite {
     pub write_id: WriteId,
     pub status: WriteStatus,
     pub affected_rows: Vec<AffectedRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingBranch {
+    pub branch_id: PendingBranchId,
+    pub base: Option<CommitPosition>,
+    pub current: Option<CommitPosition>,
+    pub writes: Vec<PendingWrite>,
 }
 
 /// Result of one successful host transaction and its durable publication identity.

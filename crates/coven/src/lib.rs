@@ -395,6 +395,37 @@ pub(crate) mod storage {
                 ) -> Result<bool, CloudHomeError> {
                     unimplemented!("not exercised by these tests")
                 }
+                fn read_versioned_record(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _key: &str,
+                ) -> Result<crate::storage::cloud::CloudVersionedHead, CloudHomeError>
+                {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn create_record(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _key: &str,
+                    _data: Vec<u8>,
+                ) -> Result<
+                    crate::storage::cloud::CloudVersionedHead,
+                    crate::storage::cloud::CloudHeadCreateError,
+                > {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn replace_record(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _key: &str,
+                    _expected: &crate::storage::cloud::CloudHeadVersion,
+                    _data: Vec<u8>,
+                ) -> Result<
+                    crate::storage::cloud::CloudVersionedHead,
+                    crate::storage::cloud::CloudHeadReplaceError,
+                > {
+                    unimplemented!("not exercised by these tests")
+                }
                 fn grant_share(
                     &self,
                     _member_pubkey: &str,
@@ -555,7 +586,9 @@ pub use coven_core::rusqlite;
 pub use coven_core::{BlobDecl, Migration, MigrationStep, RowIdentity, SyncedTable};
 
 // Config.
-pub use coven_core::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorage};
+pub use coven_core::{
+    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3Serial, HomeStorage, WritePolicy,
+};
 
 // Blob descriptors, cache error, the host-implemented transition observer.
 pub use coven_core::{
@@ -621,8 +654,9 @@ pub use coven_core::{
 // bundle, the per-device activity, and the held-changeset detail the alerts carry.
 pub use coven_core::{
     AffectedRow, CommitPosition, DeviceActivity, HeldStoreCoordinate, HeldStorePosition,
-    HeldStorePositionReason, ObjectHash, PendingWrite, PublishedPosition, SyncLoopAlerts,
-    SyncLoopSuccess, WriteBlock, WriteId, WriteReceipt, WriteStatus,
+    HeldStorePositionReason, ObjectHash, PendingBranch, PendingBranchId, PendingWrite,
+    PublishedPosition, SyncLoopAlerts, SyncLoopSuccess, WriteBlock, WriteId, WriteReceipt,
+    WriteResolution, WriteStatus,
 };
 pub use sync::sync_loop::SyncLoopStatus;
 

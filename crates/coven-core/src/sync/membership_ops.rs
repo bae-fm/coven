@@ -11,6 +11,7 @@ use crate::encryption::EncryptionService;
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::storage::cloud::ListingCoverage;
+use crate::storage::cloud::{CloudAccessOutcome, CloudAccessState};
 
 use super::cloud_storage::{CloudCipherAccess, PendingRotation};
 use super::hlc::Hlc;
@@ -21,7 +22,8 @@ use super::membership::{
     AuthorHead, MemberInfo, MemberRole, MembershipChain, MembershipCoord, MembershipEntry,
     OwnerGrantId,
 };
-use super::storage::{StorageError, SyncStorage};
+use super::storage::{CoordinationStorage, StorageError, SyncStorage};
+use super::store_commit::StoreControl;
 #[cfg(test)]
 use super::store_objects::append_membership_entry_object;
 use super::store_objects::{
@@ -140,6 +142,8 @@ pub enum MembershipOpsError {
     ChainHasNoFounder,
     #[error("sharing requires an encrypted cloud home")]
     NotEncryptedHome,
+    #[error(transparent)]
+    Serial(#[from] super::store_outbound::StoreOutboundError),
 }
 
 /// `protocol_state` key holding the hex Ed25519 pubkey of the store's established
@@ -147,6 +151,11 @@ pub enum MembershipOpsError {
 /// The membership chain is anchored to it: a chain whose founder differs is a
 /// takeover attempt and is rejected (issue #95).
 pub const OWNER_PUBKEY_STATE_KEY: &str = "owner_pubkey";
+
+pub struct SerialMembershipContext<'a> {
+    pub coordination: &'a dyn CoordinationStorage,
+    pub device_id: String,
+}
 
 /// The per-author membership-head floor at the chain's current committed state:
 /// every author's highest committed seq ([`MembershipChain::author_heads`]). A
@@ -175,6 +184,54 @@ pub async fn get_members(
     user_pubkey: Option<&[u8]>,
     db: &Database,
 ) -> Result<Vec<MemberInfo>, MembershipOpsError> {
+    if db.write_policy() == crate::WritePolicy::Serial {
+        let state = match db
+            .serial_membership_state()
+            .await
+            .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+        {
+            Some(state) => state,
+            None => {
+                if db
+                    .latest_outbound_store_position()
+                    .await
+                    .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+                    .is_some()
+                {
+                    return Err(MembershipOpsError::Database(
+                        "Serial membership state is absent after a Serial commit was materialized"
+                            .to_string(),
+                    ));
+                }
+                let root_hash = db
+                    .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
+                    .await
+                    .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+                    .ok_or(MembershipOpsError::NoFounderChain)?
+                    .parse()
+                    .map_err(|error| {
+                        MembershipOpsError::Database(format!("Store protocol root hash: {error}"))
+                    })?;
+                let root =
+                    super::store_objects::load_store_protocol_root_at_hash(storage, root_hash)
+                        .await?
+                        .ok_or(MembershipOpsError::NoFounderChain)?
+                        .value;
+                super::membership::SerialMembershipState::from_founder(root_hash, &root.founder)
+                    .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+            }
+        };
+        let user_pubkey_hex = user_pubkey.map(hex::encode);
+        return Ok(state
+            .current_members()
+            .into_iter()
+            .map(|(pubkey, role)| MemberInfo {
+                is_self: user_pubkey_hex.as_deref() == Some(&pubkey),
+                pubkey,
+                role,
+            })
+            .collect());
+    }
     let entry_keys = list_membership_entries(storage).await?;
     let pinned_owner = db
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
@@ -220,10 +277,63 @@ pub async fn invite_member(
     store_name: &str,
     db: &Database,
 ) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
+    invite_member_with_coordination(
+        storage,
+        cloud_home,
+        user_keypair,
+        hlc,
+        public_key_hex,
+        invitee_email,
+        role,
+        encryption,
+        store_id,
+        store_name,
+        db,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn invite_member_with_coordination(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    user_keypair: &UserKeypair,
+    hlc: &Hlc,
+    public_key_hex: &str,
+    invitee_email: Option<&str>,
+    role: MemberRole,
+    encryption: &EncryptionService,
+    store_id: &str,
+    store_name: &str,
+    db: &Database,
+    serial: Option<SerialMembershipContext<'_>>,
+) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
     let user_pubkey_hex = hex::encode(user_keypair.public_key());
 
     if public_key_hex == user_pubkey_hex {
         return Err(MembershipOpsError::SelfInvite);
+    }
+
+    if db.write_policy() == crate::WritePolicy::Serial {
+        let serial =
+            serial.ok_or(super::store_outbound::StoreOutboundError::MissingSerialCoordination)?;
+        return invite_serial_member(
+            storage,
+            cloud_home,
+            serial.coordination,
+            &serial.device_id,
+            user_keypair,
+            hlc,
+            public_key_hex,
+            invitee_email,
+            role,
+            encryption,
+            store_id,
+            store_name,
+            db,
+        )
+        .await;
     }
 
     // Download existing membership entries
@@ -289,8 +399,527 @@ pub async fn invite_member(
         store_name: store_name.to_string(),
         join_info,
         owner_pubkey,
+        key_author_pubkey: user_pubkey_hex,
         store_root_hash: store_protocol_root.semantic_hash,
-        membership_floor,
+        membership_floor: crate::join_code::MembershipFloor::MergeConcurrent(membership_floor),
+    })
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SerialInvitePlan {
+    prepared: super::store_outbound::PreparedSerialControl,
+    invitee_pubkey: String,
+    invitee_email: Option<String>,
+    role: MemberRole,
+    desired_access: CloudAccessState,
+    prior_wrapped_key: Option<Vec<u8>>,
+    invitee_was_member: bool,
+    wrapped_key: Vec<u8>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum SerialInviteProgress {
+    Pending,
+    AccessGranted {
+        join_info: crate::storage::cloud::CloudHomeJoinInfo,
+    },
+}
+
+async fn rollback_serial_invite(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    author: &str,
+    plan: &SerialInvitePlan,
+) -> Result<(), MembershipOpsError> {
+    match plan.prior_wrapped_key.as_ref() {
+        Some(bytes) => {
+            storage
+                .put_wrapped_key(author, &plan.invitee_pubkey, bytes.clone())
+                .await?;
+        }
+        None => {
+            storage
+                .delete_wrapped_key(author, &plan.invitee_pubkey)
+                .await?
+        }
+    }
+    if !plan.invitee_was_member {
+        let outcome = cloud_home
+            .set_access(CloudAccessState::Absent {
+                member_pubkey: plan.invitee_pubkey.clone(),
+                provider_account_email: plan.invitee_email.clone(),
+            })
+            .await
+            .map_err(InviteError::from)?;
+        if !matches!(outcome, CloudAccessOutcome::Absent(_)) {
+            return Err(MembershipOpsError::Invite(
+                InviteError::InvalidDurableMutation(
+                    "provider returned present while rolling back a Serial invitation".to_string(),
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn invite_serial_member(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    coordination: &dyn CoordinationStorage,
+    device_id: &str,
+    user_keypair: &UserKeypair,
+    hlc: &Hlc,
+    public_key_hex: &str,
+    invitee_email: Option<&str>,
+    role: MemberRole,
+    encryption: &EncryptionService,
+    store_id: &str,
+    store_name: &str,
+    db: &Database,
+) -> Result<crate::join_code::InviteCode, MembershipOpsError> {
+    let _mutation = db.lock_membership_mutation().await;
+    let (plan, mut progress, intent_hash) = match db
+        .outbound_membership_mutation()
+        .await
+        .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+    {
+        Some(row) => {
+            let plan: SerialInvitePlan =
+                serde_json::from_slice(&row.plan_bytes).map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "parse Serial invitation plan: {error}"
+                    )))
+                })?;
+            let progress = serde_json::from_slice(&row.progress_bytes).map_err(|error| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                    "parse Serial invitation progress: {error}"
+                )))
+            })?;
+            if plan.invitee_pubkey != public_key_hex
+                || plan.invitee_email.as_deref() != invitee_email
+                || plan.role != role
+            {
+                return Err(MembershipOpsError::Invite(InviteError::PendingMutation(
+                    "the pending Serial invitation has different immutable inputs".to_string(),
+                )));
+            }
+            (plan, progress, row.intent_hash)
+        }
+        None => {
+            let authorization =
+                super::store_outbound::current_serial_authorization(db, storage, coordination)
+                    .await?;
+            let invitee_was_member = authorization
+                .membership
+                .current_members()
+                .iter()
+                .any(|(pubkey, _)| pubkey == public_key_hex);
+            let entry = authorization
+                .membership
+                .signed_set_member(
+                    user_keypair,
+                    public_key_hex.to_string(),
+                    invitee_email.map(str::to_string),
+                    role.clone(),
+                    hlc.now().to_string(),
+                )
+                .map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(
+                        error.to_string(),
+                    ))
+                })?;
+            let prepared = super::store_outbound::prepare_serial_control(
+                db,
+                storage,
+                coordination,
+                device_id,
+                StoreControl::SerialMembership { entry },
+                user_keypair,
+            )
+            .await?;
+            let wrapped_key = super::invite::signed_serial_wrapped_key(
+                store_id,
+                public_key_hex,
+                encryption,
+                user_keypair,
+                prepared.commit.position(),
+            )?;
+            let author = crate::keys::public_key_hex(user_keypair);
+            let prior_wrapped_key = match storage.get_wrapped_key(&author, public_key_hex).await {
+                Ok(bytes) => Some(bytes),
+                Err(StorageError::NotFound(_)) => None,
+                Err(error) => return Err(error.into()),
+            };
+            let plan = SerialInvitePlan {
+                prepared,
+                invitee_pubkey: public_key_hex.to_string(),
+                invitee_email: invitee_email.map(str::to_string),
+                role,
+                desired_access: CloudAccessState::Present {
+                    member_pubkey: public_key_hex.to_string(),
+                    provider_account_email: invitee_email.map(str::to_string),
+                },
+                prior_wrapped_key,
+                invitee_was_member,
+                wrapped_key,
+            };
+            let plan_bytes = serde_json::to_vec(&plan).map_err(|error| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                    "serialize Serial invitation plan: {error}"
+                )))
+            })?;
+            let progress = SerialInviteProgress::Pending;
+            let progress_bytes = serde_json::to_vec(&progress).map_err(|error| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                    "serialize Serial invitation progress: {error}"
+                )))
+            })?;
+            let intent_hash = db
+                .stage_membership_mutation(plan_bytes, progress_bytes)
+                .await
+                .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+            (plan, progress, intent_hash)
+        }
+    };
+    let outcome = cloud_home
+        .set_access(plan.desired_access.clone())
+        .await
+        .map_err(InviteError::from)?;
+    let CloudAccessOutcome::Present(observed_join_info) = outcome else {
+        return Err(MembershipOpsError::Invite(
+            InviteError::InvalidDurableMutation(
+                "provider returned absent for a Serial invitation".to_string(),
+            ),
+        ));
+    };
+    let join_info =
+        match &progress {
+            SerialInviteProgress::Pending => {
+                progress = SerialInviteProgress::AccessGranted {
+                    join_info: observed_join_info.clone(),
+                };
+                let progress_bytes = serde_json::to_vec(&progress).map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "serialize Serial invitation progress: {error}"
+                    )))
+                })?;
+                db.update_membership_mutation_progress(intent_hash, progress_bytes)
+                    .await
+                    .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+                observed_join_info
+            }
+            SerialInviteProgress::AccessGranted { join_info } => {
+                if *join_info != observed_join_info {
+                    return Err(MembershipOpsError::Invite(InviteError::InvalidDurableMutation(
+                    "provider returned different join information for persisted Serial access"
+                        .to_string(),
+                )));
+                }
+                join_info.clone()
+            }
+        };
+    let author = crate::keys::public_key_hex(user_keypair);
+    if let Err(error) = storage
+        .put_wrapped_key(&author, &plan.invitee_pubkey, plan.wrapped_key.clone())
+        .await
+    {
+        if error.definitely_uncommitted() {
+            rollback_serial_invite(storage, cloud_home, &author, &plan).await?;
+            db.complete_membership_mutation(intent_hash)
+                .await
+                .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
+        }
+        return Err(error.into());
+    }
+    match super::store_outbound::activate_serial_control(db, storage, coordination, &plan.prepared)
+        .await
+    {
+        Ok(()) => {}
+        Err(error) if error.definitely_uncommitted() => {
+            rollback_serial_invite(storage, cloud_home, &author, &plan).await?;
+            db.complete_membership_mutation(intent_hash)
+                .await
+                .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
+            return Err(error.into());
+        }
+        Err(error) => return Err(error.into()),
+    }
+    db.complete_membership_mutation(intent_hash)
+        .await
+        .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+    let root_hash = plan.prepared.commit.store_root_hash;
+    let root = super::store_objects::load_store_protocol_root_at_hash(storage, root_hash)
+        .await?
+        .ok_or_else(|| MembershipOpsError::Database("Store protocol root is absent".to_string()))?
+        .value;
+    Ok(crate::join_code::InviteCode {
+        v: crate::join_code::INVITE_CODE_VERSION,
+        store_id: store_id.to_string(),
+        store_name: store_name.to_string(),
+        join_info,
+        owner_pubkey: root.author_pubkey,
+        key_author_pubkey: crate::keys::public_key_hex(user_keypair),
+        store_root_hash: root_hash,
+        membership_floor: crate::join_code::MembershipFloor::Serial(Some(
+            plan.prepared.commit.position(),
+        )),
+    })
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SerialReplacementWrap {
+    recipient: String,
+    prior: Option<Vec<u8>>,
+    replacement: Option<Vec<u8>>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SerialRemovalPlan {
+    prepared: super::store_outbound::PreparedSerialControl,
+    revokee_pubkey: String,
+    revokee_email: Option<String>,
+    wraps: Vec<SerialReplacementWrap>,
+    keyring_payload: Vec<u8>,
+}
+
+async fn rollback_serial_removal(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    author: &str,
+    plan: &SerialRemovalPlan,
+) -> Result<(), MembershipOpsError> {
+    for wrap in &plan.wraps {
+        match wrap.prior.as_ref() {
+            Some(bytes) => {
+                storage
+                    .put_wrapped_key(author, &wrap.recipient, bytes.clone())
+                    .await?
+            }
+            None => storage.delete_wrapped_key(author, &wrap.recipient).await?,
+        }
+    }
+    let outcome = cloud_home
+        .set_access(CloudAccessState::Present {
+            member_pubkey: plan.revokee_pubkey.clone(),
+            provider_account_email: plan.revokee_email.clone(),
+        })
+        .await
+        .map_err(InviteError::from)?;
+    if !matches!(outcome, CloudAccessOutcome::Present(_)) {
+        return Err(MembershipOpsError::Invite(
+            InviteError::InvalidDurableMutation(
+                "provider returned absent while rolling back a Serial removal".to_string(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn remove_serial_member(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    coordination: &dyn CoordinationStorage,
+    device_id: &str,
+    user_keypair: &UserKeypair,
+    hlc: &Hlc,
+    public_key_hex: &str,
+    store_id: &str,
+    current_encryption: &EncryptionService,
+    new_key: [u8; 32],
+    db: &Database,
+) -> Result<EncryptionService, MembershipOpsError> {
+    let _mutation = db.lock_membership_mutation().await;
+    let (plan, intent_hash) = match db
+        .outbound_membership_mutation()
+        .await
+        .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+    {
+        Some(row) => {
+            let plan: SerialRemovalPlan =
+                serde_json::from_slice(&row.plan_bytes).map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                        "parse Serial removal plan: {error}"
+                    )))
+                })?;
+            if plan.revokee_pubkey != public_key_hex {
+                return Err(MembershipOpsError::Invite(InviteError::PendingMutation(
+                    "the pending Serial removal names another member".to_string(),
+                )));
+            }
+            (plan, row.intent_hash)
+        }
+        None => {
+            let authorization =
+                super::store_outbound::current_serial_authorization(db, storage, coordination)
+                    .await?;
+            if current_encryption.current_generation() != authorization.key_generation {
+                return Err(MembershipOpsError::Invite(
+                    InviteError::InvalidDurableMutation(format!(
+                        "live key generation {} differs from committed Serial generation {}",
+                        current_encryption.current_generation(),
+                        authorization.key_generation
+                    )),
+                ));
+            }
+            let revokee_email = authorization
+                .membership
+                .current_member_provider_email(public_key_hex)
+                .map(str::to_string);
+            let entry = authorization
+                .membership
+                .signed_remove_member(
+                    user_keypair,
+                    public_key_hex.to_string(),
+                    hlc.now().to_string(),
+                )
+                .map_err(|error| match error {
+                    super::membership::SerialMembershipError::NotAMember(pubkey) => {
+                        MembershipOpsError::Invite(InviteError::NotAMember(pubkey))
+                    }
+                    super::membership::SerialMembershipError::LastOwner => {
+                        MembershipOpsError::Invite(InviteError::LastOwner)
+                    }
+                    error => MembershipOpsError::Invite(InviteError::InvalidDurableMutation(
+                        error.to_string(),
+                    )),
+                })?;
+            let generation = authorization.key_generation.checked_add(1).ok_or_else(|| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(
+                    "Serial key generation overflow".to_string(),
+                ))
+            })?;
+            let prepared = super::store_outbound::prepare_serial_control(
+                db,
+                storage,
+                coordination,
+                device_id,
+                StoreControl::SerialMembershipAndKeyRotation { entry, generation },
+                user_keypair,
+            )
+            .await?;
+            let new_keyring = current_encryption
+                .with_appended_generation(generation, new_key)
+                .map_err(|error| {
+                    MembershipOpsError::Invite(InviteError::Crypto(format!(
+                        "append Serial key generation: {error}"
+                    )))
+                })?;
+            let author = crate::keys::public_key_hex(user_keypair);
+            let mut wraps = Vec::new();
+            for (recipient, _) in prepared.authorization_after.membership.current_members() {
+                let prior = match storage.get_wrapped_key(&author, &recipient).await {
+                    Ok(bytes) => Some(bytes),
+                    Err(StorageError::NotFound(_)) => None,
+                    Err(error) => return Err(error.into()),
+                };
+                let replacement = super::invite::signed_serial_wrapped_key(
+                    store_id,
+                    &recipient,
+                    &new_keyring,
+                    user_keypair,
+                    prepared.commit.position(),
+                )?;
+                wraps.push(SerialReplacementWrap {
+                    recipient,
+                    prior,
+                    replacement: Some(replacement),
+                });
+            }
+            let revokee_prior = match storage.get_wrapped_key(&author, public_key_hex).await {
+                Ok(bytes) => Some(bytes),
+                Err(StorageError::NotFound(_)) => None,
+                Err(error) => return Err(error.into()),
+            };
+            wraps.push(SerialReplacementWrap {
+                recipient: public_key_hex.to_string(),
+                prior: revokee_prior,
+                replacement: None,
+            });
+            let keyring_payload = new_keyring.to_keyring_payload().map_err(|error| {
+                MembershipOpsError::Invite(InviteError::Crypto(format!(
+                    "serialize Serial rotated keyring: {error}"
+                )))
+            })?;
+            let plan = SerialRemovalPlan {
+                prepared,
+                revokee_pubkey: public_key_hex.to_string(),
+                revokee_email,
+                wraps,
+                keyring_payload,
+            };
+            let plan_bytes = serde_json::to_vec(&plan).map_err(|error| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                    "serialize Serial removal plan: {error}"
+                )))
+            })?;
+            let progress = serde_json::to_vec(&SerialInviteProgress::Pending).unwrap();
+            let intent_hash = db
+                .stage_membership_mutation(plan_bytes, progress)
+                .await
+                .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+            (plan, intent_hash)
+        }
+    };
+    let outcome = cloud_home
+        .set_access(CloudAccessState::Absent {
+            member_pubkey: plan.revokee_pubkey.clone(),
+            provider_account_email: plan.revokee_email.clone(),
+        })
+        .await
+        .map_err(InviteError::from)?;
+    if !matches!(outcome, CloudAccessOutcome::Absent(_)) {
+        return Err(MembershipOpsError::Invite(
+            InviteError::InvalidDurableMutation(
+                "provider returned present for a Serial removal".to_string(),
+            ),
+        ));
+    }
+    let author = crate::keys::public_key_hex(user_keypair);
+    for wrap in &plan.wraps {
+        let result = match wrap.replacement.as_ref() {
+            Some(bytes) => {
+                storage
+                    .put_wrapped_key(&author, &wrap.recipient, bytes.clone())
+                    .await
+            }
+            None => storage.delete_wrapped_key(&author, &wrap.recipient).await,
+        };
+        if let Err(error) = result {
+            if error.definitely_uncommitted() {
+                rollback_serial_removal(storage, cloud_home, &author, &plan).await?;
+                db.complete_membership_mutation(intent_hash)
+                    .await
+                    .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
+            }
+            return Err(error.into());
+        }
+    }
+    match super::store_outbound::activate_serial_control(db, storage, coordination, &plan.prepared)
+        .await
+    {
+        Ok(()) => {}
+        Err(error) if error.definitely_uncommitted() => {
+            rollback_serial_removal(storage, cloud_home, &author, &plan).await?;
+            db.complete_membership_mutation(intent_hash)
+                .await
+                .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
+            return Err(error.into());
+        }
+        Err(error) => return Err(error.into()),
+    }
+    db.complete_membership_mutation(intent_hash)
+        .await
+        .map_err(|error| MembershipOpsError::Database(error.to_string()))?;
+    EncryptionService::from_keyring_payload(plan.keyring_payload).map_err(|error| {
+        MembershipOpsError::Invite(InviteError::Crypto(format!(
+            "parse Serial rotated keyring: {error}"
+        )))
     })
 }
 
@@ -325,6 +954,58 @@ pub async fn remove_member(
     pending_rotation: &PendingRotation,
     db: &Database,
 ) -> Result<String, MembershipOpsError> {
+    remove_member_with_coordination(
+        storage,
+        cloud_home,
+        user_keypair,
+        hlc,
+        public_key_hex,
+        store_id,
+        current_encryption,
+        custody,
+        cipher,
+        pending_rotation,
+        db,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn remove_member_with_coordination(
+    storage: &dyn SyncStorage,
+    cloud_home: &dyn crate::storage::cloud::CloudHome,
+    user_keypair: &UserKeypair,
+    hlc: &Hlc,
+    public_key_hex: &str,
+    store_id: &str,
+    current_encryption: &EncryptionService,
+    custody: &dyn MasterKeyCustody,
+    cipher: &dyn CloudCipherAccess,
+    pending_rotation: &PendingRotation,
+    db: &Database,
+    serial: Option<SerialMembershipContext<'_>>,
+) -> Result<String, MembershipOpsError> {
+    if db.write_policy() == crate::WritePolicy::Serial {
+        let serial =
+            serial.ok_or(super::store_outbound::StoreOutboundError::MissingSerialCoordination)?;
+        let rotated = remove_serial_member(
+            storage,
+            cloud_home,
+            serial.coordination,
+            &serial.device_id,
+            user_keypair,
+            hlc,
+            public_key_hex,
+            store_id,
+            current_encryption,
+            crate::encryption::generate_random_key(),
+            db,
+        )
+        .await?;
+        return apply_key_rotation(rotated, custody, cipher, pending_rotation)
+            .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source });
+    }
     // Download existing membership entries and build the chain.
     let entry_keys = list_membership_entries(storage).await?;
 
@@ -1248,13 +1929,179 @@ pub async fn seed_head_watermark(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::cloud_storage::CloudCipher;
+    use crate::storage::cloud::test_utils::InMemoryCloudHome;
+    use crate::storage::cloud::{
+        BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHeadCreateError,
+        CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome, CloudHomeError,
+        CloudHomeJoinInfo, CloudVersionedHead, RevokeOutcome, SequentialCopyIdGenerator,
+        UploadProgress,
+    };
+    use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::hlc::Hlc;
     use crate::sync::membership::founder_entry;
     use crate::sync::test_helpers::{
         append_membership_entry, pubkey_hex, MockSyncStorage, TestCustody,
     };
-    use std::sync::{Arc, RwLock};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, RwLock};
+
+    #[derive(Clone)]
+    struct SerialMutationHome {
+        inner: InMemoryCloudHome,
+        present: Arc<Mutex<std::collections::BTreeSet<String>>>,
+        fail_next_wrapped_write: Arc<AtomicBool>,
+    }
+
+    impl SerialMutationHome {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryCloudHome::new(),
+                present: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+                fail_next_wrapped_write: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn fail_next_wrapped_write(&self) {
+            self.fail_next_wrapped_write.store(true, Ordering::SeqCst);
+        }
+
+        fn has_access(&self, member: &str) -> bool {
+            self.present.lock().unwrap().contains(member)
+        }
+    }
+
+    #[async_trait]
+    impl CloudHeadStorage for SerialMutationHome {
+        async fn read_head(&self, key: &str) -> Result<CloudVersionedHead, CloudHomeError> {
+            self.inner.read_head(key).await
+        }
+
+        async fn create_head(
+            &self,
+            key: &str,
+            bytes: Vec<u8>,
+        ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
+            self.inner.create_head(key, bytes).await
+        }
+
+        async fn replace_head(
+            &self,
+            key: &str,
+            expected: &CloudHeadVersion,
+            bytes: Vec<u8>,
+        ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
+            self.inner.replace_head(key, expected, bytes).await
+        }
+
+        async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError> {
+            self.inner.delete_probe_head(key).await
+        }
+    }
+
+    #[async_trait]
+    impl CloudHome for SerialMutationHome {
+        async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+            if key.starts_with("keys/")
+                && self.fail_next_wrapped_write.swap(false, Ordering::SeqCst)
+            {
+                return Err(CloudHomeError::Configuration(
+                    "injected definite wrapped-key write failure".to_string(),
+                ));
+            }
+            self.inner.put_object(key, data).await
+        }
+
+        async fn open_multipart<'a>(
+            &'a self,
+            key: &str,
+            total_len: u64,
+        ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+            self.inner.open_multipart(key, total_len).await
+        }
+
+        fn multipart_threshold(&self) -> u64 {
+            self.inner.multipart_threshold()
+        }
+
+        async fn append_object(
+            &self,
+            key: &str,
+            body: BlobBody,
+            progress: &UploadProgress<'_>,
+        ) -> Result<crate::storage::cloud::AppendedObject, CloudHomeError> {
+            self.inner.append_object(key, body, progress).await
+        }
+
+        async fn list_appended(
+            &self,
+            prefix: &str,
+        ) -> Result<crate::storage::cloud::AppendedListing, CloudHomeError> {
+            self.inner.list_appended(prefix).await
+        }
+
+        async fn read_appended(
+            &self,
+            object: &crate::storage::cloud::AppendedObject,
+        ) -> Result<Vec<u8>, CloudHomeError> {
+            self.inner.read_appended(object).await
+        }
+
+        async fn delete_appended(
+            &self,
+            object: &crate::storage::cloud::AppendedObject,
+        ) -> Result<(), CloudHomeError> {
+            self.inner.delete_appended(object).await
+        }
+
+        async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+            self.inner.read(key).await
+        }
+
+        async fn read_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: u64,
+        ) -> Result<Vec<u8>, CloudHomeError> {
+            self.inner.read_range(key, start, end).await
+        }
+
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+            self.inner.list(prefix).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+            self.inner.delete(key).await
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+            self.inner.exists(key).await
+        }
+
+        async fn set_access(
+            &self,
+            desired: CloudAccessState,
+        ) -> Result<CloudAccessOutcome, CloudHomeError> {
+            match desired {
+                CloudAccessState::Present { member_pubkey, .. } => {
+                    self.present.lock().unwrap().insert(member_pubkey);
+                    Ok(CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
+                        bucket: "test-bucket".to_string(),
+                        region: "us-east-1".to_string(),
+                        endpoint: None,
+                        access_key: "test-access".to_string(),
+                        secret_key: "test-secret".to_string(),
+                        key_prefix: None,
+                    }))
+                }
+                CloudAccessState::Absent { member_pubkey, .. } => {
+                    self.present.lock().unwrap().remove(&member_pubkey);
+                    Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
+                }
+            }
+        }
+    }
 
     async fn anchored_db(storage: &MockSyncStorage, founder_pubkey: &str) -> Database {
         let db = crate::sync::test_helpers::open_test_db();
@@ -1264,6 +2111,120 @@ mod tests {
             .expect("anchor test membership")
             .expect("test membership exists");
         db
+    }
+
+    async fn serial_mutation_fixture(
+        name: &str,
+    ) -> (
+        SerialMutationHome,
+        CloudSyncStorage,
+        Database,
+        UserKeypair,
+        EncryptionService,
+    ) {
+        let home = SerialMutationHome::new();
+        let owner = UserKeypair::generate();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([7_u8; 32])),
+            BlobPathScheme::Hashed,
+            name,
+            owner.clone(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(name)))
+        .with_test_serial_coordination(Arc::new(home.clone()));
+        let db = crate::sync::test_helpers::open_serial_test_db();
+        crate::sync::test_helpers::publish_test_serial_store_protocol_root(
+            &db,
+            &storage,
+            name,
+            "owner-device",
+            &owner,
+        )
+        .await;
+        (
+            home,
+            storage,
+            db,
+            owner,
+            EncryptionService::from_key([7_u8; 32]),
+        )
+    }
+
+    #[tokio::test]
+    async fn definite_serial_invite_wrap_failure_rolls_access_back_and_clears_the_intent() {
+        let (home, storage, db, owner, encryption) =
+            serial_mutation_fixture("serial-invite-definite-rollback").await;
+        let invitee = UserKeypair::generate();
+        let invitee_pubkey = pubkey_hex(&invitee);
+        home.fail_next_wrapped_write();
+
+        let result = invite_serial_member(
+            &storage,
+            &home,
+            storage.serial_coordination().unwrap(),
+            "owner-device",
+            &owner,
+            &Hlc::new("owner-device".to_string()),
+            &invitee_pubkey,
+            None,
+            MemberRole::Member,
+            &encryption,
+            "serial-invite-definite-rollback",
+            "Serial invite rollback",
+            &db,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!home.has_access(&invitee_pubkey));
+        assert!(db.outbound_membership_mutation().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn definite_serial_removal_wrap_failure_restores_access_and_clears_the_intent() {
+        let (home, storage, db, owner, encryption) =
+            serial_mutation_fixture("serial-removal-definite-rollback").await;
+        let member = UserKeypair::generate();
+        let member_pubkey = pubkey_hex(&member);
+        invite_serial_member(
+            &storage,
+            &home,
+            storage.serial_coordination().unwrap(),
+            "owner-device",
+            &owner,
+            &Hlc::new("owner-device".to_string()),
+            &member_pubkey,
+            None,
+            MemberRole::Member,
+            &encryption,
+            "serial-removal-definite-rollback",
+            "Serial removal rollback",
+            &db,
+        )
+        .await
+        .expect("establish member before removal");
+        assert!(home.has_access(&member_pubkey));
+        home.fail_next_wrapped_write();
+
+        let result = remove_serial_member(
+            &storage,
+            &home,
+            storage.serial_coordination().unwrap(),
+            "owner-device",
+            &owner,
+            &Hlc::new("owner-device".to_string()),
+            &member_pubkey,
+            "serial-removal-definite-rollback",
+            &encryption,
+            [9_u8; 32],
+            &db,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(home.has_access(&member_pubkey));
+        assert!(db.outbound_membership_mutation().await.unwrap().is_none());
     }
 
     struct CommittedRemoval {

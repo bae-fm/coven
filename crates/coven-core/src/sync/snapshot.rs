@@ -1,5 +1,5 @@
 /// Snapshot image creation, Store snapshot bootstrap, and blob installation.
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -36,6 +36,8 @@ pub enum SnapshotError {
     Parse(String),
     #[error("storage error: {0}")]
     Bucket(#[from] StorageError),
+    #[error("Store protocol object error: {0}")]
+    StoreObject(#[source] super::store_objects::StoreObjectError),
     #[error("decryption failed: {0}")]
     Decryption(String),
     /// No synced tables were registered, so we cannot determine which tables
@@ -68,6 +70,13 @@ pub enum SnapshotError {
     },
     #[error("snapshot blob preflight failed: {0}")]
     PublishBlobs(String),
+    #[error("failed to check remote blob {namespace}/{id}: {source}")]
+    PublishBlobRemoteCheck {
+        namespace: String,
+        id: String,
+        #[source]
+        source: StorageError,
+    },
     #[error("snapshot bootstrap belongs to store {bound:?}, not {requested:?}")]
     BootstrapStoreMismatch { bound: String, requested: String },
     #[error(
@@ -146,7 +155,7 @@ pub struct BootstrapResult {
     db_hash: String,
     store_root_hash: super::store_commit::ObjectHash,
     snapshot_hash: super::store_commit::ObjectHash,
-    coverage: BTreeMap<String, super::store_commit::CommitPosition>,
+    coverage: super::store_commit::CommitFrontier,
 }
 
 #[cfg(test)]
@@ -172,7 +181,7 @@ mod bootstrap_capability_tests {
         storage: CloudSyncStorage,
         owner: UserKeypair,
         store_root_hash: ObjectHash,
-        membership_floor: Vec<crate::sync::membership::MembershipCoord>,
+        membership_floor: crate::join_code::MembershipFloor,
         coverage: BTreeMap<String, CommitPosition>,
     }
 
@@ -218,7 +227,7 @@ mod bootstrap_capability_tests {
                 host_blobs: Vec::new(),
                 publish_blobs: Vec::new(),
             },
-            coverage.clone(),
+            crate::CommitFrontier::MergeConcurrent(coverage.clone()),
             source.schema_version(),
             &owner,
             "2026-07-14T00:00:00Z".to_string(),
@@ -232,7 +241,9 @@ mod bootstrap_capability_tests {
             storage,
             owner,
             store_root_hash,
-            membership_floor: membership.author_heads(),
+            membership_floor: crate::join_code::MembershipFloor::MergeConcurrent(
+                membership.author_heads(),
+            ),
             coverage,
         }
     }
@@ -337,7 +348,11 @@ mod bootstrap_capability_tests {
 
 impl BootstrapResult {
     pub fn coverage_count(&self) -> usize {
-        self.coverage.len()
+        self.coverage.position_count()
+    }
+
+    pub fn write_policy(&self) -> crate::WritePolicy {
+        self.coverage.policy()
     }
 
     /// Consume the verified bootstrap authority by opening its bound database
@@ -372,11 +387,13 @@ impl BootstrapResult {
             if snapshot_db_hash(&database_bytes) != self.db_hash {
                 return Err(SnapshotError::BootstrapDatabaseChanged);
             }
-            let (db, _stamper) = Database::open(
+            let write_policy = self.coverage.policy();
+            let (db, _stamper) = Database::open_initialized_store(
                 &requested,
                 synced_tables,
                 blob_tombstone_grace,
                 transfer_limits,
+                write_policy,
                 device_id,
                 migrations,
             )
@@ -638,27 +655,34 @@ pub async fn bootstrap_from_snapshot(
     store_id: &str,
     expected_store_root_hash: super::store_commit::ObjectHash,
     owner_pubkey: &str,
-    membership_floor: &[super::membership::MembershipCoord],
+    membership_floor: &crate::join_code::MembershipFloor,
     binary_schema_version: u32,
     target_path: &Path,
 ) -> Result<BootstrapResult, SnapshotError> {
     // Authenticate Store protocol root, membership, snapshot metadata, and the exact image
     // before returning installation authority.
-    let (store_root_hash, meta, plaintext) = super::store_snapshot::select_store_snapshot(
-        storage,
-        store_id,
-        expected_store_root_hash,
-        owner_pubkey,
-        membership_floor,
-        binary_schema_version,
-    )
-    .await?;
+    let (store_root_hash, write_policy, meta, plaintext) =
+        super::store_snapshot::select_store_snapshot(
+            storage,
+            store_id,
+            expected_store_root_hash,
+            owner_pubkey,
+            membership_floor,
+            binary_schema_version,
+        )
+        .await?;
     let snapshot_hash = meta.snapshot_hash();
     let coverage = meta.coverage;
+    if coverage.policy() != write_policy {
+        return Err(SnapshotError::Parse(format!(
+            "snapshot coverage uses {:?}, Store protocol root uses {write_policy:?}",
+            coverage.policy()
+        )));
+    }
     write_snapshot_db(target_path, &plaintext)?;
     let target_path = std::fs::canonicalize(target_path)?;
     info!(
-        num_devices = coverage.len(),
+        num_positions = coverage.position_count(),
         db_size = plaintext.len(),
         path = %target_path.display(),
         "bootstrapped from snapshot"
@@ -742,7 +766,10 @@ pub async fn reconcile_snapshot_blobs(
             info!(total, "snapshot blob reconciliation cancelled");
             return Ok(SnapshotBlobReconcile::Cancelled);
         }
-        if !crate::sync::pull::download_blobs(db, vec![blob], storage, store_dir, None).await {
+        if crate::sync::pull::download_blobs(db, vec![blob], storage, store_dir, None)
+            .await
+            .is_err()
+        {
             all_ok = false;
         }
     }

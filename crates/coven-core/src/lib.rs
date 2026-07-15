@@ -147,7 +147,9 @@ pub use migration::{Migration, MigrationStep};
 pub use sync::session::{BlobDecl, RowIdentity, SyncedTable};
 
 // Config.
-pub use config::{CloudHomeConfig, CloudProvider, Config, ConfigError, HomeStorage};
+pub use config::{
+    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3Serial, HomeStorage,
+};
 
 // Keys / oauth / keyring bootstrap. The keyring service name has a setter and the
 // two getters that pair with it; the OAuth registration takes/returns its creds
@@ -186,7 +188,9 @@ pub use clock::{FixedClock, SteppingClock};
 pub use id_provider::SequentialIdProvider;
 pub use id_provider::{IdProvider, IdRef, UuidProvider};
 pub use write::{
-    AffectedRow, PendingWrite, PublishedPosition, WriteBlock, WriteId, WriteReceipt, WriteStatus,
+    AffectedRow, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition,
+    SerializationConflict, WriteBlock, WriteId, WritePolicy, WriteReceipt, WriteResolution,
+    WriteStatus,
 };
 
 // Managed local blob store: the host constructs it; coven never does.
@@ -204,7 +208,7 @@ pub use sync::store_pull::{HeldStoreCoordinate, HeldStorePosition, HeldStorePosi
 // synced, and when" from.
 pub use sync::loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use sync::status::DeviceActivity;
-pub use sync::store_commit::{CommitPosition, ObjectHash};
+pub use sync::store_commit::{CommitFrontier, CommitPosition, ObjectHash, StoreCommitOrder};
 
 // In-memory cloud home for host integration tests.
 #[cfg(any(test, feature = "test-utils"))]

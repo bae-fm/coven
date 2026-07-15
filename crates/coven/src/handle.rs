@@ -231,7 +231,7 @@ impl CovenHandle {
             open_guard,
             sync: Arc::new(RwLock::new(None)),
             sync_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
-            sync_status_tx: tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
+            sync_status_tx: tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
         }
     }
 
@@ -283,7 +283,7 @@ impl CovenHandle {
     /// state to check.
     ///
     /// The receiver immediately contains the current value. Intermediate values
-    /// may be coalesced; `Succeeded.row_changes` is a refresh hint rather than a
+    /// may be coalesced; `Synchronized.row_changes` is a refresh hint rather than a
     /// complete change stream.
     pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncLoopStatus> {
         self.sync_status_tx.subscribe()
@@ -293,6 +293,52 @@ impl CovenHandle {
     pub async fn pending_writes(&self) -> Result<Vec<coven_core::PendingWrite>, crate::CovenError> {
         self.db
             .pending_writes()
+            .await
+            .map_err(crate::CovenError::from)
+    }
+
+    /// Writes stopped by a semantic publication fault and awaiting an explicit
+    /// retry or discard decision.
+    pub async fn blocked_writes(&self) -> Result<Vec<coven_core::PendingWrite>, crate::CovenError> {
+        self.db
+            .blocked_writes()
+            .await
+            .map_err(crate::CovenError::from)
+    }
+
+    /// Requeue one blocked write for full production validation. Serial writes
+    /// requeue their whole ordered branch. A connected sync loop is woken after
+    /// the durable transition.
+    pub async fn retry_blocked_write(
+        &self,
+        write_id: &coven_core::WriteId,
+    ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
+        let retried = self
+            .db
+            .retry_blocked_write(write_id)
+            .await
+            .map_err(crate::CovenError::from)?;
+        self.sync_now();
+        Ok(retried)
+    }
+
+    /// Atomically discard a blocked write and reverse every later unpublished
+    /// shared write whose working-row state depends on it.
+    pub async fn discard_blocked_write(
+        &self,
+        write_id: &coven_core::WriteId,
+    ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
+        self.db
+            .discard_blocked_write(write_id)
+            .await
+            .map_err(crate::CovenError::from)
+    }
+
+    pub async fn pending_branches(
+        &self,
+    ) -> Result<Option<coven_core::PendingBranch>, crate::CovenError> {
+        self.db
+            .pending_branches()
             .await
             .map_err(crate::CovenError::from)
     }
@@ -549,10 +595,8 @@ impl CovenHandle {
         Ok(keyring.fingerprint())
     }
 
-    /// Import a master key a host already holds — a pasted restore/invite
-    /// key, or a keyring migrated from elsewhere — and establish it under the
-    /// handle's custody, replacing whatever custody already holds. Accepts
-    /// both the keyring JSON and the legacy 64-hex single-key formats.
+    /// Import a serialized master keyring a host already holds and establish it
+    /// under the handle's custody, replacing whatever custody already holds.
     /// Returns its fingerprint for the host to record in its own config.
     pub fn import_master_key(&self, serialized: &str) -> Result<String, MasterKeyError> {
         let keyring = MasterKeyring::from_serialized(serialized)?;
@@ -969,8 +1013,11 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    type TestCloudKitCoordinate = (CloudKitScope, String);
+    type TestCloudKitObject = (Vec<u8>, u64);
+
     struct TestCloudKitOps {
-        store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
+        store: Mutex<HashMap<TestCloudKitCoordinate, TestCloudKitObject>>,
         shares: Mutex<HashMap<String, CloudKitShare>>,
     }
 
@@ -1100,10 +1147,10 @@ mod tests {
             key: &str,
             data: Vec<u8>,
         ) -> Result<(), CloudHomeError> {
-            self.store
-                .lock()
-                .unwrap()
-                .insert((scope.clone(), key.to_string()), data);
+            let mut store = self.store.lock().unwrap();
+            let coordinate = (scope.clone(), key.to_string());
+            let version = store.get(&coordinate).map_or(1, |(_, version)| version + 1);
+            store.insert(coordinate, (data, version));
             Ok(())
         }
 
@@ -1112,7 +1159,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get(&(scope.clone(), key.to_string()))
-                .cloned()
+                .map(|(bytes, _)| bytes.clone())
                 .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
         }
 
@@ -1145,6 +1192,74 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains_key(&(scope.clone(), key.to_string())))
+        }
+
+        fn read_versioned_record(
+            &self,
+            scope: &CloudKitScope,
+            key: &str,
+        ) -> Result<crate::storage::cloud::CloudVersionedHead, CloudHomeError> {
+            let store = self.store.lock().unwrap();
+            let (bytes, version) = store
+                .get(&(scope.clone(), key.to_string()))
+                .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?;
+            Ok(crate::storage::cloud::CloudVersionedHead {
+                bytes: bytes.clone(),
+                version: crate::storage::cloud::CloudHeadVersion::from_provider(
+                    version.to_string(),
+                )?,
+            })
+        }
+
+        fn create_record(
+            &self,
+            scope: &CloudKitScope,
+            key: &str,
+            data: Vec<u8>,
+        ) -> Result<
+            crate::storage::cloud::CloudVersionedHead,
+            crate::storage::cloud::CloudHeadCreateError,
+        > {
+            let mut store = self.store.lock().unwrap();
+            let coordinate = (scope.clone(), key.to_string());
+            if store.contains_key(&coordinate) {
+                return Err(crate::storage::cloud::CloudHeadCreateError::AlreadyExists);
+            }
+            store.insert(coordinate, (data.clone(), 1));
+            Ok(crate::storage::cloud::CloudVersionedHead {
+                bytes: data,
+                version: crate::storage::cloud::CloudHeadVersion::from_provider("1".to_string())?,
+            })
+        }
+
+        fn replace_record(
+            &self,
+            scope: &CloudKitScope,
+            key: &str,
+            expected: &crate::storage::cloud::CloudHeadVersion,
+            data: Vec<u8>,
+        ) -> Result<
+            crate::storage::cloud::CloudVersionedHead,
+            crate::storage::cloud::CloudHeadReplaceError,
+        > {
+            let mut store = self.store.lock().unwrap();
+            let coordinate = (scope.clone(), key.to_string());
+            let Some((_, current)) = store.get(&coordinate) else {
+                return Err(
+                    crate::storage::cloud::CloudHomeError::NotFound(key.to_string()).into(),
+                );
+            };
+            if expected.as_provider() != current.to_string() {
+                return Err(crate::storage::cloud::CloudHeadReplaceError::VersionMismatch);
+            }
+            let version = current + 1;
+            store.insert(coordinate, (data.clone(), version));
+            Ok(crate::storage::cloud::CloudVersionedHead {
+                bytes: data,
+                version: crate::storage::cloud::CloudHeadVersion::from_provider(
+                    version.to_string(),
+                )?,
+            })
         }
 
         fn grant_share(&self, member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError> {
@@ -1639,37 +1754,30 @@ mod tests {
         );
     }
 
-    /// `import_master_key` accepts both formats `MasterKeyring::from_serialized`
-    /// does — the legacy 64-hex single key and the keyring JSON — and returns
-    /// the fingerprint of whichever generation it just established.
     #[tokio::test]
-    async fn import_master_key_accepts_legacy_hex_and_keyring_json() {
+    async fn import_master_key_rejects_raw_hex() {
         let (_tmp, store_dir) = temp_store_dir();
         let db = read_test_db("images");
         let handle = test_handle("lib-import-master-key", store_dir, db);
 
         let raw_hex = hex::encode([0x22u8; 32]);
-        let hex_fingerprint = handle
-            .import_master_key(&raw_hex)
-            .expect("import the legacy raw-hex format");
-        assert_eq!(
-            hex_fingerprint,
-            EncryptionService::from_key([0x22u8; 32]).fingerprint(),
-        );
-        assert_eq!(
-            handle.master_key_fingerprint().unwrap(),
-            Some(hex_fingerprint),
-        );
+        assert!(handle.import_master_key(&raw_hex).is_err());
+    }
+
+    #[tokio::test]
+    async fn import_master_key_accepts_the_current_serialized_keyring() {
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = read_test_db("images");
+        let handle = test_handle("lib-import-master-key", store_dir, db);
 
         let keyring = crate::encryption::MasterKeyring::generate();
-        let json_fingerprint = handle
+        let imported_fingerprint = handle
             .import_master_key(&keyring.to_serialized())
-            .expect("import the keyring JSON format");
-        assert_eq!(json_fingerprint, keyring.fingerprint());
+            .expect("import the serialized keyring");
+        assert_eq!(imported_fingerprint, keyring.fingerprint());
         assert_eq!(
             handle.master_key_fingerprint().unwrap(),
-            Some(json_fingerprint),
-            "the second import replaces the first",
+            Some(imported_fingerprint),
         );
     }
 
@@ -2267,42 +2375,85 @@ mod tests {
         (tmp, handle)
     }
 
-    /// The loop emits `Started` when a cycle begins and a terminal status when it
-    /// ends, so a host can show a sync in progress and then its outcome.
+    /// The current state starts offline, moves through storage checking and
+    /// publication, then reports synchronization.
     #[tokio::test]
-    async fn subscribed_host_sees_started_then_a_terminal_status() {
+    async fn subscribed_host_sees_offline_checking_publishing_then_synchronized() {
         test_keyring::install();
 
         let (_tmp, handle) = status_test_handle("lib-status-syncing");
         let mut rx = handle.subscribe_sync_status();
-        assert!(matches!(*rx.borrow(), SyncLoopStatus::Idle));
+        assert_eq!(format!("{:?}", *rx.borrow()), "Offline");
 
+        let home = InMemoryCloudHome::new();
         handle
-            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .connect_sync_with_test_home(Arc::new(home.clone()), CloudCipher::Plaintext)
             .await
             .expect("connect over injected home");
+        let (storage_check_reached, release_storage_check) = home.pause_next_appended_listing();
 
+        tokio::time::timeout(Duration::from_secs(20), storage_check_reached.notified())
+            .await
+            .expect("the provider operation reaches its test pause");
         tokio::time::timeout(Duration::from_secs(20), rx.changed())
             .await
             .expect("a start status arrives within the timeout")
             .expect("the status channel is open");
-        let start = rx.borrow().clone();
-        assert!(
-            matches!(start, SyncLoopStatus::Started),
-            "the first status of a cycle marks it in progress",
-        );
+        assert_eq!(format!("{:?}", *rx.borrow()), "CheckingStorage");
+
+        release_storage_check.notify_one();
+        tokio::time::timeout(Duration::from_secs(20), rx.changed())
+            .await
+            .expect("a publication status arrives within the timeout")
+            .expect("the status channel is open");
+        let publishing = rx.borrow().clone();
+        assert_eq!(format!("{publishing:?}"), "Publishing");
 
         tokio::time::timeout(Duration::from_secs(20), rx.changed())
             .await
-            .expect("a completion status arrives within the timeout")
+            .expect("a synchronized status arrives within the timeout")
             .expect("the status channel is open");
         let done = rx.borrow().clone();
-        // The cycle over an empty plaintext home succeeds — a terminal Succeeded,
-        // never a Failed.
         assert!(
-            matches!(done, SyncLoopStatus::Succeeded(_)),
-            "a successful cycle ends with Succeeded, got {done:?}",
+            format!("{done:?}").starts_with("Synchronized("),
+            "a successful cycle ends synchronized, got {done:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn transport_failure_after_reachability_probe_returns_to_offline() {
+        test_keyring::install();
+
+        let (_tmp, handle) = status_test_handle("lib-status-cycle-transport");
+        let mut rx = handle.subscribe_sync_status();
+        let home = InMemoryCloudHome::new();
+        handle
+            .connect_sync_with_test_home(Arc::new(home.clone()), CloudCipher::Plaintext)
+            .await
+            .expect("connect over injected home");
+        let (storage_check_reached, release_storage_check) = home.pause_next_appended_listing();
+
+        tokio::time::timeout(Duration::from_secs(20), storage_check_reached.notified())
+            .await
+            .expect("the reachability probe reaches the provider");
+        assert_eq!(format!("{:?}", *rx.borrow()), "CheckingStorage");
+        home.arm_write_failures();
+        release_storage_check.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                rx.changed().await.expect("the status channel remains open");
+                match rx.borrow().clone() {
+                    SyncLoopStatus::CheckingStorage | SyncLoopStatus::Publishing => {}
+                    SyncLoopStatus::Offline => break,
+                    status => {
+                        panic!("a provider transport failure must end offline, got {status:?}")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the failed cycle publishes a terminal status");
     }
 
     /// A subscription created before any provider is connected keeps receiving
@@ -2337,7 +2488,10 @@ mod tests {
             .expect("a reconnect does not close the handle-owned status channel");
         let status = rx.borrow().clone();
         assert!(
-            matches!(status, SyncLoopStatus::Started),
+            matches!(
+                status,
+                SyncLoopStatus::CheckingStorage | SyncLoopStatus::Publishing
+            ),
             "the received status is a cycle start marker, got {status:?}",
         );
     }

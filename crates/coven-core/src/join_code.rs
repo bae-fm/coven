@@ -8,7 +8,23 @@ use crate::sync::membership::OwnerGrantId;
 #[cfg(test)]
 use crate::sync::store_commit::ObjectHash;
 
-pub const INVITE_CODE_VERSION: u8 = 2;
+pub const INVITE_CODE_VERSION: u8 = 3;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MembershipFloor {
+    MergeConcurrent(Vec<MembershipCoord>),
+    Serial(Option<crate::sync::store_commit::CommitPosition>),
+}
+
+impl MembershipFloor {
+    pub fn write_policy(&self) -> crate::WritePolicy {
+        match self {
+            Self::MergeConcurrent(_) => crate::WritePolicy::MergeConcurrent,
+            Self::Serial(_) => crate::WritePolicy::Serial,
+        }
+    }
+}
 
 /// An invite is always for a private home: sharing wraps and rotates the store
 /// key, which a public (plaintext) home has none of, so the joiner always builds
@@ -19,22 +35,18 @@ pub const INVITE_CODE_VERSION: u8 = 2;
 /// its own redacting `Debug`, and no other field here carries a secret.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InviteCode {
-    /// Version (currently 1).
+    /// Wire-format version.
     pub v: u8,
     pub store_id: String,
     pub store_name: String,
     pub join_info: CloudHomeJoinInfo,
     pub owner_pubkey: String,
+    pub key_author_pubkey: String,
     pub store_root_hash: crate::sync::store_commit::ObjectHash,
-    /// Every author's membership-head coordinate at mint time
-    /// ([`MembershipChain::author_heads`](crate::sync::membership::MembershipChain::author_heads)),
-    /// non-empty in codes minted from an initialized store.
-    /// The joiner seeds its per-author head watermark from this before its
-    /// first sync cycle, so a storage provider serving an older, otherwise
-    /// validly signed membership state — e.g. from before a removal this floor
-    /// already reflects — is refused as a regression rather than accepted for
-    /// having no watermark yet. Decode requires a non-empty, well-formed floor.
-    pub membership_floor: Vec<MembershipCoord>,
+    /// The exact membership state the joiner must observe: causal author
+    /// coordinates for MergeConcurrent stores, or the global commit position
+    /// for Serial stores.
+    pub membership_floor: MembershipFloor,
 }
 
 /// Encode an `InviteCode` into a prefixed base64url string.
@@ -45,11 +57,8 @@ pub fn encode(code: &InviteCode) -> String {
 /// Decode an invite code string back into an `InviteCode`.
 pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
     let code: InviteCode = code_envelope::decode_code(code_envelope::PREFIX, s)?;
-    if code.v < INVITE_CODE_VERSION {
-        return Err(JoinCodeError::ObsoleteVersion(code.v));
-    }
-    if code.v > INVITE_CODE_VERSION {
-        return Err(JoinCodeError::NewerVersion(code.v));
+    if code.v != INVITE_CODE_VERSION {
+        return Err(JoinCodeError::UnsupportedVersion(code.v));
     }
     // An invite is unsigned, so `store_id` is attacker-controlled. It becomes the
     // name of a directory the joiner creates under `stores/` and recursively
@@ -64,11 +73,30 @@ pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
     // failure deep in the join.
     crate::sync::restore_code::decode_hex_bytes("owner public key", &code.owner_pubkey, 32)
         .map_err(JoinCodeError::InvalidOwnerPubkey)?;
-    if code.membership_floor.is_empty() {
-        return Err(JoinCodeError::EmptyMembershipFloor);
+    crate::sync::restore_code::decode_hex_bytes(
+        "wrapped-key author public key",
+        &code.key_author_pubkey,
+        32,
+    )
+    .map_err(JoinCodeError::InvalidOwnerPubkey)?;
+    match &code.membership_floor {
+        MembershipFloor::MergeConcurrent(floor) => {
+            if floor.is_empty() {
+                return Err(JoinCodeError::EmptyMembershipFloor);
+            }
+            crate::sync::membership_ops::membership_floor_by_grant(floor)
+                .map_err(JoinCodeError::InvalidMembershipFloor)?;
+        }
+        MembershipFloor::Serial(None) => {
+            return Err(JoinCodeError::EmptyMembershipFloor);
+        }
+        MembershipFloor::Serial(Some(position)) if position.seq == 0 => {
+            return Err(JoinCodeError::InvalidMembershipFloor(
+                "Serial membership floor has sequence zero".to_string(),
+            ));
+        }
+        MembershipFloor::Serial(Some(_)) => {}
     }
-    crate::sync::membership_ops::membership_floor_by_grant(&code.membership_floor)
-        .map_err(JoinCodeError::InvalidMembershipFloor)?;
     Ok(code)
 }
 
@@ -139,14 +167,8 @@ pub enum JoinCodeError {
     InvalidBase64,
     #[error("The invite code is corrupted. Ask the inviter to generate a new one. ({0})")]
     InvalidJson(String),
-    #[error(
-        "This invite code was made with an older version of the app (v{0}). Ask the inviter to generate a new one."
-    )]
-    ObsoleteVersion(u8),
-    #[error(
-        "This invite code was made with a newer version of the app (v{0}). Update the app to use it."
-    )]
-    NewerVersion(u8),
+    #[error("This invite code uses unsupported format version v{0}. Ask the inviter to generate a new one.")]
+    UnsupportedVersion(u8),
     /// The invite's `store_id` is not a safe path component, so it cannot name a
     /// store directory under `stores/`. The invite is unsigned and anyone can
     /// craft one, so the id is refused here at decode rather than reaching a path
@@ -210,10 +232,11 @@ mod tests {
                 key_prefix: None,
             },
             owner_pubkey: test_owner_pubkey(),
+            key_author_pubkey: test_owner_pubkey(),
             store_root_hash: crate::sync::store_commit::ObjectHash::digest(
                 b"invite store protocol root",
             ),
-            membership_floor: test_membership_floor(),
+            membership_floor: MembershipFloor::MergeConcurrent(test_membership_floor()),
         }
     }
 
@@ -227,7 +250,10 @@ mod tests {
         assert_eq!(decoded.store_id, "lib-123");
         assert_eq!(decoded.store_name, "My Store");
         assert_eq!(decoded.owner_pubkey, test_owner_pubkey());
-        assert_eq!(decoded.membership_floor, test_membership_floor());
+        assert_eq!(
+            decoded.membership_floor,
+            MembershipFloor::MergeConcurrent(test_membership_floor())
+        );
         match decoded.join_info {
             CloudHomeJoinInfo::S3 {
                 bucket,
@@ -341,7 +367,7 @@ mod tests {
         let encoded = encode(&code);
         assert!(matches!(
             decode(&encoded),
-            Err(JoinCodeError::ObsoleteVersion(0))
+            Err(JoinCodeError::UnsupportedVersion(0))
         ));
     }
 
@@ -352,12 +378,12 @@ mod tests {
         let encoded = encode(&code);
         assert!(matches!(
             decode(&encoded),
-            Err(JoinCodeError::NewerVersion(99))
+            Err(JoinCodeError::UnsupportedVersion(99))
         ));
     }
 
     /// `membership_floor` is required, not merely present-when-known: a code
-    /// serialized without it (an older minter, or a hand-crafted attack code)
+    /// serialized without it by a hand-crafted attack code
     /// must be refused at decode rather than silently read as "no floor" — the
     /// exact masking this field exists to remove.
     #[test]
@@ -375,7 +401,7 @@ mod tests {
     #[test]
     fn decode_empty_membership_floor_is_refused() {
         let mut code = sample_s3_code("lib-empty-floor");
-        code.membership_floor.clear();
+        code.membership_floor = MembershipFloor::MergeConcurrent(Vec::new());
         assert!(matches!(
             decode(&encode(&code)),
             Err(JoinCodeError::EmptyMembershipFloor)

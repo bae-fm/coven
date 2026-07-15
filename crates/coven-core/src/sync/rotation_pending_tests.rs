@@ -30,11 +30,13 @@ use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::membership::MemberRole;
 use crate::sync::membership_ops::{
-    invite_member, remove_member, MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
+    invite_member, invite_member_with_coordination, remove_member, remove_member_with_coordination,
+    MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
 };
 use crate::sync::test_helpers::{
-    host_exec, open_test_db, pubkey_hex, publish_test_founder_membership,
-    publish_test_store_protocol_root, temp_store_dir, TestCustody,
+    host_exec, open_serial_test_db, open_test_db, pubkey_hex, publish_test_founder_membership,
+    publish_test_serial_store_protocol_root, publish_test_store_protocol_root, temp_store_dir,
+    TestCustody,
 };
 
 const LIB_ID: &str = "rotation-pending-test";
@@ -109,6 +111,143 @@ impl CloudHome for GrantingCloudHome {
             absent => self.0.set_access(absent).await,
         }
     }
+}
+
+#[tokio::test]
+async fn public_serial_invite_activates_one_exact_empty_package_control_commit() {
+    let home = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let member = UserKeypair::generate();
+    let key = [0x41; 32];
+    let storage =
+        storage_for(&home, key, &owner).with_test_serial_coordination(Arc::new(home.clone()));
+    let db = open_serial_test_db();
+    let root =
+        publish_test_serial_store_protocol_root(&db, &storage, LIB_ID, DEVICE_ID, &owner).await;
+    let granting_home = GrantingCloudHome(home.clone());
+    let code = invite_member_with_coordination(
+        &storage,
+        &granting_home,
+        &owner,
+        &Hlc::new(DEVICE_ID.to_string()),
+        &pubkey_hex(&member),
+        None,
+        MemberRole::Member,
+        &EncryptionService::from_key(key),
+        LIB_ID,
+        "Serial Store",
+        &db,
+        Some(crate::sync::membership_ops::SerialMembershipContext {
+            coordination: storage.serial_coordination().unwrap(),
+            device_id: DEVICE_ID.to_string(),
+        }),
+    )
+    .await
+    .expect("public Serial invitation");
+    let position = match code.membership_floor {
+        crate::join_code::MembershipFloor::Serial(Some(position)) => position,
+        crate::join_code::MembershipFloor::Serial(None) => {
+            panic!("Serial invitation returned the root floor")
+        }
+        crate::join_code::MembershipFloor::MergeConcurrent(_) => {
+            panic!("Serial invitation returned a causal membership floor")
+        }
+    };
+    let head = storage
+        .serial_coordination()
+        .unwrap()
+        .read_head(crate::sync::store_commit::serial_head_key())
+        .await
+        .unwrap();
+    let head = crate::sync::store_commit::StoreSerialHead::parse(&head.bytes, root).unwrap();
+    assert_eq!(head.commit.as_ref(), Some(&position));
+    let commit =
+        crate::sync::store_objects::load_serial_commit_at_position(&storage, root, &position)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+    assert_eq!(commit.position(), position);
+    assert!(matches!(
+        commit.control.as_ref(),
+        Some(crate::sync::store_commit::StoreControl::SerialMembership { .. })
+    ));
+    let package = crate::sync::store_objects::load_package(&storage, &commit)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(package.value.is_empty());
+    assert_eq!(commit.package.changeset_size, 0);
+    assert!(db
+        .serial_membership_state()
+        .await
+        .unwrap()
+        .unwrap()
+        .can_write(&pubkey_hex(&member)));
+
+    let custody = TestCustody::default();
+    custody.set_initial_key(key);
+    let cipher = storage.cipher_state().clone();
+    let pending_rotation = storage.shared_pending_rotation();
+    remove_member_with_coordination(
+        &storage,
+        &granting_home,
+        &owner,
+        &Hlc::new(DEVICE_ID.to_string()),
+        &pubkey_hex(&member),
+        LIB_ID,
+        &EncryptionService::from_key(key),
+        &custody,
+        &cipher,
+        &pending_rotation,
+        &db,
+        Some(crate::sync::membership_ops::SerialMembershipContext {
+            coordination: storage.serial_coordination().unwrap(),
+            device_id: DEVICE_ID.to_string(),
+        }),
+    )
+    .await
+    .expect("public Serial removal and rotation");
+    assert!(!db
+        .serial_membership_state()
+        .await
+        .unwrap()
+        .unwrap()
+        .can_write(&pubkey_hex(&member)));
+    assert_eq!(db.serial_key_generation().await.unwrap(), Some(2));
+    let head = storage
+        .serial_coordination()
+        .unwrap()
+        .read_head(crate::sync::store_commit::serial_head_key())
+        .await
+        .unwrap();
+    let head = crate::sync::store_commit::StoreSerialHead::parse(&head.bytes, root).unwrap();
+    let removal_position = head.commit.unwrap();
+    assert_eq!(removal_position.seq, 2);
+    let removal = crate::sync::store_objects::load_serial_commit_at_position(
+        &storage,
+        root,
+        &removal_position,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .value;
+    assert!(matches!(
+        removal.control.as_ref(),
+        Some(
+            crate::sync::store_commit::StoreControl::SerialMembershipAndKeyRotation {
+                generation: 2,
+                ..
+            }
+        )
+    ));
+    assert!(crate::sync::store_objects::load_package(&storage, &removal)
+        .await
+        .unwrap()
+        .unwrap()
+        .value
+        .is_empty());
 }
 
 async fn insert_shareable_row(db: &crate::database::Database, id: &str, stamp: &str) {

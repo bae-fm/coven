@@ -9,13 +9,13 @@ use super::membership::{
 };
 use super::storage::{ProtocolObjectLocator, StorageError, SyncStorage};
 use super::store_commit::{
-    ack_slot_prefix, commit_slot_prefix, head_slot_prefix, package_semantic_prefix,
-    parse_ack_copy_key, parse_commit_copy_key, parse_head_copy_key,
+    ack_slot_prefix, commit_semantic_prefix, commit_slot_prefix, head_slot_prefix,
+    package_semantic_prefix, parse_ack_copy_key, parse_commit_copy_key, parse_head_copy_key,
     parse_membership_entry_copy_key, parse_membership_head_copy_key, parse_package_copy_key,
     parse_registration_copy_key, parse_snapshot_meta_copy_key, parse_store_protocol_root_copy_key,
-    registration_slot_prefix, snapshot_image_semantic_prefix, SnapshotMeta, StoreAck,
-    StoreBatchCommit, StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationState,
-    StoreProtocolRoot,
+    registration_slot_prefix, snapshot_image_semantic_prefix, CommitFrontier, CommitPosition,
+    SnapshotMeta, StoreAck, StoreBatchCommit, StoreDeviceHead, StoreDeviceRegistration,
+    StoreDeviceRegistrationState, StoreProtocolRoot,
 };
 use super::store_commit::{ObjectHash, StoreProtocolError};
 
@@ -90,7 +90,7 @@ pub struct VerifiedMembershipHeadListing {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreObjectError {
-    #[error(transparent)]
+    #[error("{0}")]
     Storage(#[from] StorageError),
     #[error("Store candidate {key:?} could not be opened: {source}")]
     CandidateUnreadable { key: String, source: StorageError },
@@ -180,10 +180,49 @@ pub async fn load_expected_store_protocol_root(
     expected_hash: ObjectHash,
     expected_store_id: &str,
     expected_founder: &str,
+    expected_policy: crate::WritePolicy,
 ) -> Result<Option<VerifiedCopies<StoreProtocolRoot>>, StoreObjectError> {
     let semantic_prefix = super::store_commit::store_protocol_root_semantic_prefix(expected_hash);
     load_semantic_copies(storage, &semantic_prefix, ".json", expected_hash, |bytes| {
-        StoreProtocolRoot::parse_expected(bytes, expected_hash, expected_store_id, expected_founder)
+        StoreProtocolRoot::parse_expected(
+            bytes,
+            expected_hash,
+            expected_store_id,
+            expected_founder,
+            expected_policy,
+        )
+    })
+    .await
+}
+
+pub async fn load_pinned_store_protocol_root(
+    storage: &dyn SyncStorage,
+    expected_hash: ObjectHash,
+    expected_store_id: &str,
+    expected_founder: &str,
+) -> Result<Option<VerifiedCopies<StoreProtocolRoot>>, StoreObjectError> {
+    let semantic_prefix = super::store_commit::store_protocol_root_semantic_prefix(expected_hash);
+    load_semantic_copies(storage, &semantic_prefix, ".json", expected_hash, |bytes| {
+        StoreProtocolRoot::parse_pinned(bytes, expected_hash, expected_store_id, expected_founder)
+    })
+    .await
+}
+
+pub async fn load_store_protocol_root_at_hash(
+    storage: &dyn SyncStorage,
+    expected_hash: ObjectHash,
+) -> Result<Option<VerifiedCopies<StoreProtocolRoot>>, StoreObjectError> {
+    let semantic_prefix = super::store_commit::store_protocol_root_semantic_prefix(expected_hash);
+    load_semantic_copies(storage, &semantic_prefix, ".json", expected_hash, |bytes| {
+        let root = StoreProtocolRoot::parse(bytes)?;
+        let actual = root.object_hash();
+        if actual != expected_hash {
+            return Err(StoreProtocolError::ObjectHashMismatch {
+                expected: expected_hash,
+                actual,
+            });
+        }
+        Ok(root)
     })
     .await
 }
@@ -269,6 +308,58 @@ pub async fn load_commit_slot(
     device_id: &str,
     seq: u64,
 ) -> Result<Option<VerifiedCopies<StoreBatchCommit>>, StoreObjectError> {
+    load_commit_slot_for_policy(
+        storage,
+        store_root_hash,
+        crate::WritePolicy::MergeConcurrent,
+        device_id,
+        seq,
+    )
+    .await
+}
+
+pub async fn load_serial_commit_at_position(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    position: &CommitPosition,
+) -> Result<Option<VerifiedCopies<StoreBatchCommit>>, StoreObjectError> {
+    let semantic_prefix = commit_semantic_prefix(
+        super::store_commit::SERIAL_STREAM_ID,
+        position.seq,
+        position.commit_hash,
+    );
+    load_semantic_copies(
+        storage,
+        &semantic_prefix,
+        ".json",
+        position.commit_hash,
+        |bytes| {
+            let commit = StoreBatchCommit::parse_at(
+                bytes,
+                store_root_hash,
+                crate::WritePolicy::Serial,
+                super::store_commit::SERIAL_STREAM_ID,
+                position.seq,
+            )?;
+            if commit.commit_hash() != position.commit_hash {
+                return Err(StoreProtocolError::ObjectHashMismatch {
+                    expected: position.commit_hash,
+                    actual: commit.commit_hash(),
+                });
+            }
+            Ok(commit)
+        },
+    )
+    .await
+}
+
+async fn load_commit_slot_for_policy(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    write_policy: crate::WritePolicy,
+    device_id: &str,
+    seq: u64,
+) -> Result<Option<VerifiedCopies<StoreBatchCommit>>, StoreObjectError> {
     let slot = commit_slot_prefix(device_id, seq);
     load_singleton_slot(
         storage,
@@ -276,7 +367,8 @@ pub async fn load_commit_slot(
         ".json",
         |key| Ok(parse_commit_copy_key(key)?.semantic_hash),
         |semantic_hash, bytes| {
-            let commit = StoreBatchCommit::parse_at(bytes, store_root_hash, device_id, seq)?;
+            let commit =
+                StoreBatchCommit::parse_at(bytes, store_root_hash, write_policy, device_id, seq)?;
             if commit.commit_hash() != semantic_hash {
                 return Err(StoreProtocolError::ObjectHashMismatch {
                     expected: semantic_hash,
@@ -345,8 +437,11 @@ pub async fn load_package(
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
 ) -> Result<Option<VerifiedCopies<Vec<u8>>>, StoreObjectError> {
-    let semantic_prefix =
-        package_semantic_prefix(&commit.device_id, commit.seq, commit.package.content_hash);
+    let semantic_prefix = package_semantic_prefix(
+        commit.order.stream_id(&commit.device_id),
+        commit.seq(),
+        commit.package.content_hash,
+    );
     load_semantic_copies(
         storage,
         &semantic_prefix,
@@ -1021,10 +1116,33 @@ pub async fn list_latest_registration_chains(
     })
 }
 
-pub async fn list_store_packages(
+pub async fn list_reclaimable_store_packages(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
+    snapshot_coverage: &CommitFrontier,
 ) -> Result<VerifiedPackageListing, StoreObjectError> {
+    let mut authoritative_serial_commits = BTreeMap::new();
+    if let CommitFrontier::Serial(mut position) = snapshot_coverage.clone() {
+        while let Some(expected) = position {
+            let commit = load_serial_commit_at_position(storage, store_root_hash, &expected)
+                .await?
+                .ok_or_else(|| {
+                    StoreObjectError::Storage(StorageError::NotFound(commit_semantic_prefix(
+                        super::store_commit::SERIAL_STREAM_ID,
+                        expected.seq,
+                        expected.commit_hash,
+                    )))
+                })?;
+            position = commit
+                .value
+                .previous_commit_hash()
+                .map(|commit_hash| CommitPosition {
+                    seq: commit.value.seq() - 1,
+                    commit_hash,
+                });
+            authoritative_serial_commits.insert(expected.seq, commit);
+        }
+    }
     let listing = storage.list_protocol_objects("store-v1/packages/").await?;
     let mut groups: BTreeMap<(String, u64, ObjectHash), Vec<ProtocolObjectLocator>> =
         BTreeMap::new();
@@ -1043,13 +1161,48 @@ pub async fn list_store_packages(
     }
     let mut packages = Vec::with_capacity(groups.len());
     for ((device_id, seq, package_hash), objects) in groups {
-        let commit = load_commit_slot(storage, store_root_hash, &device_id, seq)
-            .await?
-            .ok_or_else(|| {
+        let merge_commit = match snapshot_coverage {
+            CommitFrontier::MergeConcurrent(_) => {
+                load_commit_slot(storage, store_root_hash, &device_id, seq).await?
+            }
+            CommitFrontier::Serial(_) => None,
+        };
+        let commit = match snapshot_coverage {
+            CommitFrontier::MergeConcurrent(_) => merge_commit.as_ref().ok_or_else(|| {
                 StoreObjectError::Storage(StorageError::NotFound(commit_slot_prefix(
                     &device_id, seq,
                 )))
-            })?;
+            })?,
+            CommitFrontier::Serial(_) if device_id == super::store_commit::SERIAL_STREAM_ID => {
+                let Some(commit) = authoritative_serial_commits.get(&seq) else {
+                    tracing::debug!(
+                        device_id,
+                        seq,
+                        package_hash = %package_hash,
+                        "ignoring Serial package outside snapshot ancestry"
+                    );
+                    continue;
+                };
+                if commit.value.package.content_hash != package_hash {
+                    tracing::debug!(
+                        device_id,
+                        seq,
+                        package_hash = %package_hash,
+                        authoritative_package_hash = %commit.value.package.content_hash,
+                        "ignoring Serial package outside the authoritative commit ancestry"
+                    );
+                    continue;
+                }
+                commit
+            }
+            CommitFrontier::Serial(_) => {
+                return Err(StoreObjectError::Collision {
+                    semantic_prefix: package_semantic_prefix(&device_id, seq, package_hash),
+                    key: package_semantic_prefix(&device_id, seq, package_hash),
+                    reason: format!("Serial Store package is in non-serial stream {device_id:?}"),
+                });
+            }
+        };
         if commit.value.package.content_hash != package_hash {
             return Err(StoreObjectError::Collision {
                 semantic_prefix: package_semantic_prefix(&device_id, seq, package_hash),

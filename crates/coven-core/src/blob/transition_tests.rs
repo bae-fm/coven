@@ -31,7 +31,7 @@ use crate::keys::UserKeypair;
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, PendingRotation};
-use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
+use crate::sync::cycle::{ensure_owner_anchored_chain, run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
@@ -161,6 +161,14 @@ async fn run_cycle(
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> SyncCycleResult {
     bind_mock_store_protocol(db, storage, device).await;
+    ensure_owner_anchored_chain(
+        storage,
+        db,
+        &storage.store_protocol_root(),
+        &storage.protocol_founder_keypair(),
+    )
+    .await
+    .expect("initialize MergeConcurrent test membership");
     // A fresh gate each call: none of these transition tests exercise a rotation
     // this device can't adopt.
     let pending_rotation = PendingRotation::none();
@@ -196,6 +204,14 @@ async fn try_run_cycle(
     lib: &StoreDir,
 ) -> Result<SyncCycleResult, String> {
     bind_mock_store_protocol(db, storage, device).await;
+    ensure_owner_anchored_chain(
+        storage,
+        db,
+        &storage.store_protocol_root(),
+        &storage.protocol_founder_keypair(),
+    )
+    .await
+    .expect("initialize MergeConcurrent test membership");
     let pending_rotation = PendingRotation::none();
     run_single_sync_cycle(
         storage,
@@ -213,6 +229,7 @@ async fn try_run_cycle(
         None,
     )
     .await
+    .map_err(|error| error.to_string())
 }
 
 /// Insert the gated note + its blob-bearing photo row, `shared` (Remote) or not,

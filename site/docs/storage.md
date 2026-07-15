@@ -8,6 +8,13 @@ plaintext, never assigns sequence numbers, and never coordinates concurrent
 writers. It reads, writes, lists, and deletes objects addressed by a flat string
 key.
 
+That byte interface is sufficient for `MergeConcurrent`. `Serial` uses a
+second, deliberately separate
+[`CoordinationStorage`](rustdoc:trait:coven::sync::storage::CoordinationStorage)
+capability for one mutable global head. Keeping it separate makes provider
+eligibility explicit: a `CloudHome` implementation cannot accidentally claim
+conditional-write semantics by returning a runtime error from optional methods.
+
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
 <svg class="flow" viewBox="0 0 660 210" role="img" aria-label="Sync concepts pass through the sealing layer to the raw byte trait and then to a provider">
@@ -76,10 +83,8 @@ pub trait CloudHome: Send + Sync {
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError>;
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError>;
 
-    async fn grant_access(&self, grant: CloudAccessGrant)
-        -> Result<CloudHomeJoinInfo, CloudHomeError>;
-    async fn revoke_access(&self, revoke: CloudAccessRevoke)
-        -> Result<RevokeOutcome, CloudHomeError>;
+    async fn set_access(&self, desired: CloudAccessState)
+        -> Result<CloudAccessOutcome, CloudHomeError>;
 }
 ```
 
@@ -102,8 +107,37 @@ pub trait CloudHome: Send + Sync {
   encrypted chunks covering a blob byte range.
 - `list` returns every key under a prefix. `delete` is not an error when the key
   is absent. `exists` is a presence check.
-- `grant_access` and `revoke_access` change who can reach the cloud home. They
-  are provider-shaped and described below.
+- `set_access` sets whether one member principal can reach the cloud home. The
+  command carries the absolute desired state, verifies provider readback, and
+  is safe to retry after an unknown outcome. It is provider-shaped and
+  described below.
+
+## Serial coordination
+
+`CoordinationStorage` requires four operations: read a head with its provider
+version, create only if absent, replace only when that exact version still
+matches, and delete a reserved probe head. Setup exercises two independent
+clients against a fresh reserved key and requires one winner for both the
+create race and the replace race, followed by authoritative readback and
+cleanup.
+
+CloudKit and AWS S3 expose this capability. An S3-compatible endpoint is not
+assumed to have AWS's conditional writes and strong reads: the host must set
+`CloudHomeConfig::s3_serial` to
+`CustomS3Serial::ConditionalPutAndStrongReads`. Google Drive, Dropbox, and
+OneDrive have no Serial coordination adapter. Creating, joining, restoring, or
+starting Serial sync on those providers is refused before provider access or
+local mutation.
+
+The choice belongs to the signed Store, not to the local connection. A store
+can be opened and used locally with either policy while no provider is
+configured; the coordination requirement begins when `Serial` sync connects.
+
+The signed global head is an authoritative chain selector, not a filename
+winner. Pull opens every visible physical candidate in the head slot, requires
+copies under one semantic hash to contain identical plaintext, rejects multiple
+valid hashes as a fork, and follows only the exact predecessor chain named by
+the accepted head. Provider listing order never selects a Serial history.
 
 ## Granting and revoking access
 
@@ -111,20 +145,19 @@ Membership is cryptographic, but a new member still has to *reach* the bytes:
 the storage itself must admit them. That is inherently provider-shaped (a
 folder share, a credential, a share URL), so it lives on the trait.
 
-`grant_access` takes a
-[`CloudAccessGrant`](rustdoc:struct:coven::storage::cloud::CloudAccessGrant)
-(the member's public key, plus the provider account email for backends that
-share by account) and returns a
+`set_access(CloudAccessState::Present { ... })` carries the member's public key
+plus the provider account email for backends that share by account, and returns
+a
 [`CloudHomeJoinInfo`](rustdoc:enum:coven::storage::cloud::CloudHomeJoinInfo), one
 variant per provider, carrying exactly what another device needs to reach the
 same cloud home:
 
 - The consumer clouds (Drive, Dropbox, OneDrive) share the store folder with
   the member's provider account and return its folder or drive id.
-  `revoke_access` unshares it and reports `RevokeOutcome::Revoked`.
+  setting access to `Absent` unshares it and reports `RevokeOutcome::Revoked`.
 - S3 returns the bucket, region, endpoint, access key, secret key, and optional
   key prefix: access rides pre-shared credentials. One member's copy of a
-  shared key cannot be withdrawn alone, so `revoke_access` reports
+  shared key cannot be withdrawn alone, so setting access to `Absent` reports
   `RevokeOutcome::Unsupported` and removal proceeds anyway: the
   [key rotation](/docs/sharing#revocation-is-key-rotation) that removal
   performs, not credential withdrawal, is what protects post-removal content.
@@ -132,7 +165,9 @@ same cloud home:
   bucket credentials, which is the user's call.
 - CloudKit returns a share URL.
 
-Because `grant_access`/`revoke_access` work with folder shares and share URLs,
+`set_access(CloudAccessState::Absent { ... })` withdraws access where the
+provider supports per-member revocation and reports a `RevokeOutcome`.
+Because access updates work with folder shares and share URLs,
 not encrypted payloads, they live below the encryption layer and are called
 directly on the `CloudHome`, not through the wrapper described under
 [Where encryption sits](#where-encryption-sits).
@@ -146,7 +181,8 @@ failure crosses this boundary as a sentence a UI can show verbatim.
 ```rust
 pub enum CloudHomeError {
     NotFound(String),
-    Storage(String),
+    Configuration(String),
+    Transport(String),
     Io(#[from] std::io::Error),
 }
 ```
@@ -154,10 +190,11 @@ pub enum CloudHomeError {
 - `NotFound(key)`: the key is not there. coven uses it for the expected misses
   (no snapshot yet, a blob not uploaded yet), so a host that maps it to a UI
   state matches the variant directly.
-- `Storage(msg)`: every other failure. The `msg` is the string a host can show
-  in an error banner without rewording. coven and its drivers translate
-  provider-specific signals into a sentence that names the cause and the
-  recovery.
+- `Configuration(msg)`: missing or invalid settings, credentials, OAuth
+  authorization, or provider capability. Retrying the same request cannot
+  succeed until configuration changes.
+- `Transport(msg)`: a backend, network, response, or service failure that may
+  succeed when the initiating operation retries.
 - `Io`: a local filesystem or I/O failure surfaced from `std::io::Error`.
 
 Each driver classifies the failures a user can act on. For example, S3
@@ -169,6 +206,15 @@ rarely returns these). The consumer clouds do the same for their full-storage
 codes (`storageQuotaExceeded`, `path/insufficient_space`, `quotaLimitReached`).
 Every other service error keeps its raw code and message so it stays debuggable
 in logs.
+
+Above the raw `CloudHome` boundary, blob reads retain three distinct causes. A
+provider or network failure is transport and sets the sync loop to `Offline`.
+Plaintext that fails its signed content hash is `InvalidContent`; failure to
+create, write, sync, or rename the local destination is `LocalFilesystem`.
+Invalid content and local filesystem failures hold or fail the affected work
+without reporting that storage is offline. Inline host-blob uploads, snapshot
+uploads, row-gate `make_remote` uploads, and candidate blob downloads all keep
+provider transport typed through this boundary.
 
 ## Providers
 
@@ -184,6 +230,9 @@ only places a provider deviates from "write opaque bytes by key".
   parts. An optional key prefix is prepended to every key (trailing slashes
   normalized), so `changes/dev1/42.enc` can become
   `libs/abc/changes/dev1/42.enc`.
+  AWS S3 also supplies the conditional global-head adapter used by `Serial`.
+  A custom endpoint supplies it only with the explicit `s3_serial` assertion
+  described above.
 
 - **Google Drive**
   ([`GoogleDriveCloudHome`](rustdoc:struct:coven::storage::cloud::google_drive::GoogleDriveCloudHome))
@@ -192,17 +241,20 @@ only places a provider deviates from "write opaque bytes by key".
   list; the encoding is exact and reversible, never a lossy substitution. Large
   files use a resumable upload session in 8 MiB chunks (Drive requires 256
   KiB alignment).
+  It supports `MergeConcurrent`, not `Serial`.
 
 - **OneDrive**
   ([`OneDriveCloudHome`](rustdoc:struct:coven::storage::cloud::onedrive::OneDriveCloudHome))
   uses the same hex filename encoding and a Microsoft Graph resumable
   upload session in 7.5 MiB chunks (Graph requires 320 KiB alignment).
+  It supports `MergeConcurrent`, not `Serial`.
 
 - **Dropbox**
   ([`DropboxCloudHome`](rustdoc:struct:coven::storage::cloud::dropbox::DropboxCloudHome))
   uses native Dropbox paths under the store folder (for example
   `/Apps/your-app/my-store/changes/dev1/42.enc`), so no filename encoding is
   needed. Sharing goes through `share_folder` to get a `shared_folder_id`.
+  It supports `MergeConcurrent`, not `Serial`.
 
 - **CloudKit**
   ([`CloudKitCloudHome`](rustdoc:struct:coven::storage::cloud::cloudkit::CloudKitCloudHome))
@@ -215,6 +267,8 @@ only places a provider deviates from "write opaque bytes by key".
   [`create_cloud_home`](rustdoc:fn:coven::storage::cloud::create_cloud_home)
   cannot build this one from Rust alone and returns a `Storage` error directing
   you to construct it through your Swift layer.
+  Its record versions supply the conditional global-head adapter used by
+  `Serial`.
 
 - **In-memory**
   ([`InMemoryCloudHome`](rustdoc:struct:coven::storage::cloud::test_utils::InMemoryCloudHome),

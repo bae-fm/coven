@@ -4,14 +4,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::storage::cloud::ListingCoverage;
 
-use super::membership::MembershipChain;
+use super::membership::{MemberRole, MembershipChain, SerialMembershipState};
 use super::storage::SyncStorage;
 use super::store_commit::{
-    CommitPosition, ObjectHash, SnapshotMeta, StoreAck, StoreDeviceRegistrationState,
+    CommitFrontier, CommitPosition, ObjectHash, SnapshotMeta, StoreAck,
+    StoreDeviceRegistrationState, SERIAL_STREAM_ID,
 };
 use super::store_objects::{
-    list_latest_ack_chains, list_latest_registration_chains, list_snapshot_metas,
-    list_store_packages, load_commit_slot, load_snapshot_image, StoreObjectError,
+    list_latest_ack_chains, list_latest_registration_chains, list_reclaimable_store_packages,
+    list_snapshot_metas, load_commit_slot, load_serial_commit_at_position, load_snapshot_image,
+    StoreObjectError,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -28,6 +30,10 @@ pub enum StoreReclaimError {
     IncompleteListing { listing: &'static str },
     #[error("no authorized complete Store snapshot is available for reclamation")]
     NoSnapshot,
+    #[error("snapshot authorization history is invalid: {0}")]
+    Authorization(String),
+    #[error("Store reclamation proof uses the wrong write policy: {0}")]
+    PolicyMismatch(String),
     #[error("active member {member:?} has no Store device registration history")]
     MissingRegisteredDevice { member: String },
     #[error(
@@ -71,17 +77,51 @@ pub enum StoreReclaimError {
     },
 }
 
+#[derive(Clone, Copy)]
+pub enum ReclaimMembership<'a> {
+    MergeConcurrent {
+        membership: &'a MembershipChain,
+        listing_proof: super::pull::MembershipListingProof,
+    },
+    Serial(&'a SerialMembershipState),
+}
+
+impl ReclaimMembership<'_> {
+    fn write_policy(self) -> crate::WritePolicy {
+        match self {
+            Self::MergeConcurrent { .. } => crate::WritePolicy::MergeConcurrent,
+            Self::Serial(_) => crate::WritePolicy::Serial,
+        }
+    }
+
+    fn is_owner(self, pubkey: &str) -> bool {
+        match self {
+            Self::MergeConcurrent { membership, .. } => membership.is_owner_now(pubkey),
+            Self::Serial(membership) => membership.is_owner(pubkey),
+        }
+    }
+
+    fn current_members(self) -> Vec<(String, MemberRole)> {
+        match self {
+            Self::MergeConcurrent { membership, .. } => membership.current_members(),
+            Self::Serial(membership) => membership.current_members(),
+        }
+    }
+}
+
 pub async fn reclaim_store_packages(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
-    membership: &MembershipChain,
-    membership_proof: super::pull::MembershipListingProof,
+    membership: ReclaimMembership<'_>,
 ) -> Result<StoreReclaimResult, StoreReclaimError> {
-    if !membership_proof.is_complete() {
-        return Err(StoreReclaimError::IncompleteListing {
-            listing: "membership",
-        });
+    if let ReclaimMembership::MergeConcurrent { listing_proof, .. } = membership {
+        if !listing_proof.is_complete() {
+            return Err(StoreReclaimError::IncompleteListing {
+                listing: "membership",
+            });
+        }
     }
+    let write_policy = membership.write_policy();
     let metas = list_snapshot_metas(storage, store_root_hash).await?;
     require_complete(metas.coverage, "snapshot metadata")?;
     if metas
@@ -93,7 +133,14 @@ pub async fn reclaim_store_packages(
             listing: "snapshot metadata",
         });
     }
-    let snapshot = choose_snapshot(storage, membership, metas.metas).await?;
+    let snapshot = choose_snapshot(
+        storage,
+        store_root_hash,
+        write_policy,
+        membership,
+        metas.metas,
+    )
+    .await?;
 
     let registration_listing = list_latest_registration_chains(storage, store_root_hash).await?;
     require_complete(registration_listing.coverage, "device registration")?;
@@ -111,6 +158,7 @@ pub async fn reclaim_store_packages(
     require_registered_device_acks(
         storage,
         store_root_hash,
+        write_policy,
         membership,
         &snapshot,
         &registration_listing.latest_by_device,
@@ -118,7 +166,8 @@ pub async fn reclaim_store_packages(
     )
     .await?;
 
-    let package_listing = list_store_packages(storage, store_root_hash).await?;
+    let package_listing =
+        list_reclaimable_store_packages(storage, store_root_hash, &snapshot.coverage).await?;
     require_complete(package_listing.coverage, "package")?;
     if package_listing.packages.iter().any(|package| {
         package.package.coverage != ListingCoverage::CompleteAtScan
@@ -132,12 +181,25 @@ pub async fn reclaim_store_packages(
     let mut packages_deleted = 0_u64;
     let mut physical_copies_deleted = 0_u64;
     for package in package_listing.packages {
-        let Some(snapshot_position) = snapshot.coverage.get(&package.device_id) else {
+        let snapshot_position = match &snapshot.coverage {
+            CommitFrontier::MergeConcurrent(coverage) => coverage.get(&package.device_id),
+            CommitFrontier::Serial(position) if package.device_id == SERIAL_STREAM_ID => {
+                position.as_ref()
+            }
+            CommitFrontier::Serial(_) => {
+                return Err(StoreReclaimError::PolicyMismatch(format!(
+                    "Serial package is in non-serial stream {:?}",
+                    package.device_id
+                )));
+            }
+        };
+        let Some(snapshot_position) = snapshot_position else {
             continue;
         };
         if !position_covers(
             storage,
             store_root_hash,
+            write_policy,
             &package.device_id,
             snapshot_position,
             &package.commit_position,
@@ -179,12 +241,34 @@ fn require_complete(
 
 async fn choose_snapshot(
     storage: &dyn SyncStorage,
-    membership: &MembershipChain,
+    store_root_hash: ObjectHash,
+    write_policy: crate::WritePolicy,
+    membership: ReclaimMembership<'_>,
     metas: Vec<super::store_objects::VerifiedCopies<SnapshotMeta>>,
 ) -> Result<SnapshotMeta, StoreReclaimError> {
     let mut authorized = Vec::new();
     for meta in metas {
-        if !membership.is_owner_now(&meta.value.author_pubkey) {
+        if meta.value.coverage.policy() != write_policy {
+            return Err(StoreReclaimError::PolicyMismatch(format!(
+                "snapshot coverage uses {:?}, Store uses {write_policy:?}",
+                meta.value.coverage.policy()
+            )));
+        }
+        let author_is_owner = match &meta.value.coverage {
+            CommitFrontier::MergeConcurrent(_) => membership.is_owner(&meta.value.author_pubkey),
+            CommitFrontier::Serial(position) => {
+                super::store_pull::load_serial_authorization_at_position(
+                    storage,
+                    store_root_hash,
+                    position.clone(),
+                )
+                .await
+                .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?
+                .membership
+                .is_owner(&meta.value.author_pubkey)
+            }
+        };
+        if !author_is_owner {
             continue;
         }
         let Some(image) =
@@ -212,7 +296,8 @@ async fn choose_snapshot(
 async fn require_registered_device_acks(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
-    membership: &MembershipChain,
+    write_policy: crate::WritePolicy,
+    membership: ReclaimMembership<'_>,
     snapshot: &SnapshotMeta,
     registrations: &BTreeMap<
         String,
@@ -257,27 +342,75 @@ async fn require_registered_device_acks(
                 ack_author: ack.value.author_pubkey.clone(),
             });
         }
-        for (device_id, snapshot_position) in &snapshot.coverage {
-            let covered = match ack.value.frontier.get(device_id) {
-                Some(ack_position) => {
-                    position_covers(
-                        storage,
-                        store_root_hash,
-                        device_id,
-                        ack_position,
-                        snapshot_position,
-                    )
-                    .await?
+        if ack.value.frontier.policy() != write_policy {
+            return Err(StoreReclaimError::PolicyMismatch(format!(
+                "acknowledgement for {:?} uses {:?}, Store uses {write_policy:?}",
+                ack.value.device_id,
+                ack.value.frontier.policy()
+            )));
+        }
+        match (&snapshot.coverage, &ack.value.frontier) {
+            (
+                CommitFrontier::MergeConcurrent(snapshot_coverage),
+                CommitFrontier::MergeConcurrent(ack_frontier),
+            ) => {
+                for (device_id, snapshot_position) in snapshot_coverage {
+                    let covered = match ack_frontier.get(device_id) {
+                        Some(ack_position) => {
+                            position_covers(
+                                storage,
+                                store_root_hash,
+                                write_policy,
+                                device_id,
+                                ack_position,
+                                snapshot_position,
+                            )
+                            .await?
+                        }
+                        None => false,
+                    };
+                    if !covered {
+                        return Err(StoreReclaimError::StaleAcknowledgement {
+                            member: member.clone(),
+                            ack_device_id: ack.value.device_id.clone(),
+                            device_id: device_id.clone(),
+                            position: snapshot_position.clone(),
+                        });
+                    }
                 }
-                None => false,
-            };
-            if !covered {
-                return Err(StoreReclaimError::StaleAcknowledgement {
-                    member: member.clone(),
-                    ack_device_id: ack.value.device_id.clone(),
-                    device_id: device_id.clone(),
-                    position: snapshot_position.clone(),
-                });
+            }
+            (
+                CommitFrontier::Serial(Some(snapshot_position)),
+                CommitFrontier::Serial(ack_position),
+            ) => {
+                let covered = match ack_position {
+                    Some(ack_position) => {
+                        position_covers(
+                            storage,
+                            store_root_hash,
+                            write_policy,
+                            SERIAL_STREAM_ID,
+                            ack_position,
+                            snapshot_position,
+                        )
+                        .await?
+                    }
+                    None => false,
+                };
+                if !covered {
+                    return Err(StoreReclaimError::StaleAcknowledgement {
+                        member,
+                        ack_device_id: ack.value.device_id.clone(),
+                        device_id: SERIAL_STREAM_ID.to_string(),
+                        position: snapshot_position.clone(),
+                    });
+                }
+            }
+            (CommitFrontier::Serial(None), CommitFrontier::Serial(_)) => {}
+            _ => {
+                return Err(StoreReclaimError::PolicyMismatch(
+                    "snapshot and acknowledgement frontiers use different policies".to_string(),
+                ));
             }
         }
     }
@@ -287,6 +420,7 @@ async fn require_registered_device_acks(
 async fn position_covers(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
+    write_policy: crate::WritePolicy,
     device_id: &str,
     covering: &CommitPosition,
     covered: &CommitPosition,
@@ -297,13 +431,32 @@ async fn position_covers(
     let mut seq = covering.seq;
     let mut expected = covering.commit_hash;
     while seq > covered.seq {
-        let commit = load_commit_slot(storage, store_root_hash, device_id, seq)
-            .await?
-            .ok_or_else(|| StoreReclaimError::MissingAncestry {
-                device_id: device_id.to_string(),
-                position: covering.clone(),
-                missing_seq: seq,
-            })?;
+        let commit = match write_policy {
+            crate::WritePolicy::MergeConcurrent => {
+                load_commit_slot(storage, store_root_hash, device_id, seq).await?
+            }
+            crate::WritePolicy::Serial if device_id == SERIAL_STREAM_ID => {
+                load_serial_commit_at_position(
+                    storage,
+                    store_root_hash,
+                    &CommitPosition {
+                        seq,
+                        commit_hash: expected,
+                    },
+                )
+                .await?
+            }
+            crate::WritePolicy::Serial => {
+                return Err(StoreReclaimError::PolicyMismatch(format!(
+                    "Serial ancestry requested for non-serial stream {device_id:?}"
+                )));
+            }
+        }
+        .ok_or_else(|| StoreReclaimError::MissingAncestry {
+            device_id: device_id.to_string(),
+            position: covering.clone(),
+            missing_seq: seq,
+        })?;
         require_complete(commit.coverage, "commit ancestry")?;
         let actual = commit.value.commit_hash();
         if actual != expected {
@@ -316,7 +469,7 @@ async fn position_covers(
         }
         expected = commit
             .value
-            .previous_commit_hash
+            .previous_commit_hash()
             .expect("verified commit above covered sequence has a predecessor");
         seq -= 1;
     }
@@ -335,13 +488,16 @@ mod tests {
     use crate::sync::membership::{founder_entry, MemberRole};
     use crate::sync::store_commit::{
         ack_copy_key, ack_semantic_prefix, registration_semantic_prefix, StoreAck,
-        StoreDeviceRegistration, StoreDeviceRegistrationState,
+        StoreBatchCommit, StoreDeviceRegistration, StoreDeviceRegistrationState,
     };
     use crate::sync::store_objects::{append_and_verify, load_commit_slot, load_package};
-    use crate::sync::store_outbound::{drain_store_writes, prepare_pending_store_write};
+    use crate::sync::store_outbound::{
+        drain_store_writes, drain_store_writes_with_coordination, prepare_pending_store_write,
+        prepare_pending_store_write_with_coordination,
+    };
     use crate::sync::test_helpers::{
-        bootstrap_chain, host_exec, open_test_db, pubkey_hex, publish_test_store_protocol_root,
-        temp_store_dir,
+        bootstrap_chain, host_exec, open_serial_test_db, open_test_db, pubkey_hex,
+        publish_test_serial_store_protocol_root, publish_test_store_protocol_root, temp_store_dir,
     };
 
     struct ReclaimSetup {
@@ -425,7 +581,7 @@ mod tests {
                 host_blobs: Vec::new(),
                 publish_blobs: Vec::new(),
             },
-            coverage.clone(),
+            CommitFrontier::MergeConcurrent(coverage.clone()),
             1,
             &owner,
             "2026-01-01T00:00:00Z".to_string(),
@@ -520,7 +676,7 @@ mod tests {
             device_id.to_string(),
             revision,
             previous,
-            frontier,
+            crate::CommitFrontier::MergeConcurrent(frontier),
             stamp.to_string(),
             signer,
         )
@@ -543,6 +699,23 @@ mod tests {
             .into_iter()
             .filter(|key| key.starts_with("store-v1/packages/dev-owner/1/"))
             .count()
+    }
+
+    async fn reclaim_store_packages(
+        storage: &dyn SyncStorage,
+        store_root_hash: ObjectHash,
+        membership: &MembershipChain,
+        membership_proof: super::super::pull::MembershipListingProof,
+    ) -> Result<StoreReclaimResult, StoreReclaimError> {
+        super::reclaim_store_packages(
+            storage,
+            store_root_hash,
+            ReclaimMembership::MergeConcurrent {
+                membership,
+                listing_proof: membership_proof,
+            },
+        )
+        .await
     }
 
     #[tokio::test]
@@ -805,6 +978,341 @@ mod tests {
             .is_err());
             assert_eq!(package_count(&setup), 1, "case {case}");
         }
+    }
+
+    #[tokio::test]
+    async fn serial_reclamation_proves_each_device_ack_on_the_global_commit_chain() {
+        let home = InMemoryCloudHome::new();
+        let owner = UserKeypair::generate();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "serial-reclaim-store",
+            owner.clone(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("serial-reclaim")))
+        .with_test_serial_coordination(Arc::new(home.clone()));
+        let db = open_serial_test_db();
+        let store_root_hash = publish_test_serial_store_protocol_root(
+            &db,
+            &storage,
+            "serial-reclaim-store",
+            "serial-owner-device",
+            &owner,
+        )
+        .await;
+        host_exec(
+            &db,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('serial-reclaim-1', 'one', NULL, 1, '0000000001000-0000-owner', '2026-01-01')",
+        )
+        .await;
+        host_exec(
+            &db,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('serial-reclaim-2', 'two', NULL, 1, '0000000001001-0000-owner', '2026-01-01')",
+        )
+        .await;
+        let (_temp, store_dir) = temp_store_dir();
+        assert!(prepare_pending_store_write_with_coordination(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().unwrap()),
+            "serial-owner-device",
+            "2026-07-14T00:00:00Z",
+            &owner,
+            &store_dir,
+            None,
+            None,
+        )
+        .await
+        .unwrap());
+        assert_eq!(
+            drain_store_writes_with_coordination(
+                &db,
+                &storage,
+                Some(storage.serial_coordination().unwrap()),
+            )
+            .await
+            .unwrap(),
+            2
+        );
+        let first = CommitPosition {
+            seq: 1,
+            commit_hash: db
+                .exact_materialized_hash(SERIAL_STREAM_ID, 1)
+                .await
+                .unwrap()
+                .unwrap(),
+        };
+        let second = CommitPosition {
+            seq: 2,
+            commit_hash: db
+                .exact_materialized_hash(SERIAL_STREAM_ID, 2)
+                .await
+                .unwrap()
+                .unwrap(),
+        };
+        let winner_package_key = load_serial_commit_at_position(&storage, store_root_hash, &first)
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .package
+            .object_key;
+        let loser_package = b"orphan loser package";
+        let loser = StoreBatchCommit::signed(
+            store_root_hash,
+            crate::WriteId::from_generated("serial-reclaim-orphan-loser".to_string()),
+            "orphan-loser".to_string(),
+            crate::StoreCommitOrder::Serial {
+                seq: 1,
+                previous_commit_hash: None,
+            },
+            None,
+            1,
+            loser_package,
+            &owner,
+        )
+        .unwrap();
+        append_and_verify(&storage, &loser.package.object_key, ".pkg", loser_package)
+            .await
+            .unwrap();
+        append_and_verify(
+            &storage,
+            &super::super::store_commit::commit_semantic_prefix(
+                SERIAL_STREAM_ID,
+                1,
+                loser.commit_hash(),
+            ),
+            ".json",
+            &loser.to_bytes(),
+        )
+        .await
+        .unwrap();
+        super::super::store_snapshot::push_store_snapshot(
+            &storage,
+            store_root_hash,
+            super::super::snapshot::CreatedSnapshot {
+                db_image: b"Serial reclaim snapshot".to_vec(),
+                host_blobs: Vec::new(),
+                publish_blobs: Vec::new(),
+            },
+            CommitFrontier::Serial(Some(first)),
+            1,
+            &owner,
+            "2026-07-14T00:00:01Z".to_string(),
+            None,
+            &db,
+        )
+        .await
+        .unwrap();
+        let registration = StoreDeviceRegistration::signed(
+            store_root_hash,
+            "serial-owner-device".to_string(),
+            1,
+            None,
+            StoreDeviceRegistrationState::Active,
+            &owner,
+        )
+        .unwrap();
+        append_and_verify(
+            &storage,
+            &registration_semantic_prefix(
+                "serial-owner-device",
+                1,
+                registration.registration_hash(),
+            ),
+            ".json",
+            &registration.to_bytes(),
+        )
+        .await
+        .unwrap();
+        let ack = StoreAck::signed(
+            store_root_hash,
+            "serial-owner-device".to_string(),
+            1,
+            None,
+            CommitFrontier::Serial(Some(second)),
+            "2026-07-14T00:00:02Z".to_string(),
+            &owner,
+        )
+        .unwrap();
+        append_and_verify(
+            &storage,
+            &ack_semantic_prefix("serial-owner-device", 1, ack.ack_hash()),
+            ".json",
+            &ack.to_bytes(),
+        )
+        .await
+        .unwrap();
+
+        let serial_membership = db
+            .serial_membership_state()
+            .await
+            .unwrap()
+            .expect("Serial founder membership");
+        let reclaimed = super::reclaim_store_packages(
+            &storage,
+            store_root_hash,
+            ReclaimMembership::Serial(&serial_membership),
+        )
+        .await
+        .expect("prove Serial acknowledgement ancestry and reclaim covered package");
+        assert_eq!(reclaimed.packages_deleted, 1);
+        assert_eq!(
+            home.appended_keys()
+                .iter()
+                .filter(|key| key.starts_with("store-v1/packages/serial/1/"))
+                .count(),
+            1
+        );
+        assert!(!home
+            .appended_keys()
+            .iter()
+            .any(|key| key.starts_with(&winner_package_key)));
+        assert_eq!(
+            home.appended_keys()
+                .iter()
+                .filter(|key| key.starts_with("store-v1/packages/serial/2/"))
+                .count(),
+            1
+        );
+        assert!(home
+            .appended_keys()
+            .iter()
+            .any(|key| key.starts_with(&loser.package.object_key)));
+        assert!(!home
+            .appended_keys()
+            .iter()
+            .any(|key| key.starts_with("store-v1/membership/")));
+    }
+
+    #[tokio::test]
+    async fn serial_reclamation_authorizes_a_snapshot_at_its_coverage_position() {
+        let home = InMemoryCloudHome::new();
+        let founder = UserKeypair::generate();
+        let later_owner = UserKeypair::generate();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "serial-reclaim-coverage-auth",
+            founder.clone(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
+            "serial-reclaim-coverage-auth",
+        )))
+        .with_test_serial_coordination(Arc::new(home));
+        let db = open_serial_test_db();
+        let root = publish_test_serial_store_protocol_root(
+            &db,
+            &storage,
+            "serial-reclaim-coverage-auth",
+            "founder-device",
+            &founder,
+        )
+        .await;
+        let coordination = storage.serial_coordination().unwrap();
+        let initial =
+            super::super::store_outbound::current_serial_authorization(&db, &storage, coordination)
+                .await
+                .unwrap();
+        let add_follower = initial
+            .membership
+            .signed_set_member(
+                &founder,
+                pubkey_hex(&later_owner),
+                None,
+                MemberRole::Follower,
+                "0000000000002-0000-founder".to_string(),
+            )
+            .unwrap();
+        let first = super::super::store_outbound::prepare_serial_control(
+            &db,
+            &storage,
+            coordination,
+            "founder-device",
+            super::super::store_commit::StoreControl::SerialMembership {
+                entry: add_follower,
+            },
+            &founder,
+        )
+        .await
+        .unwrap();
+        super::super::store_outbound::activate_serial_control(&db, &storage, coordination, &first)
+            .await
+            .unwrap();
+        let coverage = first.commit.position();
+        let after_first =
+            super::super::store_outbound::current_serial_authorization(&db, &storage, coordination)
+                .await
+                .unwrap();
+        let promote = after_first
+            .membership
+            .signed_set_member(
+                &founder,
+                pubkey_hex(&later_owner),
+                None,
+                MemberRole::Owner,
+                "0000000000003-0000-founder".to_string(),
+            )
+            .unwrap();
+        let second = super::super::store_outbound::prepare_serial_control(
+            &db,
+            &storage,
+            coordination,
+            "founder-device",
+            super::super::store_commit::StoreControl::SerialMembership { entry: promote },
+            &founder,
+        )
+        .await
+        .unwrap();
+        super::super::store_outbound::activate_serial_control(&db, &storage, coordination, &second)
+            .await
+            .unwrap();
+
+        let image = b"snapshot signed by a later owner".to_vec();
+        let image_hash = ObjectHash::digest(&image);
+        let meta = SnapshotMeta::signed(
+            root,
+            image_hash,
+            CommitFrontier::Serial(Some(coverage)),
+            1,
+            "2026-07-14T00:00:00Z".to_string(),
+            &later_owner,
+        )
+        .unwrap();
+        append_and_verify(
+            &storage,
+            &super::super::store_commit::snapshot_image_semantic_prefix(
+                &pubkey_hex(&later_owner),
+                image_hash,
+            ),
+            ".db",
+            &image,
+        )
+        .await
+        .unwrap();
+        append_and_verify(
+            &storage,
+            &super::super::store_commit::snapshot_semantic_prefix(
+                &pubkey_hex(&later_owner),
+                meta.snapshot_hash(),
+            ),
+            ".json",
+            &meta.to_bytes(),
+        )
+        .await
+        .unwrap();
+        let current = db.serial_membership_state().await.unwrap().unwrap();
+
+        assert!(matches!(
+            super::reclaim_store_packages(&storage, root, ReclaimMembership::Serial(&current),)
+                .await,
+            Err(StoreReclaimError::NoSnapshot)
+        ));
     }
 
     #[tokio::test]

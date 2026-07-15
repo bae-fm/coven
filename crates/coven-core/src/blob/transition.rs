@@ -522,6 +522,7 @@ pub(crate) enum MakeRemoteCompletion {
 pub(crate) fn commit_make_remote_flip(
     conn: &Connection,
     tables: &[SyncedTable],
+    write_policy: crate::WritePolicy,
     write_id: crate::WriteId,
     root_table: &str,
     gate_column: &str,
@@ -530,7 +531,7 @@ pub(crate) fn commit_make_remote_flip(
     user_blob_ids: &[String],
     completion: MakeRemoteCompletion,
 ) -> Result<(), DbError> {
-    Database::run_internal_store_write_transaction_on(conn, tables, write_id, |tx| {
+    Database::run_internal_store_write_transaction_on(conn, tables, write_policy, write_id, |tx| {
         crate::sync::gate::write_gate(tx, root_table, gate_column, true, stamp, root_id)
             .map_err(DbError::from)?;
         for id in user_blob_ids {
@@ -610,6 +611,7 @@ pub async fn make_local(
     cancel: &watch::Receiver<bool>,
 ) -> Result<(), MakeLocalError> {
     let tables = db.synced_tables().to_vec();
+    let write_policy = db.write_policy();
     if is_remote_root(&tables, root_table) {
         return Err(MakeLocalError::RemoteRoot(root_table.to_string()));
     }
@@ -739,33 +741,39 @@ pub async fn make_local(
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
     db.call(move |conn| {
-        Database::run_internal_store_write_transaction_on(conn, &tables, write_id, |tx| {
-            crate::sync::gate::write_gate(
-                tx,
-                &root_table_owned,
-                &gate_col,
-                false,
-                &stamp,
-                &root_id_owned,
-            )
-            .map_err(DbError::from)?;
-            for (id, namespace, external_path, size, cloud_key) in &commit {
-                // A user-provided blob now lives at the user's path — register the
-                // external ref. A host-provided blob lives in the local store, tracked by
-                // file presence, so it registers no ref.
-                if let Some(path) = external_path {
-                    Database::register_external_blob_on(
-                        tx,
-                        id,
-                        namespace,
-                        std::path::Path::new(path),
-                        *size,
-                    )?;
+        Database::run_internal_store_write_transaction_on(
+            conn,
+            &tables,
+            write_policy,
+            write_id,
+            |tx| {
+                crate::sync::gate::write_gate(
+                    tx,
+                    &root_table_owned,
+                    &gate_col,
+                    false,
+                    &stamp,
+                    &root_id_owned,
+                )
+                .map_err(DbError::from)?;
+                for (id, namespace, external_path, size, cloud_key) in &commit {
+                    // A user-provided blob now lives at the user's path — register the
+                    // external ref. A host-provided blob lives in the local store, tracked by
+                    // file presence, so it registers no ref.
+                    if let Some(path) = external_path {
+                        Database::register_external_blob_on(
+                            tx,
+                            id,
+                            namespace,
+                            std::path::Path::new(path),
+                            *size,
+                        )?;
+                    }
+                    Database::enqueue_delete_on(tx, cloud_key, &stamp)?;
                 }
-                Database::enqueue_delete_on(tx, cloud_key, &stamp)?;
-            }
-            Ok(())
-        })
+                Ok(())
+            },
+        )
     })
     .await?;
 

@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
 use crate::id_provider::SequentialIdProvider;
-use crate::join_code::{encode, InviteCode, JoinCodeError};
+use crate::join_code::{encode, InviteCode, JoinCodeError, MembershipFloor};
 use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
@@ -28,6 +28,7 @@ use crate::sync::snapshot::{bootstrap_from_snapshot, create_snapshot};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::run_test_cycle;
 use crate::sync::test_helpers::*;
+use async_trait::async_trait;
 
 /// The synthetic test db opens with a single migration, so its
 /// [`Database::schema_version`] is 1. Changesets are stored at that version.
@@ -40,15 +41,257 @@ fn never_cancelled() -> tokio::sync::watch::Receiver<bool> {
     tokio::sync::watch::channel(false).1
 }
 
-fn membership_floor(author_pubkey: String) -> Vec<crate::sync::membership::MembershipCoord> {
-    vec![crate::sync::membership::MembershipCoord {
+struct GrantingCloudHome(crate::InMemoryCloudHome);
+
+#[async_trait]
+impl crate::storage::cloud::CloudHome for GrantingCloudHome {
+    async fn put_object(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Result<(), crate::storage::cloud::CloudHomeError> {
+        self.0.put_object(key, data).await
+    }
+
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        total_len: u64,
+    ) -> Result<crate::storage::cloud::BoxPartSink<'a>, crate::storage::cloud::CloudHomeError> {
+        self.0.open_multipart(key, total_len).await
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        self.0.multipart_threshold()
+    }
+
+    async fn read(&self, key: &str) -> Result<Vec<u8>, crate::storage::cloud::CloudHomeError> {
+        self.0.read(key).await
+    }
+
+    async fn read_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, crate::storage::cloud::CloudHomeError> {
+        self.0.read_range(key, start, end).await
+    }
+
+    async fn list(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, crate::storage::cloud::CloudHomeError> {
+        self.0.list(prefix).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), crate::storage::cloud::CloudHomeError> {
+        self.0.delete(key).await
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, crate::storage::cloud::CloudHomeError> {
+        self.0.exists(key).await
+    }
+
+    async fn set_access(
+        &self,
+        desired: crate::storage::cloud::CloudAccessState,
+    ) -> Result<crate::storage::cloud::CloudAccessOutcome, crate::storage::cloud::CloudHomeError>
+    {
+        match desired {
+            crate::storage::cloud::CloudAccessState::Present { .. } => Ok(
+                crate::storage::cloud::CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
+                    bucket: "test-bucket".to_string(),
+                    region: "us-east-1".to_string(),
+                    endpoint: None,
+                    access_key: "test-access-key".to_string(),
+                    secret_key: "test-secret-key".to_string(),
+                    key_prefix: None,
+                }),
+            ),
+            absent => self.0.set_access(absent).await,
+        }
+    }
+}
+
+fn membership_floor(author_pubkey: String) -> MembershipFloor {
+    MembershipFloor::MergeConcurrent(vec![crate::sync::membership::MembershipCoord {
         author_pubkey,
         author_owner_grant: crate::sync::membership::OwnerGrantId(
             crate::sync::store_commit::ObjectHash::digest(b"invite test owner grant"),
         ),
         seq: 1,
         entry_hash: crate::sync::store_commit::ObjectHash::digest(b"invite test founder entry"),
-    }]
+    }])
+}
+
+#[tokio::test]
+async fn serial_join_receives_the_exact_invite_floor() {
+    crate::keys::test_keyring::install();
+    let store_id = "serial-join-exact-floor";
+    let home = crate::InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let joiner = crate::keys::mint_pending_identity().expect("mint pending join identity");
+    let joiner_pubkey = crate::sync::test_helpers::pubkey_hex(&joiner);
+    let key = [0x57; 32];
+    let cipher = CloudCipher::Encrypted(EncryptionService::from_key(key));
+    let owner_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        cipher,
+        crate::sync::cloud_storage::BlobPathScheme::Hashed,
+        store_id,
+        owner.clone(),
+    )
+    .with_copy_ids(Arc::new(
+        crate::storage::cloud::SequentialCopyIdGenerator::new("serial-join-owner"),
+    ))
+    .with_test_serial_coordination(Arc::new(home.clone()));
+    let owner_db = crate::sync::test_helpers::open_serial_test_db();
+    let store_root_hash = crate::sync::test_helpers::publish_test_serial_store_protocol_root(
+        &owner_db,
+        &owner_storage,
+        store_id,
+        "owner-device",
+        &owner,
+    )
+    .await;
+    let provider = GrantingCloudHome(home.clone());
+    let invite = crate::sync::membership_ops::invite_member_with_coordination(
+        &owner_storage,
+        &provider,
+        &owner,
+        &Hlc::new("owner-device".to_string()),
+        &joiner_pubkey,
+        None,
+        crate::sync::membership::MemberRole::Member,
+        &EncryptionService::from_key(key),
+        store_id,
+        "Serial Join Store",
+        &owner_db,
+        Some(crate::sync::membership_ops::SerialMembershipContext {
+            coordination: owner_storage.serial_coordination().expect("coordination"),
+            device_id: "owner-device".to_string(),
+        }),
+    )
+    .await
+    .expect("mint Serial invite");
+    let floor = match &invite.membership_floor {
+        MembershipFloor::Serial(Some(position)) => position.clone(),
+        MembershipFloor::Serial(None) => panic!("Serial invite returned root floor"),
+        MembershipFloor::MergeConcurrent(_) => panic!("Serial invite returned causal floor"),
+    };
+    let winner = crate::sync::store_objects::load_serial_commit_at_position(
+        &owner_storage,
+        store_root_hash,
+        &floor,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .value;
+    let loser = crate::sync::store_commit::StoreBatchCommit::signed(
+        store_root_hash,
+        owner_db.new_write_id(),
+        "loser-device".to_string(),
+        crate::sync::store_commit::StoreCommitOrder::Serial {
+            seq: floor.seq,
+            previous_commit_hash: winner.previous_commit_hash(),
+        },
+        None,
+        owner_db.schema_version(),
+        &[],
+        &owner,
+    )
+    .unwrap();
+    crate::sync::store_objects::append_and_verify(
+        &owner_storage,
+        &loser.package.object_key,
+        ".pkg",
+        &[],
+    )
+    .await
+    .unwrap();
+    crate::sync::store_objects::append_and_verify(
+        &owner_storage,
+        &crate::sync::store_commit::commit_semantic_prefix(
+            crate::sync::store_commit::SERIAL_STREAM_ID,
+            floor.seq,
+            loser.commit_hash(),
+        ),
+        ".json",
+        &loser.to_bytes(),
+    )
+    .await
+    .unwrap();
+
+    let snapshot_dir = tempfile::tempdir().expect("snapshot directory");
+    let tables = test_synced_tables();
+    let tables_for_snapshot = tables.clone();
+    let snapshot_path = snapshot_dir.path().to_path_buf();
+    let snapshot = owner_db
+        .call(move |connection| {
+            create_snapshot(connection, &snapshot_path, &tables_for_snapshot)
+                .map_err(|error| DbError(error.to_string()))
+        })
+        .await
+        .expect("create Serial snapshot");
+    crate::sync::test_helpers::push_test_serial_store_snapshot(
+        &owner_storage,
+        store_root_hash,
+        snapshot,
+        Some(floor.clone()),
+        owner_db.schema_version(),
+        &owner,
+        &owner_db,
+    )
+    .await;
+
+    let app_dir = tempfile::tempdir().expect("join app directory");
+    let layout = crate::store_dir::StoreLayout::new(app_dir.path());
+    let custody = Arc::new(RecordingCustody::default());
+    let identity_custody = crate::identity_custody::IdentityCustody::Keyring
+        .resolve(store_id, &layout.store_dir(store_id));
+    let ids = SequentialIdProvider::new("serial-join-device");
+    let config = crate::sync::join::join_store_with_coordination(
+        &layout,
+        invite,
+        &joiner_pubkey,
+        &tables,
+        &test_migrations(),
+        custody,
+        identity_custody,
+        Arc::new(home.clone()),
+        Some((Arc::new(home.clone()), Arc::new(home))),
+        None,
+        &ids,
+        |_status| {},
+        &never_cancelled(),
+    )
+    .await
+    .expect("join Serial store");
+
+    let (joined, _stamper) = Database::open(
+        &config.store_dir.db_path(),
+        tables,
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::Serial,
+        config.device_id,
+        &test_migrations(),
+    )
+    .expect("open joined Serial database");
+    assert_eq!(
+        joined.latest_outbound_store_position().await.unwrap(),
+        Some(floor)
+    );
+    assert!(joined
+        .serial_membership_state()
+        .await
+        .unwrap()
+        .unwrap()
+        .current_members()
+        .iter()
+        .any(|(pubkey, _)| pubkey == &joiner_pubkey));
 }
 
 /// An invite code carrying an attacker-chosen `store_id` is the path-traversal
@@ -74,6 +317,7 @@ fn invite_code_with_store_id(store_id: &str) -> InviteCode {
             key_prefix: None,
         },
         owner_pubkey: hex::encode([0xAB_u8; 32]),
+        key_author_pubkey: hex::encode([0xAB_u8; 32]),
         store_root_hash: crate::sync::store_commit::ObjectHash::digest(
             b"invite test store protocol root",
         ),
@@ -107,6 +351,8 @@ async fn join_result_for(
         &crate::store_dir::StoreLayout::new(app_dir),
         &test_synced_tables(),
         &test_migrations(),
+        crate::WritePolicy::MergeConcurrent,
+        None,
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
         None,
@@ -117,6 +363,77 @@ async fn join_result_for(
         &never_cancelled(),
     )
     .await
+}
+
+#[tokio::test]
+async fn join_refuses_the_invite_policy_before_any_provider_or_local_write() {
+    let code = encode(&invite_code_with_store_id("join-policy-mismatch"));
+    let app = tempfile::tempdir().unwrap();
+    let result = join_from_invite_code(
+        &code,
+        "not-read-before-policy-check",
+        &crate::store_dir::StoreLayout::new(app.path()),
+        &test_synced_tables(),
+        &test_migrations(),
+        crate::WritePolicy::Serial,
+        None,
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        None,
+        None,
+        Arc::new(SystemClock),
+        Arc::new(SequentialIdProvider::new("device")),
+        |_| {},
+        &never_cancelled(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(BootstrapError::WritePolicyMismatch {
+            expected: crate::WritePolicy::Serial,
+            actual: crate::WritePolicy::MergeConcurrent,
+        })
+    ));
+    assert!(!app.path().join("stores/join-policy-mismatch").exists());
+}
+
+#[tokio::test]
+async fn join_refuses_a_known_unsupported_serial_provider_before_any_provider_or_local_write() {
+    let mut code = invite_code_with_store_id("join-serial-google-drive");
+    code.join_info = CloudHomeJoinInfo::GoogleDrive {
+        folder_id: "never-read".to_string(),
+    };
+    code.membership_floor =
+        MembershipFloor::Serial(Some(crate::sync::store_commit::CommitPosition {
+            seq: 1,
+            commit_hash: crate::sync::store_commit::ObjectHash::digest(b"Serial invite floor"),
+        }));
+    let app = tempfile::tempdir().unwrap();
+    let result = join_from_invite_code(
+        &encode(&code),
+        "not-read-before-provider-check",
+        &crate::store_dir::StoreLayout::new(app.path()),
+        &test_synced_tables(),
+        &test_migrations(),
+        crate::WritePolicy::Serial,
+        None,
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        None,
+        None,
+        Arc::new(SystemClock),
+        Arc::new(SequentialIdProvider::new("device")),
+        |_| {},
+        &never_cancelled(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(BootstrapError::SerialCoordinationUnavailable {
+            provider: crate::CloudProvider::GoogleDrive,
+        })
+    ));
+    assert!(!app.path().join("stores/join-serial-google-drive").exists());
 }
 
 /// Every traversal-shaped `store_id` is refused at the decode boundary: `decode`
@@ -338,6 +655,7 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
             folder_path: "/Apps/coven/oauth-cleanup-test".to_string(),
         },
         owner_pubkey: hex::encode([0xAB_u8; 32]),
+        key_author_pubkey: hex::encode([0xAB_u8; 32]),
         store_root_hash: crate::sync::store_commit::ObjectHash::digest(
             b"invite test store protocol root",
         ),
@@ -358,6 +676,8 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
         &crate::store_dir::StoreLayout::new(app_dir),
         &test_synced_tables(),
         &test_migrations(),
+        crate::WritePolicy::MergeConcurrent,
+        None,
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
         Some(oauth_tokens),
@@ -632,11 +952,12 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
             owner_pubkey: &owner_pk,
             keypair: &joiner_identity,
         },
-        &chain.author_heads(),
+        &MembershipFloor::MergeConcurrent(chain.author_heads()),
         &tables,
         &test_migrations(),
         &join_info,
         "Joined Store",
+        None,
         &store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
@@ -679,6 +1000,8 @@ async fn join_failure_calls_forget_on_the_selected_custody() {
         &crate::store_dir::StoreLayout::new(app_dir),
         &test_synced_tables(),
         &test_migrations(),
+        crate::WritePolicy::MergeConcurrent,
+        None,
         crate::custody::KeyCustody::Custom(custody.clone()),
         crate::identity_custody::IdentityCustody::Keyring,
         None,
@@ -761,7 +1084,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         "test-lib",
         storage.store_root_hash(),
         &founder_pubkey,
-        &[storage.protocol_founder_coord()],
+        &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         1,
         &lib_b.db_path(),
     )
@@ -775,8 +1098,9 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         "B",
         &founder_pubkey,
         None,
-        &[storage.protocol_founder_coord()],
+        &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         &storage,
+        None,
         boot,
         &lib_b,
         &never_cancelled(),
@@ -789,6 +1113,7 @@ async fn joined_device_first_cycle_does_not_clobber_the_shared_snapshot() {
         tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        coven_core::WritePolicy::MergeConcurrent,
         "B".to_string(),
         &test_migrations(),
     )
@@ -899,7 +1224,7 @@ async fn bootstrap_installs_snapshot_coverage_before_ordinary_pull() {
         "test-lib",
         storage.store_root_hash(),
         &founder_pubkey,
-        &[storage.protocol_founder_coord()],
+        &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         1,
         &lib_b.db_path(),
     )
@@ -913,8 +1238,9 @@ async fn bootstrap_installs_snapshot_coverage_before_ordinary_pull() {
         "B",
         &founder_pubkey,
         None,
-        &[storage.protocol_founder_coord()],
+        &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         &storage,
+        None,
         boot,
         &lib_b,
         &never_cancelled(),
@@ -928,6 +1254,7 @@ async fn bootstrap_installs_snapshot_coverage_before_ordinary_pull() {
         tables,
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        coven_core::WritePolicy::MergeConcurrent,
         "B".to_string(),
         &test_migrations(),
     )
@@ -1044,7 +1371,7 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
     .expect("parse invited member entry");
     assert_eq!(
         invite.membership_floor,
-        vec![invited_entry.coord()],
+        MembershipFloor::MergeConcurrent(vec![invited_entry.coord()]),
         "the invite's floor must reflect the post-removal, post-invite chain state",
     );
 
@@ -1165,7 +1492,11 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
     .await
     .expect("mint invite");
     assert_eq!(
-        invite.membership_floor[0].seq, 2,
+        match &invite.membership_floor {
+            MembershipFloor::MergeConcurrent(coords) => coords[0].seq,
+            MembershipFloor::Serial(_) => panic!("MergeConcurrent invite returned Serial floor"),
+        },
+        2,
         "floor lands at the invitee's Add"
     );
 
@@ -1237,6 +1568,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
         None,
         &invite.membership_floor,
         &storage,
+        None,
         boot,
         &lib_b,
         &never_cancelled(),
@@ -1336,7 +1668,7 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         "test-lib",
         storage.store_root_hash(),
         &founder_pubkey,
-        &[storage.protocol_founder_coord()],
+        &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         1,
         &lib_b.db_path(),
     )
@@ -1350,8 +1682,9 @@ async fn bootstrap_backfills_blob_files_for_snapshot_rows() {
         "B",
         &founder_pubkey,
         None,
-        &[storage.protocol_founder_coord()],
+        &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         &storage,
+        None,
         boot,
         &lib_b,
         &never_cancelled(),
@@ -1438,7 +1771,7 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
         "test-lib",
         storage.store_root_hash(),
         &founder_pubkey,
-        &[storage.protocol_founder_coord()],
+        &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         1,
         &lib_b.db_path(),
     )
@@ -1452,8 +1785,9 @@ async fn snapshot_blob_backfill_failure_aborts_bootstrap_pull() {
         "B",
         &founder_pubkey,
         None,
-        &[storage.protocol_founder_coord()],
+        &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         &storage,
+        None,
         boot,
         &lib_b,
         &never_cancelled(),
@@ -1542,7 +1876,7 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
         "test-lib",
         storage.store_root_hash(),
         &founder_pubkey,
-        &[storage.protocol_founder_coord()],
+        &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         1,
         &lib_b.db_path(),
     )
@@ -1556,8 +1890,9 @@ async fn open_db_and_pull_cancel_stops_before_downloading_snapshot_blob() {
         "B",
         &founder_pubkey,
         None,
-        &[storage.protocol_founder_coord()],
+        &MembershipFloor::MergeConcurrent(vec![storage.protocol_founder_coord()]),
         &storage,
+        None,
         boot,
         &lib_b,
         &cancel,
@@ -1755,11 +2090,12 @@ async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
             owner_pubkey: &f.owner_pk,
             keypair: &f.joiner_identity,
         },
-        &f.author_heads,
+        &MembershipFloor::MergeConcurrent(f.author_heads.clone()),
         &f.tables,
         &test_migrations(),
         &f.join_info,
         "Joined Store",
+        None,
         &f.store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
@@ -1774,6 +2110,7 @@ async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
         f.tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        coven_core::WritePolicy::MergeConcurrent,
         "device-b".to_string(),
         &test_migrations(),
     )
@@ -1863,11 +2200,12 @@ async fn bootstrap_establishes_the_joiners_identity_before_the_marker() {
             owner_pubkey: &f.owner_pk,
             keypair: &f.joiner_identity,
         },
-        &f.author_heads,
+        &MembershipFloor::MergeConcurrent(f.author_heads.clone()),
         &f.tables,
         &test_migrations(),
         &f.join_info,
         "Joined Store",
+        None,
         &f.store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
@@ -1934,11 +2272,12 @@ async fn bootstrap_failure_publishes_a_retired_registration_successor() {
             owner_pubkey: &f.owner_pk,
             keypair: &f.joiner_identity,
         },
-        &f.author_heads,
+        &MembershipFloor::MergeConcurrent(f.author_heads.clone()),
         &f.tables,
         &test_migrations(),
         &f.join_info,
         "Joined Store",
+        None,
         &f.store_keys,
         &FailPersistCustody,
         identity_custody.as_ref(),
@@ -2011,11 +2350,12 @@ async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
             owner_pubkey: &f.owner_pk,
             keypair: &f.joiner_identity,
         },
-        &f.author_heads,
+        &MembershipFloor::MergeConcurrent(f.author_heads.clone()),
         &f.tables,
         &test_migrations(),
         &f.join_info,
         "Joined Store",
+        None,
         &f.store_keys,
         &FailPersistCustody,
         identity_custody.as_ref(),
@@ -2039,6 +2379,7 @@ async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
         f.tables.clone(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        coven_core::WritePolicy::MergeConcurrent,
         "device-b".to_string(),
         &test_migrations(),
     )
@@ -2062,6 +2403,7 @@ async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
         &f.store_dir.db_path(),
         &f.tables,
         &test_migrations(),
+        coven_core::WritePolicy::MergeConcurrent,
         "device-b",
         &f.joiner_storage,
         &f.joiner_identity,

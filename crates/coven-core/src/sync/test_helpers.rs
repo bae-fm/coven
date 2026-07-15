@@ -27,8 +27,7 @@ use crate::sync::storage::{
 /// unwritable, so a test can drive a key adoption into its failure path and then
 /// clear the switch to prove the retry converges. Stores the serialized form
 /// (like the real `Keyring` preset), so `stored_key` reflects exactly what a
-/// caller wrote — a raw-hex seed from [`Self::set_initial_key`] stays raw hex
-/// until a real `persist` call re-serializes it to the keyring JSON format.
+/// caller wrote.
 #[derive(Default)]
 pub struct TestCustody {
     value: Mutex<Option<String>>,
@@ -37,7 +36,10 @@ pub struct TestCustody {
 
 impl TestCustody {
     pub fn set_initial_key(&self, key: [u8; 32]) {
-        *self.value.lock().unwrap() = Some(hex::encode(key));
+        *self.value.lock().unwrap() = Some(
+            MasterKeyring::from(crate::encryption::EncryptionService::from_key(key))
+                .to_serialized(),
+        );
     }
 
     pub fn stored_key(&self) -> Option<String> {
@@ -170,6 +172,7 @@ pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Da
         tables,
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         limits,
+        crate::WritePolicy::MergeConcurrent,
         "test-device".to_string(),
         &test_migrations(),
     )
@@ -331,6 +334,20 @@ pub fn open_test_db() -> Database {
     open_test_db_with(test_synced_tables())
 }
 
+pub fn open_serial_test_db() -> Database {
+    let (db, _stamper) = Database::open(
+        std::path::Path::new(":memory:"),
+        test_synced_tables(),
+        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::Serial,
+        "test-device".to_string(),
+        &test_migrations(),
+    )
+    .expect("open Serial test database");
+    db
+}
+
 /// Like [`open_test_db`] but with an explicit synced set and migration ladder, for
 /// tests that exercise a different schema (gate tests).
 pub fn open_test_db_schema(tables: Vec<SyncedTable>, migrations: Vec<Migration>) -> Database {
@@ -340,6 +357,7 @@ pub fn open_test_db_schema(tables: Vec<SyncedTable>, migrations: Vec<Migration>)
         tables,
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::MergeConcurrent,
         "test-device".to_string(),
         &migrations,
     )
@@ -370,6 +388,7 @@ pub fn open_test_db_with_hlc(
         test_synced_tables(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::MergeConcurrent,
         hlc,
         &migrations,
     )
@@ -389,10 +408,15 @@ pub async fn host_exec(db: &Database, sql: &str) {
     let sql = sql.to_string();
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
+    let write_policy = db.write_policy();
     db.call(move |conn| {
-        Database::run_internal_store_write_transaction_on(conn, &tables, write_id, |tx| {
-            tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from)
-        })
+        Database::run_internal_store_write_transaction_on(
+            conn,
+            &tables,
+            write_policy,
+            write_id,
+            |tx| tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from),
+        )
     })
     .await
     .unwrap_or_else(|e| panic!("exec failed: {e}"));
@@ -608,6 +632,7 @@ pub struct MockSyncStorage {
     blob_put_count: std::sync::atomic::AtomicUsize,
     blob_put_from_file_count: std::sync::atomic::AtomicUsize,
     blob_read_to_file_count: std::sync::atomic::AtomicUsize,
+    fail_blob_reads: std::sync::atomic::AtomicUsize,
     fail_blob_put_on: std::sync::atomic::AtomicUsize,
     fail_changeset_puts: std::sync::atomic::AtomicUsize,
     wrapped_key_put_count: std::sync::atomic::AtomicUsize,
@@ -679,6 +704,7 @@ impl MockSyncStorage {
             store_id.to_string(),
             founder,
             1,
+            crate::WritePolicy::MergeConcurrent,
             &keypair,
         )
         .expect("create test store protocol root");
@@ -712,6 +738,7 @@ impl MockSyncStorage {
             blob_put_count: std::sync::atomic::AtomicUsize::new(0),
             blob_put_from_file_count: std::sync::atomic::AtomicUsize::new(0),
             blob_read_to_file_count: std::sync::atomic::AtomicUsize::new(0),
+            fail_blob_reads: std::sync::atomic::AtomicUsize::new(0),
             fail_blob_put_on: std::sync::atomic::AtomicUsize::new(0),
             fail_changeset_puts: std::sync::atomic::AtomicUsize::new(0),
             wrapped_key_put_count: std::sync::atomic::AtomicUsize::new(0),
@@ -792,7 +819,7 @@ impl MockSyncStorage {
                 host_blobs: Vec::new(),
                 publish_blobs: Vec::new(),
             },
-            coverage,
+            crate::CommitFrontier::MergeConcurrent(coverage),
             schema_version,
             &self.keypair,
             "2026-02-10T00:00:00Z".to_string(),
@@ -1102,6 +1129,11 @@ impl MockSyncStorage {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub fn fail_next_blob_reads(&self, count: usize) {
+        self.fail_blob_reads
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn fail_next_changeset_puts(&self, count: usize) {
         self.fail_changeset_puts
             .store(count, std::sync::atomic::Ordering::SeqCst);
@@ -1172,7 +1204,13 @@ impl MockSyncStorage {
         changeset_bytes: &[u8],
         schema_version: u32,
     ) {
-        self.store_changeset_with_grant(device_id, seq, changeset_bytes, schema_version, None);
+        self.store_changeset_with_grant(
+            device_id,
+            seq,
+            changeset_bytes,
+            schema_version,
+            Some(self.protocol_founder_coord()),
+        );
     }
 
     pub fn store_changeset_with_grant(
@@ -1221,9 +1259,11 @@ impl MockSyncStorage {
             self.store_root_hash(),
             crate::WriteId::from_generated(format!("test-{device_id}-{seq}")),
             device_id.to_string(),
-            seq,
-            previous,
-            std::collections::BTreeMap::new(),
+            crate::sync::store_commit::StoreCommitOrder::MergeConcurrent {
+                seq,
+                previous_commit_hash: previous,
+                dependencies: std::collections::BTreeMap::new(),
+            },
             membership_grant,
             schema_version,
             changeset_bytes,
@@ -1558,6 +1598,19 @@ impl SyncStorage for MockSyncStorage {
     ) -> Result<(), StorageError> {
         self.blob_read_to_file_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .fail_blob_reads
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(StorageError::Storage(format!(
+                "forced blob download failure for {namespace}/{id}"
+            )));
+        }
         // Concurrency probe: when armed, record the peak in-flight count and gather on
         // the barrier so a fixed number of fetches must run at once to proceed. Clone
         // the Arc out of the lock first so the guard isn't held across the await.
@@ -1591,13 +1644,13 @@ impl SyncStorage for MockSyncStorage {
         // cached.
         let actual = crate::blob::content_hash(&bytes);
         if actual != expected_hash {
-            return Err(StorageError::Storage(format!(
+            return Err(StorageError::InvalidContent(format!(
                 "blob {namespace}/{id} content hash mismatch: expected {expected_hash}, got {actual}"
             )));
         }
         crate::local_blob::write_atomic(dest, &bytes)
             .await
-            .map_err(StorageError::Storage)
+            .map_err(StorageError::LocalFilesystem)
     }
 
     fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme {
@@ -1805,6 +1858,7 @@ pub async fn publish_test_store_protocol_root(
         store_id.to_string(),
         founder_entry,
         1,
+        crate::WritePolicy::MergeConcurrent,
         founder,
     )
     .expect("sign test Store protocol root");
@@ -1829,6 +1883,58 @@ pub async fn publish_test_store_protocol_root(
     hash
 }
 
+pub async fn publish_test_serial_store_protocol_root(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    store_id: &str,
+    device_id: &str,
+    founder: &UserKeypair,
+) -> crate::sync::store_commit::ObjectHash {
+    let founder_entry = crate::sync::membership::founder_entry(
+        store_id,
+        founder,
+        "0000000000001-0000-test-serial-store-protocol-root",
+    );
+    let store_protocol_root = crate::sync::store_commit::StoreProtocolRoot::signed(
+        store_id.to_string(),
+        founder_entry,
+        1,
+        crate::WritePolicy::Serial,
+        founder,
+    )
+    .expect("sign test Serial Store protocol root");
+    let hash = store_protocol_root.object_hash();
+    crate::sync::store_objects::append_and_verify(
+        storage,
+        &crate::sync::store_commit::store_protocol_root_semantic_prefix(hash),
+        ".json",
+        &store_protocol_root.to_bytes(),
+    )
+    .await
+    .expect("append test Serial Store protocol root");
+    db.set_protocol_state(
+        crate::database::STORE_ROOT_HASH_STATE_KEY,
+        &hash.to_string(),
+    )
+    .await
+    .expect("pin test Serial Store protocol root");
+    db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
+        .await
+        .expect("bind test Serial Store device");
+    let authorization = crate::sync::membership::SerialAuthorizationState::from_founder(
+        hash,
+        &store_protocol_root.founder,
+    )
+    .expect("derive test Serial founder authorization");
+    db.install_serial_root_authorization(
+        store_protocol_root.founder.author_pubkey.clone(),
+        authorization,
+    )
+    .await
+    .expect("install test Serial founder authorization");
+    hash
+}
+
 /// Publish one Store protocol root and its byte-identical membership founder root.
 pub async fn publish_test_protocol_roots(
     storage: &dyn SyncStorage,
@@ -1844,6 +1950,7 @@ pub async fn publish_test_protocol_roots(
         store_id.to_string(),
         founder_entry.clone(),
         1,
+        crate::WritePolicy::MergeConcurrent,
         founder,
     )
     .expect("sign test Store protocol root");
@@ -1915,7 +2022,7 @@ pub async fn push_test_store_snapshot(
             host_blobs: Vec::new(),
             publish_blobs: Vec::new(),
         },
-        coverage,
+        crate::CommitFrontier::MergeConcurrent(coverage),
         schema_version,
         founder,
         "2026-02-10T00:00:00Z".to_string(),
@@ -1924,6 +2031,34 @@ pub async fn push_test_store_snapshot(
     )
     .await
     .expect("publish test Store snapshot")
+}
+
+pub async fn push_test_serial_store_snapshot(
+    storage: &dyn SyncStorage,
+    store_root_hash: crate::sync::store_commit::ObjectHash,
+    db_image: Vec<u8>,
+    coverage: Option<crate::sync::store_commit::CommitPosition>,
+    schema_version: u32,
+    founder: &UserKeypair,
+    db: &Database,
+) -> crate::sync::store_commit::SnapshotMeta {
+    crate::sync::store_snapshot::push_store_snapshot(
+        storage,
+        store_root_hash,
+        crate::sync::snapshot::CreatedSnapshot {
+            db_image,
+            host_blobs: Vec::new(),
+            publish_blobs: Vec::new(),
+        },
+        crate::CommitFrontier::Serial(coverage),
+        schema_version,
+        founder,
+        "2026-07-14T00:00:00Z".to_string(),
+        None,
+        db,
+    )
+    .await
+    .expect("publish test Serial Store snapshot")
 }
 
 /// Pull into `db` the way production does: `pull_changes` applies each incoming
@@ -1960,7 +2095,11 @@ pub async fn pull_into_result(
     let store_root_hash = storage.store_root_hash();
     let membership = crate::sync::pull::load_cycle_membership(storage, db)
         .await
-        .map_err(|error| crate::sync::store_pull::StorePullError::Membership(error.to_string()))?;
+        .map_err(|error| {
+            crate::sync::store_pull::StorePullError::Membership(
+                crate::sync::store_pull::StorePullMembershipError::Message(error.to_string()),
+            )
+        })?;
     let result = crate::sync::store_pull::pull_store_commits(
         db,
         db.synced_tables(),
@@ -2065,4 +2204,5 @@ pub async fn run_test_cycle(
         observer,
     )
     .await
+    .map_err(|error| error.to_string())
 }

@@ -110,7 +110,8 @@ macro_rules! coven_tables {
     status TEXT NOT NULL CHECK (json_valid(status)),
     affected_rows TEXT NOT NULL CHECK (json_valid(affected_rows)),
     changeset BLOB NOT NULL,
-    dependencies TEXT NOT NULL CHECK (json_valid(dependencies)),
+    inverse_changeset BLOB NOT NULL,
+    base TEXT NOT NULL CHECK (json_valid(base)),
     blob_facts TEXT NOT NULL CHECK (json_valid(blob_facts)),
     prepared TEXT CHECK (prepared IS NULL OR json_valid(prepared))
 "

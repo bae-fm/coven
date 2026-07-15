@@ -42,7 +42,153 @@
 use async_trait::async_trait;
 use std::path::Path;
 
-use crate::storage::cloud::{AppendedObject, ListingCoverage};
+use crate::storage::cloud::{AppendedObject, CloudHeadVersion, ListingCoverage};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionToken(CloudHeadVersion);
+
+impl VersionToken {
+    pub(crate) fn from_cloud(version: CloudHeadVersion) -> Self {
+        Self(version)
+    }
+
+    pub(crate) fn cloud(&self) -> &CloudHeadVersion {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionedObject {
+    pub bytes: Vec<u8>,
+    pub version: VersionToken,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CoordinationError {
+    #[error("serial coordination is unavailable: {0}")]
+    Unavailable(String),
+    #[error("coordination head not found: {0}")]
+    NotFound(String),
+    #[error("coordination storage failed: {0}")]
+    Storage(String),
+    #[error("coordination object could not be opened: {0}")]
+    Open(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CreateHeadError {
+    #[error("coordination head already exists")]
+    AlreadyExists,
+    #[error(transparent)]
+    Coordination(#[from] CoordinationError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReplaceHeadError {
+    #[error("coordination head version no longer matches")]
+    VersionMismatch,
+    #[error(transparent)]
+    Coordination(#[from] CoordinationError),
+}
+
+/// Mandatory compare-and-swap operations exposed only by eligible adapters.
+#[async_trait]
+pub trait CoordinationStorage: Send + Sync {
+    async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError>;
+
+    async fn create_head(
+        &self,
+        key: &str,
+        bytes: &[u8],
+    ) -> Result<VersionedObject, CreateHeadError>;
+
+    async fn replace_head(
+        &self,
+        key: &str,
+        expected: &VersionToken,
+        bytes: &[u8],
+    ) -> Result<VersionedObject, ReplaceHeadError>;
+
+    async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CoordinationProbeError {
+    #[error("serial coordination probe at {key:?} failed: {reason}")]
+    Failed { key: String, reason: String },
+    #[error("serial coordination probe cleanup failed; object remains at {key:?}: {reason}")]
+    Cleanup { key: String, reason: String },
+}
+
+/// Exercise the exact operations used by the serial head. The reserved key is
+/// caller-generated and must be fresh for this probe.
+pub async fn probe_serial_coordination(
+    first: &dyn CoordinationStorage,
+    second: &dyn CoordinationStorage,
+    key: String,
+) -> Result<(), CoordinationProbeError> {
+    async fn cleanup(
+        storage: &dyn CoordinationStorage,
+        key: &str,
+    ) -> Result<(), CoordinationProbeError> {
+        storage
+            .delete_probe_head(key)
+            .await
+            .map_err(|error| CoordinationProbeError::Cleanup {
+                key: key.to_string(),
+                reason: error.to_string(),
+            })
+    }
+
+    let exercise = async {
+        let (left, right) = tokio::join!(
+            first.create_head(&key, b"create-left"),
+            second.create_head(&key, b"create-right"),
+        );
+        let created = match (left, right) {
+            (Ok(winner), Err(CreateHeadError::AlreadyExists))
+            | (Err(CreateHeadError::AlreadyExists), Ok(winner)) => winner,
+            (left, right) => {
+                return Err(format!(
+                    "create race did not produce one winner and one precondition failure: left={left:?}, right={right:?}"
+                ));
+            }
+        };
+        let observed = first
+            .read_head(&key)
+            .await
+            .map_err(|error| format!("read after create: {error}"))?;
+        if observed != created {
+            return Err("authoritative read after create did not return winner bytes/version".into());
+        }
+
+        let (left, right) = tokio::join!(
+            first.replace_head(&key, &created.version, b"replace-left"),
+            second.replace_head(&key, &created.version, b"replace-right"),
+        );
+        let replaced = match (left, right) {
+            (Ok(winner), Err(ReplaceHeadError::VersionMismatch))
+            | (Err(ReplaceHeadError::VersionMismatch), Ok(winner)) => winner,
+            (left, right) => {
+                return Err(format!(
+                    "replace race did not produce one winner and one precondition failure: left={left:?}, right={right:?}"
+                ));
+            }
+        };
+        let observed = second
+            .read_head(&key)
+            .await
+            .map_err(|error| format!("read after replace: {error}"))?;
+        if observed != replaced {
+            return Err("authoritative read after replace did not return winner bytes/version".into());
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+
+    cleanup(first, &key).await?;
+    exercise.map_err(|reason| CoordinationProbeError::Failed { key, reason })
+}
 
 /// Runtime locator for one physical copy of a Store protocol object.
 ///
@@ -78,16 +224,22 @@ pub struct ProtocolObjectListing {
 }
 
 /// Error type for storage operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StorageError {
     #[error("storage operation failed: {0}")]
     Storage(String),
+    #[error("storage configuration is invalid: {0}")]
+    Configuration(String),
     #[error("storage object parse failed: {0}")]
     Parse(String),
     #[error("object not found: {0}")]
     NotFound(String),
     #[error("decryption failed: {0}")]
     Decryption(String),
+    #[error("remote blob content is invalid: {0}")]
+    InvalidContent(String),
+    #[error("local blob filesystem failed: {0}")]
+    LocalFilesystem(String),
     /// This device has not adopted a store-key rotation the cloud already
     /// committed; see [`crate::sync::cloud_storage::RotationPending`].
     #[error("{0}")]
@@ -98,12 +250,24 @@ impl From<crate::storage::cloud::CloudHomeError> for StorageError {
     fn from(e: crate::storage::cloud::CloudHomeError) -> Self {
         match e {
             crate::storage::cloud::CloudHomeError::NotFound(key) => StorageError::NotFound(key),
-            crate::storage::cloud::CloudHomeError::Configuration(msg)
-            | crate::storage::cloud::CloudHomeError::Transport(msg) => StorageError::Storage(msg),
+            crate::storage::cloud::CloudHomeError::Configuration(msg) => {
+                StorageError::Configuration(msg)
+            }
+            crate::storage::cloud::CloudHomeError::Transport(msg) => StorageError::Storage(msg),
             crate::storage::cloud::CloudHomeError::Io(io_err) => {
                 StorageError::Storage(format!("I/O error: {io_err}"))
             }
         }
+    }
+}
+
+impl StorageError {
+    pub fn is_transport(&self) -> bool {
+        matches!(self, Self::Storage(_))
+    }
+
+    pub(crate) fn definitely_uncommitted(&self) -> bool {
+        !self.is_transport()
     }
 }
 
@@ -126,24 +290,14 @@ pub trait SyncStorage: Send + Sync {
         semantic_prefix: &str,
         extension: &str,
         data: Vec<u8>,
-    ) -> Result<ProtocolObjectLocator, StorageError> {
-        let _ = (semantic_prefix, extension, data);
-        Err(StorageError::Storage(
-            "Store protocol append is not implemented by this storage".to_string(),
-        ))
-    }
+    ) -> Result<ProtocolObjectLocator, StorageError>;
 
     /// List all physical Store protocol copies under `prefix`, preserving
     /// duplicate provider ids.
     async fn list_protocol_objects(
         &self,
         prefix: &str,
-    ) -> Result<ProtocolObjectListing, StorageError> {
-        let _ = prefix;
-        Err(StorageError::Storage(
-            "Store protocol listing is not implemented by this storage".to_string(),
-        ))
-    }
+    ) -> Result<ProtocolObjectListing, StorageError>;
 
     /// Read and open one exact physical Store protocol copy using the signed
     /// semantic prefix as encryption AAD.
@@ -151,23 +305,13 @@ pub trait SyncStorage: Send + Sync {
         &self,
         object: &ProtocolObjectLocator,
         semantic_prefix: &str,
-    ) -> Result<Vec<u8>, StorageError> {
-        let _ = (object, semantic_prefix);
-        Err(StorageError::Storage(
-            "Store protocol locator read is not implemented by this storage".to_string(),
-        ))
-    }
+    ) -> Result<Vec<u8>, StorageError>;
 
     /// Delete one exact physical Store protocol copy.
     async fn delete_protocol_object(
         &self,
         object: &ProtocolObjectLocator,
-    ) -> Result<(), StorageError> {
-        let _ = object;
-        Err(StorageError::Storage(
-            "Store protocol locator delete is not implemented by this storage".to_string(),
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Upload a blob. Under the hashed (default) scheme it is keyed
     /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}` under this device's own

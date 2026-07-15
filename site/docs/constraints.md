@@ -40,7 +40,7 @@ so several controls a server-backed system offers do not exist:
 - **No instant, universal cutoff.** Removing a member cuts their cloud access
   where the provider allows it (an unshare on the consumer clouds), but on S3 a
   shared credential cannot be withdrawn from one holder alone, so
-  [`revoke_access`](/docs/storage#granting-and-revoking-access) reports it as
+  [setting access to absent](/docs/storage#granting-and-revoking-access) reports it as
   unrevocable and removal proceeds on the [key rotation](#revocation-withholds-new-secrets-it-cannot-un-send-old-ones)
   alone. Even where cloud access *is* cut, it does not un-see already-synced data.
 - **No per-row or per-field filtering between members.** Membership grants the
@@ -52,8 +52,8 @@ so several controls a server-backed system offers do not exist:
   [gate](/docs/local-data) that keeps some rows on one device is the owner's
   device holding its own rows back, not the store partitioning data across
   members.
-- **No tamper-proof access log.** coven signs an append-only
-  [membership chain](/docs/sharing#the-membership-entry), so who may *write* is
+- **No tamper-proof access log.** coven signs append-only
+  [membership state](/docs/sharing#membership-records), so who may *write* is
   recorded and forgery-evident. But a *read* is just a download of ciphertext from
   the provider; coven keeps no record of who fetched what, and there is no server
   to keep one.
@@ -81,24 +81,27 @@ a limit on confidentiality *within* a store: sharing a store is sharing all of
 it. When two sets of people should not see each other's data, that is two stores,
 not one store with internal walls.
 
-## Eventual consistency, not strong consistency
+## Consistency follows the write policy
 
-Devices converge; they are not consistent at every instant. Each device applies
-and [merges](/docs/merge) changes locally, with no coordinator and no global
-transaction. The consequences:
+Devices are not consistent at every instant. `MergeConcurrent` allows offline
+branches and [merges](/docs/merge) them locally. `Serial` gives published
+commits one global order through a conditional storage head, but a local replica
+may lag that head and stale offline work becomes an explicit branch conflict.
+Neither policy offers a transaction spanning devices. The consequences:
 
-- **Column-wise last-writer-wins.** Concurrent edits to different columns of one
+- **`MergeConcurrent` uses column-wise last-writer-wins.** Concurrent edits to different columns of one
   row both survive; concurrent edits to the *same* column resolve to the later
   writer, ordered by a [hybrid logical clock](/docs/merge#the-clock) rather than
   wall-clock time. The loser's value is overwritten, not queued for review.
-- **Delete-wins, and only after sync.** A delete beats a concurrent edit
+- **`MergeConcurrent` uses delete-wins, and only after sync.** A delete beats a concurrent edit
   ([`arbitrate_row_conflict`](rustdoc:fn:coven::sync::conflict::arbitrate_row_conflict)),
   but a delete only takes effect on a device once that device pulls it. Until
   then, the row is still live there.
 - **No cross-device transactions.** A transaction is atomic on the device that
-  writes it, but coven does not offer a transaction that spans devices. Two
-  devices can commit conflicting changes offline, and both commits are real until
-  they meet and merge.
+  writes it, but coven does not offer a transaction that spans devices. Under
+  `MergeConcurrent`, two offline commits meet and merge. Under `Serial`, only
+  one branch can advance a given global head; another remains local until the
+  host discards it or reruns its intent against the current state.
 - **No globally-enforced uniqueness or foreign keys.** SQLite enforces a
   `UNIQUE` or `CHECK` constraint within one device, but coven cannot enforce one
   across the store: two offline devices can each insert a row that is locally

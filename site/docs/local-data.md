@@ -73,7 +73,7 @@ remember it, and the first one that forgot would leak the row. Instead the
 host *gates* the table: privacy becomes a property of the schema, and coven
 enforces it everywhere a row can travel. The host declares the gate per table on
 the [`SyncedTable`](rustdoc:struct:coven::sync::session::SyncedTable) values
-it passes to `Coven::builder(config).synced_tables(...)`, and coven enforces
+it passes to `Coven::builder(config).write_policy(...).synced_tables(...)`, and coven enforces
 it on both paths a row can take to another device: the per-cycle changeset
 and the bootstrap snapshot.
 

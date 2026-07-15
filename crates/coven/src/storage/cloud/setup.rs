@@ -249,13 +249,8 @@ pub async fn sign_in_onedrive(
 
 /// Build a RestoreCode from config and custody, then encode it.
 ///
-/// `membership_floor` is the per-author membership-head floor at mint time
-/// ([`crate::sync::membership_ops::current_membership_floor`]) — the caller's
-/// responsibility to fetch, since this function itself never touches the
-/// network. The restorer seeds its watermark from it before its first sync
-/// cycle, so this must be the CURRENT chain state, not a stale or empty
-/// placeholder. Every initialized store, including a browsable one, has a
-/// committed founder floor.
+/// `membership_floor` is the exact policy-shaped membership state at mint
+/// time. The caller fetches it because this function never touches the network.
 pub fn generate_restore_code(
     config: &Config,
     key_service: &StoreKeys,
@@ -263,7 +258,7 @@ pub fn generate_restore_code(
     identity_custody: &dyn DeviceIdentityCustody,
     store_root_hash: crate::sync::store_commit::ObjectHash,
     founder_pubkey: String,
-    membership_floor: Vec<crate::sync::membership::MembershipCoord>,
+    membership_floor: crate::join_code::MembershipFloor,
 ) -> Result<String, SetupError> {
     use crate::storage::cloud::CloudHomeJoinInfo;
     use crate::sync::restore_code::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
@@ -412,6 +407,8 @@ pub enum StorageSetupError {
     Key(#[from] crate::keys::KeyError),
     #[error("no encryption key found for an encrypted cloud home")]
     NoEncryptionKey,
+    #[error("{provider:?} cannot coordinate a Serial Store with this configuration")]
+    SerialCoordinationUnavailable { provider: CloudProvider },
 }
 
 pub(crate) fn build_cloud_cipher(
@@ -446,14 +443,180 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
     cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
     let cloud_home =
-        super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops).await?;
-    create_sync_storage_with_home(
+        super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops.clone())
+            .await?;
+    let coordination = match config.cloud_home.provider.as_ref() {
+        Some(CloudProvider::S3) if serial_coordination_eligible(config) => {
+            s3_coordination(config, key_service).await?
+        }
+        Some(CloudProvider::CloudKit) if serial_coordination_eligible(config) => {
+            cloudkit_coordination(config, cloudkit_ops.clone())?
+        }
+        _ => None,
+    };
+    let storage = create_sync_storage_with_home(
         config,
         custody,
         identity_custody,
         Arc::from(cloud_home),
         cipher,
+    )?;
+    Ok(match coordination {
+        Some((primary, peer)) => storage.with_serial_coordination_clients(primary, peer),
+        None => storage,
+    })
+}
+
+pub(crate) type CoordinationClients = (
+    Arc<dyn crate::storage::cloud::CloudHeadStorage>,
+    Arc<dyn crate::storage::cloud::CloudHeadStorage>,
+);
+
+fn cloudkit_coordination(
+    config: &Config,
+    ops: Option<Arc<dyn super::cloudkit::CloudKitOps>>,
+) -> Result<Option<CoordinationClients>, StorageSetupError> {
+    if config.cloud_home.provider != Some(CloudProvider::CloudKit) {
+        return Ok(None);
+    }
+    let ops = ops.ok_or_else(|| {
+        super::CloudHomeError::Configuration("CloudKit driver not provided".to_string())
+    })?;
+    let (primary, peer) = match (
+        config.cloud_home.cloudkit_owner_name.as_ref(),
+        config.cloud_home.cloudkit_zone_name.as_ref(),
+    ) {
+        (None, None) => (
+            super::cloudkit::CloudKitCloudHome::new_private(ops.clone()),
+            super::cloudkit::CloudKitCloudHome::new_private(ops),
+        ),
+        (Some(owner), Some(zone)) => (
+            super::cloudkit::CloudKitCloudHome::new_shared(
+                ops.clone(),
+                owner.clone(),
+                zone.clone(),
+            ),
+            super::cloudkit::CloudKitCloudHome::new_shared(ops, owner.clone(), zone.clone()),
+        ),
+        _ => {
+            return Err(StorageSetupError::CloudHome(
+                super::CloudHomeError::Configuration(
+                    "CloudKit share config requires both cloudkit_owner_name and cloudkit_zone_name"
+                        .to_string(),
+                ),
+            ));
+        }
+    };
+    Ok(Some((Arc::new(primary), Arc::new(peer))))
+}
+
+async fn s3_coordination(
+    config: &Config,
+    key_service: &StoreKeys,
+) -> Result<Option<CoordinationClients>, StorageSetupError> {
+    if config.cloud_home.provider != Some(CloudProvider::S3) {
+        return Ok(None);
+    }
+    let bucket = config.cloud_home.s3_bucket.clone().ok_or_else(|| {
+        super::CloudHomeError::Configuration("S3 bucket not configured".to_string())
+    })?;
+    let region = config.cloud_home.s3_region.clone().ok_or_else(|| {
+        super::CloudHomeError::Configuration("S3 region not configured".to_string())
+    })?;
+    let credentials = key_service
+        .get_cloud_home_credentials()
+        .map_err(StorageSetupError::Key)?
+        .ok_or_else(|| {
+            super::CloudHomeError::Configuration("S3 credentials not in keyring".to_string())
+        })?;
+    let crate::keys::CloudHomeCredentials::S3 {
+        access_key,
+        secret_key,
+    } = credentials
+    else {
+        return Err(StorageSetupError::CloudHome(
+            super::CloudHomeError::Configuration(
+                "configured cloud credentials are not S3 credentials".to_string(),
+            ),
+        ));
+    };
+    let (primary, peer) = super::s3::S3CloudHome::new_pair(
+        bucket,
+        region,
+        config.cloud_home.s3_endpoint.clone(),
+        access_key,
+        secret_key,
+        config.cloud_home.s3_key_prefix.clone(),
     )
+    .await?;
+    Ok(Some((Arc::new(primary), Arc::new(peer))))
+}
+
+pub(crate) fn require_serial_coordination_config(
+    config: &Config,
+    write_policy: crate::WritePolicy,
+) -> Result<(), StorageSetupError> {
+    if write_policy != crate::WritePolicy::Serial || serial_coordination_eligible(config) {
+        return Ok(());
+    }
+    Err(StorageSetupError::SerialCoordinationUnavailable {
+        provider: config.cloud_home.provider.clone().ok_or_else(|| {
+            super::CloudHomeError::Configuration(
+                "Serial coordination requires a configured provider".to_string(),
+            )
+        })?,
+    })
+}
+
+pub(crate) fn require_serial_coordination_join_info(
+    join_info: &crate::storage::cloud::CloudHomeJoinInfo,
+    custom_s3_serial: Option<crate::config::CustomS3Serial>,
+    write_policy: crate::WritePolicy,
+) -> Result<(), CloudProvider> {
+    if write_policy != crate::WritePolicy::Serial {
+        return Ok(());
+    }
+    let supported = serial_coordination_supported(
+        &join_info.cloud_provider(),
+        matches!(
+            join_info,
+            crate::storage::cloud::CloudHomeJoinInfo::S3 {
+                endpoint: Some(_),
+                ..
+            }
+        ),
+        custom_s3_serial,
+    );
+    if supported {
+        Ok(())
+    } else {
+        Err(join_info.cloud_provider())
+    }
+}
+
+fn serial_coordination_eligible(config: &Config) -> bool {
+    config.cloud_home.provider.as_ref().is_some_and(|provider| {
+        serial_coordination_supported(
+            provider,
+            config.cloud_home.s3_endpoint.is_some(),
+            config.cloud_home.s3_serial,
+        )
+    })
+}
+
+fn serial_coordination_supported(
+    provider: &CloudProvider,
+    custom_s3_endpoint: bool,
+    custom_s3_serial: Option<crate::config::CustomS3Serial>,
+) -> bool {
+    match provider {
+        CloudProvider::CloudKit => true,
+        CloudProvider::S3 if !custom_s3_endpoint => true,
+        CloudProvider::S3 => {
+            custom_s3_serial == Some(crate::config::CustomS3Serial::ConditionalPutAndStrongReads)
+        }
+        CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive => false,
+    }
 }
 
 /// Create sync storage over an already-built [`CloudHome`](super::CloudHome).
@@ -536,6 +699,69 @@ mod tests {
         config
     }
 
+    #[test]
+    fn serial_coordination_provider_matrix_is_explicit() {
+        let mut config = Config::with_defaults(
+            "store-1".to_string(),
+            "device-1".to_string(),
+            StoreDir::new("unused-store-dir"),
+            "Provider matrix".to_string(),
+        );
+
+        config.cloud_home.provider = Some(CloudProvider::CloudKit);
+        assert!(serial_coordination_eligible(&config));
+
+        config.cloud_home.provider = Some(CloudProvider::S3);
+        config.cloud_home.s3_endpoint = None;
+        assert!(serial_coordination_eligible(&config));
+
+        config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
+        config.cloud_home.s3_serial = None;
+        assert!(!serial_coordination_eligible(&config));
+        config.cloud_home.s3_serial =
+            Some(crate::config::CustomS3Serial::ConditionalPutAndStrongReads);
+        assert!(serial_coordination_eligible(&config));
+
+        for provider in [
+            CloudProvider::GoogleDrive,
+            CloudProvider::Dropbox,
+            CloudProvider::OneDrive,
+        ] {
+            config.cloud_home.provider = Some(provider);
+            assert!(!serial_coordination_eligible(&config));
+        }
+    }
+
+    #[test]
+    fn serial_join_provider_matrix_requires_the_local_custom_s3_assertion() {
+        let custom_s3 = CloudHomeJoinInfo::S3 {
+            bucket: "bucket".to_string(),
+            region: "region".to_string(),
+            endpoint: Some("https://objects.example".to_string()),
+            access_key: "access".to_string(),
+            secret_key: "secret".to_string(),
+            key_prefix: None,
+        };
+        assert_eq!(
+            require_serial_coordination_join_info(&custom_s3, None, crate::WritePolicy::Serial,),
+            Err(CloudProvider::S3),
+        );
+        assert!(require_serial_coordination_join_info(
+            &custom_s3,
+            Some(crate::CustomS3Serial::ConditionalPutAndStrongReads),
+            crate::WritePolicy::Serial,
+        )
+        .is_ok());
+        assert!(require_serial_coordination_join_info(
+            &CloudHomeJoinInfo::GoogleDrive {
+                folder_id: "folder".to_string(),
+            },
+            None,
+            crate::WritePolicy::Serial,
+        )
+        .is_err());
+    }
+
     /// A device that joined via a CloudKit share has `cloudkit_owner_name` /
     /// `cloudkit_zone_name` set (`build_config`'s `CloudKitShare` arm).
     /// Restoring a share is illegitimate — decode already rejects
@@ -563,7 +789,9 @@ mod tests {
             identity_custody.as_ref(),
             crate::sync::store_commit::ObjectHash::digest(b"restore test store protocol root"),
             hex::encode([7u8; 32]),
-            membership_floor(hex::encode([7u8; 32])),
+            crate::join_code::MembershipFloor::MergeConcurrent(membership_floor(hex::encode(
+                [7u8; 32],
+            ))),
         )
         .expect_err("a share-joined CloudKit config must not generate a restore code");
         let message = err.to_string();
@@ -595,7 +823,9 @@ mod tests {
             identity_custody.as_ref(),
             crate::sync::store_commit::ObjectHash::digest(b"restore test store protocol root"),
             hex::encode([7u8; 32]),
-            membership_floor(hex::encode([7u8; 32])),
+            crate::join_code::MembershipFloor::MergeConcurrent(membership_floor(hex::encode(
+                [7u8; 32],
+            ))),
         )
         .expect("a private CloudKit config generates a restore code");
         let decoded = decode_restore_code(&code).expect("generated code decodes");
@@ -603,6 +833,36 @@ mod tests {
             matches!(decoded.provider, CloudHomeJoinInfo::CloudKit),
             "expected CloudKit provider, got {:?}",
             decoded.provider
+        );
+    }
+
+    #[test]
+    fn generate_restore_code_round_trips_an_empty_serial_store_floor() {
+        crate::keys::test_keyring::install();
+
+        let config = cloudkit_config(None);
+        let key_service = StoreKeys::new(config.store_id.clone());
+        let custody =
+            crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
+        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(
+            crate::keys::UserKeypair::generate(),
+        )
+        .resolve(&config.store_id, &config.store_dir);
+
+        let code = generate_restore_code(
+            &config,
+            &key_service,
+            custody.as_ref(),
+            identity_custody.as_ref(),
+            crate::sync::store_commit::ObjectHash::digest(b"empty Serial restore root"),
+            hex::encode([7u8; 32]),
+            crate::join_code::MembershipFloor::Serial(None),
+        )
+        .expect("mint empty Serial restore code");
+        let decoded = decode_restore_code(&code).expect("decode empty Serial restore code");
+        assert_eq!(
+            decoded.membership_floor,
+            crate::join_code::MembershipFloor::Serial(None)
         );
     }
 }

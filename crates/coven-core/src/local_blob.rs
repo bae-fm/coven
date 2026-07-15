@@ -19,13 +19,34 @@ pub struct PlaintextReader(Box<dyn PlaintextChunkReader>);
 
 impl PlaintextReader {
     pub async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
-        self.0.next_chunk(max).await
+        self.0
+            .next_chunk(max)
+            .await
+            .map_err(|error| error.to_string())
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PlaintextChunkError {
+    #[error(transparent)]
+    Remote(#[from] crate::sync::storage::StorageError),
+    #[error("invalid remote content: {0}")]
+    InvalidContent(String),
+    #[error("local plaintext source: {0}")]
+    Local(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum StreamWriteError {
+    #[error(transparent)]
+    Source(#[from] PlaintextChunkError),
+    #[error("local destination: {0}")]
+    Local(String),
 }
 
 #[async_trait]
 pub trait PlaintextChunkReader: Send {
-    async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String>;
+    async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, PlaintextChunkError>;
 }
 
 struct FilePlaintextReader {
@@ -35,16 +56,14 @@ struct FilePlaintextReader {
 
 #[async_trait]
 impl PlaintextChunkReader for FilePlaintextReader {
-    async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+    async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, PlaintextChunkError> {
         debug_assert!(max > 0, "next_chunk max must be positive");
         let mut buf = vec![0u8; max];
         let mut filled = 0;
         while filled < max {
-            let read = self
-                .file
-                .read(&mut buf[filled..])
-                .await
-                .map_err(|e| format!("read local blob {}: {e}", self.path.display()))?;
+            let read = self.file.read(&mut buf[filled..]).await.map_err(|e| {
+                PlaintextChunkError::Local(format!("read local blob {}: {e}", self.path.display()))
+            })?;
             if read == 0 {
                 break;
             }
@@ -128,36 +147,36 @@ pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
 pub async fn write_stream_atomic(
     path: &Path,
     source: &mut dyn PlaintextChunkReader,
-) -> Result<u64, String> {
+) -> Result<u64, StreamWriteError> {
     use tokio::io::AsyncWriteExt;
 
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("blob path has no parent dir: {}", path.display()))?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|e| format!("create parent dir for {}: {e}", path.display()))?;
+    let parent = path.parent().ok_or_else(|| {
+        StreamWriteError::Local(format!("blob path has no parent dir: {}", path.display()))
+    })?;
+    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+        StreamWriteError::Local(format!("create parent dir for {}: {e}", path.display()))
+    })?;
     let tmp = temp_sibling(parent);
 
     let write = async {
-        let mut file = tokio::fs::File::create(&tmp)
-            .await
-            .map_err(|e| format!("create temp blob {}: {e}", tmp.display()))?;
+        let mut file = tokio::fs::File::create(&tmp).await.map_err(|e| {
+            StreamWriteError::Local(format!("create temp blob {}: {e}", tmp.display()))
+        })?;
         let mut written = 0u64;
         loop {
             let chunk = source.next_chunk(1 << 20).await?;
             if chunk.is_empty() {
                 break;
             }
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| format!("write temp blob {}: {e}", tmp.display()))?;
+            file.write_all(&chunk).await.map_err(|e| {
+                StreamWriteError::Local(format!("write temp blob {}: {e}", tmp.display()))
+            })?;
             written += chunk.len() as u64;
         }
-        file.sync_all()
-            .await
-            .map_err(|e| format!("fsync temp blob {}: {e}", tmp.display()))?;
-        Ok::<u64, String>(written)
+        file.sync_all().await.map_err(|e| {
+            StreamWriteError::Local(format!("fsync temp blob {}: {e}", tmp.display()))
+        })?;
+        Ok::<u64, StreamWriteError>(written)
     }
     .await;
     let written = match write {
@@ -169,11 +188,11 @@ pub async fn write_stream_atomic(
     };
     if let Err(error) = tokio::fs::rename(&tmp, path).await {
         remove_failed_temp(&tmp, "streamed rename").await;
-        return Err(format!(
+        return Err(StreamWriteError::Local(format!(
             "rename temp blob {} -> {}: {error}",
             tmp.display(),
             path.display()
-        ));
+        )));
     }
     Ok(written)
 }
@@ -372,11 +391,11 @@ mod tests {
     use super::*;
 
     struct ChunkSource {
-        chunks: VecDeque<Result<Vec<u8>, String>>,
+        chunks: VecDeque<Result<Vec<u8>, PlaintextChunkError>>,
     }
 
     impl ChunkSource {
-        fn new(chunks: impl IntoIterator<Item = Result<Vec<u8>, String>>) -> Self {
+        fn new(chunks: impl IntoIterator<Item = Result<Vec<u8>, PlaintextChunkError>>) -> Self {
             Self {
                 chunks: chunks.into_iter().collect(),
             }
@@ -385,7 +404,7 @@ mod tests {
 
     #[async_trait]
     impl PlaintextChunkReader for ChunkSource {
-        async fn next_chunk(&mut self, _max: usize) -> Result<Vec<u8>, String> {
+        async fn next_chunk(&mut self, _max: usize) -> Result<Vec<u8>, PlaintextChunkError> {
             match self.chunks.pop_front() {
                 Some(chunk) => chunk,
                 None => Ok(Vec::new()),
@@ -504,14 +523,23 @@ mod tests {
         write_atomic(&path, b"committed")
             .await
             .expect("seed destination");
-        let mut source =
-            ChunkSource::new([Ok(b"partial".to_vec()), Err("source failed".to_string())]);
+        let mut source = ChunkSource::new([
+            Ok(b"partial".to_vec()),
+            Err(PlaintextChunkError::InvalidContent(
+                "source failed".to_string(),
+            )),
+        ]);
 
         let error = write_stream_atomic(&path, &mut source)
             .await
             .expect_err("source failure");
 
-        assert_eq!(error, "source failed");
+        assert_eq!(
+            error,
+            StreamWriteError::Source(PlaintextChunkError::InvalidContent(
+                "source failed".to_string(),
+            ))
+        );
         assert_eq!(read(&path).await.expect("read destination"), b"committed");
         assert!(temp_entries(tmp.path()).await.is_empty());
     }

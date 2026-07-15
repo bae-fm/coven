@@ -56,16 +56,66 @@ async fn run_drain(
 /// no synced tables (the upload drain doesn't need them). The upload queue lives
 /// in coven's `cloud_outbox` migration table, created by `Database::open`.
 fn open_outbox_db() -> Database {
+    open_outbox_db_with_policy(crate::WritePolicy::MergeConcurrent)
+}
+
+fn open_outbox_db_with_policy(policy: crate::WritePolicy) -> Database {
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         Vec::new(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        policy,
         "test-device".to_string(),
         &[],
     )
     .expect("open outbox database");
     db
+}
+
+#[tokio::test]
+async fn provider_upload_failure_remains_typed_for_both_write_policies() {
+    for policy in [
+        crate::WritePolicy::MergeConcurrent,
+        crate::WritePolicy::Serial,
+    ] {
+        let db = open_outbox_db_with_policy(policy);
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("provider-upload");
+        crate::local_blob::write_atomic(&source, b"provider-upload")
+            .await
+            .unwrap();
+        insert_upload(
+            &db,
+            1,
+            "provider-upload",
+            "photos/provider-upload",
+            Some(source.to_string_lossy().into_owned()),
+            0,
+            None,
+        )
+        .await;
+        let cloud = FailingCloudHome::new();
+        let (_store_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+
+        let outcome = run_drain(
+            &db,
+            &cloud,
+            &RwLock::new(CloudCipher::Plaintext),
+            &store_dir,
+            &fixed_clock(T0),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.failures.failures().len(), 1);
+        assert!(outcome.failures.has_transport_failure());
+        assert!(crate::sync::cycle::SyncCycleFailure::operation(
+            "upload queued blob",
+            outcome.failures,
+        )
+        .is_offline());
+    }
 }
 
 /// An outbox-only `Database` whose upload drain runs up to `uploads` writes at once
@@ -79,6 +129,7 @@ fn open_outbox_db_with_uploads(uploads: usize) -> Database {
             uploads: std::num::NonZeroUsize::new(uploads).expect("uploads limit is nonzero"),
             downloads: std::num::NonZeroUsize::MIN,
         },
+        crate::WritePolicy::MergeConcurrent,
         "test-device".to_string(),
         &[],
     )
@@ -379,7 +430,7 @@ async fn bad_item_does_not_block_good_later_item() {
     let observer = RecordingObserver::new();
     let clock = fixed_clock(T0);
 
-    let n = run_drain(
+    let outcome = run_drain(
         &db,
         &cloud,
         &enc(),
@@ -388,10 +439,18 @@ async fn bad_item_does_not_block_good_later_item() {
         Some(&observer),
     )
     .await
-    .unwrap()
-    .uploaded;
+    .unwrap();
 
-    assert_eq!(n, 1, "the good entry uploads despite the earlier failure");
+    assert_eq!(
+        outcome.uploaded, 1,
+        "the good entry uploads despite the earlier failure"
+    );
+    assert_eq!(outcome.failures.failures().len(), 1);
+    assert!(!outcome.failures.has_transport_failure());
+    assert!(matches!(
+        outcome.failures.failures()[0].cause,
+        super::upload::UploadFailureCause::Local(_)
+    ));
     assert!(cloud.get("key-b").is_some(), "good blob landed in cloud");
     assert!(cloud.get("key-a").is_none(), "failed blob did not land");
 

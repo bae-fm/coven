@@ -30,7 +30,7 @@ use crate::store_dir::StoreDir;
 use crate::sync::session::SyncedTable;
 
 use super::membership::{MembershipChain, MembershipCoord};
-use super::storage::SyncStorage;
+use super::storage::{StorageError, SyncStorage};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,7 +93,10 @@ pub(crate) async fn prepare_store_payload(
                 let exists = storage
                     .blob_exists(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
                     .await
-                    .map_err(|error| SyncCycleError::AssetUpload(error.to_string()))?;
+                    .map_err(|source| SyncCycleError::Storage {
+                        operation: "check user-provided blob",
+                        source,
+                    })?;
                 if !exists {
                     return Err(SyncCycleError::MissingBlob {
                         namespace: blob.namespace.clone(),
@@ -310,7 +313,10 @@ async fn cancel_host_blob_tombstone(
     };
     let cloud_key = storage
         .blob_cloud_key(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
-        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+        .map_err(|source| SyncCycleError::Storage {
+            operation: "form host-provided blob key",
+            source,
+        })?;
     crate::blob::delete::cancel_tombstone_or_enqueue(
         db,
         cancel.cloud_home,
@@ -403,7 +409,10 @@ async fn upload_host_provided_blob_exact(
     let uploaded = storage
         .blob_exists(&blob.namespace, &blob.id, blob.cloud_path.as_deref())
         .await
-        .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+        .map_err(|source| SyncCycleError::Storage {
+            operation: "check host-provided blob",
+            source,
+        })?;
 
     // Upload iff the blob is not in the cloud AND coven holds the bytes to put there.
     // The two absences are different: a blob coven does not hold was never coven's to
@@ -425,7 +434,10 @@ async fn upload_host_provided_blob_exact(
                     local.path(),
                 )
                 .await
-                .map_err(|e| SyncCycleError::AssetUpload(e.to_string()))?;
+                .map_err(|source| SyncCycleError::Storage {
+                    operation: "upload host-provided blob",
+                    source,
+                })?;
             info!(id = %blob.id, namespace = %blob.namespace, "uploaded blob");
         }
         (None, false) => {
@@ -677,10 +689,12 @@ async fn finish_host_provided_make_remote(
     // shares the blob is durable — matching the inline-push path.
     let intent_seq = local_seq + 1;
     let write_id = db.new_write_id();
+    let write_policy = db.write_policy();
     db.call(move |conn| {
         crate::blob::transition::commit_make_remote_flip(
             conn,
             &tables,
+            write_policy,
             write_id,
             &root.intent.root_table,
             &root.gate_column,
@@ -699,6 +713,10 @@ pub enum SyncCycleError {
     Gate(String),
     AssetScan(String),
     AssetUpload(String),
+    Storage {
+        operation: &'static str,
+        source: StorageError,
+    },
     /// An outgoing changeset still names a user-owned local file.
     LocalUserBlob {
         namespace: String,
@@ -718,6 +736,9 @@ impl std::fmt::Display for SyncCycleError {
             SyncCycleError::Gate(e) => write!(f, "gate error: {e}"),
             SyncCycleError::AssetScan(e) => write!(f, "asset scan error: {e}"),
             SyncCycleError::AssetUpload(e) => write!(f, "asset upload error: {e}"),
+            SyncCycleError::Storage { operation, source } => {
+                write!(f, "{operation}: {source}")
+            }
             SyncCycleError::LocalUserBlob { namespace, id } => {
                 write!(
                     f,
@@ -734,4 +755,15 @@ impl std::fmt::Display for SyncCycleError {
     }
 }
 
-impl std::error::Error for SyncCycleError {}
+impl std::error::Error for SyncCycleError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Storage { source, .. } => Some(source),
+            Self::Gate(_)
+            | Self::AssetScan(_)
+            | Self::AssetUpload(_)
+            | Self::LocalUserBlob { .. }
+            | Self::MissingBlob { .. } => None,
+        }
+    }
+}

@@ -13,13 +13,14 @@ use super::membership::{
 };
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::CopyId;
-use crate::WriteId;
+use crate::{WriteId, WritePolicy};
 
 pub const STORE_PROTOCOL_VERSION: u32 = 1;
 
 const STORE_PROTOCOL_ROOT_DOMAIN: &[u8] = b"coven.store-protocol-root.v1\0";
 const COMMIT_DOMAIN: &[u8] = b"coven.store-batch-commit.v1\0";
 const HEAD_DOMAIN: &[u8] = b"coven.store-device-head.v1\0";
+const SERIAL_HEAD_DOMAIN: &[u8] = b"coven.store-serial-head.v1\0";
 const REGISTRATION_DOMAIN: &[u8] = b"coven.store-device-registration.v1\0";
 const ACK_DOMAIN: &[u8] = b"coven.store-ack.v1\0";
 const SNAPSHOT_DOMAIN: &[u8] = b"coven.snapshot-meta.v1\0";
@@ -96,6 +97,139 @@ pub struct CommitPosition {
     pub commit_hash: ObjectHash,
 }
 
+/// Exact materialized cut, shaped by the Store's signed write policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CommitFrontier {
+    MergeConcurrent(BTreeMap<String, CommitPosition>),
+    Serial(Option<CommitPosition>),
+}
+
+impl CommitFrontier {
+    pub fn from_positions(
+        policy: WritePolicy,
+        mut positions: BTreeMap<String, CommitPosition>,
+    ) -> Result<Self, StoreProtocolError> {
+        match policy {
+            WritePolicy::MergeConcurrent => Ok(Self::MergeConcurrent(positions)),
+            WritePolicy::Serial => {
+                let position = positions.remove(SERIAL_STREAM_ID);
+                if !positions.is_empty() {
+                    return Err(StoreProtocolError::Malformed(format!(
+                        "Serial frontier contains non-serial streams: {:?}",
+                        positions.keys().collect::<Vec<_>>()
+                    )));
+                }
+                Ok(Self::Serial(position))
+            }
+        }
+    }
+
+    pub fn into_positions(self) -> BTreeMap<String, CommitPosition> {
+        match self {
+            Self::MergeConcurrent(positions) => positions,
+            Self::Serial(Some(position)) => {
+                BTreeMap::from([(SERIAL_STREAM_ID.to_string(), position)])
+            }
+            Self::Serial(None) => BTreeMap::new(),
+        }
+    }
+
+    pub fn position_count(&self) -> usize {
+        match self {
+            Self::MergeConcurrent(positions) => positions.len(),
+            Self::Serial(Some(_)) => 1,
+            Self::Serial(None) => 0,
+        }
+    }
+
+    pub fn policy(&self) -> WritePolicy {
+        match self {
+            Self::MergeConcurrent(_) => WritePolicy::MergeConcurrent,
+            Self::Serial(_) => WritePolicy::Serial,
+        }
+    }
+
+    pub fn merge_positions(&self) -> Result<&BTreeMap<String, CommitPosition>, StoreProtocolError> {
+        match self {
+            Self::MergeConcurrent(positions) => Ok(positions),
+            Self::Serial(_) => Err(StoreProtocolError::WritePolicyMismatch {
+                expected: WritePolicy::MergeConcurrent,
+                actual: WritePolicy::Serial,
+            }),
+        }
+    }
+
+    pub fn serial_position(&self) -> Result<Option<&CommitPosition>, StoreProtocolError> {
+        match self {
+            Self::Serial(position) => Ok(position.as_ref()),
+            Self::MergeConcurrent(_) => Err(StoreProtocolError::WritePolicyMismatch {
+                expected: WritePolicy::Serial,
+                actual: WritePolicy::MergeConcurrent,
+            }),
+        }
+    }
+}
+
+/// Predecessor and dependency order authenticated by one Store commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreCommitOrder {
+    MergeConcurrent {
+        seq: u64,
+        previous_commit_hash: Option<ObjectHash>,
+        dependencies: BTreeMap<String, CommitPosition>,
+    },
+    Serial {
+        seq: u64,
+        previous_commit_hash: Option<ObjectHash>,
+    },
+}
+
+impl StoreCommitOrder {
+    pub fn policy(&self) -> WritePolicy {
+        match self {
+            Self::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
+            Self::Serial { .. } => WritePolicy::Serial,
+        }
+    }
+
+    pub fn seq(&self) -> u64 {
+        match self {
+            Self::MergeConcurrent { seq, .. } | Self::Serial { seq, .. } => *seq,
+        }
+    }
+
+    pub fn previous_commit_hash(&self) -> Option<ObjectHash> {
+        match self {
+            Self::MergeConcurrent {
+                previous_commit_hash,
+                ..
+            }
+            | Self::Serial {
+                previous_commit_hash,
+                ..
+            } => *previous_commit_hash,
+        }
+    }
+
+    pub fn dependencies(&self) -> Option<&BTreeMap<String, CommitPosition>> {
+        match self {
+            Self::MergeConcurrent { dependencies, .. } => Some(dependencies),
+            Self::Serial { .. } => None,
+        }
+    }
+
+    pub fn stream_id<'a>(&self, device_id: &'a str) -> &'a str {
+        match self {
+            Self::MergeConcurrent { .. } => device_id,
+            Self::Serial { .. } => SERIAL_STREAM_ID,
+        }
+    }
+}
+
+pub const SERIAL_STREAM_ID: &str = "serial";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorePackageRef {
@@ -106,6 +240,34 @@ pub struct StorePackageRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreControl {
+    SerialMembership {
+        entry: super::membership::SerialMembershipEntry,
+    },
+    SerialMembershipAndKeyRotation {
+        entry: super::membership::SerialMembershipEntry,
+        generation: u64,
+    },
+}
+
+impl StoreControl {
+    pub fn serial_membership_entry(&self) -> &super::membership::SerialMembershipEntry {
+        match self {
+            Self::SerialMembership { entry }
+            | Self::SerialMembershipAndKeyRotation { entry, .. } => entry,
+        }
+    }
+
+    pub fn key_generation(&self) -> Option<u64> {
+        match self {
+            Self::SerialMembership { .. } => None,
+            Self::SerialMembershipAndKeyRotation { generation, .. } => Some(*generation),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreBatchCommit {
     pub version: u32,
@@ -113,10 +275,10 @@ pub struct StoreBatchCommit {
     pub device_id: String,
     pub author_pubkey: String,
     pub write_id: WriteId,
-    pub seq: u64,
-    pub previous_commit_hash: Option<ObjectHash>,
-    pub dependencies: BTreeMap<String, CommitPosition>,
+    pub order: StoreCommitOrder,
     pub membership_grant: Option<MembershipCoord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<StoreControl>,
     pub package: StorePackageRef,
     pub signature: String,
 }
@@ -128,28 +290,77 @@ struct CommitSignedFields<'a> {
     device_id: &'a str,
     author_pubkey: &'a str,
     write_id: &'a WriteId,
-    seq: u64,
-    previous_commit_hash: Option<ObjectHash>,
-    dependencies: &'a BTreeMap<String, CommitPosition>,
+    order: &'a StoreCommitOrder,
     membership_grant: Option<&'a MembershipCoord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control: Option<&'a StoreControl>,
     package: &'a StorePackageRef,
 }
 
 impl StoreBatchCommit {
+    pub fn policy(&self) -> WritePolicy {
+        self.order.policy()
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.order.seq()
+    }
+
+    pub fn previous_commit_hash(&self) -> Option<ObjectHash> {
+        self.order.previous_commit_hash()
+    }
+
+    pub fn merge_dependencies(
+        &self,
+    ) -> Result<&BTreeMap<String, CommitPosition>, StoreProtocolError> {
+        match &self.order {
+            StoreCommitOrder::MergeConcurrent { dependencies, .. } => Ok(dependencies),
+            StoreCommitOrder::Serial { .. } => Err(StoreProtocolError::WritePolicyMismatch {
+                expected: WritePolicy::MergeConcurrent,
+                actual: WritePolicy::Serial,
+            }),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn signed(
         store_root_hash: ObjectHash,
         write_id: WriteId,
         device_id: String,
-        seq: u64,
-        previous_commit_hash: Option<ObjectHash>,
-        dependencies: BTreeMap<String, CommitPosition>,
+        order: StoreCommitOrder,
         membership_grant: Option<MembershipCoord>,
         schema_version: u32,
         package_bytes: &[u8],
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
+        Self::signed_with_control(
+            store_root_hash,
+            write_id,
+            device_id,
+            order,
+            membership_grant,
+            None,
+            schema_version,
+            package_bytes,
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_control(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        device_id: String,
+        order: StoreCommitOrder,
+        membership_grant: Option<MembershipCoord>,
+        control: Option<StoreControl>,
+        schema_version: u32,
+        package_bytes: &[u8],
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
         validate_device_id(&device_id)?;
+        let seq = order.seq();
+        let previous_commit_hash = order.previous_commit_hash();
         if seq == 0 {
             return Err(StoreProtocolError::InvalidSequence(seq));
         }
@@ -159,19 +370,29 @@ impl StoreBatchCommit {
             (_, Some(_)) => {}
             (_, None) => return Err(StoreProtocolError::MissingPredecessor),
         }
-        if dependencies.contains_key(&device_id) {
-            return Err(StoreProtocolError::OwnDependency(device_id));
+        if let Some(dependencies) = order.dependencies() {
+            if dependencies.contains_key(&device_id) {
+                return Err(StoreProtocolError::OwnDependency(device_id));
+            }
+            validate_frontier(dependencies)?;
         }
-        validate_frontier(&dependencies)?;
         if let Some(grant) = membership_grant.as_ref() {
             validate_membership_coord(grant)?;
         }
+        let author_pubkey = keys::public_key_hex(signer);
+        validate_control(
+            order.policy(),
+            package_bytes.is_empty(),
+            store_root_hash,
+            &author_pubkey,
+            control.as_ref(),
+        )?;
         let changeset_size =
             u64::try_from(package_bytes.len()).map_err(|_| StoreProtocolError::PackageTooLarge)?;
-        let author_pubkey = keys::public_key_hex(signer);
         let content_hash = ObjectHash::digest(package_bytes);
+        let stream_id = order.stream_id(&device_id);
         let package = StorePackageRef {
-            object_key: package_semantic_prefix(&device_id, seq, content_hash),
+            object_key: package_semantic_prefix(stream_id, seq, content_hash),
             content_hash,
             schema_version,
             changeset_size,
@@ -182,10 +403,9 @@ impl StoreBatchCommit {
             device_id,
             author_pubkey,
             write_id,
-            seq,
-            previous_commit_hash,
-            dependencies,
+            order,
             membership_grant,
+            control,
             package,
             signature: String::new(),
         };
@@ -201,10 +421,9 @@ impl StoreBatchCommit {
             device_id: &self.device_id,
             author_pubkey: &self.author_pubkey,
             write_id: &self.write_id,
-            seq: self.seq,
-            previous_commit_hash: self.previous_commit_hash,
-            dependencies: &self.dependencies,
+            order: &self.order,
             membership_grant: self.membership_grant.as_ref(),
+            control: self.control.as_ref(),
             package: &self.package,
         };
         domain_json(COMMIT_DOMAIN, &fields)
@@ -216,7 +435,7 @@ impl StoreBatchCommit {
 
     pub fn position(&self) -> CommitPosition {
         CommitPosition {
-            seq: self.seq,
+            seq: self.order.seq(),
             commit_hash: self.commit_hash(),
         }
     }
@@ -228,19 +447,26 @@ impl StoreBatchCommit {
     pub fn parse_at(
         bytes: &[u8],
         expected_store_root_hash: ObjectHash,
-        expected_device: &str,
+        expected_policy: WritePolicy,
+        expected_stream: &str,
         expected_seq: u64,
     ) -> Result<Self, StoreProtocolError> {
         let commit: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-        commit.verify_at(expected_store_root_hash, expected_device, expected_seq)?;
+        commit.verify_at(
+            expected_store_root_hash,
+            expected_policy,
+            expected_stream,
+            expected_seq,
+        )?;
         Ok(commit)
     }
 
     pub fn verify_at(
         &self,
         expected_store_root_hash: ObjectHash,
-        expected_device: &str,
+        expected_policy: WritePolicy,
+        expected_stream: &str,
         expected_seq: u64,
     ) -> Result<(), StoreProtocolError> {
         require_version(self.version)?;
@@ -250,39 +476,49 @@ impl StoreBatchCommit {
                 actual: self.store_root_hash,
             });
         }
-        if self.device_id != expected_device || self.seq != expected_seq {
+        if self.order.policy() != expected_policy {
+            return Err(StoreProtocolError::WritePolicyMismatch {
+                expected: expected_policy,
+                actual: self.order.policy(),
+            });
+        }
+        let stream_id = self.order.stream_id(&self.device_id);
+        if stream_id != expected_stream || self.order.seq() != expected_seq {
             return Err(StoreProtocolError::RelocatedSlot {
-                expected: commit_slot_prefix(expected_device, expected_seq),
-                actual: commit_slot_prefix(&self.device_id, self.seq),
+                expected: commit_slot_prefix(expected_stream, expected_seq),
+                actual: commit_slot_prefix(stream_id, self.order.seq()),
             });
         }
         validate_device_id(&self.device_id)?;
         if self.package.object_key
-            != package_semantic_prefix(&self.device_id, self.seq, self.package.content_hash)
+            != package_semantic_prefix(stream_id, self.order.seq(), self.package.content_hash)
         {
             return Err(StoreProtocolError::RelocatedPackage {
                 expected: package_semantic_prefix(
-                    &self.device_id,
-                    self.seq,
+                    stream_id,
+                    self.order.seq(),
                     self.package.content_hash,
                 ),
                 actual: self.package.object_key.clone(),
             });
         }
-        match (self.seq, self.previous_commit_hash) {
+        match (self.order.seq(), self.order.previous_commit_hash()) {
             (0, _) => return Err(StoreProtocolError::InvalidSequence(0)),
             (1, None) => {}
             (1, Some(_)) => return Err(StoreProtocolError::UnexpectedPredecessor),
             (_, None) => return Err(StoreProtocolError::MissingPredecessor),
             (_, Some(_)) => {}
         }
-        if self.dependencies.contains_key(&self.device_id) {
-            return Err(StoreProtocolError::OwnDependency(self.device_id.clone()));
+        if let Some(dependencies) = self.order.dependencies() {
+            if dependencies.contains_key(&self.device_id) {
+                return Err(StoreProtocolError::OwnDependency(self.device_id.clone()));
+            }
+            validate_frontier(dependencies)?;
         }
-        validate_frontier(&self.dependencies)?;
         if let Some(grant) = self.membership_grant.as_ref() {
             validate_membership_coord(grant)?;
         }
+        validate_parsed_control(self)?;
         if !keys::verify_signature_hex(
             &self.author_pubkey,
             &self.signature,
@@ -311,6 +547,46 @@ impl StoreBatchCommit {
         }
         Ok(())
     }
+}
+
+fn validate_control(
+    policy: WritePolicy,
+    package_is_empty: bool,
+    store_root_hash: ObjectHash,
+    author_pubkey: &str,
+    control: Option<&StoreControl>,
+) -> Result<(), StoreProtocolError> {
+    let Some(control) = control else {
+        return Ok(());
+    };
+    if policy != WritePolicy::Serial {
+        return Err(StoreProtocolError::ControlRequiresSerial);
+    }
+    if !package_is_empty {
+        return Err(StoreProtocolError::ControlPackageNotEmpty);
+    }
+    let entry = control.serial_membership_entry();
+    if entry.store_root_hash != store_root_hash
+        || entry.author_pubkey != author_pubkey
+        || !entry.verify()
+    {
+        return Err(StoreProtocolError::InvalidSerialControl);
+    }
+    if control.key_generation() == Some(0) {
+        return Err(StoreProtocolError::InvalidKeyGeneration(0));
+    }
+    Ok(())
+}
+
+fn validate_parsed_control(commit: &StoreBatchCommit) -> Result<(), StoreProtocolError> {
+    validate_control(
+        commit.policy(),
+        commit.package.changeset_size == 0
+            && commit.package.content_hash == ObjectHash::digest(&[]),
+        commit.store_root_hash,
+        &commit.author_pubkey,
+        commit.control.as_ref(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -409,6 +685,109 @@ impl StoreDeviceHead {
         validate_device_id(&head.device_id)?;
         if head
             .position
+            .as_ref()
+            .is_some_and(|position| position.seq == 0)
+        {
+            return Err(StoreProtocolError::InvalidSequence(0));
+        }
+        if !keys::verify_signature_hex(
+            &head.author_pubkey,
+            &head.signature,
+            &head.canonical_signed_bytes(),
+        ) {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        Ok(head)
+    }
+}
+
+/// Signed global activation point for a Serial Store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreSerialHead {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub commit: Option<CommitPosition>,
+    pub tip_write_id: Option<WriteId>,
+    pub author_pubkey: String,
+    pub signature: String,
+}
+
+#[derive(Serialize)]
+struct SerialHeadSignedFields<'a> {
+    version: u32,
+    store_root_hash: ObjectHash,
+    commit: Option<&'a CommitPosition>,
+    tip_write_id: Option<&'a WriteId>,
+    author_pubkey: &'a str,
+}
+
+impl StoreSerialHead {
+    pub fn signed(
+        store_root_hash: ObjectHash,
+        commit: Option<CommitPosition>,
+        tip_write_id: Option<WriteId>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        if commit.is_some() != tip_write_id.is_some() {
+            return Err(StoreProtocolError::InvalidSerialHead);
+        }
+        if commit.as_ref().is_some_and(|position| position.seq == 0) {
+            return Err(StoreProtocolError::InvalidSequence(0));
+        }
+        let author_pubkey = keys::public_key_hex(signer);
+        let mut head = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            commit,
+            tip_write_id,
+            author_pubkey,
+            signature: String::new(),
+        };
+        let (_, signature) = keys::sign_hex(signer, &head.canonical_signed_bytes());
+        head.signature = signature;
+        Ok(head)
+    }
+
+    fn canonical_signed_bytes(&self) -> Vec<u8> {
+        domain_json(
+            SERIAL_HEAD_DOMAIN,
+            &SerialHeadSignedFields {
+                version: self.version,
+                store_root_hash: self.store_root_hash,
+                commit: self.commit.as_ref(),
+                tip_write_id: self.tip_write_id.as_ref(),
+                author_pubkey: &self.author_pubkey,
+            },
+        )
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("StoreSerialHead serialization cannot fail")
+    }
+
+    pub fn head_hash(&self) -> ObjectHash {
+        ObjectHash::digest(&self.canonical_signed_bytes())
+    }
+
+    pub fn parse(
+        bytes: &[u8],
+        expected_store_root_hash: ObjectHash,
+    ) -> Result<Self, StoreProtocolError> {
+        let head: Self = serde_json::from_slice(bytes)
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        require_version(head.version)?;
+        if head.store_root_hash != expected_store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: expected_store_root_hash,
+                actual: head.store_root_hash,
+            });
+        }
+        if head.commit.is_some() != head.tip_write_id.is_some() {
+            return Err(StoreProtocolError::InvalidSerialHead);
+        }
+        if head
+            .commit
             .as_ref()
             .is_some_and(|position| position.seq == 0)
         {
@@ -551,7 +930,7 @@ pub struct StoreAck {
     pub author_pubkey: String,
     pub revision: u64,
     pub previous_ack_hash: Option<ObjectHash>,
-    pub frontier: BTreeMap<String, CommitPosition>,
+    pub frontier: CommitFrontier,
     pub last_sync: String,
     pub signature: String,
 }
@@ -564,7 +943,7 @@ struct AckSignedFields<'a> {
     author_pubkey: &'a str,
     revision: u64,
     previous_ack_hash: Option<ObjectHash>,
-    frontier: &'a BTreeMap<String, CommitPosition>,
+    frontier: &'a CommitFrontier,
     last_sync: &'a str,
 }
 
@@ -574,13 +953,13 @@ impl StoreAck {
         device_id: String,
         revision: u64,
         previous_ack_hash: Option<ObjectHash>,
-        frontier: BTreeMap<String, CommitPosition>,
+        frontier: CommitFrontier,
         last_sync: String,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         validate_device_id(&device_id)?;
         validate_chained_revision(revision, previous_ack_hash)?;
-        validate_frontier(&frontier)?;
+        validate_commit_frontier(&frontier)?;
         let author_pubkey = keys::public_key_hex(signer);
         let mut ack = Self {
             version: STORE_PROTOCOL_VERSION,
@@ -645,7 +1024,7 @@ impl StoreAck {
         }
         validate_device_id(&ack.device_id)?;
         validate_chained_revision(ack.revision, ack.previous_ack_hash)?;
-        validate_frontier(&ack.frontier)?;
+        validate_commit_frontier(&ack.frontier)?;
         if !keys::verify_signature_hex(
             &ack.author_pubkey,
             &ack.signature,
@@ -664,7 +1043,7 @@ pub struct SnapshotMeta {
     pub store_root_hash: ObjectHash,
     pub author_pubkey: String,
     pub image_hash: ObjectHash,
-    pub coverage: BTreeMap<String, CommitPosition>,
+    pub coverage: CommitFrontier,
     pub schema_version: u32,
     pub created_at: String,
     pub signature: String,
@@ -676,7 +1055,7 @@ struct SnapshotSignedFields<'a> {
     store_root_hash: ObjectHash,
     author_pubkey: &'a str,
     image_hash: ObjectHash,
-    coverage: &'a BTreeMap<String, CommitPosition>,
+    coverage: &'a CommitFrontier,
     schema_version: u32,
     created_at: &'a str,
 }
@@ -685,12 +1064,12 @@ impl SnapshotMeta {
     pub fn signed(
         store_root_hash: ObjectHash,
         image_hash: ObjectHash,
-        coverage: BTreeMap<String, CommitPosition>,
+        coverage: CommitFrontier,
         schema_version: u32,
         created_at: String,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        validate_frontier(&coverage)?;
+        validate_commit_frontier(&coverage)?;
         let author_pubkey = keys::public_key_hex(signer);
         let mut meta = Self {
             version: STORE_PROTOCOL_VERSION,
@@ -752,7 +1131,7 @@ impl SnapshotMeta {
             });
         }
         validate_device_id(&meta.author_pubkey)?;
-        validate_frontier(&meta.coverage)?;
+        validate_commit_frontier(&meta.coverage)?;
         if !keys::verify_signature_hex(
             &meta.author_pubkey,
             &meta.signature,
@@ -778,6 +1157,7 @@ pub struct StoreProtocolRoot {
     pub store_id: String,
     pub founder: MembershipEntry,
     pub schema_version: u32,
+    pub write_policy: WritePolicy,
     pub author_pubkey: String,
     pub signature: String,
 }
@@ -788,6 +1168,7 @@ struct StoreProtocolRootSignedFields<'a> {
     store_id: &'a str,
     founder: &'a MembershipEntry,
     schema_version: u32,
+    write_policy: WritePolicy,
     author_pubkey: &'a str,
 }
 
@@ -796,6 +1177,7 @@ impl StoreProtocolRoot {
         store_id: String,
         founder: MembershipEntry,
         schema_version: u32,
+        write_policy: WritePolicy,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         let author_pubkey = keys::public_key_hex(signer);
@@ -804,6 +1186,7 @@ impl StoreProtocolRoot {
             store_id,
             founder,
             schema_version,
+            write_policy,
             author_pubkey,
             signature: String::new(),
         };
@@ -821,6 +1204,7 @@ impl StoreProtocolRoot {
                 store_id: &self.store_id,
                 founder: &self.founder,
                 schema_version: self.schema_version,
+                write_policy: self.write_policy,
                 author_pubkey: &self.author_pubkey,
             },
         )
@@ -850,6 +1234,24 @@ impl StoreProtocolRoot {
     }
 
     pub fn parse_expected(
+        bytes: &[u8],
+        expected_hash: ObjectHash,
+        expected_store_id: &str,
+        expected_founder: &str,
+        expected_write_policy: WritePolicy,
+    ) -> Result<Self, StoreProtocolError> {
+        let store_protocol_root =
+            Self::parse_pinned(bytes, expected_hash, expected_store_id, expected_founder)?;
+        if store_protocol_root.write_policy != expected_write_policy {
+            return Err(StoreProtocolError::WritePolicyMismatch {
+                expected: expected_write_policy,
+                actual: store_protocol_root.write_policy,
+            });
+        }
+        Ok(store_protocol_root)
+    }
+
+    pub fn parse_pinned(
         bytes: &[u8],
         expected_hash: ObjectHash,
         expected_store_id: &str,
@@ -929,6 +1331,21 @@ pub enum StoreProtocolError {
     FounderMismatch { expected: String, actual: String },
     #[error("store protocol root has an invalid founder membership entry")]
     InvalidFounder,
+    #[error("Store write policy is {actual:?}, expected {expected:?}")]
+    WritePolicyMismatch {
+        expected: WritePolicy,
+        actual: WritePolicy,
+    },
+    #[error("Store controls require the Serial write policy")]
+    ControlRequiresSerial,
+    #[error("Store control commit package must be empty")]
+    ControlPackageNotEmpty,
+    #[error("Store Serial control is invalid or signed by a different commit author")]
+    InvalidSerialControl,
+    #[error("Store key generation must be positive, got {0}")]
+    InvalidKeyGeneration(u64),
+    #[error("Serial head commit and tip write id must either both be present or both be absent")]
+    InvalidSerialHead,
     #[error("store protocol root store id is empty")]
     EmptyStoreId,
     #[error("Store commit sequence must start at 1, got {0}")]
@@ -1168,6 +1585,10 @@ pub fn protocol_prefix() -> &'static str {
     "store-v1/"
 }
 
+pub fn serial_head_key() -> &'static str {
+    "store-v1/heads/serial.json"
+}
+
 pub fn store_protocol_root_semantic_prefix(store_root_hash: ObjectHash) -> String {
     format!("store-v1/store-protocol-root/{store_root_hash}")
 }
@@ -1384,6 +1805,16 @@ fn validate_frontier(
     Ok(())
 }
 
+fn validate_commit_frontier(frontier: &CommitFrontier) -> Result<(), StoreProtocolError> {
+    match frontier {
+        CommitFrontier::MergeConcurrent(frontier) => validate_frontier(frontier),
+        CommitFrontier::Serial(Some(position)) if position.seq == 0 => {
+            Err(StoreProtocolError::InvalidSequence(0))
+        }
+        CommitFrontier::Serial(_) => Ok(()),
+    }
+}
+
 fn validate_membership_coord(coord: &MembershipCoord) -> Result<(), StoreProtocolError> {
     if coord.seq == 0 || coord.author_pubkey.is_empty() {
         return Err(StoreProtocolError::InvalidMembershipCoordinate {
@@ -1409,23 +1840,30 @@ mod tests {
     fn fixture() -> (UserKeypair, StoreProtocolRoot, StoreBatchCommit, Vec<u8>) {
         let signer = UserKeypair::generate();
         let founder = founder_entry("store-a", &signer, "0000000001000-0000-device-a");
-        let store_protocol_root =
-            StoreProtocolRoot::signed("store-a".to_string(), founder, 3, &signer)
-                .expect("sign Store protocol root");
+        let store_protocol_root = StoreProtocolRoot::signed(
+            "store-a".to_string(),
+            founder,
+            3,
+            WritePolicy::MergeConcurrent,
+            &signer,
+        )
+        .expect("sign Store protocol root");
         let package = b"package".to_vec();
         let commit = StoreBatchCommit::signed(
             store_protocol_root.object_hash(),
             WriteId::from_generated("canonical-write".to_string()),
             "device-a".to_string(),
-            1,
-            None,
-            BTreeMap::from([(
-                "device-b".to_string(),
-                CommitPosition {
-                    seq: 4,
-                    commit_hash: ObjectHash::digest(b"device-b/4"),
-                },
-            )]),
+            StoreCommitOrder::MergeConcurrent {
+                seq: 1,
+                previous_commit_hash: None,
+                dependencies: BTreeMap::from([(
+                    "device-b".to_string(),
+                    CommitPosition {
+                        seq: 4,
+                        commit_hash: ObjectHash::digest(b"device-b/4"),
+                    },
+                )]),
+            },
             Some(MembershipCoord {
                 author_pubkey: keys::public_key_hex(&signer),
                 author_owner_grant: store_protocol_root.founder.author_owner_grant.clone(),
@@ -1459,9 +1897,14 @@ mod tests {
     fn canonical_commit_round_trip_and_literal_bytes() {
         let (_, store_protocol_root, commit, package) = fixture();
         let bytes = commit.to_bytes();
-        let parsed =
-            StoreBatchCommit::parse_at(&bytes, store_protocol_root.object_hash(), "device-a", 1)
-                .expect("parse commit");
+        let parsed = StoreBatchCommit::parse_at(
+            &bytes,
+            store_protocol_root.object_hash(),
+            WritePolicy::MergeConcurrent,
+            "device-a",
+            1,
+        )
+        .expect("parse commit");
         parsed.verify_package(&package).expect("verify package");
         assert_eq!(parsed, commit);
         assert!(commit.canonical_signed_bytes().starts_with(COMMIT_DOMAIN));
@@ -1471,21 +1914,39 @@ mod tests {
     fn commit_rejects_dependency_package_predecessor_and_slot_tamper() {
         let (_, store_protocol_root, commit, package) = fixture();
         let mut tampered = commit.clone();
-        tampered.dependencies.get_mut("device-b").unwrap().seq += 1;
+        let StoreCommitOrder::MergeConcurrent { dependencies, .. } = &mut tampered.order else {
+            panic!("fixture uses MergeConcurrent order")
+        };
+        dependencies.get_mut("device-b").unwrap().seq += 1;
         assert!(matches!(
-            tampered.verify_at(store_protocol_root.object_hash(), "device-a", 1),
+            tampered.verify_at(
+                store_protocol_root.object_hash(),
+                WritePolicy::MergeConcurrent,
+                "device-a",
+                1
+            ),
             Err(StoreProtocolError::InvalidSignature)
         ));
 
         let mut tampered = commit.clone();
         tampered.package.content_hash = ObjectHash::digest(b"different");
         assert!(matches!(
-            tampered.verify_at(store_protocol_root.object_hash(), "device-a", 1),
+            tampered.verify_at(
+                store_protocol_root.object_hash(),
+                WritePolicy::MergeConcurrent,
+                "device-a",
+                1
+            ),
             Err(StoreProtocolError::RelocatedPackage { .. })
         ));
 
         assert!(matches!(
-            commit.verify_at(store_protocol_root.object_hash(), "device-a", 2),
+            commit.verify_at(
+                store_protocol_root.object_hash(),
+                WritePolicy::MergeConcurrent,
+                "device-a",
+                2
+            ),
             Err(StoreProtocolError::RelocatedSlot { .. })
         ));
         assert!(matches!(
@@ -1504,6 +1965,7 @@ mod tests {
         assert!(StoreBatchCommit::parse_at(
             &serde_json::to_vec(&value).unwrap(),
             store_protocol_root.object_hash(),
+            WritePolicy::MergeConcurrent,
             "device-a",
             1,
         )
@@ -1515,6 +1977,7 @@ mod tests {
             StoreBatchCommit::parse_at(
                 &serde_json::to_vec(&value).unwrap(),
                 store_protocol_root.object_hash(),
+                WritePolicy::MergeConcurrent,
                 "device-a",
                 1,
             ),
@@ -1531,8 +1994,98 @@ mod tests {
             store_protocol_root.object_hash(),
             "store-a",
             &store_protocol_root.author_pubkey,
+            WritePolicy::MergeConcurrent,
         )
         .expect("parse exact Store protocol root");
         assert_eq!(parsed, store_protocol_root);
+    }
+
+    #[test]
+    fn store_protocol_root_signs_the_required_write_policy() {
+        let (_, store_protocol_root, _, _) = fixture();
+        let value = serde_json::to_value(store_protocol_root).expect("serialize Store root");
+
+        assert_eq!(
+            value.get("write_policy"),
+            Some(&serde_json::json!("merge_concurrent"))
+        );
+    }
+
+    #[test]
+    fn serial_membership_and_rotation_are_authenticated_by_the_global_commit() {
+        let owner = UserKeypair::generate();
+        let member = UserKeypair::generate();
+        let founder = founder_entry("serial-control", &owner, "founder");
+        let root = StoreProtocolRoot::signed(
+            "serial-control".to_string(),
+            founder.clone(),
+            1,
+            WritePolicy::Serial,
+            &owner,
+        )
+        .unwrap();
+        let state = crate::sync::membership::SerialMembershipState::from_founder(
+            root.object_hash(),
+            &founder,
+        )
+        .unwrap();
+        let entry = state
+            .signed_set_member(
+                &owner,
+                keys::public_key_hex(&member),
+                None,
+                crate::sync::membership::MemberRole::Member,
+                "add".to_string(),
+            )
+            .unwrap();
+        let commit = StoreBatchCommit::signed_with_control(
+            root.object_hash(),
+            WriteId::from_generated("serial-control-write".to_string()),
+            "owner-device".to_string(),
+            StoreCommitOrder::Serial {
+                seq: 1,
+                previous_commit_hash: None,
+            },
+            None,
+            Some(StoreControl::SerialMembershipAndKeyRotation {
+                entry: entry.clone(),
+                generation: 2,
+            }),
+            1,
+            &[],
+            &owner,
+        )
+        .unwrap();
+        let parsed = StoreBatchCommit::parse_at(
+            &commit.to_bytes(),
+            root.object_hash(),
+            WritePolicy::Serial,
+            SERIAL_STREAM_ID,
+            1,
+        )
+        .unwrap();
+        assert_eq!(parsed, commit);
+        assert!(state
+            .apply(parsed.control.unwrap().serial_membership_entry())
+            .is_ok());
+
+        assert!(matches!(
+            StoreBatchCommit::signed_with_control(
+                root.object_hash(),
+                WriteId::from_generated("merge-control-write".to_string()),
+                "owner-device".to_string(),
+                StoreCommitOrder::MergeConcurrent {
+                    seq: 1,
+                    previous_commit_hash: None,
+                    dependencies: BTreeMap::new(),
+                },
+                None,
+                Some(StoreControl::SerialMembership { entry }),
+                1,
+                &[],
+                &owner,
+            ),
+            Err(StoreProtocolError::ControlRequiresSerial)
+        ));
     }
 }

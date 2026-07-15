@@ -33,6 +33,7 @@ use crate::sync::test_helpers::{
     bind_mock_store_protocol, bootstrap_chain, capture_bytes, open_test_db, pubkey_hex,
     temp_store_dir, MockSyncStorage, TestCustody,
 };
+use crate::sync::wrapped_store_key::WrappedKeyActivation;
 
 const LIB_ID: &str = "lib-refresh-test";
 
@@ -90,6 +91,7 @@ async fn run_cycle(
         None,
     )
     .await
+    .map_err(|error| error.to_string())
 }
 
 /// A non-rotating running device B adopts a rotated store key on its next cycle,
@@ -243,12 +245,16 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     // it — i.e. B can independently unwrap keys/{A}/{B} to the same bytes.
     let visible_entries =
         membership_coords(&storage, &storage.discover_membership_entries().await).await;
+    let visible_activations: Vec<_> = visible_entries
+        .into_iter()
+        .map(WrappedKeyActivation::MergeConcurrent)
+        .collect();
     let reunwrapped = unwrap_store_keyring_for_owners_with_activation(
         &storage,
         &device_b,
         LIB_ID,
         std::iter::once(owner_pk.as_str()),
-        Some(&visible_entries),
+        Some(&visible_activations),
     )
     .await
     .expect("B can unwrap its re-wrapped key")
@@ -1097,7 +1103,10 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     );
     assert_eq!(
         ks.stored_key(),
-        Some(hex::encode(old_key)),
+        Some(
+            crate::encryption::MasterKeyring::from(EncryptionService::from_key(old_key))
+                .to_serialized(),
+        ),
         "the failed adoption did not persist a new key",
     );
 

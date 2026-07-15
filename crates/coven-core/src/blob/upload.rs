@@ -185,6 +185,74 @@ pub struct DrainOutcome {
     /// `false` when the queue drained in one pass (or stopped on a pause / left
     /// only backed-off entries), so the loop waits its normal interval.
     pub yielded_for_publish: bool,
+    /// Exact failed queue entries. Provider failures remain typed so the sync
+    /// loop can report Offline; local/semantic failures stay per-entry warnings.
+    pub failures: UploadFailures,
+}
+
+#[derive(Debug)]
+pub enum UploadFailureCause {
+    Local(String),
+    Provider(CloudHomeError),
+}
+
+impl std::fmt::Display for UploadFailureCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local(reason) => write!(formatter, "local upload source: {reason}"),
+            Self::Provider(error) => write!(formatter, "provider upload: {error}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct UploadFailure {
+    pub entry_id: i64,
+    pub cloud_key: String,
+    pub cause: UploadFailureCause,
+}
+
+#[derive(Debug, Default)]
+pub struct UploadFailures(Vec<UploadFailure>);
+
+impl UploadFailures {
+    pub fn failures(&self) -> &[UploadFailure] {
+        &self.0
+    }
+
+    pub fn has_transport_failure(&self) -> bool {
+        self.0.iter().any(|failure| {
+            matches!(
+                &failure.cause,
+                UploadFailureCause::Provider(CloudHomeError::Transport(_) | CloudHomeError::Io(_))
+            )
+        })
+    }
+}
+
+impl std::fmt::Display for UploadFailures {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} blob upload(s) failed", self.0.len())?;
+        for failure in &self.0 {
+            write!(
+                formatter,
+                "; entry {} {}: {}",
+                failure.entry_id, failure.cloud_key, failure.cause
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for UploadFailures {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.iter().find_map(|failure| match &failure.cause {
+            UploadFailureCause::Provider(
+                error @ (CloudHomeError::Transport(_) | CloudHomeError::Io(_)),
+            ) => Some(error as &(dyn std::error::Error + 'static)),
+            _ => None,
+        })
+    }
 }
 
 /// Drain pending blob uploads: read each local file, seal it under its scope,
@@ -241,6 +309,7 @@ pub async fn drain_uploads(
         return Ok(DrainOutcome {
             uploaded: 0,
             yielded_for_publish: false,
+            failures: UploadFailures::default(),
         });
     } else {
         build_transition_models(db).await?
@@ -259,6 +328,7 @@ pub async fn drain_uploads(
     // Set once a pause is seen or a make_remote completes: stop admitting new
     // uploads while letting those already in flight finish (never aborting them).
     let mut stop_admitting = false;
+    let mut failures = Vec::new();
 
     loop {
         while !stop_admitting && inflight.len() < limit {
@@ -307,7 +377,7 @@ pub async fn drain_uploads(
                     stop_admitting = true;
                 }
             }
-            Some(EntryOutcome::NotUploaded) => {}
+            Some(EntryOutcome::NotUploaded(failure)) => failures.push(failure),
             // Nothing left in flight and none admitted this pass: the drain is done.
             None => break,
         }
@@ -316,6 +386,7 @@ pub async fn drain_uploads(
     Ok(DrainOutcome {
         uploaded: count,
         yielded_for_publish,
+        failures: UploadFailures(failures),
     })
 }
 
@@ -323,7 +394,7 @@ pub async fn drain_uploads(
 enum EntryOutcome {
     /// The cloud write failed; the failure was recorded and the entry left queued.
     /// Not counted toward [`DrainOutcome::uploaded`].
-    NotUploaded,
+    NotUploaded(UploadFailure),
     /// The cloud write succeeded (counts toward [`DrainOutcome::uploaded`]).
     /// `made_remote` is true iff the post-upload commit completed a make_remote, so
     /// the drain yields to publish and stops admitting new uploads.
@@ -420,7 +491,11 @@ async fn upload_entry(
                     entry.cloud_key
                 );
                 record_failure(db, &entry, file_id, &msg, now, observer).await;
-                return EntryOutcome::NotUploaded;
+                return EntryOutcome::NotUploaded(UploadFailure {
+                    entry_id: entry.id,
+                    cloud_key: entry.cloud_key.clone(),
+                    cause: UploadFailureCause::Local(msg),
+                });
             }
         },
     };
@@ -441,7 +516,11 @@ async fn upload_entry(
         Err(msg) => {
             warn!("Upload failed for {}: {msg}", entry.cloud_key);
             record_failure(db, &entry, file_id, &msg, now, observer).await;
-            return EntryOutcome::NotUploaded;
+            return EntryOutcome::NotUploaded(UploadFailure {
+                entry_id: entry.id,
+                cloud_key: entry.cloud_key.clone(),
+                cause: UploadFailureCause::Local(msg),
+            });
         }
     };
 
@@ -451,7 +530,11 @@ async fn upload_entry(
         let msg = format!("cloud write failed: {e}");
         warn!("Upload failed for {}: {msg}", entry.cloud_key);
         record_failure(db, &entry, file_id, &msg, now, observer).await;
-        return EntryOutcome::NotUploaded;
+        return EntryOutcome::NotUploaded(UploadFailure {
+            entry_id: entry.id,
+            cloud_key: entry.cloud_key.clone(),
+            cause: UploadFailureCause::Provider(e),
+        });
     }
 
     // A pinned upload keeps its blob local: stream-copy the source plaintext file
@@ -613,6 +696,7 @@ async fn commit_after_upload(
 ) -> Result<PostUpload, DbError> {
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
+    let write_policy = db.write_policy();
     db.call(move |conn| {
         // Map the uploaded blob to its row, then up to its gated root. The blob's
         // namespace is the first component of its durable cloud key, so the row is
@@ -690,6 +774,7 @@ async fn commit_after_upload(
         crate::blob::transition::commit_make_remote_flip(
             conn,
             &tables,
+            write_policy,
             write_id,
             &root_table,
             gate_col,

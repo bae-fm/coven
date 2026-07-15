@@ -15,7 +15,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::code_envelope::{self, EnvelopeError};
+use crate::join_code::MembershipFloor;
 use crate::storage::cloud::CloudHomeJoinInfo;
+#[cfg(test)]
 use crate::sync::membership::MembershipCoord;
 #[cfg(test)]
 use crate::sync::membership::OwnerGrantId;
@@ -31,7 +33,7 @@ pub const RESTORE_CODE_VERSION: u8 = 3;
 /// cannot leak key material.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RestoreCode {
-    /// Version (currently 2).
+    /// Wire-format version.
     pub v: u8,
     /// Store ID (UUID).
     pub sid: String,
@@ -53,14 +55,10 @@ pub struct RestoreCode {
     pub sk: String,
     pub store_root_hash: super::store_commit::ObjectHash,
     pub founder_pubkey: String,
-    /// Every author's membership-head coordinate at mint time
-    /// ([`MembershipChain::author_heads`](crate::sync::membership::MembershipChain::author_heads)),
-    /// non-empty for every initialized store, including a browsable one. The
-    /// restorer seeds its per-author head watermark from this before its first sync
-    /// cycle, so a storage provider serving an older, otherwise validly signed
-    /// membership state is refused as a regression rather than accepted for
-    /// having no watermark yet. Decode requires a non-empty, well-formed floor.
-    pub membership_floor: Vec<MembershipCoord>,
+    /// The exact membership state the restorer must observe: causal author
+    /// coordinates for MergeConcurrent stores, or the global commit position
+    /// for Serial stores.
+    pub membership_floor: MembershipFloor,
 }
 
 impl std::fmt::Debug for RestoreCode {
@@ -91,14 +89,8 @@ pub enum RestoreCodeError {
     InvalidBase64,
     #[error("The restore code is corrupted. Regenerate it on the source device. ({0})")]
     InvalidJson(String),
-    #[error(
-        "This restore code was made with an older version of the app (v{0}). Generate a new restore code on the source device."
-    )]
-    ObsoleteVersion(u8),
-    #[error(
-        "This restore code was made with a newer version of the app (v{0}). Update the app to use it."
-    )]
-    NewerVersion(u8),
+    #[error("This restore code uses unsupported format version v{0}. Generate a new restore code on the source device.")]
+    UnsupportedVersion(u8),
     /// The restore code's `sid` is not a safe path component, so it cannot name a
     /// store directory under `stores/`. The code is unsigned and anyone can
     /// craft one, so the id is refused here at decode rather than reaching a path
@@ -144,11 +136,8 @@ pub fn encode_restore_code(code: &RestoreCode) -> String {
 /// Decode a restore code string back into a `RestoreCode`.
 pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     let code: RestoreCode = code_envelope::decode_code(code_envelope::PREFIX, s)?;
-    if code.v < RESTORE_CODE_VERSION {
-        return Err(RestoreCodeError::ObsoleteVersion(code.v));
-    }
-    if code.v > RESTORE_CODE_VERSION {
-        return Err(RestoreCodeError::NewerVersion(code.v));
+    if code.v != RESTORE_CODE_VERSION {
+        return Err(RestoreCodeError::UnsupportedVersion(code.v));
     }
     // A restore code is unsigned, so `sid` is attacker-controlled. It becomes the
     // name of a directory the restorer creates under `stores/` and recursively
@@ -163,18 +152,30 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
     if matches!(code.provider, CloudHomeJoinInfo::CloudKitShare { .. }) {
         return Err(RestoreCodeError::CloudKitShareNotRestorable);
     }
-    if let Some(key_hex) = &code.ek {
-        crate::encryption::EncryptionService::new(key_hex)
+    if let Some(serialized_keyring) = &code.ek {
+        crate::encryption::EncryptionService::new(serialized_keyring)
             .map_err(|e| RestoreCodeError::InvalidEncryptionKey(e.to_string()))?;
     }
     decode_hex_bytes("signing key", &code.sk, 64).map_err(RestoreCodeError::InvalidSigningKey)?;
     decode_hex_bytes("founder public key", &code.founder_pubkey, 32)
         .map_err(RestoreCodeError::InvalidFounderKey)?;
-    if code.membership_floor.is_empty() {
-        return Err(RestoreCodeError::EmptyMembershipFloor);
+    match &code.membership_floor {
+        MembershipFloor::MergeConcurrent(floor) => {
+            if floor.is_empty() {
+                return Err(RestoreCodeError::EmptyMembershipFloor);
+            }
+            super::membership_ops::membership_floor_by_grant(floor)
+                .map_err(RestoreCodeError::InvalidMembershipFloor)?;
+        }
+        MembershipFloor::Serial(Some(position)) => {
+            if position.seq == 0 {
+                return Err(RestoreCodeError::InvalidMembershipFloor(
+                    "Serial floor sequence must be nonzero".to_string(),
+                ));
+            }
+        }
+        MembershipFloor::Serial(None) => {}
     }
-    super::membership_ops::membership_floor_by_grant(&code.membership_floor)
-        .map_err(RestoreCodeError::InvalidMembershipFloor)?;
     Ok(code)
 }
 
@@ -244,20 +245,27 @@ mod tests {
         hex::encode([0xAB_u8; 64])
     }
 
-    fn test_membership_floor() -> Vec<MembershipCoord> {
-        vec![MembershipCoord {
+    fn test_keyring(byte: u8) -> String {
+        crate::encryption::MasterKeyring::from(crate::encryption::EncryptionService::from_key(
+            [byte; 32],
+        ))
+        .to_serialized()
+    }
+
+    fn test_membership_floor() -> MembershipFloor {
+        MembershipFloor::MergeConcurrent(vec![MembershipCoord {
             author_pubkey: hex::encode([0xCDu8; 32]),
             author_owner_grant: OwnerGrantId(ObjectHash::digest(b"test owner grant")),
             seq: 1,
             entry_hash: ObjectHash::digest(b"test membership entry"),
-        }]
+        }])
     }
 
     fn sample_s3_code() -> RestoreCode {
         RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
-            ek: Some("aa".repeat(32)),
+            ek: Some(test_keyring(0xaa)),
             name: "Test Store".to_string(),
             provider: CloudHomeJoinInfo::S3 {
                 bucket: "my-bucket".to_string(),
@@ -310,11 +318,19 @@ mod tests {
     }
 
     #[test]
+    fn empty_serial_store_round_trips_the_founder_only_floor() {
+        let mut code = sample_s3_code();
+        code.membership_floor = MembershipFloor::Serial(None);
+        let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
+        assert_eq!(decoded.membership_floor, MembershipFloor::Serial(None));
+    }
+
+    #[test]
     fn roundtrip_cloudkit() {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-123".to_string(),
-            ek: Some("bb".repeat(32)),
+            ek: Some(test_keyring(0xbb)),
             name: "CloudKit Store".to_string(),
             provider: CloudHomeJoinInfo::CloudKit,
             sk: test_sk(),
@@ -335,7 +351,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-456".to_string(),
-            ek: Some("cc".repeat(32)),
+            ek: Some(test_keyring(0xcc)),
             name: "GDrive Store".to_string(),
             provider: CloudHomeJoinInfo::GoogleDrive {
                 folder_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs".to_string(),
@@ -361,7 +377,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-789".to_string(),
-            ek: Some("dd".repeat(32)),
+            ek: Some(test_keyring(0xdd)),
             name: "Dropbox Store".to_string(),
             provider: CloudHomeJoinInfo::Dropbox {
                 folder_path: "/Apps/your-app/My Store".to_string(),
@@ -387,7 +403,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-abc".to_string(),
-            ek: Some("ee".repeat(32)),
+            ek: Some(test_keyring(0xee)),
             name: "OneDrive Store".to_string(),
             provider: CloudHomeJoinInfo::OneDrive {
                 drive_id: "drive-id-123".to_string(),
@@ -420,7 +436,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-ck-share".to_string(),
-            ek: Some("ff".repeat(32)),
+            ek: Some(test_keyring(0xff)),
             name: "CloudKit Share Store".to_string(),
             provider: CloudHomeJoinInfo::CloudKitShare {
                 share_url: "https://share.example/abc".to_string(),
@@ -478,19 +494,18 @@ mod tests {
         let encoded = encode_restore_code(&code);
         assert!(matches!(
             decode_restore_code(&encoded),
-            Err(RestoreCodeError::NewerVersion(99))
+            Err(RestoreCodeError::UnsupportedVersion(99))
         ));
     }
 
     #[test]
-    fn v1_base64_signing_key_is_unsupported_version() {
+    fn obsolete_version_is_rejected_before_field_validation() {
         let mut code = sample_s3_code();
-        code.v = 1;
-        code.sk = URL_SAFE_NO_PAD.encode([0xAB_u8; 64]);
+        code.v = 0;
         let encoded = encode_restore_code(&code);
         assert!(matches!(
             decode_restore_code(&encoded),
-            Err(RestoreCodeError::ObsoleteVersion(1))
+            Err(RestoreCodeError::UnsupportedVersion(0))
         ));
     }
 
@@ -508,7 +523,7 @@ mod tests {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
             sid: "lib-1".to_string(),
-            ek: Some("aa".repeat(32)),
+            ek: Some(test_keyring(0xaa)),
             name: "Test Store".to_string(),
             provider: CloudHomeJoinInfo::S3 {
                 bucket: "b".to_string(),
@@ -622,22 +637,25 @@ mod tests {
         assert!(invalid_json.contains("Regenerate"), "{invalid_json}");
         assert!(invalid_json.contains("trailing comma"), "{invalid_json}");
 
-        let old_version = RestoreCodeError::ObsoleteVersion(1).to_string();
-        assert!(old_version.contains("v1"), "{old_version}");
+        let old_version = RestoreCodeError::UnsupportedVersion(0).to_string();
+        assert!(old_version.contains("v0"), "{old_version}");
         assert!(
             old_version.contains("Generate a new restore code"),
             "{old_version}"
         );
 
-        let newer_version = RestoreCodeError::NewerVersion(99).to_string();
+        let newer_version = RestoreCodeError::UnsupportedVersion(99).to_string();
         assert!(newer_version.contains("v99"), "{newer_version}");
-        assert!(newer_version.contains("Update the app"), "{newer_version}");
+        assert!(
+            newer_version.contains("Generate a new restore code"),
+            "{newer_version}"
+        );
     }
 
     #[test]
     fn invalid_encryption_key_rejected_at_decode() {
         let mut code = sample_s3_code();
-        code.ek = Some("not hex".to_string());
+        code.ek = Some("not keyring JSON".to_string());
         let encoded = encode_restore_code(&code);
         assert!(matches!(
             decode_restore_code(&encoded),
@@ -645,7 +663,7 @@ mod tests {
         ));
 
         let mut code = sample_s3_code();
-        code.ek = Some(hex::encode([0u8; 31]));
+        code.ek = Some(hex::encode([0u8; 32]));
         let encoded = encode_restore_code(&code);
         assert!(matches!(
             decode_restore_code(&encoded),
@@ -691,7 +709,7 @@ mod tests {
     #[test]
     fn empty_membership_floor_is_refused_at_decode() {
         let mut code = sample_s3_code();
-        code.membership_floor.clear();
+        code.membership_floor = MembershipFloor::MergeConcurrent(Vec::new());
         assert!(matches!(
             decode_restore_code(&encode_restore_code(&code)),
             Err(RestoreCodeError::EmptyMembershipFloor)

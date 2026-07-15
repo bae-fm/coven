@@ -16,13 +16,13 @@ use crate::identity_custody::IdentityCustody;
 use crate::keys::{DeviceIdentityCustody, MasterKeyCustody, StoreKeys, UserKeypair};
 use crate::migration::Migration;
 use crate::oauth::OAuthTokens;
+use crate::storage::cloud::setup::CoordinationClients;
 use crate::storage::cloud::{CloudHome, CloudHomeJoinInfo};
 use crate::store_dir::StoreLayout;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::join::{
     bootstrap_and_save_store, cleanup_after_bootstrap_failure, BootstrapError,
 };
-use crate::sync::membership::MembershipCoord;
 use crate::sync::session::SyncedTable;
 
 /// Cloud provider source for restore: the join info a restore code carries
@@ -31,6 +31,7 @@ use crate::sync::session::SyncedTable;
 /// driver).
 pub struct RestoreSource {
     pub join_info: CloudHomeJoinInfo,
+    pub custom_s3_serial: Option<crate::CustomS3Serial>,
     pub oauth_tokens: Option<OAuthTokens>,
     pub cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 }
@@ -53,16 +54,24 @@ fn require_and_persist_oauth(
     Ok((tokens, ks))
 }
 
-/// Build a `(CloudHomeJoinInfo, Box<dyn CloudHome>)` from a `RestoreSource`.
+/// Build the data and coordination views of a cloud home from a `RestoreSource`.
 async fn build_cloud_home(
     source: RestoreSource,
     store_id: &str,
     clock: crate::clock::ClockRef,
-) -> Result<(CloudHomeJoinInfo, Box<dyn CloudHome>), BootstrapError> {
+) -> Result<
+    (
+        CloudHomeJoinInfo,
+        Arc<dyn CloudHome>,
+        Option<CoordinationClients>,
+    ),
+    BootstrapError,
+> {
     use crate::storage::cloud::*;
 
     let RestoreSource {
         join_info,
+        custom_s3_serial: _,
         oauth_tokens,
         cloudkit_ops,
     } = source;
@@ -71,7 +80,7 @@ async fn build_cloud_home(
     #[cfg(not(feature = "oauth-providers"))]
     let _ = (store_id, &clock, &oauth_tokens);
 
-    let home: Box<dyn CloudHome> = match &join_info {
+    let (home, coordination): (Arc<dyn CloudHome>, Option<CoordinationClients>) = match &join_info {
         CloudHomeJoinInfo::S3 {
             bucket,
             region,
@@ -79,8 +88,8 @@ async fn build_cloud_home(
             access_key,
             secret_key,
             key_prefix,
-        } => Box::new(
-            s3::S3CloudHome::new(
+        } => {
+            let (home, peer) = s3::S3CloudHome::new_pair(
                 bucket.clone(),
                 region.clone(),
                 endpoint.clone(),
@@ -88,14 +97,19 @@ async fn build_cloud_home(
                 secret_key.clone(),
                 key_prefix.clone(),
             )
-            .await?,
-        ),
+            .await?;
+            let home = Arc::new(home);
+            let peer = Arc::new(peer);
+            (home.clone(), Some((home, peer)))
+        }
 
         CloudHomeJoinInfo::CloudKit => {
             let ops = cloudkit_ops.ok_or_else(|| {
                 BootstrapError::Provider("CloudKit driver not provided".to_string())
             })?;
-            Box::new(cloudkit::CloudKitCloudHome::new_private(ops)) as Box<dyn CloudHome>
+            let home = Arc::new(cloudkit::CloudKitCloudHome::new_private(ops.clone()));
+            let peer = Arc::new(cloudkit::CloudKitCloudHome::new_private(ops));
+            (home.clone(), Some((home, peer)))
         }
 
         // Restore recovers your own zone, never one shared to you;
@@ -111,23 +125,29 @@ async fn build_cloud_home(
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             let (tokens, ks) = require_and_persist_oauth(oauth_tokens, store_id, "Google Drive")?;
-            Box::new(google_drive::GoogleDriveCloudHome::new(
-                folder_id.clone(),
-                tokens,
-                ks,
-                clock,
-            )?) as Box<dyn CloudHome>
+            (
+                Arc::new(google_drive::GoogleDriveCloudHome::new(
+                    folder_id.clone(),
+                    tokens,
+                    ks,
+                    clock,
+                )?),
+                None,
+            )
         }
 
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { folder_path } => {
             let (tokens, ks) = require_and_persist_oauth(oauth_tokens, store_id, "Dropbox")?;
-            Box::new(dropbox::DropboxCloudHome::new(
-                folder_path.clone(),
-                tokens,
-                ks,
-                clock,
-            )?) as Box<dyn CloudHome>
+            (
+                Arc::new(dropbox::DropboxCloudHome::new(
+                    folder_path.clone(),
+                    tokens,
+                    ks,
+                    clock,
+                )?),
+                None,
+            )
         }
 
         #[cfg(feature = "oauth-providers")]
@@ -136,13 +156,16 @@ async fn build_cloud_home(
             folder_id,
         } => {
             let (tokens, ks) = require_and_persist_oauth(oauth_tokens, store_id, "OneDrive")?;
-            Box::new(onedrive::OneDriveCloudHome::new(
-                drive_id.clone(),
-                folder_id.clone(),
-                tokens,
-                ks,
-                clock,
-            )?) as Box<dyn CloudHome>
+            (
+                Arc::new(onedrive::OneDriveCloudHome::new(
+                    drive_id.clone(),
+                    folder_id.clone(),
+                    tokens,
+                    ks,
+                    clock,
+                )?),
+                None,
+            )
         }
 
         #[cfg(not(feature = "oauth-providers"))]
@@ -155,7 +178,7 @@ async fn build_cloud_home(
         }
     };
 
-    Ok((join_info, home))
+    Ok((join_info, home, coordination))
 }
 
 /// Restore a store from cloud storage.
@@ -170,14 +193,15 @@ pub async fn restore_from_cloud(
     store_id: &str,
     store_root_hash: crate::sync::store_commit::ObjectHash,
     founder_pubkey: &str,
-    encryption_key_hex: Option<&str>,
+    serialized_keyring: Option<&str>,
     store_name: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
+    expected_write_policy: crate::WritePolicy,
     custody: Arc<dyn MasterKeyCustody>,
     identity_custody: Arc<dyn DeviceIdentityCustody>,
     source: RestoreSource,
-    membership_floor: &[MembershipCoord],
+    membership_floor: &crate::join_code::MembershipFloor,
     keypair: &UserKeypair,
     layout: &StoreLayout,
     clock: crate::clock::ClockRef,
@@ -189,6 +213,20 @@ pub async fn restore_from_cloud(
     // caller, independent of the decode-time check on untrusted input.
     crate::store_dir::validate_path_token(store_id)
         .map_err(|e| BootstrapError::InvalidCode(format!("invalid store id: {e}")))?;
+    let actual_write_policy = membership_floor.write_policy();
+    if actual_write_policy != expected_write_policy {
+        return Err(BootstrapError::WritePolicyMismatch {
+            expected: expected_write_policy,
+            actual: actual_write_policy,
+        });
+    }
+    crate::storage::cloud::setup::require_serial_coordination_join_info(
+        &source.join_info,
+        source.custom_s3_serial,
+        actual_write_policy,
+    )
+    .map_err(|provider| BootstrapError::SerialCoordinationUnavailable { provider })?;
+    let custom_s3_serial = source.custom_s3_serial;
 
     let store_dir = layout.store_dir(store_id);
 
@@ -224,15 +262,15 @@ pub async fn restore_from_cloud(
         // same blob keys the source wrote. Parsed once here (not re-parsed
         // inside `bootstrap_and_save_store`) so the cipher and the persisted
         // master key always agree on the same value.
-        let storage = if encryption_key_hex.is_some() {
+        let storage = if serialized_keyring.is_some() {
             HomeStorage::Opaque
         } else {
             HomeStorage::Browsable
         };
-        let master_key: Option<MasterKeyring> = match encryption_key_hex {
-            Some(key_hex) => {
+        let master_key: Option<MasterKeyring> = match serialized_keyring {
+            Some(serialized_keyring) => {
                 on_status("Verifying encryption key...");
-                Some(MasterKeyring::from_serialized(key_hex)?)
+                Some(MasterKeyring::from_serialized(serialized_keyring)?)
             }
             None => None,
         };
@@ -243,10 +281,11 @@ pub async fn restore_from_cloud(
 
         let blob_paths = BlobPathScheme::for_storage(storage);
 
-        let (join_info, cloud_home) = build_cloud_home(source, store_id, clock.clone()).await?;
+        let (join_info, cloud_home, coordination) =
+            build_cloud_home(source, store_id, clock.clone()).await?;
 
         let storage = CloudSyncStorage::new(
-            std::sync::Arc::from(cloud_home),
+            cloud_home,
             cipher.clone(),
             blob_paths,
             store_id.to_string(),
@@ -255,6 +294,10 @@ pub async fn restore_from_cloud(
         .with_copy_ids(std::sync::Arc::new(
             crate::storage::cloud::RandomCopyIdGenerator,
         ));
+        let storage = match coordination {
+            Some((primary, peer)) => storage.with_serial_coordination_clients(primary, peer),
+            None => storage,
+        };
 
         // Create the store directory under `stores/` (its non-existence was
         // checked up front, so this create and the failure-cleanup below own
@@ -279,6 +322,7 @@ pub async fn restore_from_cloud(
             migrations,
             &join_info,
             store_name,
+            custom_s3_serial,
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
@@ -318,6 +362,8 @@ pub async fn restore_from_code(
     code: &str,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
+    expected_write_policy: crate::WritePolicy,
+    custom_s3_serial: Option<crate::CustomS3Serial>,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
@@ -332,6 +378,19 @@ pub async fn restore_from_code(
 
     let parsed = restore_code::decode_restore_code(code)
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
+    let actual_write_policy = parsed.membership_floor.write_policy();
+    if actual_write_policy != expected_write_policy {
+        return Err(BootstrapError::WritePolicyMismatch {
+            expected: expected_write_policy,
+            actual: actual_write_policy,
+        });
+    }
+    crate::storage::cloud::setup::require_serial_coordination_join_info(
+        &parsed.provider,
+        custom_s3_serial,
+        actual_write_policy,
+    )
+    .map_err(|provider| BootstrapError::SerialCoordinationUnavailable { provider })?;
     let custody = key_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
     let identity_custody = identity_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
 
@@ -355,6 +414,7 @@ pub async fn restore_from_code(
     // no per-provider conversion left to do here.
     let source = RestoreSource {
         join_info: parsed.provider,
+        custom_s3_serial,
         oauth_tokens,
         cloudkit_ops,
     };
@@ -370,6 +430,7 @@ pub async fn restore_from_code(
         &parsed.name,
         synced_tables,
         migrations,
+        expected_write_policy,
         custody.clone(),
         identity_custody.clone(),
         source,
@@ -414,6 +475,7 @@ mod tests {
             join_info: CloudHomeJoinInfo::Dropbox {
                 folder_path: "/Apps/coven/my-store".to_string(),
             },
+            custom_s3_serial: None,
             oauth_tokens: Some(tokens.clone()),
             cloudkit_ops: None,
         };
@@ -463,14 +525,16 @@ mod build_cloud_home_tests {
                 secret_key: "sk".to_string(),
                 key_prefix: Some("prefix/".to_string()),
             },
+            custom_s3_serial: None,
             oauth_tokens: None,
             cloudkit_ops: None,
         };
 
-        let (returned_info, _home) =
+        let (returned_info, _home, coordination) =
             build_cloud_home(source, "store-id", Arc::new(crate::clock::SystemClock))
                 .await
                 .expect("build S3 cloud home");
+        assert!(coordination.is_some());
 
         match returned_info {
             CloudHomeJoinInfo::S3 { key_prefix, .. } => {
@@ -492,6 +556,7 @@ mod build_cloud_home_tests {
                 owner_name: "owner".to_string(),
                 zone_name: "zone".to_string(),
             },
+            custom_s3_serial: None,
             oauth_tokens: None,
             cloudkit_ops: None,
         };

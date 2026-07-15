@@ -16,8 +16,9 @@ use tracing::warn;
 use crate::id_provider::{IdRef, UuidProvider};
 
 use super::{
-    CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    RevokeOutcome,
+    CloudAccessOutcome, CloudAccessState, CloudHeadCreateError, CloudHeadReplaceError,
+    CloudHeadStorage, CloudHeadVersion, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    CloudVersionedHead, RevokeOutcome,
 };
 
 const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
@@ -42,6 +43,28 @@ pub trait CloudKitOps: Send + Sync {
     ) -> Result<Vec<String>, CloudHomeError>;
     fn delete_record(&self, scope: &CloudKitScope, key: &str) -> Result<(), CloudHomeError>;
     fn record_exists(&self, scope: &CloudKitScope, key: &str) -> Result<bool, CloudHomeError>;
+    /// Read the exact CKRecord and return its opaque `recordChangeTag` with the
+    /// bytes. A later replacement must mutate this fetched record.
+    fn read_versioned_record(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+    ) -> Result<CloudVersionedHead, CloudHomeError>;
+    fn create_record(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadCreateError>;
+    /// Replace by saving the previously fetched CKRecord with
+    /// `ifServerRecordUnchanged`; copying its tag into a new CKRecord is invalid.
+    fn replace_record(
+        &self,
+        scope: &CloudKitScope,
+        key: &str,
+        expected: &CloudHeadVersion,
+        data: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadReplaceError>;
     fn share_for_member(
         &self,
         member_pubkey: &str,
@@ -68,10 +91,64 @@ pub struct CloudKitShare {
 }
 
 /// CloudKit-backed cloud home with automatic chunking for large files.
+#[derive(Clone)]
 pub(crate) struct CloudKitCloudHome {
     ops: Arc<dyn CloudKitOps>,
     ids: IdRef,
     scope: CloudKitScope,
+}
+
+#[async_trait]
+impl CloudHeadStorage for CloudKitCloudHome {
+    async fn read_head(&self, key: &str) -> Result<CloudVersionedHead, CloudHomeError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let key = key.to_string();
+        blocking(move || ops.read_versioned_record(&scope, &key)).await
+    }
+
+    async fn create_head(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || ops.create_record(&scope, &key, bytes))
+            .await
+            .map_err(|error| {
+                CloudHeadCreateError::Storage(CloudHomeError::Transport(format!(
+                    "spawn_blocking failed: {error}"
+                )))
+            })?
+    }
+
+    async fn replace_head(
+        &self,
+        key: &str,
+        expected: &CloudHeadVersion,
+        bytes: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let key = key.to_string();
+        let expected = expected.clone();
+        tokio::task::spawn_blocking(move || ops.replace_record(&scope, &key, &expected, bytes))
+            .await
+            .map_err(|error| {
+                CloudHeadReplaceError::Storage(CloudHomeError::Transport(format!(
+                    "spawn_blocking failed: {error}"
+                )))
+            })?
+    }
+
+    async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let key = key.to_string();
+        blocking(move || ops.delete_record(&scope, &key)).await
+    }
 }
 
 impl CloudKitCloudHome {
@@ -824,6 +901,7 @@ mod tests {
 
     struct MockCloudKitOps {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
+        versions: Mutex<HashMap<(CloudKitScope, String), u64>>,
         calls: Mutex<Vec<MockCall>>,
         fail_deletes: Mutex<HashSet<String>>,
         fail_writes: Mutex<HashSet<String>>,
@@ -837,6 +915,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 store: Mutex::new(HashMap::new()),
+                versions: Mutex::new(HashMap::new()),
                 calls: Mutex::new(Vec::new()),
                 fail_deletes: Mutex::new(HashSet::new()),
                 fail_writes: Mutex::new(HashSet::new()),
@@ -943,6 +1022,75 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains_key(&(scope.clone(), key.to_string())))
+        }
+
+        fn read_versioned_record(
+            &self,
+            scope: &CloudKitScope,
+            key: &str,
+        ) -> Result<CloudVersionedHead, CloudHomeError> {
+            let record = (scope.clone(), key.to_string());
+            let store = self.store.lock().unwrap();
+            let versions = self.versions.lock().unwrap();
+            Ok(CloudVersionedHead {
+                bytes: store
+                    .get(&record)
+                    .cloned()
+                    .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?,
+                version: CloudHeadVersion::from_provider(
+                    versions
+                        .get(&record)
+                        .copied()
+                        .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))?
+                        .to_string(),
+                )?,
+            })
+        }
+
+        fn create_record(
+            &self,
+            scope: &CloudKitScope,
+            key: &str,
+            data: Vec<u8>,
+        ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
+            let record = (scope.clone(), key.to_string());
+            let mut store = self.store.lock().unwrap();
+            let mut versions = self.versions.lock().unwrap();
+            if store.contains_key(&record) {
+                return Err(CloudHeadCreateError::AlreadyExists);
+            }
+            store.insert(record.clone(), data.clone());
+            versions.insert(record, 1);
+            Ok(CloudVersionedHead {
+                bytes: data,
+                version: CloudHeadVersion::from_provider("1".to_string())?,
+            })
+        }
+
+        fn replace_record(
+            &self,
+            scope: &CloudKitScope,
+            key: &str,
+            expected: &CloudHeadVersion,
+            data: Vec<u8>,
+        ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
+            let record = (scope.clone(), key.to_string());
+            let mut store = self.store.lock().unwrap();
+            let mut versions = self.versions.lock().unwrap();
+            let current = versions
+                .get(&record)
+                .copied()
+                .ok_or(CloudHeadReplaceError::VersionMismatch)?;
+            if expected.as_provider() != current.to_string() {
+                return Err(CloudHeadReplaceError::VersionMismatch);
+            }
+            let next = current + 1;
+            store.insert(record.clone(), data.clone());
+            versions.insert(record, next);
+            Ok(CloudVersionedHead {
+                bytes: data,
+                version: CloudHeadVersion::from_provider(next.to_string())?,
+            })
         }
 
         fn grant_share(&self, member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError> {

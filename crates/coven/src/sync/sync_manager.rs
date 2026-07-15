@@ -115,6 +115,47 @@ pub(crate) struct SyncManager {
 }
 
 impl SyncManager {
+    fn require_configured_coordination(&self, config: &Config) -> Result<(), SyncError> {
+        crate::storage::cloud::setup::require_serial_coordination_config(
+            config,
+            self.db.write_policy(),
+        )
+        .map_err(SyncError::StorageSetup)
+    }
+
+    async fn storage_for_command(
+        &self,
+        config: &Config,
+        active_loop: Option<&Arc<SyncLoopHandle>>,
+    ) -> Result<Arc<crate::sync::cloud_storage::CloudSyncStorage>, SyncError> {
+        if let Some(active_loop) = active_loop {
+            return Ok(active_loop.storage().clone());
+        }
+        let storage = match self.cloud_home() {
+            Some(home) => crate::storage::cloud::setup::create_sync_storage_with_home(
+                config,
+                self.custody.as_ref(),
+                self.identity_custody.as_ref(),
+                home,
+                None,
+            ),
+            None => {
+                crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
+                    config,
+                    &self.key_service,
+                    self.custody.as_ref(),
+                    self.identity_custody.as_ref(),
+                    None,
+                    self.clock.clone(),
+                    self.cloudkit_ops.clone(),
+                )
+                .await
+            }
+        }
+        .map_err(SyncError::StorageSetup)?;
+        Ok(Arc::new(storage))
+    }
+
     /// Build the manager off the owned [`Database`]. Session initialization takes
     /// the database's already-seeded register clock into [`SyncComponents`], and
     /// every connected command reads that captured clock from the installed loop.
@@ -160,6 +201,35 @@ impl SyncManager {
         self.sync_loop_handle.read().unwrap().clone()
     }
 
+    pub(crate) async fn prepare_serial_resolution(
+        &self,
+        branch_base: Option<crate::sync::store_commit::CommitPosition>,
+        store_dir: &crate::store_dir::StoreDir,
+    ) -> Result<crate::sync::store_pull::SerialResolutionPlan, SyncError> {
+        let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
+        let storage = loop_handle.storage();
+        let coordination = storage
+            .serial_coordination()
+            .map_err(|error| SyncError::Protocol(error.to_string()))?;
+        let store_root_hash = self
+            .db
+            .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
+            .await?
+            .ok_or_else(|| SyncError::Protocol("store protocol root is absent".to_string()))?
+            .parse()
+            .map_err(|error| SyncError::Protocol(format!("store protocol root: {error}")))?;
+        crate::sync::store_pull::prepare_serial_resolution(
+            &self.db,
+            &**storage,
+            coordination,
+            store_root_hash,
+            store_dir,
+            branch_base,
+        )
+        .await
+        .map_err(|error| SyncError::Protocol(error.to_string()))
+    }
+
     // =========================================================================
     // Sync lifecycle
     // =========================================================================
@@ -200,6 +270,8 @@ impl SyncManager {
             info!("start_sync: sync not configured; no loop started");
             return Ok(());
         }
+
+        self.require_configured_coordination(&config)?;
 
         self.stop_current_connection()?;
 
@@ -558,40 +630,14 @@ impl SyncManager {
             info!("get_members: sync not configured; returning no members");
             return Ok(Vec::new());
         }
-
-        let loop_storage = active_loop.map(|handle| handle.storage().clone());
-        let owned_storage;
-        let storage: &dyn SyncStorage = if let Some(storage) = loop_storage.as_deref() {
-            storage
-        } else {
-            owned_storage = match self.cloud_home() {
-                Some(home) => crate::storage::cloud::setup::create_sync_storage_with_home(
-                    &config,
-                    self.custody.as_ref(),
-                    self.identity_custody.as_ref(),
-                    home,
-                    None,
-                ),
-                None => {
-                    crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
-                        &config,
-                        &self.key_service,
-                        self.custody.as_ref(),
-                        self.identity_custody.as_ref(),
-                        None,
-                        self.clock.clone(),
-                        self.cloudkit_ops.clone(),
-                    )
-                    .await
-                }
-            }
-            .map_err(SyncError::StorageSetup)?;
-            &owned_storage
-        };
+        self.require_configured_coordination(&config)?;
+        let storage = self
+            .storage_for_command(&config, active_loop.as_ref())
+            .await?;
 
         let user_pubkey = crate::keys::identity_public_key(self.identity_custody.as_ref())?;
         crate::sync::membership_ops::get_members(
-            storage,
+            &*storage,
             user_pubkey.as_ref().map(|k| k.as_slice()),
             &self.db,
         )
@@ -615,36 +661,10 @@ impl SyncManager {
         if active_loop.is_none() && config.cloud_home.provider.is_none() {
             return Err(SyncError::NotConfigured);
         }
-
-        let loop_storage = active_loop.map(|handle| handle.storage().clone());
-        let owned_storage;
-        let storage: &dyn SyncStorage = if let Some(storage) = loop_storage.as_deref() {
-            storage
-        } else {
-            owned_storage = match self.cloud_home() {
-                Some(home) => crate::storage::cloud::setup::create_sync_storage_with_home(
-                    &config,
-                    self.custody.as_ref(),
-                    self.identity_custody.as_ref(),
-                    home,
-                    None,
-                ),
-                None => {
-                    crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
-                        &config,
-                        &self.key_service,
-                        self.custody.as_ref(),
-                        self.identity_custody.as_ref(),
-                        None,
-                        self.clock.clone(),
-                        self.cloudkit_ops.clone(),
-                    )
-                    .await
-                }
-            }
-            .map_err(SyncError::StorageSetup)?;
-            &owned_storage
-        };
+        self.require_configured_coordination(&config)?;
+        let storage = self
+            .storage_for_command(&config, active_loop.as_ref())
+            .await?;
 
         let pinned_owner = self
             .db
@@ -660,13 +680,31 @@ impl SyncManager {
             .ok_or_else(|| SyncError::Protocol("store protocol root hash is absent".to_string()))?
             .parse()
             .map_err(|error| SyncError::Protocol(format!("store protocol root hash: {error}")))?;
-        let membership_floor = crate::sync::membership_ops::current_membership_floor(
-            storage,
-            pinned_owner.as_deref(),
-            Some(&self.db),
-        )
-        .await
-        .map_err(SyncError::Membership)?;
+        let membership_floor = match self.db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => {
+                crate::join_code::MembershipFloor::MergeConcurrent(
+                    crate::sync::membership_ops::current_membership_floor(
+                        &*storage,
+                        pinned_owner.as_deref(),
+                        Some(&self.db),
+                    )
+                    .await
+                    .map_err(SyncError::Membership)?,
+                )
+            }
+            crate::WritePolicy::Serial => {
+                let coordination = storage.serial_coordination().map_err(|error| {
+                    SyncError::Protocol(format!("Serial coordination: {error}"))
+                })?;
+                let position = crate::sync::store_outbound::current_serial_head_position(
+                    &self.db,
+                    coordination,
+                )
+                .await
+                .map_err(|error| SyncError::Protocol(error.to_string()))?;
+                crate::join_code::MembershipFloor::Serial(position)
+            }
+        };
 
         crate::storage::cloud::setup::generate_restore_code(
             &config,
@@ -833,6 +871,7 @@ mod tests {
             "store",
             &join_info,
             &CloudCipher::Plaintext,
+            None,
         );
         let manager = SyncManager::new(
             Arc::new(move || config.clone()),
@@ -844,7 +883,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
         );
 
         let error = manager
@@ -890,7 +929,7 @@ mod tests {
             None,
             None,
             open_guard,
-            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
         );
 
         let error = manager
@@ -901,6 +940,44 @@ mod tests {
             matches!(error, SyncError::MasterKeyNotEstablished),
             "expected MasterKeyNotEstablished, got {error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn start_sync_refuses_a_known_unsupported_serial_provider_before_provider_access() {
+        let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
+        let mut config = Config::with_defaults(
+            "serial-google-drive".to_string(),
+            "test-device".to_string(),
+            store_dir,
+            "Serial Store".to_string(),
+        );
+        config.cloud_home.provider = Some(CloudProvider::GoogleDrive);
+        let manager = SyncManager::new(
+            Arc::new(move || config.clone()),
+            StoreKeys::new("serial-google-drive".to_string()),
+            Arc::new(NoKeyCustody),
+            Arc::new(NoIdentityCustody),
+            crate::sync::test_helpers::open_serial_test_db(),
+            Arc::new(SystemClock),
+            None,
+            None,
+            open_guard,
+            tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+        );
+
+        let error = manager
+            .start_sync()
+            .await
+            .expect_err("Google Drive cannot coordinate a Serial Store");
+        assert!(matches!(
+            error,
+            SyncError::StorageSetup(StorageSetupError::SerialCoordinationUnavailable {
+                provider: CloudProvider::GoogleDrive,
+            })
+        ));
+        assert!(manager.sync_loop_handle().is_none());
+        assert!(manager.cloud_home().is_none());
     }
 
     #[tokio::test]
@@ -925,7 +1002,7 @@ mod tests {
             None,
             None,
             open_guard,
-            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
         );
 
         let home = Arc::new(InMemoryCloudHome::new());
@@ -987,7 +1064,7 @@ mod tests {
             None,
             None,
             open_guard,
-            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
         );
 
         manager
@@ -1057,7 +1134,7 @@ mod tests {
             None,
             None,
             open_guard,
-            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
         );
 
         let error = manager
@@ -1124,7 +1201,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
         );
 
         let error = manager
@@ -1188,7 +1265,7 @@ mod tests {
             None,
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
-            tokio::sync::watch::channel(SyncLoopStatus::Idle).0,
+            tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
         );
 
         let fingerprint_a = match manager

@@ -15,8 +15,9 @@ use super::s3_common::{
     apply_prefix, is_not_found_code, normalize_prefix, probe_error, strip_listed_key_prefix,
 };
 use super::{
-    range_header, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, RevokeOutcome,
+    range_header, CloudAccessOutcome, CloudAccessState, CloudHeadCreateError,
+    CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, CloudVersionedHead, RevokeOutcome,
 };
 
 /// A coven-owned tokio runtime whose worker threads have a large stack, used to
@@ -56,6 +57,7 @@ async fn on_s3_rt<T: Send + 'static>(
 }
 
 /// S3-backed cloud home.
+#[derive(Clone)]
 pub struct S3CloudHome {
     client: Client,
     bucket: String,
@@ -66,7 +68,150 @@ pub struct S3CloudHome {
     key_prefix: Option<String>,
 }
 
+fn coordination_version(key: &str, etag: Option<&str>) -> Result<CloudHeadVersion, CloudHomeError> {
+    CloudHeadVersion::from_provider(
+        etag.ok_or_else(|| {
+            CloudHomeError::Transport(format!("S3 coordination response for {key:?} has no ETag"))
+        })?
+        .to_string(),
+    )
+}
+
+fn conditional_put_failed(
+    error: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
+) -> bool {
+    use aws_sdk_s3::error::ProvideErrorMetadata;
+    matches!(
+        error.code(),
+        Some("PreconditionFailed" | "ConditionalRequestConflict")
+    )
+}
+
+#[async_trait]
+impl CloudHeadStorage for S3CloudHome {
+    async fn read_head(&self, key: &str) -> Result<CloudVersionedHead, CloudHomeError> {
+        let full = self.full_key(key);
+        let key = key.to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        on_s3_rt(async move {
+            let response = client
+                .get_object()
+                .bucket(&bucket)
+                .key(full)
+                .send()
+                .await
+                .map_err(|error| get_object_error(&key, error))?;
+            let version = coordination_version(&key, response.e_tag())?;
+            let bytes = response
+                .body
+                .collect()
+                .await
+                .map_err(|error| body_read_error("read coordination head", &key, error))?
+                .into_bytes()
+                .to_vec();
+            Ok(CloudVersionedHead { bytes, version })
+        })
+        .await
+    }
+
+    async fn create_head(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
+        let full = self.full_key(key);
+        let key = key.to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        on_s3_rt(async move {
+            let result = client
+                .put_object()
+                .bucket(&bucket)
+                .key(full)
+                .if_none_match("*")
+                .body(bytes.clone().into())
+                .send()
+                .await;
+            Ok(match result {
+                Ok(output) => Ok(CloudVersionedHead {
+                    bytes,
+                    version: coordination_version(&key, output.e_tag())?,
+                }),
+                Err(error) if conditional_put_failed(&error) => {
+                    Err(CloudHeadCreateError::AlreadyExists)
+                }
+                Err(error) => Err(CloudHeadCreateError::Storage(put_object_error(&key, error))),
+            })
+        })
+        .await
+        .map_err(CloudHeadCreateError::Storage)?
+    }
+
+    async fn replace_head(
+        &self,
+        key: &str,
+        expected: &CloudHeadVersion,
+        bytes: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
+        let full = self.full_key(key);
+        let key = key.to_string();
+        let expected = expected.as_provider().to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        on_s3_rt(async move {
+            let result = client
+                .put_object()
+                .bucket(&bucket)
+                .key(full)
+                .if_match(expected)
+                .body(bytes.clone().into())
+                .send()
+                .await;
+            Ok(match result {
+                Ok(output) => Ok(CloudVersionedHead {
+                    bytes,
+                    version: coordination_version(&key, output.e_tag())?,
+                }),
+                Err(error) if conditional_put_failed(&error) => {
+                    Err(CloudHeadReplaceError::VersionMismatch)
+                }
+                Err(error) => Err(CloudHeadReplaceError::Storage(put_object_error(
+                    &key, error,
+                ))),
+            })
+        })
+        .await
+        .map_err(CloudHeadReplaceError::Storage)?
+    }
+
+    async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError> {
+        <Self as CloudHome>::delete(self, key).await
+    }
+}
+
 impl S3CloudHome {
+    pub async fn new_pair(
+        bucket: String,
+        region: String,
+        endpoint: Option<String>,
+        access_key: String,
+        secret_key: String,
+        key_prefix: Option<String>,
+    ) -> Result<(Self, Self), CloudHomeError> {
+        let primary = Self::new(
+            bucket.clone(),
+            region.clone(),
+            endpoint.clone(),
+            access_key.clone(),
+            secret_key.clone(),
+            key_prefix.clone(),
+        )
+        .await?;
+        let peer = Self::new(bucket, region, endpoint, access_key, secret_key, key_prefix).await?;
+        Ok((primary, peer))
+    }
+
     pub async fn new(
         bucket: String,
         region: String,

@@ -30,6 +30,7 @@ use super::cloud_storage::{BlobPathScheme, CloudSyncStorage};
 use super::cycle::SyncComponents;
 use super::hlc::Hlc;
 use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
+use super::storage::SyncStorage;
 
 /// Why starting or stopping the background sync loop failed.
 #[derive(Debug, thiserror::Error)]
@@ -46,31 +47,44 @@ pub enum SyncLoopError {
     ThreadPanicked,
 }
 
-/// A sync-loop status the host renders. The loop emits [`Started`](Self::Started)
-/// when a cycle begins and one terminal status — [`Succeeded`](Self::Succeeded)
-/// or [`Failed`](Self::Failed) — when it ends. The in-progress marker is the
-/// variant itself, so there is no separate "syncing" flag and no outcome fields
-/// to leave unset on a start.
+/// A sync-loop status the host renders. The loop reports provider reachability,
+/// publication, and one terminal status. [`Conflict`](Self::Conflict)
+/// and [`Blocked`](Self::Blocked) are successful storage cycles with unresolved
+/// durable writes; [`Synchronized`](Self::Synchronized) has none, while
+/// [`Failed`](Self::Failed) means the cycle itself failed. The in-progress marker
+/// is the variant itself, so there is no separate "syncing" flag.
 ///
-/// A completed cycle is [`Succeeded`](Self::Succeeded) or [`Failed`](Self::Failed), never both: a whole-cycle
-/// failure is `Failed`; an otherwise-successful cycle that surfaced warnings
-/// (skipped-schema, unauthorized, held changesets, …) is `Succeeded`, and the
-/// warnings ride in its [`SyncLoopSuccess::alerts`]. So a host tells "failed" from
-/// "succeeded with warnings" by which variant it got, not by sniffing a field.
+/// A whole-cycle failure is `Failed`; an otherwise-successful cycle carries its
+/// [`SyncLoopSuccess`] in `Synchronized`, `Conflict`, or `Blocked`. Warnings ride in
+/// [`SyncLoopSuccess::alerts`].
 ///
 /// A subscription immediately exposes the current value. Intermediate values may
 /// be coalesced when the producer changes state faster than a receiver observes
-/// it. A `Succeeded` value's [`SyncLoopSuccess::row_changes`] therefore remains a
+/// it. A `Synchronized` value's [`SyncLoopSuccess::row_changes`] therefore remains a
 /// refresh hint, not a complete change stream.
 #[derive(Debug, Clone)]
 pub enum SyncLoopStatus {
-    /// No cycle has started since the handle opened.
-    Idle,
-    /// A cycle has begun; the paired terminal status carries its outcome.
-    Started,
+    /// No provider operation has succeeded for the current connection.
+    Offline,
+    /// The loop is checking whether storage is reachable.
+    CheckingStorage,
+    /// Storage is reachable and the cycle may publish local state.
+    Publishing,
     /// The cycle completed. Warnings, if any, ride in the success's `alerts`;
     /// the observed device activity and applied row changes are on it too.
-    Succeeded(SyncLoopSuccess),
+    Synchronized(SyncLoopSuccess),
+    /// The cycle reached storage, but the Serial branch was based on
+    /// an older global head and require explicit discard or replacement.
+    Conflict {
+        success: SyncLoopSuccess,
+        branch: crate::PendingBranch,
+    },
+    /// The cycle reached storage, but one or more writes cannot publish until
+    /// their named prerequisite is supplied or repaired.
+    Blocked {
+        success: SyncLoopSuccess,
+        writes: Vec<crate::PendingWrite>,
+    },
     /// The cycle failed as a whole — no outcome to report, only the fault.
     Failed { error: String },
 }
@@ -215,20 +229,56 @@ impl SyncLoopHandle {
 
                     let mut consecutive_failures: u32 = 0;
                     while running.load(Ordering::Acquire) && !*stop_rx.borrow() {
-                        // A cycle is starting — mark it in progress before the work,
-                        // so a host can show that a sync is running.
-                        status_tx.send_replace(SyncLoopStatus::Started);
-
-                        let decision = match run_single_cycle(&inner, clock.as_ref(), &store_dir).await {
-                            Ok(result) => loop_policy::after_success(result),
-                            Err(error) => loop_policy::after_failure(error, consecutive_failures, 300),
+                        status_tx.send_replace(SyncLoopStatus::CheckingStorage);
+                        let reachable = inner
+                            .components
+                            .storage()
+                            .list_protocol_objects(crate::sync::store_commit::protocol_prefix())
+                            .await;
+                        let (decision, status) = match reachable {
+                            Err(error) => {
+                                let status = storage_check_failure_status(&error);
+                                let decision = loop_policy::after_failure(
+                                    format!("check sync storage: {error}"),
+                                    consecutive_failures,
+                                    300,
+                                );
+                                (decision, status)
+                            }
+                            Ok(_) => {
+                                status_tx.send_replace(SyncLoopStatus::Publishing);
+                                let (decision, cycle_went_offline) = match run_single_cycle(&inner, clock.as_ref(), &store_dir).await {
+                                    Ok(result) => (loop_policy::after_success(result), false),
+                                    Err(error) => {
+                                        let offline = error.is_offline();
+                                        (
+                                            loop_policy::after_failure(
+                                                error.to_string(),
+                                                consecutive_failures,
+                                                300,
+                                            ),
+                                            offline,
+                                        )
+                                    }
+                                };
+                                let status = match &decision.report {
+                                    SyncLoopReport::Success(success) => {
+                                        match current_success_status(inner.components.database(), success.clone()).await {
+                                            Ok(status) => status,
+                                            Err(error) => SyncLoopStatus::Failed { error },
+                                        }
+                                    }
+                                    SyncLoopReport::Failure(_) if cycle_went_offline => {
+                                        SyncLoopStatus::Offline
+                                    }
+                                    SyncLoopReport::Failure(error) => SyncLoopStatus::Failed {
+                                        error: error.clone(),
+                                    },
+                                };
+                                (decision, status)
+                            }
                         };
                         consecutive_failures = decision.consecutive_failures;
-
-                        let status = match decision.report {
-                            SyncLoopReport::Success(success) => SyncLoopStatus::Succeeded(success),
-                            SyncLoopReport::Failure(error) => SyncLoopStatus::Failed { error },
-                        };
                         status_tx.send_replace(status);
 
                         let wait = match decision.wait {
@@ -392,6 +442,40 @@ impl SyncLoopHandle {
     }
 }
 
+fn storage_check_failure_status(error: &crate::sync::storage::StorageError) -> SyncLoopStatus {
+    if error.is_transport() {
+        SyncLoopStatus::Offline
+    } else {
+        SyncLoopStatus::Failed {
+            error: format!("check sync storage: {error}"),
+        }
+    }
+}
+
+async fn current_success_status(
+    db: &crate::database::Database,
+    success: SyncLoopSuccess,
+) -> Result<SyncLoopStatus, String> {
+    let branches = db
+        .pending_branches()
+        .await
+        .map_err(|error| format!("read pending Serial branches after sync: {error}"))?;
+    if let Some(branch) = branches {
+        return Ok(SyncLoopStatus::Conflict { success, branch });
+    }
+    let writes: Vec<_> = db
+        .pending_writes()
+        .await
+        .map_err(|error| format!("read pending writes after sync: {error}"))?
+        .into_iter()
+        .filter(|write| matches!(write.status, crate::WriteStatus::Blocked(_)))
+        .collect();
+    if !writes.is_empty() {
+        return Ok(SyncLoopStatus::Blocked { success, writes });
+    }
+    Ok(SyncLoopStatus::Synchronized(success))
+}
+
 struct RunningGuard {
     running: Arc<AtomicBool>,
 }
@@ -407,7 +491,7 @@ async fn run_single_cycle(
     inner: &SyncLoopInner,
     clock: &dyn crate::clock::Clock,
     store_dir: &StoreDir,
-) -> Result<super::cycle::SyncCycleResult, String> {
+) -> Result<super::cycle::SyncCycleResult, super::cycle::SyncCycleFailure> {
     inner
         .components
         .run_cycle(
@@ -417,4 +501,115 @@ async fn run_single_cycle(
             inner.observer.as_deref(),
         )
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn success() -> SyncLoopSuccess {
+        SyncLoopSuccess {
+            last_sync_time: "2026-07-14T00:00:00Z".to_string(),
+            device_count: 1,
+            device_activity: Vec::new(),
+            data_changed: false,
+            row_changes: None,
+            alerts: crate::SyncLoopAlerts {
+                rotation_pending: None,
+                held_positions: Vec::new(),
+                asset_downloads_failed: false,
+                local_blob_cleanup_pending: false,
+            },
+        }
+    }
+
+    #[test]
+    fn storage_configuration_failure_is_terminal() {
+        let status = storage_check_failure_status(
+            &crate::sync::storage::StorageError::Configuration("missing bucket".to_string()),
+        );
+
+        assert!(matches!(status, SyncLoopStatus::Failed { .. }));
+    }
+
+    fn database() -> crate::database::Database {
+        coven_core::database::Database::open(
+            std::path::Path::new(":memory:"),
+            Vec::new(),
+            chrono::Duration::days(30),
+            coven_core::blob::TransferLimits::serial(),
+            crate::WritePolicy::Serial,
+            "status-test".to_string(),
+            &[],
+        )
+        .expect("open status test database")
+        .0
+    }
+
+    async fn insert_write_status(
+        db: &crate::database::Database,
+        write_id: &'static str,
+        branch_id: &'static str,
+        status: &'static str,
+    ) {
+        let base = format!(r#"{{"serial":{{"branch_id":"{branch_id}","base":null}}}}"#);
+        db.call(move |conn| {
+            conn.execute(
+                r#"INSERT INTO store_writes
+                 (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
+                 VALUES (?1, ?2, '[]', X'', X'', ?3, '{"blobs":[]}')"#,
+                (write_id, status, base),
+            )
+            .map(|_| ())
+            .map_err(crate::DbError::from)
+        })
+        .await
+        .expect("insert durable write status");
+    }
+
+    #[tokio::test]
+    async fn successful_cycle_projects_durable_blocked_and_conflict_states() {
+        let db = database();
+        insert_write_status(
+            &db,
+            "blocked-write",
+            "blocked-write",
+            r#"{"blocked":{"missing_blob":{"namespace":"audio","id":"missing"}}}"#,
+        )
+        .await;
+        let blocked = current_success_status(&db, success())
+            .await
+            .expect("project blocked state");
+        assert!(matches!(
+            blocked,
+            SyncLoopStatus::Blocked { writes, .. }
+                if writes.len() == 1 && writes[0].write_id.as_str() == "blocked-write"
+        ));
+        db.call(|conn| {
+            conn.execute(
+                "DELETE FROM store_writes WHERE write_id = 'blocked-write'",
+                [],
+            )
+            .map(|_| ())
+            .map_err(crate::DbError::from)
+        })
+        .await
+        .expect("remove blocked projection fixture");
+
+        insert_write_status(
+            &db,
+            "branch-write",
+            "branch-write",
+            r#"{"conflict":{"branch_id":"branch-write","base":null,"current":null}}"#,
+        )
+        .await;
+        let conflict = current_success_status(&db, success())
+            .await
+            .expect("project conflict state");
+        assert!(matches!(
+            conflict,
+            SyncLoopStatus::Conflict { branch, .. }
+                if branch.branch_id.first_write_id().as_str() == "branch-write"
+        ));
+    }
 }

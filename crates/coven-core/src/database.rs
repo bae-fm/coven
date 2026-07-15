@@ -24,19 +24,29 @@ use crate::db::{
 use crate::migration::{run_migrations, Migration, MigrationError};
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
+use crate::sync::membership::{SerialAuthorizationState, SerialMembershipState};
 use crate::sync::session::SyncedTable;
 use crate::sync::store_commit::{
-    CommitPosition, ObjectHash, SnapshotMeta, StoreAck, StoreBatchCommit, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationState, StoreProtocolRoot,
+    CommitFrontier, CommitPosition, ObjectHash, SnapshotMeta, StoreAck, StoreBatchCommit,
+    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationState, StoreProtocolRoot,
+    StoreSerialHead, SERIAL_STREAM_ID,
 };
 use crate::write::{
-    AffectedRow, PendingWrite, PublishedPosition, WriteId, WriteReceipt, WriteStatus,
+    AffectedRow, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition, WriteId,
+    WriteReceipt, WriteResolution, WriteStatus,
 };
+use crate::WritePolicy;
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
+pub const WRITE_POLICY_STATE_KEY: &str = "write_policy";
+const COVEN_INITIALIZED_STATE_KEY: &str = "coven_initialized";
+const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
 pub const STORE_ROOT_HASH_STATE_KEY: &str = "store_root_hash";
 pub const LAST_SNAPSHOT_HASH_STATE_KEY: &str = "last_snapshot_hash";
 pub const LAST_SNAPSHOT_FRONTIER_STATE_KEY: &str = "last_snapshot_frontier";
+pub const LAST_SNAPSHOT_POSITION_STATE_KEY: &str = "last_snapshot_position";
+pub const SERIAL_MEMBERSHIP_STATE_KEY: &str = "serial_membership_state";
+pub const SERIAL_KEY_GENERATION_STATE_KEY: &str = "serial_key_generation";
 const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
 
 fn authorize_host_sql(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization {
@@ -88,6 +98,7 @@ pub enum OpenError {
 
 #[derive(Clone)]
 struct DatabaseState {
+    write_policy: WritePolicy,
     hlc: Arc<Hlc>,
     synced_tables: Arc<Vec<SyncedTable>>,
     schema_version: u32,
@@ -238,6 +249,123 @@ struct DatabaseCore {
     blob_decls: Arc<BlobDecls>,
     blob_tombstone_grace: chrono::Duration,
     transfer_limits: crate::blob::TransferLimits,
+    write_policy: WritePolicy,
+}
+
+#[derive(Clone, Copy)]
+enum CovenMetadataOpen {
+    Detect,
+    InitializeVerifiedSnapshot,
+}
+
+fn serialized_write_policy(write_policy: WritePolicy) -> Result<String, DbError> {
+    serde_json::to_string(&write_policy)
+        .map_err(|error| DbError(format!("serialize Store write policy: {error}")))
+}
+
+fn initialize_write_policy(conn: &Connection, write_policy: WritePolicy) -> Result<(), DbError> {
+    let serialized = serialized_write_policy(write_policy)?;
+    conn.execute(
+        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
+        (WRITE_POLICY_STATE_KEY, serialized),
+    )
+    .map_err(DbError::from)?;
+    Ok(())
+}
+
+fn protocol_state_exists(conn: &Connection) -> Result<bool, DbError> {
+    conn.query_row(
+        "SELECT EXISTS(\
+             SELECT 1 FROM main.sqlite_schema \
+             WHERE type = 'table' AND name = 'protocol_state'\
+         )",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(DbError::from)
+}
+
+fn has_coven_initialization_marker(conn: &Connection) -> Result<bool, DbError> {
+    if !protocol_state_exists(conn)? {
+        return Ok(false);
+    }
+    let marker = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [COVEN_INITIALIZED_STATE_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    match marker.as_deref() {
+        None => Ok(false),
+        Some(COVEN_INITIALIZED_STATE_VALUE) => Ok(true),
+        Some(value) => Err(DbError(format!(
+            "Store database has invalid Coven initialization marker {value:?}"
+        ))),
+    }
+}
+
+fn initialize_coven_metadata(
+    conn: &mut Connection,
+    write_policy: WritePolicy,
+) -> Result<(), DbError> {
+    let tx = conn.transaction().map_err(DbError::from)?;
+    apply_coven_schema(&tx).map_err(DbError::from)?;
+    initialize_write_policy(&tx, write_policy)?;
+    tx.execute(
+        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
+        (COVEN_INITIALIZED_STATE_KEY, COVEN_INITIALIZED_STATE_VALUE),
+    )
+    .map_err(DbError::from)?;
+    tx.commit().map_err(DbError::from)
+}
+
+fn initialize_or_validate_coven_metadata(
+    conn: &mut Connection,
+    write_policy: WritePolicy,
+    metadata_open: CovenMetadataOpen,
+) -> Result<(), DbError> {
+    match metadata_open {
+        CovenMetadataOpen::InitializeVerifiedSnapshot => {
+            initialize_coven_metadata(conn, write_policy)
+        }
+        CovenMetadataOpen::Detect if has_coven_initialization_marker(conn)? => {
+            validate_write_policy(conn, write_policy)
+        }
+        CovenMetadataOpen::Detect => initialize_coven_metadata(conn, write_policy),
+    }
+}
+
+fn validate_coven_metadata(conn: &Connection, write_policy: WritePolicy) -> Result<(), DbError> {
+    if !has_coven_initialization_marker(conn)? {
+        return Err(DbError(
+            "Store database is missing required Coven initialization metadata".to_string(),
+        ));
+    }
+    validate_write_policy(conn, write_policy)
+}
+
+fn validate_write_policy(conn: &Connection, requested: WritePolicy) -> Result<(), DbError> {
+    let stored = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [WRITE_POLICY_STATE_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .ok_or_else(|| {
+            DbError("Store database is missing required write_policy metadata".to_string())
+        })?;
+    let stored: WritePolicy = serde_json::from_str(&stored)
+        .map_err(|error| DbError(format!("Store write_policy metadata is invalid: {error}")))?;
+    if stored != requested {
+        return Err(DbError(format!(
+            "Store write policy is {stored:?}, but open requested {requested:?}"
+        )));
+    }
+    Ok(())
 }
 
 impl DatabaseCore {
@@ -246,19 +374,20 @@ impl DatabaseCore {
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
+        write_policy: WritePolicy,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
+        metadata_open: CovenMetadataOpen,
     ) -> Result<(Self, DatabaseState, UpdatedAtStamper), OpenError> {
-        let conn = open_connection(path)?;
+        let mut conn = open_connection(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
 
-        // coven's bookkeeping tables first (declarative, idempotent, run every
-        // open), then the host's synced schema ladder over `PRAGMA user_version`.
-        // The two are kept separate by sync-visibility: coven's bookkeeping rows
-        // are stripped on snapshot, so a versioned ledger can't track them; the
-        // host's synced ladder version rides inside the snapshot's DB header.
-        apply_coven_schema(&conn).map_err(DbError::from)?;
+        // A committed marker is the authority that coven's bookkeeping schema and
+        // immutable write policy were created together. Without it, create the
+        // complete internal schema, policy, and marker in one transaction. With it,
+        // validate the policy and never rerun DDL to conceal a damaged store.
+        initialize_or_validate_coven_metadata(&mut conn, write_policy, metadata_open)?;
         conn.execute(
             "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -314,6 +443,7 @@ impl DatabaseCore {
             blob_decls,
             blob_tombstone_grace,
             transfer_limits,
+            write_policy,
         };
         let state = core.state();
 
@@ -331,6 +461,7 @@ impl DatabaseCore {
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
+        write_policy: WritePolicy,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
     ) -> Result<(Self, DatabaseState), OpenError> {
@@ -340,6 +471,7 @@ impl DatabaseCore {
         // writer's relational view. A read never inserts, so it enforces nothing new.
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(DbError::from)?;
+        validate_coven_metadata(&conn, write_policy)?;
 
         // Open against the on-disk schema exactly as the writer left it: run no
         // migration ladder (that writes), but refuse a schema newer than this binary
@@ -371,6 +503,7 @@ impl DatabaseCore {
             blob_decls,
             blob_tombstone_grace,
             transfer_limits,
+            write_policy,
         };
         let state = core.state();
         Ok((core, state))
@@ -378,6 +511,7 @@ impl DatabaseCore {
 
     fn state(&self) -> DatabaseState {
         DatabaseState {
+            write_policy: self.write_policy,
             hlc: self.hlc.clone(),
             synced_tables: self.synced_tables.clone(),
             schema_version: self.schema_version,
@@ -482,8 +616,27 @@ pub struct Database {
 pub(crate) struct PreparedStoreWrite {
     pub write_id: WriteId,
     pub changeset: Vec<u8>,
-    pub dependencies: BTreeMap<String, CommitPosition>,
+    pub inverse_changeset: Vec<u8>,
+    pub base: StoreWriteBase,
     pub blob_facts: StoreWriteBlobFacts,
+}
+
+pub(crate) struct SerialStoreBranchPreparationWork {
+    pub branch_id: PendingBranchId,
+    pub base: Option<CommitPosition>,
+    pub writes: Vec<PreparedStoreWrite>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum StoreWriteBase {
+    MergeConcurrent {
+        dependencies: BTreeMap<String, CommitPosition>,
+    },
+    Serial {
+        branch_id: PendingBranchId,
+        base: Option<CommitPosition>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -547,6 +700,28 @@ pub(crate) struct PreparedStoreWriteCommit {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct PreparedSerialStoreWriteCommit {
+    pub package_bytes: Vec<u8>,
+    pub commit: ExactProtocolObject<StoreBatchCommit>,
+    pub blob_manifest: StoreBlobManifest,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSerialStoreBranch {
+    pub branch_id: PendingBranchId,
+    pub base: Option<CommitPosition>,
+    pub writes: Vec<PreparedSerialStoreWriteCommit>,
+    pub head: ExactProtocolObject<StoreSerialHead>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UnresolvedSerialBranch {
+    pub branch_id: PendingBranchId,
+    pub base: Option<CommitPosition>,
+    pub conflicted: bool,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct OutboundStoreAck {
     pub revision: u64,
     pub ack_hash: ObjectHash,
@@ -596,14 +771,40 @@ pub(crate) struct StoreWritePreparation {
     pub completion: StoreBatchCompletion,
 }
 
+pub(crate) struct SerialStoreWritePreparation {
+    pub branch_id: PendingBranchId,
+    pub base: Option<CommitPosition>,
+    pub writes: Vec<SerialStoreWritePreparationEntry>,
+    pub head: StoreSerialHead,
+}
+
+pub(crate) struct SerialStoreWritePreparationEntry {
+    pub write_id: WriteId,
+    pub package_bytes: Vec<u8>,
+    pub commit: StoreBatchCommit,
+    pub blob_manifest: StoreBlobManifest,
+    pub local_cleanup: StoreBatchLocalCleanup,
+    pub completion: StoreBatchCompletion,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreparedStoreWriteState {
-    commit_bytes: Vec<u8>,
-    head_bytes: Vec<u8>,
-    blob_manifest: StoreBlobManifest,
-    local_cleanup: StoreBatchLocalCleanup,
-    completion: StoreBatchCompletion,
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum PreparedStoreWriteState {
+    MergeConcurrent {
+        commit_bytes: Vec<u8>,
+        head_bytes: Vec<u8>,
+        blob_manifest: StoreBlobManifest,
+        local_cleanup: StoreBatchLocalCleanup,
+        completion: StoreBatchCompletion,
+    },
+    SerialPreparing,
+    Serial {
+        commit_bytes: Vec<u8>,
+        tip_head_bytes: Option<Vec<u8>>,
+        blob_manifest: StoreBlobManifest,
+        local_cleanup: StoreBatchLocalCleanup,
+        completion: StoreBatchCompletion,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -944,8 +1145,9 @@ impl Database {
             let mut statement = conn
                 .prepare(
                     "SELECT write_id, status, affected_rows FROM store_writes
-                     WHERE status != '\"local_only\"'
-                       AND json_extract(status, '$.published') IS NULL
+                     WHERE status IN ('\"pending\"', '\"publishing\"')
+                        OR json_extract(status, '$.blocked') IS NOT NULL
+                        OR json_extract(status, '$.conflict') IS NOT NULL
                      ORDER BY ordinal",
                 )
                 .map_err(DbError::from)?;
@@ -969,6 +1171,414 @@ impl Database {
                 })
             })
             .collect()
+        })
+        .await
+    }
+
+    /// Writes whose semantic publication fault requires an explicit host action.
+    pub async fn blocked_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
+        Ok(self
+            .pending_writes()
+            .await?
+            .into_iter()
+            .filter(|write| matches!(write.status, WriteStatus::Blocked(_)))
+            .collect())
+    }
+
+    /// Return one blocked write, or its whole Serial branch, to production
+    /// publication. The next preparation attempt revalidates every captured fact;
+    /// another semantic failure records a fresh `Blocked` status.
+    pub async fn retry_blocked_write(&self, write_id: &WriteId) -> Result<Vec<WriteId>, DbError> {
+        let write_id = write_id.clone();
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (raw_status, raw_base, prepared): (String, String, Option<String>) = tx
+                .query_row(
+                    "SELECT status, base, prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError(format!("blocked write {write_id} status: {error}")))?;
+            if !matches!(status, WriteStatus::Blocked(_)) {
+                return Err(DbError(format!("write {write_id} is not blocked")));
+            }
+            let base: StoreWriteBase = serde_json::from_str(&raw_base)
+                .map_err(|error| DbError(format!("blocked write {write_id} base: {error}")))?;
+
+            let mut retried = Vec::new();
+            match base {
+                StoreWriteBase::MergeConcurrent { .. } => {
+                    if let Some(raw_prepared) = prepared.as_deref() {
+                        let prepared: PreparedStoreWriteState = serde_json::from_str(raw_prepared)
+                            .map_err(|error| {
+                                DbError(format!("blocked write {write_id} preparation: {error}"))
+                            })?;
+                        if !matches!(prepared, PreparedStoreWriteState::MergeConcurrent { .. }) {
+                            return Err(DbError(format!(
+                                "blocked MergeConcurrent write {write_id} has Serial preparation"
+                            )));
+                        }
+                    }
+                    let next = if prepared.is_some() {
+                        WriteStatus::Publishing
+                    } else {
+                        WriteStatus::Pending
+                    };
+                    let next_json = serde_json::to_string(&next)
+                        .map_err(|error| DbError(format!("serialize retry status: {error}")))?;
+                    let updated = tx
+                        .execute(
+                            "UPDATE store_writes SET status = ?2
+                             WHERE write_id = ?1 AND json_extract(status, '$.blocked') IS NOT NULL",
+                            rusqlite::params![write_id.as_str(), next_json],
+                        )
+                        .map_err(DbError::from)?;
+                    if updated != 1 {
+                        return Err(DbError(format!(
+                            "blocked write {write_id} changed during retry"
+                        )));
+                    }
+                    retried.push((write_id, next));
+                }
+                StoreWriteBase::Serial {
+                    branch_id,
+                    base: branch_base,
+                } => {
+                    if prepared.is_some() {
+                        return Err(DbError(format!(
+                            "blocked Serial branch {} retains publication preparation",
+                            branch_id.first_write_id()
+                        )));
+                    }
+                    let expected_base = StoreWriteBase::Serial {
+                        branch_id: branch_id.clone(),
+                        base: branch_base,
+                    };
+                    let mut statement = tx
+                        .prepare(
+                            "SELECT write_id, status, base, prepared FROM store_writes
+                             WHERE base = ?1
+                               AND status != '\"local_only\"'
+                               AND json_extract(status, '$.published') IS NULL
+                               AND json_extract(status, '$.resolved') IS NULL
+                             ORDER BY ordinal",
+                        )
+                        .map_err(DbError::from)?;
+                    let rows = statement
+                        .query_map([&raw_base], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                            ))
+                        })
+                        .map_err(DbError::from)?;
+                    let mut branch_write_ids = Vec::new();
+                    for row in rows {
+                        let (stored_id, raw_status, raw_base, prepared) =
+                            row.map_err(DbError::from)?;
+                        let stored_base: StoreWriteBase = serde_json::from_str(&raw_base)
+                            .map_err(|error| DbError(format!("Serial retry base: {error}")))?;
+                        if stored_base != expected_base {
+                            return Err(DbError(
+                                "Serial database contains more than one unresolved branch"
+                                    .to_string(),
+                            ));
+                        }
+                        let stored_status: WriteStatus = serde_json::from_str(&raw_status)
+                            .map_err(|error| DbError(format!("Serial retry status: {error}")))?;
+                        if !matches!(stored_status, WriteStatus::Pending | WriteStatus::Blocked(_))
+                            || prepared.is_some()
+                        {
+                            return Err(DbError(format!(
+                                "Serial branch write {stored_id} is not pending or blocked without preparation"
+                            )));
+                        }
+                        if matches!(stored_status, WriteStatus::Blocked(_)) {
+                            branch_write_ids.push(WriteId::from_generated(stored_id));
+                        }
+                    }
+                    drop(statement);
+                    let pending = serde_json::to_string(&WriteStatus::Pending)
+                        .map_err(|error| DbError(format!("serialize retry status: {error}")))?;
+                    for branch_write_id in branch_write_ids {
+                        let updated = tx
+                            .execute(
+                                "UPDATE store_writes SET status = ?2
+                                 WHERE write_id = ?1
+                                   AND json_extract(status, '$.blocked') IS NOT NULL
+                                   AND prepared IS NULL",
+                                rusqlite::params![branch_write_id.as_str(), &pending],
+                            )
+                            .map_err(DbError::from)?;
+                        if updated != 1 {
+                            return Err(DbError(format!(
+                                "blocked Serial write {branch_write_id} changed during retry"
+                            )));
+                        }
+                        retried.push((branch_write_id, WriteStatus::Pending));
+                    }
+                }
+            }
+            tx.commit().map_err(DbError::from)?;
+            let retried_ids = retried
+                .iter()
+                .map(|(write_id, _)| write_id.clone())
+                .collect();
+            for (write_id, status) in retried {
+                Self::notify_write_status_in(&statuses, &write_id, status);
+            }
+            Ok(retried_ids)
+        })
+        .await
+    }
+
+    /// Atomically reverse a blocked write and every later unpublished shared
+    /// write whose working-row state depends on it.
+    pub async fn discard_blocked_write(&self, write_id: &WriteId) -> Result<Vec<WriteId>, DbError> {
+        let write_id = write_id.clone();
+        let synced_tables = self.synced_tables().to_vec();
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (raw_status, target_ordinal): (String, i64) = tx
+                .query_row(
+                    "SELECT status, ordinal FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let target_status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError(format!("blocked write {write_id} status: {error}")))?;
+            if !matches!(target_status, WriteStatus::Blocked(_)) {
+                return Err(DbError(format!("write {write_id} is not blocked")));
+            }
+
+            let mut statement = tx
+                .prepare(
+                    "SELECT write_id, status, inverse_changeset FROM store_writes
+                     WHERE ordinal >= ?1
+                       AND status != '\"local_only\"'
+                       AND json_extract(status, '$.published') IS NULL
+                       AND json_extract(status, '$.resolved') IS NULL
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([target_ordinal], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            let mut discarded = Vec::new();
+            for row in rows {
+                let (stored_id, raw_status, inverse) = row.map_err(DbError::from)?;
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError(format!("discard write status: {error}")))?;
+                if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {
+                    return Err(DbError(format!(
+                        "write {stored_id} after blocked write {write_id} has non-discardable status {status:?}"
+                    )));
+                }
+                discarded.push((WriteId::from_generated(stored_id), inverse));
+            }
+            drop(statement);
+            if discarded.first().map(|(stored_id, _)| stored_id) != Some(&write_id) {
+                return Err(DbError(format!(
+                    "blocked write {write_id} is absent from its unpublished suffix"
+                )));
+            }
+            let schema = Arc::new(crate::sync::conflict::TableSchema::from_db(
+                &tx,
+                &synced_tables,
+            )?);
+            for (_, inverse) in discarded.iter().rev() {
+                let inverse = crate::sync::apply::ValidatedChangeset::new(
+                    inverse,
+                    schema.clone(),
+                )
+                .map_err(|error| DbError(format!("invalid blocked-write inverse: {error}")))?;
+                crate::sync::apply::apply_changeset_strict_on(&tx, inverse, &[])
+                    .map_err(|error| DbError(format!("reverse blocked-write suffix: {error}")))?;
+            }
+            let discarded_ids: Vec<_> = discarded
+                .into_iter()
+                .map(|(write_id, _)| write_id)
+                .collect();
+            let resolution = WriteResolution::Discarded;
+            Self::resolve_unpublished_writes_on(&tx, &discarded_ids, &resolution)?;
+            tx.commit().map_err(DbError::from)?;
+            let status = WriteStatus::Resolved(resolution);
+            for discarded_id in &discarded_ids {
+                Self::notify_write_status_in(&statuses, discarded_id, status.clone());
+            }
+            Ok(discarded_ids)
+        })
+        .await
+    }
+
+    pub async fn pending_branches(&self) -> Result<Option<PendingBranch>, DbError> {
+        self.call(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT write_id, status, affected_rows, base FROM store_writes
+                     WHERE status IN ('\"pending\"', '\"publishing\"')
+                        OR json_extract(status, '$.blocked') IS NOT NULL
+                        OR json_extract(status, '$.conflict') IS NOT NULL
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            let mut records = Vec::new();
+            for row in rows {
+                let (write_id, status, affected_rows, base) = row.map_err(DbError::from)?;
+                records.push((
+                    PendingWrite {
+                        write_id: WriteId::from_generated(write_id),
+                        status: serde_json::from_str(&status)
+                            .map_err(|error| DbError(format!("pending write status: {error}")))?,
+                        affected_rows: serde_json::from_str(&affected_rows)
+                            .map_err(|error| DbError(format!("pending affected rows: {error}")))?,
+                    },
+                    serde_json::from_str::<StoreWriteBase>(&base)
+                        .map_err(|error| DbError(format!("pending write base: {error}")))?,
+                ));
+            }
+            drop(statement);
+
+            let mut conflict = None;
+            for (write, base) in &records {
+                let WriteStatus::Conflict(candidate) = &write.status else {
+                    continue;
+                };
+                let StoreWriteBase::Serial {
+                    branch_id,
+                    base: stored_base,
+                } = base
+                else {
+                    return Err(DbError(
+                        "MergeConcurrent base carries a Serial conflict".to_string(),
+                    ));
+                };
+                if branch_id != &candidate.branch_id || stored_base != &candidate.base {
+                    return Err(DbError(
+                        "Serial conflict status differs from its durable branch base".to_string(),
+                    ));
+                }
+                match &conflict {
+                    None => conflict = Some(candidate.clone()),
+                    Some(existing) if existing == candidate => {}
+                    Some(_) => {
+                        return Err(DbError(
+                            "Serial database contains more than one conflict branch".to_string(),
+                        ))
+                    }
+                }
+            }
+            let Some(conflict) = conflict else {
+                return Ok(None);
+            };
+            let expected_base = StoreWriteBase::Serial {
+                branch_id: conflict.branch_id.clone(),
+                base: conflict.base.clone(),
+            };
+            let mut writes = Vec::new();
+            for (write, base) in records {
+                if matches!(base, StoreWriteBase::MergeConcurrent { .. }) {
+                    continue;
+                }
+                if base != expected_base {
+                    return Err(DbError(
+                        "Serial database contains more than one unresolved branch".to_string(),
+                    ));
+                }
+                if !matches!(
+                    &write.status,
+                    WriteStatus::Conflict(_) | WriteStatus::Pending
+                ) {
+                    return Err(DbError(format!(
+                        "conflicted Serial branch write {} has non-resolvable status {:?}",
+                        write.write_id, write.status
+                    )));
+                }
+                writes.push(write);
+            }
+            Ok(Some(PendingBranch {
+                branch_id: conflict.branch_id,
+                base: conflict.base,
+                current: conflict.current,
+                writes,
+            }))
+        })
+        .await
+    }
+
+    pub(crate) async fn unresolved_serial_branch(
+        &self,
+    ) -> Result<Option<UnresolvedSerialBranch>, DbError> {
+        self.call(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT base, status FROM store_writes
+                     WHERE status != '\"local_only\"'
+                       AND json_extract(status, '$.published') IS NULL
+                       AND json_extract(status, '$.resolved') IS NULL
+                       AND json_type(base, '$.serial') IS NOT NULL
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(DbError::from)?;
+            let mut branch = None;
+            for row in rows {
+                let (raw_base, raw_status) = row.map_err(DbError::from)?;
+                let StoreWriteBase::Serial { branch_id, base } = serde_json::from_str(&raw_base)
+                    .map_err(|error| DbError(format!("unresolved Serial base: {error}")))?
+                else {
+                    return Err(DbError(
+                        "MergeConcurrent base reached a Serial branch query".to_string(),
+                    ));
+                };
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError(format!("unresolved Serial status: {error}")))?;
+                match &mut branch {
+                    None => {
+                        branch = Some(UnresolvedSerialBranch {
+                            branch_id,
+                            base,
+                            conflicted: matches!(status, WriteStatus::Conflict(_)),
+                        });
+                    }
+                    Some(existing) if existing.branch_id == branch_id && existing.base == base => {
+                        existing.conflicted |= matches!(status, WriteStatus::Conflict(_));
+                    }
+                    Some(_) => {
+                        return Err(DbError(
+                            "Serial database contains more than one unresolved branch".to_string(),
+                        ));
+                    }
+                }
+            }
+            Ok(branch)
         })
         .await
     }
@@ -1049,17 +1659,42 @@ impl Database {
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
+        write_policy: WritePolicy,
         device_id: String,
         migrations: &[Migration],
     ) -> Result<(Database, UpdatedAtStamper), OpenError> {
         let hlc = Hlc::try_new(device_id).map_err(|e| DbError(format!("device_id {e}")))?;
-        Self::open_with_hlc(
+        Self::open_with_hlc_and_coven_metadata(
             path,
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
+            write_policy,
             Arc::new(hlc),
             migrations,
+            CovenMetadataOpen::Detect,
+        )
+    }
+
+    pub(crate) fn open_initialized_store(
+        path: &Path,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: crate::blob::TransferLimits,
+        write_policy: WritePolicy,
+        device_id: String,
+        migrations: &[Migration],
+    ) -> Result<(Database, UpdatedAtStamper), OpenError> {
+        let hlc = Hlc::try_new(device_id).map_err(|e| DbError(format!("device_id {e}")))?;
+        Self::open_with_hlc_and_coven_metadata(
+            path,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            write_policy,
+            Arc::new(hlc),
+            migrations,
+            CovenMetadataOpen::InitializeVerifiedSnapshot,
         )
     }
 
@@ -1069,21 +1704,47 @@ impl Database {
     /// production open path (migration, seed, session) so the test drives the
     /// real unit.
     ///
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn open_with_hlc(
         path: &Path,
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
+        write_policy: WritePolicy,
         hlc: Arc<Hlc>,
         migrations: &[Migration],
+    ) -> Result<(Database, UpdatedAtStamper), OpenError> {
+        Self::open_with_hlc_and_coven_metadata(
+            path,
+            synced_tables,
+            blob_tombstone_grace,
+            transfer_limits,
+            write_policy,
+            hlc,
+            migrations,
+            CovenMetadataOpen::Detect,
+        )
+    }
+
+    fn open_with_hlc_and_coven_metadata(
+        path: &Path,
+        synced_tables: Vec<SyncedTable>,
+        blob_tombstone_grace: chrono::Duration,
+        transfer_limits: crate::blob::TransferLimits,
+        write_policy: WritePolicy,
+        hlc: Arc<Hlc>,
+        migrations: &[Migration],
+        metadata_open: CovenMetadataOpen,
     ) -> Result<(Database, UpdatedAtStamper), OpenError> {
         let (core, state, stamper) = DatabaseCore::open(
             path,
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
+            write_policy,
             hlc,
             migrations,
+            metadata_open,
         )?;
 
         let database = {
@@ -1124,6 +1785,7 @@ impl Database {
         synced_tables: Vec<SyncedTable>,
         blob_tombstone_grace: chrono::Duration,
         transfer_limits: crate::blob::TransferLimits,
+        write_policy: WritePolicy,
         device_id: String,
         migrations: &[Migration],
     ) -> Result<Database, OpenError> {
@@ -1133,6 +1795,7 @@ impl Database {
             synced_tables,
             blob_tombstone_grace,
             transfer_limits,
+            write_policy,
             Arc::new(hlc),
             migrations,
         )?;
@@ -1171,6 +1834,10 @@ impl Database {
     /// ([`crate::blob::cache::pin`]). Fixed for this handle's life.
     pub fn transfer_limits(&self) -> crate::blob::TransferLimits {
         self.state.transfer_limits
+    }
+
+    pub fn write_policy(&self) -> WritePolicy {
+        self.state.write_policy
     }
 
     /// The gate model resolved from the final synced table set and live schema at
@@ -1287,6 +1954,15 @@ impl Database {
         capture_changeset(session)
     }
 
+    fn invert_changeset(changeset: &[u8]) -> Result<Vec<u8>, DbError> {
+        if changeset.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut inverse = Vec::new();
+        rusqlite::session::invert_strm(&mut &changeset[..], &mut inverse).map_err(DbError::from)?;
+        Ok(inverse)
+    }
+
     fn run_host_sql_on<R, E>(conn: &Connection, f: impl FnOnce() -> Result<R, E>) -> Result<R, E>
     where
         E: From<DbError>,
@@ -1304,6 +1980,24 @@ impl Database {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
         }
+    }
+
+    fn capture_host_changes_on<R, E>(
+        conn: &Connection,
+        synced_tables: &[SyncedTable],
+        f: impl FnOnce() -> Result<R, E>,
+    ) -> Result<(R, Vec<u8>), E>
+    where
+        E: From<DbError>,
+    {
+        let mut journal =
+            Self::start_host_change_journal_on(conn, synced_tables).map_err(E::from)?;
+        let value = Self::run_host_sql_on(conn, f)?;
+        let captured = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
+        crate::sync::session::validate_changeset_row_identities(&captured, synced_tables)
+            .map_err(|error| DbError(error.to_string()))
+            .map_err(E::from)?;
+        Ok((value, captured))
     }
 
     fn capture_store_write_blob_facts_on(
@@ -1393,7 +2087,8 @@ impl Database {
         tx: &rusqlite::Transaction<'_>,
         write_id: &WriteId,
         changeset: &[u8],
-        dependencies: &BTreeMap<String, CommitPosition>,
+        inverse_changeset: &[u8],
+        base: &StoreWriteBase,
         blob_facts: &StoreWriteBlobFacts,
         rows_changed: u64,
     ) -> Result<WriteStatus, DbError> {
@@ -1446,8 +2141,8 @@ impl Database {
         } else {
             WriteStatus::Pending
         };
-        let dependencies = serde_json::to_string(dependencies)
-            .map_err(|error| DbError(format!("serialize pending dependency frontier: {error}")))?;
+        let base = serde_json::to_string(base)
+            .map_err(|error| DbError(format!("serialize pending Store base: {error}")))?;
         let status_json = serde_json::to_string(&status)
             .map_err(|error| DbError(format!("serialize write status: {error}")))?;
         let affected_rows = serde_json::to_string(&affected_rows)
@@ -1456,14 +2151,15 @@ impl Database {
             .map_err(|error| DbError(format!("serialize Store write blob facts: {error}")))?;
         tx.execute(
             "INSERT INTO store_writes
-             (write_id, status, affected_rows, changeset, dependencies, blob_facts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 write_id.as_str(),
                 status_json,
                 affected_rows,
                 changeset,
-                dependencies,
+                inverse_changeset,
+                base,
                 blob_facts_json,
             ],
         )
@@ -1489,6 +2185,7 @@ impl Database {
         synced_tables: &[SyncedTable],
         gates: &Gates,
         blob_decls: &BlobDecls,
+        write_policy: WritePolicy,
         write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<WriteReceipt<R>, E>
@@ -1496,18 +2193,12 @@ impl Database {
         E: From<DbError>,
     {
         (|| {
-            let mut journal =
-                Self::start_host_change_journal_on(conn, synced_tables).map_err(E::from)?;
             let changes_before = conn.total_changes();
             let tx = conn
                 .unchecked_transaction()
                 .map_err(DbError::from)
                 .map_err(E::from)?;
-            let value = Self::run_host_sql_on(&tx, || f(&tx))?;
-            let captured = Self::drain_host_change_journal_on(&mut journal).map_err(E::from)?;
-            crate::sync::session::validate_changeset_row_identities(&captured, synced_tables)
-                .map_err(|error| DbError(error.to_string()))
-                .map_err(E::from)?;
+            let (value, captured) = Self::capture_host_changes_on(&tx, synced_tables, || f(&tx))?;
             let changeset = gate::gate_outbound(&tx, &captured, gates)
                 .map_err(|error| DbError(format!("gate host transaction: {error}")))
                 .map_err(E::from)?;
@@ -1523,13 +2214,47 @@ impl Database {
                 )
                 .map_err(DbError::from)
                 .map_err(E::from)?;
-            let dependencies =
-                Self::materialized_frontier_on(&tx, Some(&local_device_id)).map_err(E::from)?;
+            let inverse_changeset = Self::invert_changeset(&changeset).map_err(E::from)?;
+            let base = match write_policy {
+                WritePolicy::MergeConcurrent => StoreWriteBase::MergeConcurrent {
+                    dependencies: Self::materialized_frontier_on(&tx, Some(&local_device_id))
+                        .map_err(E::from)?,
+                },
+                WritePolicy::Serial => {
+                    let existing: Option<String> = tx
+                        .query_row(
+                            "SELECT base FROM store_writes
+                             WHERE status != '\"local_only\"'
+                               AND json_extract(status, '$.published') IS NULL
+                               AND json_extract(status, '$.resolved') IS NULL
+                               AND json_type(base, '$.serial') IS NOT NULL
+                             ORDER BY ordinal LIMIT 1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(DbError::from)
+                        .map_err(E::from)?;
+                    match existing {
+                        Some(existing) => serde_json::from_str(&existing)
+                            .map_err(|error| {
+                                DbError(format!("pending serial branch base: {error}"))
+                            })
+                            .map_err(E::from)?,
+                        None => StoreWriteBase::Serial {
+                            branch_id: PendingBranchId::from_first_write(write_id.clone()),
+                            base: Self::latest_position_for_device_on(&tx, SERIAL_STREAM_ID)
+                                .map_err(E::from)?,
+                        },
+                    }
+                }
+            };
             let status = Self::insert_store_write_on(
                 &tx,
                 &write_id,
                 &changeset,
-                &dependencies,
+                &inverse_changeset,
+                &base,
                 &blob_facts,
                 rows_changed,
             )
@@ -1546,6 +2271,7 @@ impl Database {
     pub fn run_internal_store_write_transaction_on<R, E>(
         conn: &Connection,
         synced_tables: &[SyncedTable],
+        write_policy: WritePolicy,
         write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<R, E>
@@ -1558,19 +2284,28 @@ impl Database {
         let blob_decls = BlobDecls::from_tables(conn, synced_tables)
             .map_err(|error| DbError(error.to_string()))
             .map_err(E::from)?;
-        Self::run_store_write_transaction_on(conn, synced_tables, &gates, &blob_decls, write_id, f)
-            .map(|receipt| receipt.value)
+        Self::run_store_write_transaction_on(
+            conn,
+            synced_tables,
+            &gates,
+            &blob_decls,
+            write_policy,
+            write_id,
+            f,
+        )
+        .map(|receipt| receipt.value)
     }
 
     pub(crate) async fn prepare_store_write(&self) -> Result<Option<PreparedStoreWrite>, DbError> {
         self.call(|conn| {
             conn.query_row(
-                "SELECT write_id, changeset, dependencies, blob_facts FROM store_writes
+                "SELECT write_id, changeset, inverse_changeset, base, blob_facts FROM store_writes
                  WHERE status = '\"pending\"'
                    AND ordinal = (
                        SELECT MIN(ordinal) FROM store_writes
                        WHERE status != '\"local_only\"'
                          AND json_extract(status, '$.published') IS NULL
+                         AND json_extract(status, '$.resolved') IS NULL
                    )
                    AND NOT EXISTS (
                        SELECT 1 FROM store_writes WHERE prepared IS NOT NULL
@@ -1581,24 +2316,150 @@ impl Database {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<_, Vec<u8>>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
                     ))
                 },
             )
             .optional()
             .map_err(DbError::from)?
-            .map(|(write_id, changeset, dependencies, blob_facts)| {
-                Ok(PreparedStoreWrite {
+            .map(
+                |(write_id, changeset, inverse_changeset, base, blob_facts)| {
+                    Ok(PreparedStoreWrite {
+                        write_id: WriteId::from_generated(write_id),
+                        changeset,
+                        inverse_changeset,
+                        base: serde_json::from_str(&base)
+                            .map_err(|error| DbError(format!("pending write base: {error}")))?,
+                        blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
+                            DbError(format!("pending write blob facts: {error}"))
+                        })?,
+                    })
+                },
+            )
+            .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn reserve_serial_store_branch(
+        &self,
+    ) -> Result<Option<SerialStoreBranchPreparationWork>, DbError> {
+        if self.write_policy() != WritePolicy::Serial {
+            return Err(DbError(
+                "Serial branch reservation requires the Serial write policy".to_string(),
+            ));
+        }
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let mut statement = tx
+                .prepare(
+                    "SELECT write_id, changeset, inverse_changeset, base, blob_facts, status, prepared
+                     FROM store_writes
+                     WHERE status != '\"local_only\"'
+                       AND json_extract(status, '$.published') IS NULL
+                       AND json_extract(status, '$.resolved') IS NULL
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            let mut records = Vec::new();
+            for row in rows {
+                records.push(row.map_err(DbError::from)?);
+            }
+            drop(statement);
+            let Some(first) = records.first() else {
+                tx.commit().map_err(DbError::from)?;
+                return Ok(None);
+            };
+            let first_base: StoreWriteBase = serde_json::from_str(&first.3)
+                .map_err(|error| DbError(format!("pending Serial write base: {error}")))?;
+            let StoreWriteBase::Serial { branch_id, base } = first_base else {
+                return Err(DbError(
+                    "MergeConcurrent write exists in a Serial database".to_string(),
+                ));
+            };
+            let preparing = serde_json::to_string(&PreparedStoreWriteState::SerialPreparing)
+                .map_err(|error| DbError(format!("serialize Serial reservation: {error}")))?;
+            let publishing = serde_json::to_string(&WriteStatus::Publishing)
+                .map_err(|error| DbError(format!("serialize write status: {error}")))?;
+            let mut writes = Vec::new();
+            let mut newly_reserved = Vec::new();
+            for (write_id, changeset, inverse_changeset, raw_base, blob_facts, status, prepared) in
+                records
+            {
+                let parsed_base: StoreWriteBase = serde_json::from_str(&raw_base)
+                    .map_err(|error| DbError(format!("pending Serial write base: {error}")))?;
+                if parsed_base
+                    != (StoreWriteBase::Serial {
+                        branch_id: branch_id.clone(),
+                        base: base.clone(),
+                    })
+                {
+                    break;
+                }
+                match (status.as_str(), prepared.as_deref()) {
+                    ("\"pending\"", None) => {
+                        let updated = tx
+                            .execute(
+                                "UPDATE store_writes SET status = ?2, prepared = ?3
+                                 WHERE write_id = ?1 AND status = '\"pending\"' AND prepared IS NULL",
+                                rusqlite::params![&write_id, &publishing, &preparing],
+                            )
+                            .map_err(DbError::from)?;
+                        if updated != 1 {
+                            return Err(DbError(format!(
+                                "Serial write {write_id} lost branch reservation"
+                            )));
+                        }
+                        newly_reserved.push(WriteId::from_generated(write_id.clone()));
+                    }
+                    ("\"publishing\"", Some(stored)) if stored == preparing => {}
+                    ("\"publishing\"", Some(_)) => {
+                        tx.commit().map_err(DbError::from)?;
+                        return Ok(None);
+                    }
+                    _ => {
+                        tx.commit().map_err(DbError::from)?;
+                        return Ok(None);
+                    }
+                }
+                writes.push(PreparedStoreWrite {
                     write_id: WriteId::from_generated(write_id),
                     changeset,
-                    dependencies: serde_json::from_str(&dependencies)
-                        .map_err(|error| DbError(format!("pending write dependencies: {error}")))?,
-                    blob_facts: serde_json::from_str(&blob_facts)
-                        .map_err(|error| DbError(format!("pending write blob facts: {error}")))?,
-                })
-            })
-            .transpose()
+                    inverse_changeset,
+                    base: parsed_base,
+                    blob_facts: serde_json::from_str(&blob_facts).map_err(|error| {
+                        DbError(format!("pending Serial write blob facts: {error}"))
+                    })?,
+                });
+            }
+            if writes.is_empty() {
+                return Err(DbError("Serial branch reservation is empty".to_string()));
+            }
+            tx.commit().map_err(DbError::from)?;
+            for write_id in newly_reserved {
+                Self::notify_write_status_in(&statuses, &write_id, WriteStatus::Publishing);
+            }
+            Ok(Some(SerialStoreBranchPreparationWork {
+                branch_id,
+                base,
+                writes,
+            }))
         })
         .await
     }
@@ -1611,6 +2472,7 @@ impl Database {
         let write_id = self.new_write_id();
         let gates = self.gates();
         let blob_decls = self.blob_decls();
+        let write_policy = self.write_policy();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let local_device_id: String = tx
@@ -1620,10 +2482,27 @@ impl Database {
                     |row| row.get(0),
                 )
                 .map_err(DbError::from)?;
-            let dependencies = Self::materialized_frontier_on(&tx, Some(&local_device_id))?;
+            let base = match write_policy {
+                WritePolicy::MergeConcurrent => StoreWriteBase::MergeConcurrent {
+                    dependencies: Self::materialized_frontier_on(&tx, Some(&local_device_id))?,
+                },
+                WritePolicy::Serial => StoreWriteBase::Serial {
+                    branch_id: PendingBranchId::from_first_write(write_id.clone()),
+                    base: Self::latest_position_for_device_on(&tx, SERIAL_STREAM_ID)?,
+                },
+            };
+            let inverse_changeset = Self::invert_changeset(&changeset)?;
             let blob_facts =
                 Self::capture_store_write_blob_facts_on(&tx, &changeset, &gates, &blob_decls)?;
-            Self::insert_store_write_on(&tx, &write_id, &changeset, &dependencies, &blob_facts, 1)?;
+            Self::insert_store_write_on(
+                &tx,
+                &write_id,
+                &changeset,
+                &inverse_changeset,
+                &base,
+                &blob_facts,
+                1,
+            )?;
             tx.commit().map_err(DbError::from)
         })
         .await
@@ -1662,7 +2541,12 @@ impl Database {
                 .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
             stage
                 .commit
-                .verify_at(store_root_hash, &local_device_id, stage.commit.seq)
+                .verify_at(
+                    store_root_hash,
+                    WritePolicy::MergeConcurrent,
+                    &local_device_id,
+                    stage.commit.seq(),
+                )
                 .map_err(|error| DbError(format!("verify prepared Store commit: {error}")))?;
             stage
                 .commit
@@ -1673,14 +2557,14 @@ impl Database {
                     "prepared write id differs from signed commit".to_string(),
                 ));
             }
-            let (stored_changeset, stored_dependencies, stored_status, stored_preparation): (
+            let (stored_changeset, stored_base, stored_status, stored_preparation): (
                 Vec<u8>,
                 String,
                 String,
                 Option<String>,
             ) = tx
                 .query_row(
-                    "SELECT changeset, dependencies, status, prepared
+                    "SELECT changeset, base, status, prepared
                      FROM store_writes WHERE write_id = ?1",
                     [stage.write_id.as_str()],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -1698,14 +2582,23 @@ impl Database {
                     stage.write_id
                 )));
             }
-            let stored_dependencies: BTreeMap<String, CommitPosition> =
-                serde_json::from_str(&stored_dependencies).map_err(|error| {
-                    DbError(format!(
-                        "write {} dependency frontier: {error}",
-                        stage.write_id
-                    ))
-                })?;
-            if stored_dependencies != stage.commit.dependencies {
+            let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)
+                .map_err(|error| DbError(format!("write {} base: {error}", stage.write_id)))?;
+            let StoreWriteBase::MergeConcurrent {
+                dependencies: stored_dependencies,
+            } = stored_base
+            else {
+                return Err(DbError(format!(
+                    "serial write {} reached MergeConcurrent preparation",
+                    stage.write_id
+                )));
+            };
+            if stored_dependencies
+                != *stage
+                    .commit
+                    .merge_dependencies()
+                    .map_err(|error| DbError(format!("prepared Store commit policy: {error}")))?
+            {
                 return Err(DbError(format!(
                     "prepared commit dependencies differ from write {}",
                     stage.write_id
@@ -1737,7 +2630,7 @@ impl Database {
                 &head_bytes,
                 store_root_hash,
                 &local_device_id,
-                stage.commit.seq,
+                stage.commit.seq(),
             )
             .map_err(|error| DbError(format!("verify prepared Store head: {error}")))?;
             if parsed_head != stage.head {
@@ -1751,16 +2644,17 @@ impl Database {
                 .as_ref()
                 .map_or(1, |position| position.seq.saturating_add(1));
             let expected_hash = durable_predecessor.map(|position| position.commit_hash);
-            if stage.commit.seq != expected_seq
-                || stage.commit.previous_commit_hash != expected_hash
+            if stage.commit.seq() != expected_seq
+                || stage.commit.previous_commit_hash() != expected_hash
             {
                 return Err(DbError(format!(
                     "outbound Store commit is {}/{:?}, expected {expected_seq}/{expected_hash:?}",
-                    stage.commit.seq, stage.commit.previous_commit_hash
+                    stage.commit.seq(),
+                    stage.commit.previous_commit_hash()
                 )));
             }
 
-            let prepared = PreparedStoreWriteState {
+            let prepared = PreparedStoreWriteState::MergeConcurrent {
                 commit_bytes: stage.commit.to_bytes(),
                 head_bytes,
                 blob_manifest: stage.blob_manifest,
@@ -1791,12 +2685,251 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn prepare_serial_store_branch_commit(
+        &self,
+        stage: SerialStoreWritePreparation,
+    ) -> Result<(), DbError> {
+        if self.write_policy() != WritePolicy::Serial {
+            return Err(DbError(
+                "Serial branch preparation requires the Serial write policy".to_string(),
+            ));
+        }
+        if stage.writes.is_empty() {
+            return Err(DbError("prepared Serial branch is empty".to_string()));
+        }
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let local_device_id: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let store_root_hash: ObjectHash = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [STORE_ROOT_HASH_STATE_KEY],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)?
+                .parse()
+                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
+            let expected_base = StoreWriteBase::Serial {
+                branch_id: stage.branch_id.clone(),
+                base: stage.base.clone(),
+            };
+            let head_bytes = stage.head.to_bytes();
+            let parsed_head = StoreSerialHead::parse(&head_bytes, store_root_hash)
+                .map_err(|error| DbError(format!("verify prepared Serial head: {error}")))?;
+            if parsed_head != stage.head {
+                return Err(DbError(
+                    "prepared Serial head changed during encoding".to_string(),
+                ));
+            }
+            let tip = stage.writes.last().expect("nonempty checked above");
+            if stage.head.commit.as_ref() != Some(&tip.commit.position())
+                || stage.head.tip_write_id.as_ref() != Some(&tip.write_id)
+            {
+                return Err(DbError(
+                    "prepared Serial head does not activate the branch tip".to_string(),
+                ));
+            }
+            let mut predecessor = stage.base.clone();
+            for (index, write) in stage.writes.iter().enumerate() {
+                if write.commit.write_id != write.write_id
+                    || write.commit.device_id != local_device_id
+                {
+                    return Err(DbError(format!(
+                        "prepared Serial write {} identity differs from its commit",
+                        write.write_id
+                    )));
+                }
+                let expected_seq = predecessor
+                    .as_ref()
+                    .map_or(1, |position| position.seq.saturating_add(1));
+                let expected_hash = predecessor.as_ref().map(|position| position.commit_hash);
+                write
+                    .commit
+                    .verify_at(
+                        store_root_hash,
+                        WritePolicy::Serial,
+                        SERIAL_STREAM_ID,
+                        expected_seq,
+                    )
+                    .map_err(|error| DbError(format!("verify prepared Serial commit: {error}")))?;
+                write
+                    .commit
+                    .verify_package(&write.package_bytes)
+                    .map_err(|error| DbError(format!("verify prepared Serial package: {error}")))?;
+                if write.commit.previous_commit_hash() != expected_hash {
+                    return Err(DbError(format!(
+                        "prepared Serial commit {} has the wrong predecessor",
+                        write.write_id
+                    )));
+                }
+                let (stored_changeset, stored_base, status, prepared): (
+                    Vec<u8>,
+                    String,
+                    String,
+                    String,
+                ) = tx
+                    .query_row(
+                        "SELECT changeset, base, status, prepared FROM store_writes
+                         WHERE write_id = ?1",
+                        [write.write_id.as_str()],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .map_err(DbError::from)?;
+                let stored_base: StoreWriteBase = serde_json::from_str(&stored_base)
+                    .map_err(|error| DbError(format!("stored Serial base: {error}")))?;
+                let stored_prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
+                    .map_err(|error| DbError(format!("stored Serial reservation: {error}")))?;
+                if stored_changeset != write.package_bytes
+                    || stored_base != expected_base
+                    || status != "\"publishing\""
+                    || !matches!(stored_prepared, PreparedStoreWriteState::SerialPreparing)
+                {
+                    return Err(DbError(format!(
+                        "Serial write {} no longer owns its exact branch reservation",
+                        write.write_id
+                    )));
+                }
+                let tip_head_bytes = (index + 1 == stage.writes.len()).then(|| head_bytes.clone());
+                let durable = PreparedStoreWriteState::Serial {
+                    commit_bytes: write.commit.to_bytes(),
+                    tip_head_bytes,
+                    blob_manifest: write.blob_manifest.clone(),
+                    local_cleanup: write.local_cleanup.clone(),
+                    completion: write.completion.clone(),
+                };
+                let durable = serde_json::to_string(&durable).map_err(|error| {
+                    DbError(format!("serialize prepared Serial write: {error}"))
+                })?;
+                let updated = tx
+                    .execute(
+                        "UPDATE store_writes SET prepared = ?2
+                         WHERE write_id = ?1 AND status = '\"publishing\"'",
+                        rusqlite::params![write.write_id.as_str(), durable],
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError(format!(
+                        "Serial write {} lost exact preparation ownership",
+                        write.write_id
+                    )));
+                }
+                predecessor = Some(write.commit.position());
+            }
+            let reserved_count: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM store_writes
+                     WHERE status = '\"publishing\"' AND json_type(base, '$.serial') IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if reserved_count
+                != i64::try_from(stage.writes.len())
+                    .map_err(|_| DbError("Serial branch length exceeds SQLite integer".into()))?
+            {
+                return Err(DbError(format!(
+                    "prepared Serial branch contains {} writes but {reserved_count} are reserved",
+                    stage.writes.len()
+                )));
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    fn write_ids_matching_serial_base<I>(
+        rows: I,
+        expected_base: &StoreWriteBase,
+    ) -> Result<Vec<WriteId>, DbError>
+    where
+        I: IntoIterator<Item = rusqlite::Result<(String, String)>>,
+    {
+        let mut write_ids = Vec::new();
+        for row in rows {
+            let (write_id, raw_base) = row.map_err(DbError::from)?;
+            let stored_base: StoreWriteBase = serde_json::from_str(&raw_base)
+                .map_err(|error| DbError(format!("stored Serial base: {error}")))?;
+            if &stored_base == expected_base {
+                write_ids.push(WriteId::from_generated(write_id));
+            }
+        }
+        Ok(write_ids)
+    }
+
+    pub(crate) async fn release_serial_store_branch_reservation(
+        &self,
+        branch_id: PendingBranchId,
+        base: Option<CommitPosition>,
+        status: WriteStatus,
+    ) -> Result<(), DbError> {
+        if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {
+            return Err(DbError(
+                "Serial preparation can only return a reservation to pending or blocked"
+                    .to_string(),
+            ));
+        }
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let expected_base = StoreWriteBase::Serial { branch_id, base };
+            let preparing = serde_json::to_string(&PreparedStoreWriteState::SerialPreparing)
+                .map_err(|error| DbError(format!("serialize Serial reservation: {error}")))?;
+            let status_json = serde_json::to_string(&status)
+                .map_err(|error| DbError(format!("serialize write status: {error}")))?;
+            let mut statement = tx
+                .prepare(
+                    "SELECT write_id, base FROM store_writes
+                     WHERE status = '\"publishing\"' AND prepared = ?1
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([&preparing], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(DbError::from)?;
+            let write_ids = Self::write_ids_matching_serial_base(rows, &expected_base)?;
+            drop(statement);
+            if write_ids.is_empty() {
+                return Err(DbError(
+                    "reserved Serial branch disappeared during preparation".to_string(),
+                ));
+            }
+            for write_id in &write_ids {
+                let updated = tx
+                    .execute(
+                        "UPDATE store_writes SET status = ?2, prepared = NULL
+                         WHERE write_id = ?1 AND status = '\"publishing\"' AND prepared = ?3",
+                        rusqlite::params![write_id.as_str(), &status_json, &preparing],
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError(format!(
+                        "reserved Serial write {write_id} disappeared during release"
+                    )));
+                }
+            }
+            tx.commit().map_err(DbError::from)?;
+            for write_id in write_ids {
+                Self::notify_write_status_in(&statuses, &write_id, status.clone());
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub(crate) async fn oldest_prepared_store_write(
         &self,
     ) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
         self.call(|conn| {
             conn.query_row(
-                "SELECT write_id, changeset, dependencies, prepared FROM store_writes
+                "SELECT write_id, changeset, base, prepared FROM store_writes
                  WHERE prepared IS NOT NULL
                    AND status IN ('\"pending\"', '\"publishing\"')
                  ORDER BY ordinal LIMIT 1",
@@ -1812,12 +2945,23 @@ impl Database {
             )
             .optional()
             .map_err(DbError::from)?
-            .map(|(write_id, package_bytes, dependencies, prepared)| {
+            .map(|(write_id, package_bytes, base, prepared)| {
                 let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
                     .map_err(|error| DbError(format!("prepared Store write: {error}")))?;
-                let commit: StoreBatchCommit = serde_json::from_slice(&prepared.commit_bytes)
+                let PreparedStoreWriteState::MergeConcurrent {
+                    commit_bytes,
+                    head_bytes,
+                    blob_manifest,
+                    ..
+                } = prepared
+                else {
+                    return Err(DbError(
+                        "serial branch reached MergeConcurrent publication".to_string(),
+                    ));
+                };
+                let commit: StoreBatchCommit = serde_json::from_slice(&commit_bytes)
                     .map_err(|error| DbError(format!("prepared Store commit: {error}")))?;
-                let head: StoreDeviceHead = serde_json::from_slice(&prepared.head_bytes)
+                let head: StoreDeviceHead = serde_json::from_slice(&head_bytes)
                     .map_err(|error| DbError(format!("prepared Store head: {error}")))?;
                 let write_id = WriteId::from_generated(write_id);
                 if commit.write_id != write_id {
@@ -1825,11 +2969,18 @@ impl Database {
                         "prepared write id differs from signed commit".to_string(),
                     ));
                 }
-                let dependencies: BTreeMap<String, CommitPosition> =
-                    serde_json::from_str(&dependencies).map_err(|error| {
-                        DbError(format!("prepared write dependency frontier: {error}"))
-                    })?;
-                if commit.dependencies != dependencies {
+                let base: StoreWriteBase = serde_json::from_str(&base)
+                    .map_err(|error| DbError(format!("prepared write base: {error}")))?;
+                let StoreWriteBase::MergeConcurrent { dependencies } = base else {
+                    return Err(DbError(
+                        "serial base reached MergeConcurrent publication".to_string(),
+                    ));
+                };
+                if *commit
+                    .merge_dependencies()
+                    .map_err(|error| DbError(format!("prepared Store commit policy: {error}")))?
+                    != dependencies
+                {
                     return Err(DbError(
                         "prepared commit differs from its write dependency frontier".to_string(),
                     ));
@@ -1838,16 +2989,136 @@ impl Database {
                     package_bytes,
                     commit: ExactProtocolObject {
                         value: commit,
-                        bytes: prepared.commit_bytes,
+                        bytes: commit_bytes,
                     },
                     head: ExactProtocolObject {
                         value: head,
-                        bytes: prepared.head_bytes,
+                        bytes: head_bytes,
                     },
-                    blob_manifest: prepared.blob_manifest,
+                    blob_manifest,
                 })
             })
             .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn prepared_serial_store_branch(
+        &self,
+    ) -> Result<Option<PreparedSerialStoreBranch>, DbError> {
+        self.call(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT write_id, changeset, base, prepared FROM store_writes
+                     WHERE prepared IS NOT NULL AND status = '\"publishing\"'
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            let mut branch_id = None;
+            let mut base = None;
+            let mut writes = Vec::new();
+            let mut head = None;
+            for row in rows {
+                let (write_id, package_bytes, raw_base, prepared) = row.map_err(DbError::from)?;
+                let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
+                    .map_err(|error| DbError(format!("prepared Serial write: {error}")))?;
+                if matches!(prepared, PreparedStoreWriteState::SerialPreparing) {
+                    if writes.is_empty() {
+                        return Ok(None);
+                    }
+                    return Err(DbError(
+                        "Serial branch mixes reserved and exact prepared writes".to_string(),
+                    ));
+                }
+                let PreparedStoreWriteState::Serial {
+                    commit_bytes,
+                    tip_head_bytes,
+                    blob_manifest,
+                    ..
+                } = prepared
+                else {
+                    return Err(DbError(
+                        "MergeConcurrent write reached Serial publication".to_string(),
+                    ));
+                };
+                let StoreWriteBase::Serial {
+                    branch_id: row_branch_id,
+                    base: row_base,
+                } = serde_json::from_str(&raw_base)
+                    .map_err(|error| DbError(format!("prepared Serial base: {error}")))?
+                else {
+                    return Err(DbError(
+                        "MergeConcurrent base reached Serial publication".to_string(),
+                    ));
+                };
+                if branch_id
+                    .as_ref()
+                    .is_some_and(|value| value != &row_branch_id)
+                    || base.as_ref().is_some_and(|value| value != &row_base)
+                {
+                    return Err(DbError(
+                        "prepared Serial writes do not share one branch base".to_string(),
+                    ));
+                }
+                branch_id.get_or_insert(row_branch_id);
+                base.get_or_insert(row_base);
+                let commit: StoreBatchCommit = serde_json::from_slice(&commit_bytes)
+                    .map_err(|error| DbError(format!("prepared Serial commit: {error}")))?;
+                if commit.write_id.as_str() != write_id {
+                    return Err(DbError(
+                        "prepared Serial write id differs from signed commit".to_string(),
+                    ));
+                }
+                if let Some(head_bytes) = tip_head_bytes {
+                    if head.is_some() {
+                        return Err(DbError(
+                            "prepared Serial branch has more than one tip head".to_string(),
+                        ));
+                    }
+                    let value: StoreSerialHead = serde_json::from_slice(&head_bytes)
+                        .map_err(|error| DbError(format!("prepared Serial head: {error}")))?;
+                    head = Some(ExactProtocolObject {
+                        value,
+                        bytes: head_bytes,
+                    });
+                }
+                writes.push(PreparedSerialStoreWriteCommit {
+                    package_bytes,
+                    commit: ExactProtocolObject {
+                        value: commit,
+                        bytes: commit_bytes,
+                    },
+                    blob_manifest,
+                });
+            }
+            if writes.is_empty() {
+                return Ok(None);
+            }
+            let head = head.ok_or_else(|| {
+                DbError("prepared Serial branch has no activating tip head".to_string())
+            })?;
+            if writes.last().map(|write| write.commit.value.position()) != head.value.commit.clone()
+            {
+                return Err(DbError(
+                    "prepared Serial head does not activate the final commit".to_string(),
+                ));
+            }
+            Ok(Some(PreparedSerialStoreBranch {
+                branch_id: branch_id.expect("nonempty branch"),
+                base: base.expect("nonempty branch"),
+                writes,
+                head,
+            }))
         })
         .await
     }
@@ -1864,6 +3135,25 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             Self::latest_position_for_device_on(conn, &device_id)
+        })
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn latest_outbound_store_position(&self) -> Result<Option<CommitPosition>, DbError> {
+        let write_policy = self.write_policy();
+        self.call(move |conn| {
+            let stream_id = match write_policy {
+                WritePolicy::MergeConcurrent => conn
+                    .query_row(
+                        "SELECT value FROM protocol_state WHERE key = ?1",
+                        [LOCAL_DEVICE_ID_STATE_KEY],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(DbError::from)?,
+                WritePolicy::Serial => SERIAL_STREAM_ID.to_string(),
+            };
+            Self::latest_position_for_device_on(conn, &stream_id)
         })
         .await
     }
@@ -1904,6 +3194,17 @@ impl Database {
                 .map_err(DbError::from)?;
             let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
                 .map_err(|error| DbError(format!("prepared Store write: {error}")))?;
+            let PreparedStoreWriteState::MergeConcurrent {
+                commit_bytes,
+                local_cleanup,
+                completion,
+                ..
+            } = prepared
+            else {
+                return Err(DbError(
+                    "serial branch reached MergeConcurrent completion".to_string(),
+                ));
+            };
             let store_root_hash: ObjectHash = tx
                 .query_row(
                     "SELECT value FROM protocol_state WHERE key = ?1",
@@ -1914,8 +3215,9 @@ impl Database {
                 .parse()
                 .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
             let commit = StoreBatchCommit::parse_at(
-                &prepared.commit_bytes,
+                &commit_bytes,
                 store_root_hash,
+                WritePolicy::MergeConcurrent,
                 &local_device_id,
                 position.seq,
             )
@@ -1933,7 +3235,7 @@ impl Database {
                 ));
             }
             Self::record_materialized_commit_on(&tx, &commit)?;
-            for drop in prepared.local_cleanup.drops {
+            for drop in local_cleanup.drops {
                 tx.execute(
                     "INSERT INTO published_blob_drop_intents
                      (seq, namespace, blob_id, size, disposition)
@@ -1951,7 +3253,7 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             }
-            for intent in prepared.completion.consumed_make_remote_intents {
+            for intent in completion.consumed_make_remote_intents {
                 Self::delete_make_remote_intent_on(&tx, &intent.root_table, &intent.root_id)?;
             }
             tx.execute(
@@ -1970,7 +3272,7 @@ impl Database {
                 return Err(DbError("prepared Store write disappeared".to_string()));
             }
             let write_id = commit.write_id;
-            let status = WriteStatus::Published(PublishedPosition {
+            let status = WriteStatus::Published(PublishedPosition::MergeConcurrent {
                 device_id: local_device_id,
                 position,
             });
@@ -1980,6 +3282,515 @@ impl Database {
             Ok(())
         })
         .await
+    }
+
+    pub(crate) async fn mark_serial_branch_conflict(
+        &self,
+        branch_id: PendingBranchId,
+        base: Option<CommitPosition>,
+        current: Option<CommitPosition>,
+    ) -> Result<(), DbError> {
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let expected_base = StoreWriteBase::Serial {
+                branch_id: branch_id.clone(),
+                base: base.clone(),
+            };
+            let conflict = crate::SerializationConflict {
+                branch_id: branch_id.clone(),
+                base,
+                current,
+            };
+            let status = WriteStatus::Conflict(conflict);
+            let status_json = serde_json::to_string(&status)
+                .map_err(|error| DbError(format!("serialize Serial conflict: {error}")))?;
+            let mut statement = tx
+                .prepare(
+                    "SELECT write_id, base FROM store_writes
+                     WHERE status != '\"local_only\"'
+                       AND json_extract(status, '$.published') IS NULL
+                       AND json_extract(status, '$.resolved') IS NULL
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(DbError::from)?;
+            let write_ids = Self::write_ids_matching_serial_base(rows, &expected_base)?;
+            drop(statement);
+            if write_ids.is_empty() {
+                return Err(DbError(format!(
+                    "Serial branch {:?} has no pending writes",
+                    branch_id.first_write_id()
+                )));
+            }
+            for write_id in &write_ids {
+                let updated = tx
+                    .execute(
+                        "UPDATE store_writes SET status = ?2, prepared = NULL WHERE write_id = ?1",
+                        rusqlite::params![write_id.as_str(), &status_json],
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError(format!(
+                        "Serial conflict write {write_id} disappeared"
+                    )));
+                }
+            }
+            tx.commit().map_err(DbError::from)?;
+            for write_id in write_ids {
+                Self::notify_write_status_in(&statuses, &write_id, status.clone());
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_prepared_serial_branch(
+        &self,
+        activated: CommitPosition,
+        tip_write_id: WriteId,
+    ) -> Result<u64, DbError> {
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let store_root_hash: ObjectHash = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [STORE_ROOT_HASH_STATE_KEY],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)?
+                .parse()
+                .map_err(|error| DbError(format!("store protocol root hash: {error}")))?;
+            let mut statement = tx
+                .prepare(
+                    "SELECT write_id, prepared, base FROM store_writes
+                     WHERE prepared IS NOT NULL AND status = '\"publishing\"'
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            let mut completed = Vec::new();
+            let mut completed_base = None;
+            for row in rows {
+                let (stored_write_id, prepared, raw_base) = row.map_err(DbError::from)?;
+                let stored_base: StoreWriteBase = serde_json::from_str(&raw_base)
+                    .map_err(|error| DbError(format!("prepared Serial base: {error}")))?;
+                match &completed_base {
+                    Some(expected) if expected != &stored_base => {
+                        return Err(DbError(
+                            "prepared Serial branch contains inconsistent bases".to_string(),
+                        ));
+                    }
+                    None => completed_base = Some(stored_base),
+                    Some(_) => {}
+                }
+                let PreparedStoreWriteState::Serial {
+                    commit_bytes,
+                    local_cleanup,
+                    completion,
+                    ..
+                } = serde_json::from_str(&prepared)
+                    .map_err(|error| DbError(format!("prepared Serial write: {error}")))?
+                else {
+                    return Err(DbError(
+                        "non-Serial write reached Serial completion".to_string(),
+                    ));
+                };
+                let commit: StoreBatchCommit = serde_json::from_slice(&commit_bytes)
+                    .map_err(|error| DbError(format!("prepared Serial commit: {error}")))?;
+                commit
+                    .verify_at(
+                        store_root_hash,
+                        WritePolicy::Serial,
+                        SERIAL_STREAM_ID,
+                        commit.seq(),
+                    )
+                    .map_err(|error| DbError(format!("outbound Serial commit: {error}")))?;
+                if commit.write_id.as_str() != stored_write_id {
+                    return Err(DbError(
+                        "prepared Serial write id differs from signed commit".to_string(),
+                    ));
+                }
+                Self::record_materialized_commit_on(&tx, &commit)?;
+                for drop in local_cleanup.drops {
+                    tx.execute(
+                        "INSERT INTO published_blob_drop_intents
+                         (seq, namespace, blob_id, size, disposition)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(seq, namespace, blob_id) DO NOTHING",
+                        rusqlite::params![
+                            Self::sequence_to_sqlite(SERIAL_STREAM_ID, commit.seq())?,
+                            drop.namespace,
+                            drop.id,
+                            i64::try_from(drop.size).map_err(|_| DbError(
+                                "outbound local cleanup size exceeds SQLite integer".to_string()
+                            ))?,
+                            drop.disposition.as_db(),
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+                }
+                for intent in completion.consumed_make_remote_intents {
+                    Self::delete_make_remote_intent_on(&tx, &intent.root_table, &intent.root_id)?;
+                }
+                let write_id = commit.write_id.clone();
+                tx.execute(
+                    "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
+                    [write_id.as_str()],
+                )
+                .map_err(DbError::from)?;
+                tx.execute(
+                    "UPDATE store_writes SET prepared = NULL WHERE write_id = ?1",
+                    [write_id.as_str()],
+                )
+                .map_err(DbError::from)?;
+                let status = WriteStatus::Published(PublishedPosition::Serial {
+                    position: commit.position(),
+                });
+                Self::set_write_status_on(&tx, &write_id, &status)?;
+                completed.push((write_id, status, commit.position()));
+            }
+            drop(statement);
+            let Some((final_write_id, _, final_position)) = completed.last() else {
+                return Err(DbError("prepared Serial branch is absent".to_string()));
+            };
+            if final_write_id != &tip_write_id || final_position != &activated {
+                return Err(DbError(
+                    "activated Serial head differs from the prepared branch tip".to_string(),
+                ));
+            }
+            let completed_base = completed_base
+                .ok_or_else(|| DbError("prepared Serial branch base is absent".to_string()))?;
+            let suffix_first: Option<String> = tx
+                .query_row(
+                    "SELECT write_id FROM store_writes
+                     WHERE status = '\"pending\"' AND prepared IS NULL AND base = ?1
+                     ORDER BY ordinal LIMIT 1",
+                    [serde_json::to_string(&completed_base)
+                        .map_err(|error| DbError(format!("serialize Serial base: {error}")))?],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if let Some(suffix_first) = suffix_first {
+                let rebased = StoreWriteBase::Serial {
+                    branch_id: PendingBranchId::from_first_write(WriteId::from_generated(
+                        suffix_first,
+                    )),
+                    base: Some(activated.clone()),
+                };
+                tx.execute(
+                    "UPDATE store_writes SET base = ?2
+                     WHERE status = '\"pending\"' AND prepared IS NULL AND base = ?1",
+                    rusqlite::params![
+                        serde_json::to_string(&completed_base).map_err(|error| DbError(
+                            format!("serialize completed Serial base: {error}")
+                        ))?,
+                        serde_json::to_string(&rebased).map_err(|error| DbError(format!(
+                            "serialize rebased Serial suffix: {error}"
+                        )))?,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            }
+            let count = u64::try_from(completed.len())
+                .map_err(|_| DbError("Serial completion count exceeds u64".to_string()))?;
+            tx.commit().map_err(DbError::from)?;
+            for (write_id, status, _) in completed {
+                Self::notify_write_status_in(&statuses, &write_id, status);
+            }
+            Ok(count)
+        })
+        .await
+    }
+
+    fn apply_serial_resolution_on(
+        tx: &rusqlite::Transaction<'_>,
+        synced_tables: &[SyncedTable],
+        branch_id: &PendingBranchId,
+        plan: crate::sync::store_pull::SerialResolutionPlan,
+    ) -> Result<Vec<WriteId>, DbError> {
+        let schema = Arc::new(crate::sync::conflict::TableSchema::from_db(
+            tx,
+            synced_tables,
+        )?);
+        let mut statement = tx
+            .prepare(
+                "SELECT write_id, status, inverse_changeset, base, prepared FROM store_writes
+                 WHERE status != '\"local_only\"'
+                   AND json_extract(status, '$.published') IS NULL
+                   AND json_extract(status, '$.resolved') IS NULL
+                   AND json_type(base, '$.serial') IS NOT NULL
+                 ORDER BY ordinal",
+            )
+            .map_err(DbError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(DbError::from)?;
+        let mut branch = Vec::new();
+        let mut branch_base = None;
+        let mut saw_conflict = false;
+        for row in rows {
+            let (write_id, status, inverse, raw_base, prepared) = row.map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&status)
+                .map_err(|error| DbError(format!("Serial branch status: {error}")))?;
+            let base: StoreWriteBase = serde_json::from_str(&raw_base)
+                .map_err(|error| DbError(format!("Serial branch base: {error}")))?;
+            let StoreWriteBase::Serial {
+                branch_id: stored_branch_id,
+                base,
+            } = base
+            else {
+                return Err(DbError(
+                    "MergeConcurrent base reached Serial resolution".to_string(),
+                ));
+            };
+            if &stored_branch_id != branch_id {
+                return Err(DbError(
+                    "Serial database contains more than one unresolved branch".to_string(),
+                ));
+            }
+            match status {
+                WriteStatus::Conflict(conflict) => {
+                    if conflict.branch_id != stored_branch_id || conflict.base != base {
+                        return Err(DbError(
+                            "Serial conflict status differs from its durable branch base"
+                                .to_string(),
+                        ));
+                    }
+                    saw_conflict = true;
+                }
+                WriteStatus::Pending if prepared.is_none() => {}
+                status => {
+                    return Err(DbError(format!(
+                        "conflicted Serial branch write {write_id} has non-resolvable status {status:?}"
+                    )))
+                }
+            }
+            if prepared.is_some() {
+                return Err(DbError(
+                    "conflicted Serial branch contains prepared publication state".to_string(),
+                ));
+            }
+            if branch_base.as_ref().is_some_and(|stored| stored != &base) {
+                return Err(DbError(
+                    "Serial conflict branch has inconsistent bases".to_string(),
+                ));
+            }
+            branch_base.get_or_insert(base);
+            branch.push((WriteId::from_generated(write_id), inverse));
+        }
+        drop(statement);
+        if branch.is_empty() || !saw_conflict {
+            return Err(DbError(format!(
+                "Serial branch {} is not conflicted",
+                branch_id.first_write_id()
+            )));
+        }
+        let branch_base = branch_base.expect("nonempty branch has a base value");
+        let durable_base = Self::latest_position_for_device_on(tx, SERIAL_STREAM_ID)?;
+        if durable_base != branch_base {
+            return Err(DbError(format!(
+                "local Serial position {durable_base:?} differs from branch base {branch_base:?}"
+            )));
+        }
+        for (_, inverse) in branch.iter().rev() {
+            let inverse = crate::sync::apply::ValidatedChangeset::new(inverse, schema.clone())
+                .map_err(|error| DbError(format!("invalid Serial inverse: {error}")))?;
+            crate::sync::apply::apply_changeset_strict_on(tx, inverse, &[])
+                .map_err(|error| DbError(format!("reverse Serial branch: {error}")))?;
+        }
+        let mut predecessor = branch_base;
+        for resolution in plan.commits {
+            let expected_seq = predecessor
+                .as_ref()
+                .map_or(1, |position| position.seq.saturating_add(1));
+            let expected_hash = predecessor.as_ref().map(|position| position.commit_hash);
+            if resolution.commit.seq() != expected_seq
+                || resolution.commit.previous_commit_hash() != expected_hash
+            {
+                return Err(DbError(format!(
+                    "Serial resolution commit {} does not follow the branch base",
+                    resolution.commit.seq()
+                )));
+            }
+            let changeset =
+                crate::sync::apply::ValidatedChangeset::new(resolution.package, schema.clone())
+                    .map_err(|error| {
+                        DbError(format!("invalid Serial resolution changeset: {error}"))
+                    })?;
+            crate::sync::apply::apply_changeset_strict_on(tx, changeset, &resolution.uploads)
+                .map_err(|error| {
+                    DbError(format!(
+                        "apply Serial resolution commit {}: {error}",
+                        resolution.commit.seq()
+                    ))
+                })?;
+            let blob_decls = BlobDecls::from_tables(tx, synced_tables)
+                .map_err(|error| DbError(error.to_string()))?;
+            for intent in resolution.cleanup {
+                crate::blob::local_cleanup::record_if_unreferenced_on(tx, &blob_decls, &intent)?;
+            }
+            Self::record_materialized_serial_commit_on(
+                tx,
+                &resolution.commit,
+                &resolution.authorization_after.membership,
+                resolution.authorization_after.key_generation,
+            )?;
+            predecessor = Some(resolution.commit.position());
+        }
+        if predecessor != plan.head.commit {
+            return Err(DbError(
+                "Serial resolution commits do not reach the verified global head".to_string(),
+            ));
+        }
+        Ok(branch.into_iter().map(|(write_id, _)| write_id).collect())
+    }
+
+    fn resolve_unpublished_writes_on(
+        tx: &rusqlite::Transaction<'_>,
+        write_ids: &[WriteId],
+        resolution: &WriteResolution,
+    ) -> Result<(), DbError> {
+        let status = WriteStatus::Resolved(resolution.clone());
+        for write_id in write_ids {
+            tx.execute(
+                "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "UPDATE store_writes SET prepared = NULL WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            Self::set_write_status_on(tx, write_id, &status)?;
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub async fn discard_pending_serial_branch(
+        &self,
+        branch_id: PendingBranchId,
+        plan: crate::sync::store_pull::SerialResolutionPlan,
+    ) -> Result<(), DbError> {
+        let synced_tables = self.synced_tables().to_vec();
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let write_ids =
+                Self::apply_serial_resolution_on(&tx, &synced_tables, &branch_id, plan)?;
+            let resolution = WriteResolution::Discarded;
+            Self::resolve_unpublished_writes_on(&tx, &write_ids, &resolution)?;
+            tx.commit().map_err(DbError::from)?;
+            let status = WriteStatus::Resolved(resolution);
+            for write_id in write_ids {
+                Self::notify_write_status_in(&statuses, &write_id, status.clone());
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn replace_pending_serial_branch<R, E, F>(
+        &self,
+        branch_id: PendingBranchId,
+        plan: crate::sync::store_pull::SerialResolutionPlan,
+        replacement_write_id: WriteId,
+        f: F,
+    ) -> Result<WriteReceipt<R>, E>
+    where
+        R: Send + 'static,
+        E: From<DbError> + Send + 'static,
+        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E> + Send + 'static,
+    {
+        let synced_tables = self.synced_tables().to_vec();
+        let gates = self.gates();
+        let blob_decls = self.blob_decls();
+        let statuses = self.state.write_statuses.clone();
+        let outcome = self
+            .call(move |conn| {
+                Ok((|| {
+                    let tx = conn
+                        .unchecked_transaction()
+                        .map_err(DbError::from)
+                        .map_err(E::from)?;
+                    let old_write_ids =
+                        Self::apply_serial_resolution_on(&tx, &synced_tables, &branch_id, plan)
+                            .map_err(E::from)?;
+                    let changes_before = tx.total_changes();
+                    let (value, captured) =
+                        Self::capture_host_changes_on(&tx, &synced_tables, || f(&tx))?;
+                    let changeset = gate::gate_outbound(&tx, &captured, &gates)
+                        .map_err(|error| DbError(format!("gate replacement transaction: {error}")))
+                        .map_err(E::from)?;
+                    let blob_facts = Self::capture_store_write_blob_facts_on(
+                        &tx,
+                        &changeset,
+                        &gates,
+                        &blob_decls,
+                    )
+                    .map_err(E::from)?;
+                    let rows_changed = tx.total_changes().saturating_sub(changes_before);
+                    let inverse_changeset = Self::invert_changeset(&changeset).map_err(E::from)?;
+                    let base = StoreWriteBase::Serial {
+                        branch_id: PendingBranchId::from_first_write(replacement_write_id.clone()),
+                        base: Self::latest_position_for_device_on(&tx, SERIAL_STREAM_ID)
+                            .map_err(E::from)?,
+                    };
+                    let status = Self::insert_store_write_on(
+                        &tx,
+                        &replacement_write_id,
+                        &changeset,
+                        &inverse_changeset,
+                        &base,
+                        &blob_facts,
+                        rows_changed,
+                    )
+                    .map_err(E::from)?;
+                    let resolution = WriteResolution::Replaced {
+                        replacement: replacement_write_id.clone(),
+                    };
+                    Self::resolve_unpublished_writes_on(&tx, &old_write_ids, &resolution)
+                        .map_err(E::from)?;
+                    tx.commit().map_err(DbError::from).map_err(E::from)?;
+                    let old_status = WriteStatus::Resolved(resolution);
+                    for write_id in old_write_ids {
+                        Self::notify_write_status_in(&statuses, &write_id, old_status.clone());
+                    }
+                    Ok(WriteReceipt {
+                        value,
+                        write_id: replacement_write_id,
+                        status,
+                    })
+                })())
+            })
+            .await
+            .map_err(E::from)?;
+        outcome
     }
 
     pub(crate) async fn latest_local_store_ack(
@@ -2374,6 +4185,7 @@ impl Database {
         &self,
         snapshot_hash: ObjectHash,
     ) -> Result<(), DbError> {
+        let write_policy = self.write_policy();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let (stored_image_hash, image_bytes, meta_bytes): (String, Vec<u8>, Vec<u8>) = tx
@@ -2407,13 +4219,12 @@ impl Database {
                     "outbound snapshot metadata names different image bytes".to_string(),
                 ));
             }
-            let local_device_id: String = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [LOCAL_DEVICE_ID_STATE_KEY],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
+            if meta.coverage.policy() != write_policy {
+                return Err(DbError(format!(
+                    "outbound snapshot coverage uses {:?}, database uses {write_policy:?}",
+                    meta.coverage.policy()
+                )));
+            }
             let frontier = serde_json::to_string(&meta.coverage)
                 .map_err(|error| DbError(format!("serialize snapshot frontier: {error}")))?;
             for (key, value) in [
@@ -2428,7 +4239,20 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             }
-            match meta.coverage.get(&local_device_id) {
+            let snapshot_position = match &meta.coverage {
+                CommitFrontier::MergeConcurrent(coverage) => {
+                    let local_device_id: String = tx
+                        .query_row(
+                            "SELECT value FROM protocol_state WHERE key = ?1",
+                            [LOCAL_DEVICE_ID_STATE_KEY],
+                            |row| row.get(0),
+                        )
+                        .map_err(DbError::from)?;
+                    coverage.get(&local_device_id)
+                }
+                CommitFrontier::Serial(position) => position.as_ref(),
+            };
+            match snapshot_position {
                 Some(position) => {
                     let encoded = serde_json::to_string(position).map_err(|error| {
                         DbError(format!("serialize snapshot position: {error}"))
@@ -2436,14 +4260,14 @@ impl Database {
                     tx.execute(
                         "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
                          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        ("last_snapshot_local_position", encoded),
+                        (LAST_SNAPSHOT_POSITION_STATE_KEY, encoded),
                     )
                     .map_err(DbError::from)?;
                 }
                 None => {
                     tx.execute(
                         "DELETE FROM protocol_state WHERE key = ?1",
-                        ["last_snapshot_local_position"],
+                        [LAST_SNAPSHOT_POSITION_STATE_KEY],
                     )
                     .map_err(DbError::from)?;
                 }
@@ -3157,10 +4981,11 @@ impl Database {
         commit: &StoreBatchCommit,
     ) -> Result<(), DbError> {
         let actual_hash = commit.commit_hash();
-        let predecessor = if commit.seq == 1 {
+        let stream_id = commit.order.stream_id(&commit.device_id);
+        let predecessor = if commit.seq() == 1 {
             None
         } else if let Some(hash) =
-            Self::materialized_position_on(conn, &commit.device_id, commit.seq - 1)?
+            Self::materialized_position_on(conn, stream_id, commit.seq() - 1)?
         {
             Some(hash)
         } else {
@@ -3168,8 +4993,8 @@ impl Database {
                 "SELECT commit_hash FROM snapshot_coverage \
                  WHERE device_id = ?1 AND seq = ?2",
                 (
-                    &commit.device_id,
-                    Self::sequence_to_sqlite(&commit.device_id, commit.seq - 1)?,
+                    stream_id,
+                    Self::sequence_to_sqlite(stream_id, commit.seq() - 1)?,
                 ),
                 |row| row.get::<_, String>(0),
             )
@@ -3181,29 +5006,207 @@ impl Database {
             })
             .transpose()?
         };
-        if predecessor != commit.previous_commit_hash {
+        if predecessor != commit.previous_commit_hash() {
             return Err(DbError(format!(
                 "Store commit {}/{} names predecessor {:?}, durable predecessor is {:?}",
-                commit.device_id, commit.seq, commit.previous_commit_hash, predecessor
+                stream_id,
+                commit.seq(),
+                commit.previous_commit_hash(),
+                predecessor
             )));
         }
-        let seq = Self::sequence_to_sqlite(&commit.device_id, commit.seq)?;
+        let seq = Self::sequence_to_sqlite(stream_id, commit.seq())?;
         conn.execute(
             "INSERT INTO materialized_commits (device_id, seq, commit_hash) \
              VALUES (?1, ?2, ?3)",
-            (&commit.device_id, seq, actual_hash.to_string()),
+            (stream_id, seq, actual_hash.to_string()),
         )
         .map(|_| ())
         .map_err(DbError::from)
     }
 
+    pub(crate) fn record_materialized_serial_commit_on(
+        conn: &Connection,
+        commit: &StoreBatchCommit,
+        membership: &SerialMembershipState,
+        key_generation: u64,
+    ) -> Result<(), DbError> {
+        if commit.policy() != WritePolicy::Serial {
+            return Err(DbError(
+                "Serial membership state cannot accompany a MergeConcurrent commit".to_string(),
+            ));
+        }
+        Self::record_materialized_commit_on(conn, commit)?;
+        let membership = serde_json::to_string(membership)
+            .map_err(|error| DbError(format!("serialize Serial membership state: {error}")))?;
+        conn.execute(
+            "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (SERIAL_MEMBERSHIP_STATE_KEY, membership),
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (SERIAL_KEY_GENERATION_STATE_KEY, key_generation.to_string()),
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
+    }
+
+    pub async fn serial_membership_state(&self) -> Result<Option<SerialMembershipState>, DbError> {
+        let Some(raw) = self.get_protocol_state(SERIAL_MEMBERSHIP_STATE_KEY).await? else {
+            return Ok(None);
+        };
+        serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|error| DbError(format!("parse Serial membership state: {error}")))
+    }
+
+    pub async fn serial_key_generation(&self) -> Result<Option<u64>, DbError> {
+        let Some(raw) = self
+            .get_protocol_state(SERIAL_KEY_GENERATION_STATE_KEY)
+            .await?
+        else {
+            return Ok(None);
+        };
+        raw.parse::<u64>()
+            .map(Some)
+            .map_err(|error| DbError(format!("parse Serial key generation: {error}")))
+    }
+
+    pub(crate) async fn install_serial_root_authorization(
+        &self,
+        founder_pubkey: String,
+        authorization: SerialAuthorizationState,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            if Self::latest_position_for_device_on(&tx, SERIAL_STREAM_ID)?.is_some() {
+                return Err(DbError(
+                    "cannot install founder-only Serial authorization after a materialized commit"
+                        .to_string(),
+                ));
+            }
+            let existing_state: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM protocol_state WHERE key IN (?1, ?2, ?3)",
+                    rusqlite::params![
+                        crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                        SERIAL_MEMBERSHIP_STATE_KEY,
+                        SERIAL_KEY_GENERATION_STATE_KEY,
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if existing_state != 0 {
+                return Err(DbError(
+                    "cannot install founder-only Serial authorization over existing state"
+                        .to_string(),
+                ));
+            }
+            let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
+                DbError(format!(
+                    "serialize Serial founder membership state: {error}"
+                ))
+            })?;
+            for (key, value) in [
+                (
+                    crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                    founder_pubkey,
+                ),
+                (SERIAL_MEMBERSHIP_STATE_KEY, membership),
+                (
+                    SERIAL_KEY_GENERATION_STATE_KEY,
+                    authorization.key_generation.to_string(),
+                ),
+            ] {
+                tx.execute(
+                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
+                .map_err(DbError::from)?;
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn materialize_serial_control_commit(
+        &self,
+        commit: StoreBatchCommit,
+        authorization_after: SerialAuthorizationState,
+    ) -> Result<(), DbError> {
+        if commit.control.is_none() || commit.package.changeset_size != 0 {
+            return Err(DbError(
+                "Serial control materialization requires an exact empty control package"
+                    .to_string(),
+            ));
+        }
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            Self::record_materialized_serial_commit_on(
+                &tx,
+                &commit,
+                &authorization_after.membership,
+                authorization_after.key_generation,
+            )?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn install_serial_authorization_at_position(
+        &self,
+        expected: CommitPosition,
+        authorization: SerialAuthorizationState,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let actual = Self::latest_position_for_device_on(&tx, SERIAL_STREAM_ID)?;
+            if actual.as_ref() != Some(&expected) {
+                return Err(DbError(format!(
+                    "cannot install Serial authorization at {expected:?}; durable position is {actual:?}"
+                )));
+            }
+            let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
+                DbError(format!("serialize Serial membership state: {error}"))
+            })?;
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (SERIAL_MEMBERSHIP_STATE_KEY, membership),
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (
+                    SERIAL_KEY_GENERATION_STATE_KEY,
+                    authorization.key_generation.to_string(),
+                ),
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
     pub(crate) async fn install_bootstrap_state(
         &self,
-        coverage: &BTreeMap<String, CommitPosition>,
+        coverage: &CommitFrontier,
         snapshot_hash: ObjectHash,
         store_root_hash: ObjectHash,
     ) -> Result<(), DbError> {
-        let coverage = coverage.clone();
+        if coverage.policy() != self.write_policy() {
+            return Err(DbError(format!(
+                "snapshot coverage uses {:?}, database uses {:?}",
+                coverage.policy(),
+                self.write_policy()
+            )));
+        }
+        let coverage = coverage.clone().into_positions();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             tx.execute("DELETE FROM snapshot_coverage", [])
@@ -3973,6 +5976,7 @@ mod tests {
             )],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "invalid-uuid-writer".to_string(),
             &[Migration::sql(
                 1,
@@ -4000,6 +6004,7 @@ mod tests {
             vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "invalid-uuid-seed".to_string(),
             &[Migration::sql(
                 1,
@@ -4022,6 +6027,7 @@ mod tests {
             )],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "invalid-uuid-reader".to_string(),
             &[things_migration()],
         ) {
@@ -4044,6 +6050,7 @@ mod tests {
             ],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "duplicate-things".to_string(),
             &[things_migration()],
         ) {
@@ -4066,6 +6073,7 @@ mod tests {
             tables.clone(),
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "invalid-host-identity".to_string(),
             &[things_migration()],
         )
@@ -4075,8 +6083,12 @@ mod tests {
         db.call(move |conn| {
             conn.execute(
                 "INSERT INTO store_writes
-                 (write_id, status, affected_rows, changeset, dependencies, blob_facts)
-                 VALUES ('existing-write', '\"pending\"', '[]', ?1, '{}', '{\"blobs\":[]}')",
+                 (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
+                 VALUES (
+                    'existing-write', '\"pending\"', '[]', ?1, ?1,
+                    '{\"merge_concurrent\":{\"dependencies\":{}}}',
+                    '{\"blobs\":[]}'
+                 )",
                 [existing_for_insert],
             )
             .map(|_| ())
@@ -4088,17 +6100,23 @@ mod tests {
         let write_id = db.new_write_id();
         let result = db
             .call(move |conn| {
-                Database::run_internal_store_write_transaction_on(conn, &tables, write_id, |tx| {
-                    tx.execute(
-                        "INSERT INTO things VALUES (?1, 'valid', '0000000002000-0000-writer')",
-                        ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
-                    )?;
-                    tx.execute(
+                Database::run_internal_store_write_transaction_on(
+                    conn,
+                    &tables,
+                    crate::WritePolicy::MergeConcurrent,
+                    write_id,
+                    |tx| {
+                        tx.execute(
+                            "INSERT INTO things VALUES (?1, 'valid', '0000000002000-0000-writer')",
+                            ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+                        )?;
+                        tx.execute(
                         "INSERT INTO things VALUES ('2', 'invalid', '0000000002001-0000-writer')",
                         [],
                     )?;
-                    Ok::<_, DbError>(())
-                })
+                        Ok::<_, DbError>(())
+                    },
+                )
             })
             .await;
         let error = result.expect_err("invalid UUID must reject the host transaction");
@@ -4134,6 +6152,7 @@ mod tests {
             tables.clone(),
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "host-identity-changes".to_string(),
             &[things_migration()],
         )
@@ -4157,6 +6176,7 @@ mod tests {
             Database::run_internal_store_write_transaction_on(
                 conn,
                 &update_tables,
+                crate::WritePolicy::MergeConcurrent,
                 update_write_id,
                 |tx| {
                 tx.execute(
@@ -4177,6 +6197,7 @@ mod tests {
             Database::run_internal_store_write_transaction_on(
                 conn,
                 &replace_tables,
+                crate::WritePolicy::MergeConcurrent,
                 replace_write_id,
                 |tx| {
                     tx.execute("DELETE FROM things WHERE id = ?1", [renamed])?;
@@ -4197,6 +6218,7 @@ mod tests {
             Database::run_internal_store_write_transaction_on(
                 conn,
                 &ordinary_tables,
+                crate::WritePolicy::MergeConcurrent,
                 ordinary_write_id,
                 |tx| {
                 tx.execute(
@@ -4236,6 +6258,7 @@ mod tests {
                 Database::run_internal_store_write_transaction_on(
                     conn,
                     &invalid_tables,
+                    crate::WritePolicy::MergeConcurrent,
                     invalid_write_id,
                     |tx| {
                         tx.execute(
@@ -4288,6 +6311,7 @@ mod tests {
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "liveness".to_string(),
             &[],
         )
@@ -4338,6 +6362,7 @@ mod tests {
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "drop-async".to_string(),
             &[],
         )
@@ -4390,6 +6415,7 @@ mod tests {
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             String::new(),
             &[],
         );
@@ -4448,6 +6474,7 @@ mod tests {
                 )],
                 BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::serial(),
+                crate::WritePolicy::MergeConcurrent,
                 format!("reserved-{table_name}"),
                 &[notes_migration()],
             );
@@ -4473,6 +6500,7 @@ mod tests {
             )],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "empty-synced-table".to_string(),
             &[notes_migration()],
         );
@@ -4497,6 +6525,7 @@ mod tests {
             )],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "normal-synced-table".to_string(),
             &[notes_migration()],
         )
@@ -4516,6 +6545,7 @@ mod tests {
             tables,
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             device_id.to_string(),
             &[Migration::sql(1, "contract", migration_sql)],
         );
@@ -4683,6 +6713,7 @@ mod tests {
             )],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "strict-synced-table".to_string(),
             &[Migration::sql(
                 1,
@@ -4706,6 +6737,7 @@ mod tests {
             )],
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "undeclared-local-table".to_string(),
             &[Migration::sql(
                 1,
@@ -4752,6 +6784,7 @@ mod tests {
             Vec::new(),
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
             "test-device".to_string(),
             &[],
         )
@@ -4789,5 +6822,99 @@ mod tests {
             Some("0"),
             "retain_pinned must default to 0",
         );
+    }
+
+    #[tokio::test]
+    async fn serial_pending_branch_survives_reopen_with_exact_base_and_inverses() {
+        let temp = tempfile::tempdir().expect("temporary Store");
+        let path = temp.path().join("serial.db");
+        let tables = vec![SyncedTable::new(
+            "notes",
+            crate::sync::session::RowIdentity::SharedKey,
+        )];
+        let migrations = vec![notes_migration()];
+        let (db, _) = Database::open(
+            &path,
+            tables.clone(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::Serial,
+            "serial-device".to_string(),
+            &migrations,
+        )
+        .expect("open serial Store");
+        for (write_id, sql) in [
+            (
+                "serial-write-1",
+                "INSERT INTO notes VALUES ('n1', 'first', '0000000001000-0000-serial')",
+            ),
+            (
+                "serial-write-2",
+                "UPDATE notes SET body = 'second', _updated_at = '0000000002000-0000-serial' WHERE id = 'n1'",
+            ),
+        ] {
+            let tables = tables.clone();
+            let write_id = WriteId::from_generated(write_id.to_string());
+            db.call(move |conn| {
+                Database::run_internal_store_write_transaction_on(
+                    conn,
+                    &tables,
+                    crate::WritePolicy::Serial,
+                    write_id,
+                    |tx| tx.execute_batch(sql).map_err(DbError::from),
+                )
+            })
+            .await
+            .expect("commit provisional serial write");
+        }
+        drop(db);
+
+        let (reopened, _) = Database::open(
+            &path,
+            tables,
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::Serial,
+            "serial-device".to_string(),
+            &migrations,
+        )
+        .expect("reopen serial Store");
+        let rows = reopened
+            .call(|conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT write_id, inverse_changeset, base
+                         FROM store_writes ORDER BY ordinal",
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(DbError::from)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)?;
+                Ok(rows)
+            })
+            .await
+            .expect("read reopened branch");
+        assert_eq!(rows.len(), 2);
+        for (write_id, inverse, base) in rows {
+            assert!(!inverse.is_empty(), "{write_id} retains its inverse");
+            let base: StoreWriteBase = serde_json::from_str(&base).expect("serial base");
+            assert_eq!(
+                base,
+                StoreWriteBase::Serial {
+                    branch_id: PendingBranchId::from_first_write(WriteId::from_generated(
+                        "serial-write-1".to_string(),
+                    )),
+                    base: None,
+                }
+            );
+        }
     }
 }

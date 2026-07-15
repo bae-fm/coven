@@ -54,6 +54,7 @@ fn open_outbox_db() -> Database {
         Vec::new(),
         BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::MergeConcurrent,
         "test-device".to_string(),
         &[],
     )
@@ -124,6 +125,7 @@ async fn gc_tombstones_as(
         store_id,
         self_pubkey,
         membership.chain.as_ref(),
+        None,
         clock,
         grace,
     )

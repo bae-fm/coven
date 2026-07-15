@@ -14,14 +14,18 @@ them) reach teammates; the rest stay on the device that wrote them.
 coven owns the connections. The host opens one handle with
 [`Coven::builder`](rustdoc:struct:coven::Coven), handing over the set of tables
 that sync and the [migration ladder](/docs/schema-evolution) that creates the
-app's own tables. coven runs its bookkeeping migration first, then any ladder
-rungs above the database's version, seeds its clock off the rows already on
-disk, attaches the change-capture session to the synced tables, and spawns the
-threads that own the connections — a writer, and a read-only companion that
-backs `handle.sql_read`.
+app's own tables. On the first open of a database, coven creates its complete
+bookkeeping schema, the selected write policy, and its initialization marker in
+one SQLite transaction. Every later writer and read-only open requires that
+marker and validates the requested policy against the persisted value; missing,
+invalid, or different metadata refuses the open. The writer then runs any host
+migration rungs above the database's version, seeds its clock off the rows
+already on disk, attaches the change-capture session to the synced tables, and
+spawns the threads that own the connections — a writer, and a read-only
+companion that backs `handle.sql_read`.
 
 ```rust
-use coven::{Coven, Migration, RowIdentity, SyncedTable};
+use coven::{Coven, Migration, RowIdentity, SyncedTable, WritePolicy};
 
 const SCHEMA: &str = "
 CREATE TABLE workspaces (
@@ -46,6 +50,7 @@ CREATE TABLE todos (
 ";
 
 let handle = Coven::builder(config)
+    .write_policy(WritePolicy::MergeConcurrent)
     .synced_tables(vec![
         SyncedTable::new("workspaces", RowIdentity::IndependentUuid),
         SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared"),
@@ -204,7 +209,7 @@ let mut status = handle.subscribe_sync_status();
 tokio::spawn(async move {
     while status.changed().await.is_ok() {
         match status.borrow_and_update().clone() {
-            coven::SyncLoopStatus::Succeeded(cycle) => {
+            coven::SyncLoopStatus::Synchronized(cycle) => {
                 if let Some(changes) = cycle.row_changes {
                     // Re-read the tables and rows named by this refresh hint.
                 }
@@ -215,16 +220,39 @@ tokio::spawn(async move {
             coven::SyncLoopStatus::Failed { error } => {
                 // Show the whole-cycle failure.
             }
-            coven::SyncLoopStatus::Idle | coven::SyncLoopStatus::Started => {}
+            coven::SyncLoopStatus::Conflict { success, branch } => {
+                // Refresh from success, then ask the user to discard or rerun the
+                // stale Serial branch against the current global state.
+            }
+            coven::SyncLoopStatus::Blocked { success, writes } => {
+                // Refresh from success, then show the prerequisite each write names.
+            }
+            coven::SyncLoopStatus::Offline
+            | coven::SyncLoopStatus::CheckingStorage
+            | coven::SyncLoopStatus::Publishing => {}
         }
     }
 });
 ```
 
+`Offline` is reserved for provider and network transport failures. A remote
+blob that fails its signed content hash, or a local cache destination that
+cannot be written, remains failed or held work and does not report a lost
+connection.
+
 For write-specific UI, `handle.pending_writes()` lists every unpublished write
 with affected table/primary-key identities. `handle.write_status(&write_id)` and
 `handle.subscribe_write_status(&write_id)` expose its current durable state,
 including its exact published device position or a typed semantic block.
+`handle.blocked_writes()` lists only blocked records. After the prerequisite is
+repaired, `handle.retry_blocked_write(&write_id)` requeues them and wakes sync;
+a Serial retry revalidates the complete ordered branch, including writes that
+remained pending. `handle.discard_blocked_write(&write_id)` atomically reverses
+that write and every later unpublished write whose local rows depend on it.
+For a `Serial` store, `handle.pending_branches()` returns the stale branch, if present;
+`handle.discard_pending_branch(...)` removes one explicitly, while
+`handle.replace_pending_branch(...)` reruns the host's intent against the
+current global state and commits the replacement atomically.
 
 ## Attachments
 

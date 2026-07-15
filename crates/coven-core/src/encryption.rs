@@ -205,9 +205,7 @@ impl MasterKeyring {
             .expect("a MasterKeyring always holds at least one generation")
     }
 
-    /// Parse a stored master keyring. Accepts both the keyring JSON
-    /// [`Self::to_serialized`] produces and the legacy 64-hex single key, since
-    /// this reads values written by installs that predate the keyring format.
+    /// Parse the stored master-key format [`Self::to_serialized`] produces.
     pub fn from_serialized(s: &str) -> Result<Self, EncryptionError> {
         EncryptionService::new(s).map(Self::from)
     }
@@ -265,19 +263,10 @@ impl std::fmt::Debug for EncryptionService {
     }
 }
 impl EncryptionService {
-    /// Create a new encryption service from a hex-encoded key string
+    /// Create an encryption service from a serialized keyring.
     pub fn new(stored_key: &str) -> Result<Self, EncryptionError> {
         info!("Loading master key...");
-        match decode_legacy_key(stored_key) {
-            Ok(key) => Ok(EncryptionService::from_key(key)),
-            Err(legacy_error) => {
-                EncryptionService::from_keyring_json(stored_key).map_err(|keyring_error| {
-                    EncryptionError::KeyManagement(format!(
-                        "invalid stored encryption key: {legacy_error}; keyring parse failed: {keyring_error}"
-                    ))
-                })
-            }
-        }
+        EncryptionService::from_keyring_json(stored_key)
     }
 
     /// Create a new encryption service from a raw 32-byte key.
@@ -769,13 +758,6 @@ fn split_sealed_app_data(sealed: &[u8]) -> Result<([u8; 8], &[u8]), SealError> {
         .try_into()
         .expect("split_at yields exactly APP_DATA_FINGERPRINT_SIZE bytes");
     Ok((fingerprint, ciphertext))
-}
-
-fn decode_legacy_key(stored_key: &str) -> Result<[u8; 32], String> {
-    hex::decode(stored_key)
-        .map_err(|e| format!("legacy key is not hex: {e}"))?
-        .try_into()
-        .map_err(|bytes: Vec<u8>| format!("legacy key must be 32 bytes, got {}", bytes.len()))
 }
 
 fn derive_key_from(key: &[u8; 32], info: &str) -> [u8; 32] {
@@ -1467,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn master_keyring_generate_round_trips_through_serialization() {
+    fn master_keyring_from_serialized_accepts_the_current_keyring_format() {
         let keyring = MasterKeyring::generate();
         let serialized = keyring.to_serialized();
         let parsed =
@@ -1477,13 +1459,9 @@ mod tests {
     }
 
     #[test]
-    fn master_keyring_from_serialized_accepts_legacy_raw_hex() {
+    fn master_keyring_from_serialized_rejects_raw_hex() {
         let raw_hex = hex::encode(test_key());
-        let keyring = MasterKeyring::from_serialized(&raw_hex).expect("legacy hex parses");
-        assert_eq!(
-            keyring.fingerprint(),
-            EncryptionService::from_key(test_key()).fingerprint(),
-        );
+        assert!(MasterKeyring::from_serialized(&raw_hex).is_err());
     }
 
     #[test]

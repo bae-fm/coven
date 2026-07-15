@@ -21,7 +21,7 @@ use super::membership::{
 };
 use super::membership_ops::{list_membership_entries, publish_membership_head};
 use super::storage::{StorageError, SyncStorage};
-use super::wrapped_store_key::WrappedStoreKey;
+use super::wrapped_store_key::{WrappedKeyActivation, WrappedStoreKey};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InviteError {
@@ -39,11 +39,16 @@ pub enum InviteError {
         "wrapped store key for generation {generation} activation is not visible: {activation:?}"
     )]
     InactiveWrappedKey {
-        activation: MembershipCoord,
+        activation: WrappedKeyActivation,
         /// The committed generation this inactive wrap names (from its signed
         /// envelope), so a refresh can pause sealing at exactly this generation
         /// without opening the sealed keyring the activation gate forbids adopting.
         generation: u64,
+    },
+    #[error("wrapped store key activation {actual:?} differs from invite activation {expected:?}")]
+    WrappedKeyActivationMismatch {
+        expected: Box<WrappedKeyActivation>,
+        actual: Option<Box<WrappedKeyActivation>>,
     },
     #[error(
         "stale membership head for {author}: committed through seq {committed}, \
@@ -111,6 +116,18 @@ struct RevokeMutationPlan {
     desired_access: CloudAccessState,
     wraps: Vec<ReplacementWrappedKey>,
     keyring_payload: Vec<u8>,
+}
+
+fn visible_membership_activations(
+    chain: &MembershipChain,
+    additional: Option<super::membership::MembershipCoord>,
+) -> Vec<WrappedKeyActivation> {
+    chain
+        .author_heads()
+        .into_iter()
+        .chain(additional)
+        .map(WrappedKeyActivation::MergeConcurrent)
+        .collect()
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -247,13 +264,37 @@ fn signed_wrapped_key_with_activation(
     let wrapped = WrappedStoreKey::signed(
         store_id,
         recipient_ed25519_pubkey,
-        activation,
+        activation.map(WrappedKeyActivation::MergeConcurrent),
         encryption.current_generation(),
         sealed,
         owner_keypair,
     );
     serde_json::to_vec(&wrapped)
         .map_err(|e| InviteError::Crypto(format!("serialize wrapped key: {e}")))
+}
+
+pub(crate) fn signed_serial_wrapped_key(
+    store_id: &str,
+    recipient_ed25519_pubkey: &str,
+    encryption: &EncryptionService,
+    owner_keypair: &UserKeypair,
+    activation: super::store_commit::CommitPosition,
+) -> Result<Vec<u8>, InviteError> {
+    let recipient_x25519_pk = ed25519_hex_to_x25519(recipient_ed25519_pubkey)?;
+    let payload = encryption
+        .to_keyring_payload()
+        .map_err(|error| InviteError::Crypto(format!("serialize keyring payload: {error}")))?;
+    let sealed = keys::seal_box_encrypt(&payload, &recipient_x25519_pk);
+    let wrapped = WrappedStoreKey::signed(
+        store_id,
+        recipient_ed25519_pubkey,
+        Some(WrappedKeyActivation::Serial(activation)),
+        encryption.current_generation(),
+        sealed,
+        owner_keypair,
+    );
+    serde_json::to_vec(&wrapped)
+        .map_err(|error| InviteError::Crypto(format!("serialize wrapped key: {error}")))
 }
 
 #[cfg(test)]
@@ -581,7 +622,7 @@ async fn execute_invite_mutation(
     let wrapped: WrappedStoreKey = serde_json::from_slice(&plan.wrapped_key).map_err(|error| {
         InviteError::InvalidDurableMutation(format!("parse planned invitation wrap: {error}"))
     })?;
-    if wrapped.activation.as_ref() != Some(&plan.entry.coord())
+    if wrapped.activation != Some(WrappedKeyActivation::MergeConcurrent(plan.entry.coord()))
         || wrapped.author_pubkey != plan.entry.author_pubkey
         || wrapped
             .verify_and_unwrap(
@@ -970,7 +1011,11 @@ pub async fn unwrap_store_keyring(
     // Authenticate the wrapped key against that Owner set — and, if a revoke
     // re-wrapped the slot between invite and join, against the activation's
     // now-visible Remove entry — then decrypt and adopt it.
-    let visible = chain.author_heads();
+    let visible: Vec<_> = chain
+        .author_heads()
+        .into_iter()
+        .map(WrappedKeyActivation::MergeConcurrent)
+        .collect();
     unwrap_store_keyring_for_owners_with_activation(
         cloud_home.as_ref(),
         keypair,
@@ -979,6 +1024,27 @@ pub async fn unwrap_store_keyring(
         Some(&visible),
     )
     .await
+}
+
+pub async fn unwrap_serial_store_keyring(
+    cloud_home: Arc<dyn CloudHome>,
+    keypair: &UserKeypair,
+    store_id: &str,
+    key_author_pubkey: &str,
+    activation: &super::store_commit::CommitPosition,
+) -> Result<EncryptionService, InviteError> {
+    let recipient = hex::encode(keypair.public_key());
+    let wrapped = fetch_wrapped_key(cloud_home.as_ref(), key_author_pubkey, &recipient).await?;
+    if wrapped.activation != Some(WrappedKeyActivation::Serial(activation.clone())) {
+        return Err(InviteError::WrappedKeyActivationMismatch {
+            expected: Box::new(WrappedKeyActivation::Serial(activation.clone())),
+            actual: wrapped.activation.map(Box::new),
+        });
+    }
+    let sealed = wrapped
+        .verify_and_unwrap(store_id, &recipient, std::iter::once(key_author_pubkey))
+        .map_err(|error| InviteError::Crypto(format!("verify Serial wrapped key: {error}")))?;
+    open_sealed_keyring(&sealed, keypair)
 }
 
 /// Fetch and parse the wrapped-key object `owner_hex` sealed for `recipient_hex`,
@@ -1105,7 +1171,7 @@ pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
     keypair: &UserKeypair,
     store_id: &str,
     expected_owners: impl IntoIterator<Item = &'a str>,
-    visible_membership_entries: Option<&[MembershipCoord]>,
+    visible_activations: Option<&[WrappedKeyActivation]>,
 ) -> Result<EncryptionService, InviteError> {
     let recipient_hex = hex::encode(keypair.public_key());
 
@@ -1122,7 +1188,7 @@ pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
     // "this device has no wrapped key"). For an inactive wrap, keep the highest
     // generation seen: that is the committed generation a refresh must pause at,
     // even if two owners each left an inactive rotation at different generations.
-    let mut saw_inactive: Option<(MembershipCoord, u64)> = None;
+    let mut saw_inactive: Option<(WrappedKeyActivation, u64)> = None;
     let mut saw_unauthentic = false;
     let mut owners_tried = 0usize;
 
@@ -1143,7 +1209,7 @@ pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
         // A rotated wrap names the Remove entry that must be visible before it is
         // adopted; skip an owner's wrap whose activation the reader can't yet see.
         if let Some(activation) = wrapped.activation.as_ref() {
-            let visible = visible_membership_entries
+            let visible = visible_activations
                 .is_some_and(|entries| entries.iter().any(|entry| entry == activation));
             if !visible {
                 if saw_inactive
@@ -1254,8 +1320,7 @@ async fn build_revoke_mutation(
     })?;
     validate_planned_head(&entry, &head)?;
     let author = hex::encode(owner_keypair.public_key());
-    let mut visible_coords = chain.author_heads();
-    visible_coords.push(remove_coord.clone());
+    let visible_coords = visible_membership_activations(chain, Some(remove_coord.clone()));
     let prior_attempt = match unwrap_store_keyring_for_owners_with_activation(
         cloud_home,
         owner_keypair,
@@ -1384,7 +1449,7 @@ async fn execute_revoke_mutation(
                     wrapped.recipient
                 ))
             })?;
-        if envelope.activation.as_ref() != Some(&plan.entry.coord())
+        if envelope.activation != Some(WrappedKeyActivation::MergeConcurrent(plan.entry.coord()))
             || envelope.generation != keyring.current_generation()
             || envelope.author_pubkey != plan.entry.author_pubkey
             || envelope
@@ -1565,7 +1630,7 @@ pub async fn revoke_member(
     let author_pubkey_hex = hex::encode(owner_keypair.public_key());
 
     if !revokee_is_current {
-        let visible_coords = chain.author_heads();
+        let visible_coords = visible_membership_activations(chain, None);
         let keyring = unwrap_store_keyring_for_owners_with_activation(
             cloud_home,
             owner_keypair,
@@ -1604,8 +1669,7 @@ pub async fn revoke_member(
     // above the one this device still holds (a genuine prior attempt, not just its
     // own pre-rotation wrap). Anything else — no prior wrap, an activation not yet
     // visible — falls through to a fresh mint.
-    let mut visible_coords = chain.author_heads();
-    visible_coords.push(remove_coord.clone());
+    let visible_coords = visible_membership_activations(chain, Some(remove_coord.clone()));
     let prior_attempt = match unwrap_store_keyring_for_owners_with_activation(
         cloud_home,
         owner_keypair,
@@ -1887,6 +1951,14 @@ async fn rollback_revocation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn merge_activations(entries: &[MembershipCoord]) -> Vec<WrappedKeyActivation> {
+        entries
+            .iter()
+            .cloned()
+            .map(WrappedKeyActivation::MergeConcurrent)
+            .collect()
+    }
     use crate::config::HomeStorage;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{CloudHome, CloudHomeError, CloudHomeJoinInfo};
@@ -2351,6 +2423,7 @@ mod tests {
                 test_synced_tables(),
                 crate::blob::delete::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::serial(),
+                crate::WritePolicy::MergeConcurrent,
                 "durable-invite-device".to_string(),
                 &test_migrations(),
             )
@@ -2455,6 +2528,7 @@ mod tests {
                 test_synced_tables(),
                 crate::blob::delete::BLOB_TOMBSTONE_GRACE,
                 crate::blob::TransferLimits::serial(),
+                crate::WritePolicy::MergeConcurrent,
                 "durable-remove-device".to_string(),
                 &test_migrations(),
             )
@@ -2838,7 +2912,7 @@ mod tests {
             &owner,
             LIB_ID,
             std::iter::once(owner_pk.as_str()),
-            Some(&visible_entries),
+            Some(&merge_activations(&visible_entries)),
         )
         .await
         .unwrap()
@@ -2935,7 +3009,7 @@ mod tests {
             &member,
             LIB_ID,
             std::iter::once(owner_pk.as_str()),
-            Some(&visible),
+            Some(&merge_activations(&visible)),
         )
         .await
         .unwrap();
@@ -3107,7 +3181,7 @@ mod tests {
             &owner,
             LIB_ID,
             std::iter::once(owner_pk.as_str()),
-            Some(&visible_entries),
+            Some(&merge_activations(&visible_entries)),
         )
         .await
         .unwrap()
@@ -3119,7 +3193,7 @@ mod tests {
             &member2,
             LIB_ID,
             std::iter::once(owner_pk.as_str()),
-            Some(&visible_entries),
+            Some(&merge_activations(&visible_entries)),
         )
         .await
         .unwrap()
@@ -3185,13 +3259,14 @@ mod tests {
             &member,
             LIB_ID,
             std::iter::once(owner_pk.as_str()),
-            Some(&visible_entries),
+            Some(&merge_activations(&visible_entries)),
         )
         .await;
 
         assert!(matches!(
             result,
-            Err(InviteError::InactiveWrappedKey { activation: seen, generation: 2 }) if seen == activation
+            Err(InviteError::InactiveWrappedKey { activation: seen, generation: 2 })
+                if seen == WrappedKeyActivation::MergeConcurrent(activation)
         ));
     }
 
@@ -3376,7 +3451,8 @@ mod tests {
         assert!(
             matches!(
                 &result,
-                Err(InviteError::InactiveWrappedKey { activation: seen, .. }) if *seen == activation
+                Err(InviteError::InactiveWrappedKey { activation: seen, .. })
+                    if *seen == WrappedKeyActivation::MergeConcurrent(activation)
             ),
             "an activation with no visible entry must be refused, got {result:?}"
         );
@@ -3964,7 +4040,7 @@ mod tests {
                 member,
                 LIB_ID,
                 std::iter::once(owner_pk.as_str()),
-                Some(&visible_entries),
+                Some(&merge_activations(&visible_entries)),
             )
             .await
             .unwrap()
@@ -4038,7 +4114,7 @@ mod tests {
             &remaining,
             LIB_ID,
             std::iter::once(owner_pk.as_str()),
-            Some(&visible_entries),
+            Some(&merge_activations(&visible_entries)),
         )
         .await
         .unwrap()

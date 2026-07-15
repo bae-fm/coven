@@ -1,9 +1,7 @@
 //! Durable append-only Store acknowledgement publication.
 
-use std::collections::BTreeMap;
-
 use super::storage::SyncStorage;
-use super::store_commit::{ack_semantic_prefix, CommitPosition, ObjectHash, StoreAck};
+use super::store_commit::{ack_semantic_prefix, CommitFrontier, ObjectHash, StoreAck};
 use super::store_objects::{append_and_verify, StoreObjectError};
 use crate::database::Database;
 use crate::keys::UserKeypair;
@@ -12,7 +10,7 @@ use crate::keys::UserKeypair;
 pub enum StoreAckError {
     #[error("database: {0}")]
     Database(String),
-    #[error(transparent)]
+    #[error("{0}")]
     Object(#[from] StoreObjectError),
     #[error("Store acknowledgement protocol state {0:?} is absent")]
     MissingState(&'static str),
@@ -30,7 +28,7 @@ impl From<crate::database::DbError> for StoreAckError {
 
 pub async fn stage_store_ack(
     db: &Database,
-    frontier: BTreeMap<String, CommitPosition>,
+    frontier: CommitFrontier,
     last_sync: String,
     signer: &UserKeypair,
 ) -> Result<StoreAck, StoreAckError> {
@@ -48,6 +46,13 @@ pub async fn stage_store_ack(
         ))?;
     let previous = db.latest_local_store_ack().await?;
     let revision = previous.as_ref().map_or(1, |(revision, _)| revision + 1);
+    if frontier.policy() != db.write_policy() {
+        return Err(StoreAckError::InvalidOutbound(format!(
+            "acknowledgement frontier uses {:?}, database uses {:?}",
+            frontier.policy(),
+            db.write_policy()
+        )));
+    }
     let ack = StoreAck::signed(
         store_root_hash,
         device_id,
@@ -121,14 +126,19 @@ async fn store_root_hash(db: &Database) -> Result<ObjectHash, StoreAckError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use super::*;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::SequentialCopyIdGenerator;
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+    use crate::sync::store_commit::CommitPosition;
     use crate::sync::store_objects::{list_latest_ack_chains, load_ack_slot};
-    use crate::sync::test_helpers::{open_test_db, publish_test_store_protocol_root};
+    use crate::sync::test_helpers::{
+        open_serial_test_db, open_test_db, publish_test_serial_store_protocol_root,
+        publish_test_store_protocol_root,
+    };
 
     async fn initialized(
         copy_source: &str,
@@ -166,7 +176,7 @@ mod tests {
         let (_home, storage, db, signer, store_root_hash) = initialized("ack-chain").await;
         let first = stage_store_ack(
             &db,
-            BTreeMap::new(),
+            CommitFrontier::MergeConcurrent(BTreeMap::new()),
             "2026-01-01T00:00:00Z".to_string(),
             &signer,
         )
@@ -186,7 +196,7 @@ mod tests {
         );
         let second = stage_store_ack(
             &db,
-            frontier.clone(),
+            CommitFrontier::MergeConcurrent(frontier.clone()),
             "2026-01-02T00:00:00Z".to_string(),
             &signer,
         )
@@ -201,7 +211,10 @@ mod tests {
             .expect("verify acknowledgement chains");
         let latest = &chains.latest_by_device["dev-reader"];
         assert_eq!(latest.value, second);
-        assert_eq!(latest.value.frontier, frontier);
+        assert_eq!(
+            latest.value.frontier,
+            CommitFrontier::MergeConcurrent(frontier)
+        );
         assert_eq!(
             load_ack_slot(&storage, store_root_hash, "dev-reader", 1)
                 .await
@@ -210,6 +223,63 @@ mod tests {
                 .value,
             first,
         );
+    }
+
+    #[tokio::test]
+    async fn serial_acknowledgement_carries_the_exact_global_position() {
+        let home = InMemoryCloudHome::new();
+        let signer = UserKeypair::generate();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "serial-ack-store",
+            signer.clone(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("serial-ack")));
+        let db = open_serial_test_db();
+        let store_root_hash = publish_test_serial_store_protocol_root(
+            &db,
+            &storage,
+            "serial-ack-store",
+            "serial-reader",
+            &signer,
+        )
+        .await;
+        let position = CommitPosition {
+            seq: 7,
+            commit_hash: ObjectHash::digest(b"serial-seven"),
+        };
+
+        let ack = stage_store_ack(
+            &db,
+            CommitFrontier::Serial(Some(position.clone())),
+            "2026-07-14T00:00:00Z".to_string(),
+            &signer,
+        )
+        .await
+        .expect("stage Serial acknowledgement");
+        assert_eq!(ack.frontier, CommitFrontier::Serial(Some(position.clone())));
+        assert_eq!(drain_outbound_store_acks(&db, &storage).await.unwrap(), 1);
+        let loaded = load_ack_slot(&storage, store_root_hash, "serial-reader", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.value.frontier,
+            CommitFrontier::Serial(Some(position))
+        );
+
+        assert!(matches!(
+            stage_store_ack(
+                &db,
+                CommitFrontier::MergeConcurrent(BTreeMap::new()),
+                "2026-07-14T00:00:01Z".to_string(),
+                &signer,
+            )
+            .await,
+            Err(StoreAckError::InvalidOutbound(_))
+        ));
     }
 
     #[tokio::test]
@@ -223,7 +293,7 @@ mod tests {
             .await;
             let ack = stage_store_ack(
                 &db,
-                BTreeMap::new(),
+                CommitFrontier::MergeConcurrent(BTreeMap::new()),
                 "2026-01-01T00:00:00Z".to_string(),
                 &signer,
             )
@@ -264,7 +334,7 @@ mod tests {
         let (home, storage, db, signer, store_root_hash) = initialized("ack-completion").await;
         let ack = stage_store_ack(
             &db,
-            BTreeMap::new(),
+            CommitFrontier::MergeConcurrent(BTreeMap::new()),
             "2026-01-01T00:00:00Z".to_string(),
             &signer,
         )

@@ -234,6 +234,7 @@ fn open_blob_test_db_at(path: &std::path::Path, decl: BlobDecl) -> crate::databa
         test_synced_tables_with_blob(decl),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::MergeConcurrent,
         "restart-test-device".to_string(),
         &test_migrations(),
     )
@@ -521,7 +522,7 @@ async fn invalid_materialized_positions_are_rejected_at_the_database_boundary() 
     )]);
     assert!(target
         .install_bootstrap_state(
-            &overflow,
+            &crate::CommitFrontier::MergeConcurrent(overflow),
             crate::sync::store_commit::ObjectHash::digest(b"snapshot"),
             crate::sync::store_commit::ObjectHash::digest(b"store protocol root"),
         )
@@ -573,6 +574,7 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
             crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
+                crate::WritePolicy::MergeConcurrent,
                 write_id,
                 |tx| {
                     let remote_row: bool = tx
@@ -3375,7 +3377,8 @@ async fn encrypted_blob_round_trips_and_second_device_decrypts() {
 /// prove the split is driven by fill alone.
 #[tokio::test]
 async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
-    let storage = MockSyncStorage::new();
+    let keypair = UserKeypair::generate();
+    let storage = MockSyncStorage::with_keypair(keypair.clone());
 
     // Both children host-provided, differing only in fill: the photo is CacheEager,
     // the cover CacheLazy. Both inherit the `notes` gate, so a shared note carries
@@ -3411,12 +3414,19 @@ async fn inline_push_warms_cache_for_eager_and_drops_local_for_lazy() {
     local_files::store(&ld1, "covers", "clazy001", b"LAZY-BYTES")
         .await
         .expect("store lazy blob in local store");
-    let keypair = UserKeypair::generate();
     let hlc = crate::sync::hlc::Hlc::new("dev1".to_string());
     let cipher = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         [31u8; 32],
     )));
     bind_mock_store_protocol(&db1, &storage, "dev1").await;
+    cycle::ensure_owner_anchored_chain(
+        &storage,
+        &db1,
+        &storage.store_protocol_root(),
+        &storage.protocol_founder_keypair(),
+    )
+    .await
+    .expect("initialize MergeConcurrent test membership");
     cycle::run_single_sync_cycle(
         &storage,
         "test-lib",
@@ -3683,6 +3693,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
             crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
+                crate::WritePolicy::MergeConcurrent,
                 insert_write_id,
                 |tx| {
                     tx.execute(
@@ -3703,6 +3714,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
             crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &update_tables,
+                crate::WritePolicy::MergeConcurrent,
                 update_write_id,
                 |tx| {
                     tx.execute(
@@ -3805,6 +3817,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
             crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
+                crate::WritePolicy::MergeConcurrent,
                 write_id,
                 |tx| {
                     tx.execute(
@@ -5500,4 +5513,85 @@ async fn update_applied_before_its_insert_diverges_notfound_omit() {
         "updated",
         "the UPDATE applied before its INSERT must not be dropped as a local delete",
     );
+}
+
+#[tokio::test]
+async fn provider_blob_download_failure_remains_typed_for_both_write_policies() {
+    for policy in [
+        crate::WritePolicy::MergeConcurrent,
+        crate::WritePolicy::Serial,
+    ] {
+        let (db, _) = crate::database::Database::open(
+            std::path::Path::new(":memory:"),
+            test_synced_tables_with_blob(BlobDecl::new(
+                "photos",
+                Provenance::HostProvided,
+                CacheFill::CacheEager,
+            )),
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            policy,
+            format!("download-{policy:?}"),
+            &test_migrations(),
+        )
+        .expect("open policy-shaped blob database");
+        let bytes = b"provider-down";
+        let hash = crate::blob::content_hash(bytes);
+        host_exec(
+            &db,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('download-root', 'download', NULL, 1, \
+                     '0000000001000-0000-source', '2026-01-01')",
+        )
+        .await;
+        host_exec(
+            &db,
+            &format!(
+                "INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, _updated_at, created_at) \
+                 VALUES ('download-blob', 'download-root', 'cover', {}, '{}', \
+                         '0000000001000-0000-source', '2026-01-01')",
+                bytes.len(),
+                hash,
+            ),
+        )
+        .await;
+        let storage = MockSyncStorage::new();
+        storage
+            .put_blob(
+                "photos",
+                "download-blob",
+                crate::blob::BlobScope::Master,
+                None,
+                bytes.to_vec(),
+            )
+            .await
+            .expect("plant blob before provider outage");
+        storage.fail_next_blob_reads(1);
+        let (_temp, store_dir) = temp_store_dir();
+        let blob = crate::blob::BlobRef {
+            namespace: "photos".to_string(),
+            id: "download-blob".to_string(),
+            scope: crate::blob::BlobScope::Master,
+            cloud_path: None,
+            provenance: Provenance::HostProvided,
+            fill: CacheFill::CacheEager,
+        };
+
+        let failures = crate::sync::pull::download_blobs(
+            &db,
+            vec![crate::sync::pull::BlobDownload::from_installed_db(blob)],
+            &storage,
+            &store_dir,
+            Some("source"),
+        )
+        .await
+        .expect_err("provider download failure remains a typed batch failure");
+        assert_eq!(failures.failures().len(), 1);
+        assert!(failures.has_transport_failure());
+        assert!(
+            crate::sync::cycle::SyncCycleFailure::operation("pull Store commits", failures,)
+                .is_offline()
+        );
+    }
 }

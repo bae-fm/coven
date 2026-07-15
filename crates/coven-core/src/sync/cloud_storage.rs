@@ -12,10 +12,14 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 use tracing::warn;
 
-use super::storage::{ProtocolObjectListing, ProtocolObjectLocator, StorageError, SyncStorage};
+use super::storage::{
+    CoordinationError, CoordinationStorage, CreateHeadError, ProtocolObjectListing,
+    ProtocolObjectLocator, ReplaceHeadError, StorageError, SyncStorage, VersionToken,
+    VersionedObject,
+};
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
-use crate::storage::cloud::{BlobBody, CloudHome, CopyIdRef};
+use crate::storage::cloud::{BlobBody, CloudHeadStorage, CloudHome, CopyIdRef};
 
 /// Every encrypted object carries this cleartext prefix naming the key it was
 /// sealed under, by 8-byte fingerprint: magic, then the fingerprint. A read
@@ -471,6 +475,8 @@ pub struct CloudSyncStorage {
     blob_paths: BlobPathScheme,
     store_id: String,
     copy_ids: Option<CopyIdRef>,
+    coordination: Option<Arc<dyn CloudHeadStorage>>,
+    coordination_probe_peer: Option<Arc<dyn CloudHeadStorage>>,
     /// The device's signing identity. The control objects this storage writes
     /// (its head, the min_schema floor) are signed with it so a reader can
     /// attribute and verify them; the at-rest cipher proves confidentiality, not
@@ -494,6 +500,8 @@ impl CloudSyncStorage {
             store_id: store_id.into(),
             keypair,
             copy_ids: None,
+            coordination: None,
+            coordination_probe_peer: None,
         }
     }
 
@@ -502,6 +510,76 @@ impl CloudSyncStorage {
     pub fn with_copy_ids(mut self, copy_ids: CopyIdRef) -> Self {
         self.copy_ids = Some(copy_ids);
         self
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_test_serial_coordination(
+        mut self,
+        coordination: Arc<dyn CloudHeadStorage>,
+    ) -> Self {
+        self.coordination = Some(coordination.clone());
+        self.coordination_probe_peer = Some(coordination);
+        self
+    }
+
+    pub fn with_serial_coordination_clients(
+        mut self,
+        coordination: Arc<dyn CloudHeadStorage>,
+        probe_peer: Arc<dyn CloudHeadStorage>,
+    ) -> Self {
+        self.coordination = Some(coordination);
+        self.coordination_probe_peer = Some(probe_peer);
+        self
+    }
+
+    pub fn serial_coordination(&self) -> Result<&dyn CoordinationStorage, CoordinationError> {
+        self.coordination.as_ref().ok_or_else(|| {
+            CoordinationError::Unavailable(
+                "configured storage adapter has no documented coordination capability".to_string(),
+            )
+        })?;
+        Ok(self)
+    }
+
+    pub(crate) fn serial_coordination_probe_clients(
+        &self,
+    ) -> Result<(CloudCoordinationClient<'_>, CloudCoordinationClient<'_>), CoordinationError> {
+        let primary = self.primary_coordination_client()?;
+        let peer = self.coordination_probe_peer.as_deref().ok_or_else(|| {
+            CoordinationError::Unavailable(
+                "Serial coordination probe peer is not configured".to_string(),
+            )
+        })?;
+        Ok((
+            primary,
+            CloudCoordinationClient {
+                storage: self,
+                raw: peer,
+            },
+        ))
+    }
+
+    fn primary_coordination_client(
+        &self,
+    ) -> Result<CloudCoordinationClient<'_>, CoordinationError> {
+        let raw = self.coordination.as_deref().ok_or_else(|| {
+            CoordinationError::Unavailable(
+                "configured storage adapter has no documented coordination capability".to_string(),
+            )
+        })?;
+        Ok(CloudCoordinationClient { storage: self, raw })
+    }
+
+    pub(crate) fn next_coordination_probe_key(&self) -> Result<String, CoordinationError> {
+        let copy_ids = self.copy_ids.as_ref().ok_or_else(|| {
+            CoordinationError::Unavailable(
+                "coordination probe id source is not configured".to_string(),
+            )
+        })?;
+        Ok(format!(
+            "coven-probes-v1/serial-coordination/{}/head",
+            copy_ids.next_copy_id()
+        ))
     }
 
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
@@ -651,6 +729,26 @@ impl CloudSyncStorage {
                 crate::store_dir::validate_cloud_path(path)?;
                 Ok(format!("{namespace}/{path}"))
             }
+        }
+    }
+}
+
+pub(crate) struct CloudCoordinationClient<'a> {
+    storage: &'a CloudSyncStorage,
+    raw: &'a dyn CloudHeadStorage,
+}
+
+fn coordination_home_error(error: crate::storage::cloud::CloudHomeError) -> CoordinationError {
+    match error {
+        crate::storage::cloud::CloudHomeError::NotFound(key) => CoordinationError::NotFound(key),
+        crate::storage::cloud::CloudHomeError::Configuration(message) => {
+            CoordinationError::Unavailable(message)
+        }
+        crate::storage::cloud::CloudHomeError::Transport(message) => {
+            CoordinationError::Storage(message)
+        }
+        crate::storage::cloud::CloudHomeError::Io(error) => {
+            CoordinationError::Storage(format!("I/O error: {error}"))
         }
     }
 }
@@ -823,7 +921,10 @@ struct HashVerifyingPlaintextReader {
 
 #[async_trait]
 impl crate::local_blob::PlaintextChunkReader for HashVerifyingPlaintextReader {
-    async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, String> {
+    async fn next_chunk(
+        &mut self,
+        max: usize,
+    ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
         if max == 0 {
             return Ok(Vec::new());
         }
@@ -836,9 +937,11 @@ impl crate::local_blob::PlaintextChunkReader for HashVerifyingPlaintextReader {
             let hasher = std::mem::take(&mut self.hasher);
             let actual = hasher.finish();
             if actual != self.expected_hash {
-                return Err(format!(
-                    "blob {} content hash mismatch: expected {}, got {actual}",
-                    self.key, self.expected_hash
+                return Err(crate::local_blob::PlaintextChunkError::InvalidContent(
+                    format!(
+                        "blob {} content hash mismatch: expected {}, got {actual}",
+                        self.key, self.expected_hash
+                    ),
                 ));
             }
             return Ok(Vec::new());
@@ -848,12 +951,14 @@ impl crate::local_blob::PlaintextChunkReader for HashVerifyingPlaintextReader {
             .reader
             .read(self.offset, len)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(crate::local_blob::PlaintextChunkError::Remote)?;
         if chunk.len() as u64 != len {
-            return Err(format!(
-                "short blob range read at {}: got {} of {len} bytes",
-                self.offset,
-                chunk.len()
+            return Err(crate::local_blob::PlaintextChunkError::InvalidContent(
+                format!(
+                    "short blob range read at {}: got {} of {len} bytes",
+                    self.offset,
+                    chunk.len()
+                ),
             ));
         }
         self.hasher.update(&chunk);
@@ -1002,6 +1107,155 @@ impl BlobRangeReader {
                     chunk_base: (KEY_TAG_LEN + NONCE_SIZE) as u64,
                 })
             })
+            .await
+    }
+}
+
+#[async_trait]
+impl CoordinationStorage for CloudCoordinationClient<'_> {
+    async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
+        let raw = self.raw.read_head(key).await.map_err(|error| match error {
+            crate::storage::cloud::CloudHomeError::NotFound(_) => {
+                CoordinationError::NotFound(key.to_string())
+            }
+            other => coordination_home_error(other),
+        })?;
+        let bytes = self
+            .storage
+            .cipher()
+            .open(raw.bytes, &self.storage.aad_context(key))
+            .map_err(|error| CoordinationError::Open(error.to_string()))?;
+        Ok(VersionedObject {
+            bytes,
+            version: VersionToken::from_cloud(raw.version),
+        })
+    }
+
+    async fn create_head(
+        &self,
+        key: &str,
+        bytes: &[u8],
+    ) -> Result<VersionedObject, CreateHeadError> {
+        let stored = self
+            .storage
+            .cipher_for_seal()
+            .map_err(|error| {
+                CreateHeadError::Coordination(CoordinationError::Open(error.to_string()))
+            })?
+            .seal(bytes.to_vec(), &self.storage.aad_context(key));
+        let created = self
+            .raw
+            .create_head(key, stored)
+            .await
+            .map_err(|error| match error {
+                crate::storage::cloud::CloudHeadCreateError::AlreadyExists => {
+                    CreateHeadError::AlreadyExists
+                }
+                crate::storage::cloud::CloudHeadCreateError::Storage(error) => {
+                    CreateHeadError::Coordination(coordination_home_error(error))
+                }
+            })?;
+        let opened = self
+            .storage
+            .cipher()
+            .open(created.bytes, &self.storage.aad_context(key))
+            .map_err(|error| {
+                CreateHeadError::Coordination(CoordinationError::Open(error.to_string()))
+            })?;
+        if opened != bytes {
+            return Err(CreateHeadError::Coordination(CoordinationError::Open(
+                "created coordination head readback differs".to_string(),
+            )));
+        }
+        Ok(VersionedObject {
+            bytes: opened,
+            version: VersionToken::from_cloud(created.version),
+        })
+    }
+
+    async fn replace_head(
+        &self,
+        key: &str,
+        expected: &VersionToken,
+        bytes: &[u8],
+    ) -> Result<VersionedObject, ReplaceHeadError> {
+        let stored = self
+            .storage
+            .cipher_for_seal()
+            .map_err(|error| {
+                ReplaceHeadError::Coordination(CoordinationError::Open(error.to_string()))
+            })?
+            .seal(bytes.to_vec(), &self.storage.aad_context(key));
+        let replaced = self
+            .raw
+            .replace_head(key, expected.cloud(), stored)
+            .await
+            .map_err(|error| match error {
+                crate::storage::cloud::CloudHeadReplaceError::VersionMismatch => {
+                    ReplaceHeadError::VersionMismatch
+                }
+                crate::storage::cloud::CloudHeadReplaceError::Storage(error) => {
+                    ReplaceHeadError::Coordination(coordination_home_error(error))
+                }
+            })?;
+        let opened = self
+            .storage
+            .cipher()
+            .open(replaced.bytes, &self.storage.aad_context(key))
+            .map_err(|error| {
+                ReplaceHeadError::Coordination(CoordinationError::Open(error.to_string()))
+            })?;
+        if opened != bytes {
+            return Err(ReplaceHeadError::Coordination(CoordinationError::Open(
+                "replaced coordination head readback differs".to_string(),
+            )));
+        }
+        Ok(VersionedObject {
+            bytes: opened,
+            version: VersionToken::from_cloud(replaced.version),
+        })
+    }
+
+    async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError> {
+        self.raw
+            .delete_probe_head(key)
+            .await
+            .map_err(coordination_home_error)
+    }
+}
+
+#[async_trait]
+impl CoordinationStorage for CloudSyncStorage {
+    async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
+        self.primary_coordination_client()?.read_head(key).await
+    }
+
+    async fn create_head(
+        &self,
+        key: &str,
+        bytes: &[u8],
+    ) -> Result<VersionedObject, CreateHeadError> {
+        self.primary_coordination_client()
+            .map_err(CreateHeadError::Coordination)?
+            .create_head(key, bytes)
+            .await
+    }
+
+    async fn replace_head(
+        &self,
+        key: &str,
+        expected: &VersionToken,
+        bytes: &[u8],
+    ) -> Result<VersionedObject, ReplaceHeadError> {
+        self.primary_coordination_client()
+            .map_err(ReplaceHeadError::Coordination)?
+            .replace_head(key, expected, bytes)
+            .await
+    }
+
+    async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError> {
+        self.primary_coordination_client()?
+            .delete_probe_head(key)
             .await
     }
 }
@@ -1236,9 +1490,22 @@ impl SyncStorage for CloudSyncStorage {
         };
         let written = crate::local_blob::write_stream_atomic(dest, &mut source)
             .await
-            .map_err(StorageError::Storage)?;
+            .map_err(|error| match error {
+                crate::local_blob::StreamWriteError::Source(
+                    crate::local_blob::PlaintextChunkError::Remote(source),
+                ) => source,
+                crate::local_blob::StreamWriteError::Source(
+                    crate::local_blob::PlaintextChunkError::InvalidContent(reason),
+                ) => StorageError::InvalidContent(reason),
+                crate::local_blob::StreamWriteError::Source(
+                    crate::local_blob::PlaintextChunkError::Local(reason),
+                )
+                | crate::local_blob::StreamWriteError::Local(reason) => {
+                    StorageError::LocalFilesystem(reason)
+                }
+            })?;
         if written != source_size {
-            return Err(StorageError::Storage(format!(
+            return Err(StorageError::InvalidContent(format!(
                 "downloaded blob {namespace}/{id} wrote {written} bytes, expected {source_size}"
             )));
         }
@@ -1595,6 +1862,100 @@ mod tests {
         assert!(
             home.range_reads() > 1,
             "download-to-file reads the encrypted object through ranges",
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_blob_hash_mismatch_is_not_provider_transport() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Hashed,
+            "hash-mismatch-store",
+            UserKeypair::generate(),
+        );
+        let actual = b"actual-bytes";
+        storage
+            .put_blob(
+                "audio",
+                "hash-mismatch",
+                BlobScope::Master,
+                None,
+                actual.to_vec(),
+            )
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let error = storage
+            .read_blob_to_file(
+                "audio",
+                Some(&storage.self_uploader()),
+                "hash-mismatch",
+                BlobScope::Master,
+                None,
+                actual.len() as u64,
+                &crate::blob::content_hash(b"signed-bytes"),
+                &dir.path().join("download.bin"),
+            )
+            .await
+            .expect_err("signed hash rejects different remote content");
+
+        assert!(
+            matches!(&error, StorageError::InvalidContent(_)),
+            "hash mismatch retains invalid-content category: {error}"
+        );
+        assert!(
+            !error.is_transport(),
+            "hash mismatch is not offline: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_blob_local_cache_write_failure_is_not_provider_transport() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Hashed,
+            "local-write-store",
+            UserKeypair::generate(),
+        );
+        let bytes = b"cache-bytes";
+        storage
+            .put_blob(
+                "audio",
+                "local-write",
+                BlobScope::Master,
+                None,
+                bytes.to_vec(),
+            )
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let blocked_parent = dir.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, b"file").unwrap();
+        let error = storage
+            .read_blob_to_file(
+                "audio",
+                Some(&storage.self_uploader()),
+                "local-write",
+                BlobScope::Master,
+                None,
+                bytes.len() as u64,
+                &crate::blob::content_hash(bytes),
+                &blocked_parent.join("download.bin"),
+            )
+            .await
+            .expect_err("cache destination parent is not a directory");
+
+        assert!(
+            matches!(&error, StorageError::LocalFilesystem(_)),
+            "local cache write retains filesystem category: {error}"
+        );
+        assert!(
+            !error.is_transport(),
+            "local cache write is not offline: {error}"
         );
     }
 
@@ -2202,5 +2563,88 @@ mod tests {
             crate::storage::cloud::ListingCoverage::CompleteAtScan
         );
         assert_eq!(listing.objects.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn coordination_probe_observes_one_create_and_replace_winner() {
+        let home = InMemoryCloudHome::new();
+        let first = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "coordination-probe",
+            UserKeypair::generate(),
+        )
+        .with_test_serial_coordination(Arc::new(home.clone()));
+        let second = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "coordination-probe",
+            UserKeypair::generate(),
+        )
+        .with_test_serial_coordination(Arc::new(home.clone()));
+
+        crate::sync::storage::probe_serial_coordination(
+            first.serial_coordination().unwrap(),
+            second.serial_coordination().unwrap(),
+            "store-v1/__coordination-probe__/race-head".to_string(),
+        )
+        .await
+        .expect("coordination race probe");
+
+        assert!(home
+            .get("store-v1/__coordination-probe__/race-head")
+            .is_none());
+        assert_eq!(
+            home.deletes_seen(),
+            vec!["store-v1/__coordination-probe__/race-head"]
+        );
+    }
+
+    #[test]
+    fn storage_without_provider_capability_refuses_serial_coordination() {
+        let storage = CloudSyncStorage::new(
+            Arc::new(InMemoryCloudHome::new()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "unsupported-coordination",
+            UserKeypair::generate(),
+        );
+
+        assert!(matches!(
+            storage.serial_coordination(),
+            Err(CoordinationError::Unavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn coordination_probe_cleanup_failure_reports_remaining_key() {
+        let home = InMemoryCloudHome::new();
+        home.fail_coordination_probe_cleanup();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "coordination-cleanup",
+            UserKeypair::generate(),
+        )
+        .with_test_serial_coordination(Arc::new(home.clone()));
+        let key = "store-v1/__coordination-probe__/cleanup-head";
+
+        let error = crate::sync::storage::probe_serial_coordination(
+            storage.serial_coordination().unwrap(),
+            storage.serial_coordination().unwrap(),
+            key.to_string(),
+        )
+        .await
+        .expect_err("cleanup failure must abort the probe");
+
+        assert!(matches!(
+            error,
+            crate::sync::storage::CoordinationProbeError::Cleanup { ref key, .. }
+                if key == "store-v1/__coordination-probe__/cleanup-head"
+        ));
+        assert!(home.get(key).is_some());
     }
 }

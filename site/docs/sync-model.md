@@ -1,16 +1,18 @@
 # Sync
 
-coven syncs SQLite row changes between devices that share a store. There is
-no coordinator: each device appends the changesets it produces to its own
-stream in storage and pulls the streams other devices produced. Concurrent
-edits merge column by column, and deletes win over concurrent edits. The unit
-of exchange is one host transaction: its SQLite changeset becomes a Store
-package, a signed commit names that package and its exact causal dependencies,
-and a signed device head activates the commit at one per-device sequence.
+coven syncs SQLite row changes between devices that share a store. Each store
+selects one signed write policy. `MergeConcurrent` appends each device's
+changesets to its own causal stream, merges concurrent edits column by column,
+and makes deletes win over concurrent edits. `Serial` activates every
+changeset and control operation through one global compare-and-swap head. The
+unit of exchange in either policy is one host transaction: its SQLite
+changeset becomes a Store package named by an exact signed commit.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
-<svg class="flow" viewBox="0 0 660 224" role="img" aria-label="A write is captured and sealed, appends to the device's own stream, and peers pull it, advancing one exact materialized position per stream">
+The diagram below is the `MergeConcurrent` path.
+
+<svg class="flow" viewBox="0 0 660 224" role="img" aria-label="Under MergeConcurrent, a write is captured and sealed, appends to the device's own stream, and peers pull it, advancing one exact materialized position per stream">
 <text class="hdr" x="120" y="22" text-anchor="middle">ALICE'S DEVICE</text>
 <text class="hdr" x="395" y="22" text-anchor="middle">CLOUD</text>
 <text class="hdr" x="590" y="22" text-anchor="middle">BOB PULLS</text>
@@ -57,6 +59,34 @@ This page covers how a local write reaches every device. Row-level gating
 fresh-device bootstrap from a snapshot has its own page,
 [Bootstrap](/docs/bootstrap).
 
+## Write policies
+
+The host must pass one [`WritePolicy`](rustdoc:enum:coven::WritePolicy) to
+`Coven::builder(...).write_policy(...)`. The signed Store protocol root binds
+that choice permanently; open, join, and restore refuse a different expected
+policy before touching storage or local state.
+
+The local SQLite database independently persists the same required policy.
+On first open, Coven creates its complete internal schema, policy row, and
+initialization marker in one SQLite transaction. Later writer and read-only
+opens require the marker and validate the requested policy; a missing policy,
+invalid marker, or different policy fails the open without recreating metadata.
+
+- `MergeConcurrent` keeps one append-only commit stream per device. A commit
+  names its exact predecessor and materialized dependency frontier. Devices may
+  publish while offline, and pull merges independent branches.
+- `Serial` keeps one append-only global stream selected by a signed mutable
+  head. Publishing reads the head, builds a consecutive package of commits, and
+  replaces the head only if its provider version still matches. Losing that
+  comparison preserves the local writes as a `PendingBranch`; the host must
+  explicitly discard it or rerun its intent against the current global state.
+
+Opening either policy works without a provider. Running, joining, or restoring
+`Serial` sync requires the provider's separate coordination capability. CloudKit
+and AWS S3 provide it. A custom S3 endpoint requires the host's explicit
+`CustomS3Serial::ConditionalPutAndStrongReads` assertion; Google Drive,
+Dropbox, and OneDrive are refused.
+
 ## Change capture
 
 A missed write is a silent divergence: two devices disagree and nothing
@@ -67,7 +97,7 @@ cannot happen, because the only connection that can write is the one capture
 is attached to.
 
 The host opens the store once through
-`Coven::builder(config).synced_tables(...).migrations(...).open()`, declaring
+`Coven::builder(config).write_policy(...).synced_tables(...).migrations(...).open()`, declaring
 its [synced tables](/docs/local-data), and from then on runs all its writes
 through `handle.sql(...)`. The writer connection lives on one dedicated
 thread (an actor). Each host transaction gets a SQLite session attached to every
@@ -90,11 +120,14 @@ nothing and produces empty changesets forever, so
 [`init_sync_over_storage`](rustdoc:fn:coven::sync::cycle::init_sync_over_storage)
 treats an empty set as a hard error and refuses to start.
 
-Initialization also requires a signed, owner-anchored membership chain. A new
-store publishes its self-signed Owner founder and signed head, then records the
-founder and complete accepted head floor together before it returns a runnable
-session. This applies to both opaque and browsable cloud homes; browsable changes
-object visibility and blob path naming, not authorization.
+Initialization also installs policy-shaped signed authorization. A new
+`MergeConcurrent` store publishes its self-signed Owner founder and causal head,
+then records the founder and complete accepted head floor. A new `Serial` store
+derives founder membership and key generation directly from the signed Store
+protocol root; it creates no causal membership stream or head. Both policies
+finish authorization before returning a runnable session. This applies to
+opaque and browsable homes; browsable changes visibility and blob paths, not
+authorization.
 
 ## Reads
 
@@ -110,7 +143,7 @@ cannot bypass capture because it cannot write at all.
   committed writes: a `sql_read` after an awaited `sql`/`write` sees that
   data.
 - **From a second process (or a second handle)**:
-  `Coven::builder(config).open_read_only()` returns a
+  `Coven::builder(config).write_policy(...).synced_tables(...).migrations(...).open_read_only()` returns a
   [`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle) — a same-store
   reader for something like a macOS File Provider extension that must serve
   reads while the app holds the full handle open. It takes no store lock
@@ -128,15 +161,19 @@ rows while capturing nothing, which is routine and silent.
 
 One background loop runs one cycle at a time. Each cycle loads durable state and:
 
-1. Refreshes membership, encryption-key, and device-registration state.
+1. Resolves authorization from causal membership heads for `MergeConcurrent`,
+   or from the exact signed global head chain for `Serial`, then refreshes
+   encryption-key and device-registration state.
 2. Drains blob uploads and retries the oldest prepared Store write using its
    persisted exact bytes.
 3. Completes ready row-gate transitions and pulls verified remote Store commits.
-4. Prepares the oldest pending write, uploads and verifies its referenced blobs,
-   then appends and verifies its package, commit, and device head. It repeats in
-   write order until no pending write is ready.
-5. Applies remote commits whose predecessor and dependency positions are fully
-   materialized; each commit's rows and exact position advance atomically.
+4. Prepares pending writes in policy order, uploads and verifies their referenced
+   blobs, then appends and verifies their packages and commits. `MergeConcurrent`
+   activates each with its device head; `Serial` activates one consecutive
+   package with a conditional global-head replacement.
+5. Applies remote commits whose policy-specific predecessors are fully
+   materialized; each commit's rows, authorization state, and exact position
+   advance atomically.
 6. Flushes the register clock, durable file cleanup, acknowledgements, and blob
    deletion work.
 7. Evaluates snapshot publication and reclamation against exact commit coverage.
@@ -146,21 +183,27 @@ host write can land during any network operation without joining another write.
 Remote applies use the engine's apply path rather than the host transaction path
 and therefore never enter the local write ledger.
 
-When Alice edits a todo title, that call already leaves a durable pending write.
-Her loop appends encrypted physical copies below
+Under `MergeConcurrent`, when Alice edits a todo title, that call already leaves
+a durable pending write. Her loop appends encrypted physical copies below
 `store-v1/packages/<alice-device>/<seq>/`,
 `store-v1/commits/<alice-device>/<seq>/`, and
 `store-v1/heads/<alice-device>/<seq>/`. Bob verifies Alice's head and commit,
 waits until the named dependencies are materialized, then atomically applies the
 package and records Alice's exact sequence and commit hash.
 
+Under `Serial`, the same package and commit use the `serial` stream. The loop
+reads the signed global head with its provider version, prepares consecutive
+commits from that exact base, appends and verifies their immutable objects, then
+conditionally replaces the head. A peer follows only the exact predecessor
+chain selected by that head.
+
 ### Push
 
-A device's stream is only trustworthy if its sequence numbers never skip and
+A commit stream is only trustworthy if its sequence numbers never skip and
 never change meaning, even across a crash. The durable write record owns the
 changeset and dependency frontier from the host commit onward. Preparation
-assigns the oldest write its next device sequence and predecessor, constructs
-the exact signed commit and head bytes, and persists them before any protocol
+assigns each write its policy-specific sequence and predecessor, constructs the
+exact signed commit and activation bytes, and persists them before any protocol
 append. A retry appends new physical copies of those same semantic bytes.
 
 Before an append, the write is `Publishing`. A storage or readback failure puts
@@ -170,6 +213,18 @@ protocol state becomes typed durable `Blocked` and holds later writes behind it.
 After the head is read back, one SQLite transaction records the exact
 `PublishedPosition`, advances the local materialized position, applies owned
 cleanup metadata, and clears the prepared bytes from that same write record.
+For `Serial`, a head version mismatch records the whole prepared local branch
+as `Conflict`; it never silently rebases or drops those host transactions.
+
+The host lists blocked records with `handle.blocked_writes()`. After repairing
+the named prerequisite, `handle.retry_blocked_write(&write_id)` requeues the
+blocked records and wakes sync. One Serial retry covers every blocked member of
+that ordered branch, and preparation validates the complete active branch,
+including members that remained `Pending`. If the write must be abandoned,
+`handle.discard_blocked_write(&write_id)` atomically reverses it and every later
+unpublished write whose working rows depend on it. Discarded records remain
+queryable with terminal `Resolved(Discarded)` status and no longer participate
+in preparation.
 
 A peer must never learn of a row whose file is not yet in the cloud. That
 ordering rides the [gate](/docs/local-data), per root, not a global hold: the
@@ -185,16 +240,23 @@ publish.
 
 ### Pull
 
-Pull lists signed device heads, walks each unseen predecessor chain, and verifies
-every physical candidate resolves to one semantic object. A commit becomes ready
-only after its own predecessor and every exact dependency are materialized. For
-each ready commit, pull:
+`MergeConcurrent` pull lists signed device heads and makes a commit ready only
+after its predecessor and every exact dependency are materialized. `Serial`
+pull opens the complete visible candidate set for the signed global-head slot,
+requires every copy under one semantic hash to open to identical bytes, rejects
+multiple valid hashes as a fork, and then verifies the complete predecessor
+chain selected by that authoritative head. Unreachable immutable commits are
+inert, and provider listing order never chooses a Serial winner. The same
+candidate-set rule applies to packages and other signed objects in either
+policy. For each ready commit, pull:
 
 - parses the signed commit and checks its `schema_version` against the local
   [`Database::schema_version`](rustdoc:method:coven::database::Database::schema_version);
-- verifies the commit, device head, package hash, and Ed25519 signatures;
-- checks the author could write under the exact membership entry the commit
-  is signed against;
+- verifies the commit, policy-specific activation head, package hash, and
+  Ed25519 signatures;
+- checks the author against the policy-shaped authorization state: the exact
+  causal membership grant for `MergeConcurrent`, or the preceding global
+  prefix for `Serial`;
 - validates every row id under the table's declared identity mode; an invalid id
   holds that exact Store commit without changing rows or its materialized
   position, while other device chains continue;
@@ -207,10 +269,19 @@ required blob work succeed. A failed blob download leaves the exact position
 unmaterialized, so the commit is retried; the pull reports this through
 `PullResult::asset_downloads_failed`.
 
-### One bad object stops one stream
+A provider or network failure while reading a candidate or blob is a transport
+failure and drives `SyncLoopStatus::Offline`. A verified blob whose plaintext
+does not match its signed hash is invalid content, and failure to create or
+write its local cache destination is a local filesystem failure. Those two
+categories hold or fail the affected work without changing the loop to
+`Offline`.
 
-The failure rule throughout pull: no single cloud object may stop more than
-its own stream.
+### Failure isolation
+
+Under `MergeConcurrent`, no single cloud object may stop more than its own
+device stream. Under `Serial`, every commit belongs to the one global stream,
+so a malformed or missing object stops that exact global position and all
+successors; the materialized position never skips it.
 
 <svg class="flow" viewBox="0 0 660 176" role="img" aria-label="A malformed commit holds only its own device's materialized position; other streams keep flowing">
 <text class="hdr" x="330" y="22" text-anchor="middle">ONE PULL, TWO STREAMS</text>
@@ -311,20 +382,24 @@ host observes it with
 
 ```rust
 pub enum SyncLoopStatus {
-    Idle,
-    Started,
-    Succeeded(SyncLoopSuccess),
+    Offline,
+    CheckingStorage,
+    Publishing,
+    Synchronized(SyncLoopSuccess),
+    Conflict { success: SyncLoopSuccess, branch: PendingBranch },
+    Blocked { success: SyncLoopSuccess, writes: Vec<PendingWrite> },
     Failed { error: String },
 }
 ```
 
 The receiver immediately contains the current value and survives loop restarts.
-Intermediate values may be coalesced, so `Succeeded.row_changes` is a refresh
+Intermediate values may be coalesced, so `Synchronized.row_changes` is a refresh
 hint rather than a complete event stream. `Failed` carries a user-facing
-message for a whole-cycle failure. `Succeeded`
-carries [`SyncLoopSuccess`](rustdoc:struct:coven::SyncLoopSuccess), including
-alerts, device activity, and applied row changes for the host to map to its own
-domain events.
+message for a whole-cycle failure. `Synchronized`, `Conflict`, and `Blocked` carry
+[`SyncLoopSuccess`](rustdoc:struct:coven::SyncLoopSuccess), including alerts,
+device activity, and applied row changes. `Conflict` additionally names the
+stale `Serial` branch that requires explicit discard or replacement. `Blocked`
+names writes whose typed prerequisite prevents publication.
 
 ## Backoff
 
@@ -335,8 +410,11 @@ waits the base 30 seconds before the next run; each consecutive failure doubles
 the wait (60s, 120s, 240s), capped at 300 seconds. A success resets the count,
 and `sync_now` preempts the wait.
 
-Transport and storage errors leave writes retryable and recover through the
-loop. A write whose own package, blob state, or Store protocol state is invalid
-is durable `Blocked`; reconnect does not retry it. The schema-too-old floor
-requires an app upgrade, and membership rejection means the device is no longer
-a write-capable member.
+Provider and network transport errors leave writes retryable, set `Offline`,
+and recover through the loop. Remote content mismatch and local blob-filesystem
+errors are not connectivity failures; they remain typed failed or held work. A
+write whose own package, blob state, or Store protocol state is invalid is
+durable `Blocked` and requires `retry_blocked_write` after repair or
+`discard_blocked_write`; reconnect does not silently requeue it. The
+schema-too-old floor requires an app upgrade, and membership rejection means the
+device is no longer a write-capable member.

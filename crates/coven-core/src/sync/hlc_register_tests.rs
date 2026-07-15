@@ -82,6 +82,14 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
     )));
     let keypair = UserKeypair::generate();
     bind_mock_store_protocol(&db_b, &storage, "dev-b").await;
+    crate::sync::cycle::ensure_owner_anchored_chain(
+        &storage,
+        &db_b,
+        &storage.store_protocol_root(),
+        &storage.protocol_founder_keypair(),
+    )
+    .await
+    .expect("initialize MergeConcurrent test membership");
 
     let result = run_single_sync_cycle(
         &storage,
@@ -226,6 +234,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
             crate::database::Database::run_internal_store_write_transaction_on(
                 conn,
                 &tables,
+                crate::WritePolicy::MergeConcurrent,
                 write_id,
                 |tx| {
                     let stamp = stamper.stamp();
@@ -513,6 +522,7 @@ async fn returned_stamper_shares_seeded_clock() {
         test_synced_tables(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::MergeConcurrent,
         Arc::new(Hlc::with_wall_clock("dev-a".into(), || 9_000_000_000_000)),
         &migrations,
     )
@@ -686,6 +696,7 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
         test_synced_tables(),
         crate::blob::delete::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::MergeConcurrent,
         "dev-self".to_string(),
         &migrations,
     )
