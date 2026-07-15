@@ -457,6 +457,18 @@ mod tests {
     }
 
     #[test]
+    fn x25519_shared_secret_rejects_a_nonzero_low_order_public_key() {
+        let local = UserKeypair::generate();
+        let mut low_order = [0; CURVE25519_PUBLICKEYBYTES];
+        low_order[0] = 1;
+
+        let error = x25519_shared_secret(local.to_x25519_secret_key(), low_order)
+            .expect_err("a low-order public key must not produce recipient identity material");
+
+        assert!(matches!(error, KeyError::Crypto(_)));
+    }
+
+    #[test]
     fn ed25519_to_x25519_is_deterministic() {
         let kp = UserKeypair::generate();
         let x_sk1 = kp.to_x25519_secret_key();

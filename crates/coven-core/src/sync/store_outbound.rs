@@ -316,14 +316,31 @@ pub(crate) struct PreparedSerialControl {
     pub authorization_after: SerialAuthorizationState,
 }
 
+pub(crate) struct SerialAuthorizationSnapshot {
+    pub base: Option<crate::sync::store_commit::CommitPosition>,
+    pub authorization: SerialAuthorizationState,
+}
+
 pub(crate) async fn current_serial_authorization(
     db: &Database,
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,
 ) -> Result<SerialAuthorizationState, StoreOutboundError> {
+    Ok(
+        current_serial_authorization_snapshot(db, storage, coordination)
+            .await?
+            .authorization,
+    )
+}
+
+pub(crate) async fn current_serial_authorization_snapshot(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+) -> Result<SerialAuthorizationSnapshot, StoreOutboundError> {
     let store_root_hash = required_store_root_hash(db).await?;
     let observed = observe_serial_head(db, coordination).await?;
-    match observed.head() {
+    let authorization = match observed.head() {
         Some(head) => {
             super::store_pull::load_serial_authorization_at_head(storage, store_root_hash, head)
                 .await
@@ -348,7 +365,11 @@ pub(crate) async fn current_serial_authorization(
             SerialAuthorizationState::from_founder(store_root_hash, &root.founder)
                 .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))
         }
-    }
+    }?;
+    Ok(SerialAuthorizationSnapshot {
+        base: observed.position(),
+        authorization,
+    })
 }
 
 pub(crate) async fn prepare_serial_control(
@@ -360,9 +381,8 @@ pub(crate) async fn prepare_serial_control(
     keypair: &UserKeypair,
 ) -> Result<PreparedSerialControl, StoreOutboundError> {
     let store_root_hash = required_store_root_hash(db).await?;
-    let observed = observe_serial_head(db, coordination).await?;
-    let authorization = current_serial_authorization(db, storage, coordination).await?;
-    let base = observed.position();
+    let snapshot = current_serial_authorization_snapshot(db, storage, coordination).await?;
+    let base = snapshot.base;
     let seq = base.as_ref().map_or(1, |position| position.seq + 1);
     let commit = StoreBatchCommit::signed_with_control(
         store_root_hash,
@@ -379,7 +399,8 @@ pub(crate) async fn prepare_serial_control(
         keypair,
     )
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let authorization_after = authorization
+    let authorization_after = snapshot
+        .authorization
         .authorize_and_apply(&commit)
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     let head = StoreSerialHead::signed(
@@ -554,21 +575,21 @@ async fn prepare_serial_store_branch(
     };
     let branch_id = branch.branch_id.clone();
     let branch_base = branch.base.clone();
-    let observed = match observe_serial_head(db, coordination).await {
-        Ok(observed) => observed,
+    let snapshot = match current_serial_authorization_snapshot(db, storage, coordination).await {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             release_serial_preparation_after_error(db, branch_id, branch_base, &error).await?;
             return Err(error);
         }
     };
-    if observed.position() != branch.base {
-        db.mark_serial_branch_conflict(branch.branch_id, branch.base, observed.position())
+    if snapshot.base != branch.base {
+        db.mark_serial_branch_conflict(branch.branch_id, branch.base, snapshot.base)
             .await?;
         return Ok(false);
     }
     let preparation = async {
-        let authorization = current_serial_authorization(db, storage, coordination).await?;
-        if !authorization
+        if !snapshot
+            .authorization
             .membership
             .can_write(&crate::keys::public_key_hex(keypair))
         {

@@ -818,17 +818,19 @@ async fn prepare_circle_operation(
                     "Serial circle creation requires coordination storage".to_string(),
                 )
             })?;
-            let authorization =
-                super::store_outbound::current_serial_authorization(db, storage, coordination)
-                    .await?;
-            if !authorization.membership.can_write(&author_pubkey) {
+            let snapshot = super::store_outbound::current_serial_authorization_snapshot(
+                db,
+                storage,
+                coordination,
+            )
+            .await?;
+            if !snapshot.authorization.membership.can_write(&author_pubkey) {
                 return Err(CircleOperationError::InvalidState(
                     "circle creator is not a current Store writer".to_string(),
                 ));
             }
-            let base =
-                super::store_outbound::current_serial_head_position(db, coordination).await?;
-            let members = authorization.membership.current_members();
+            let base = snapshot.base;
+            let members = snapshot.authorization.membership.current_members();
             let creation = CircleCreation::founder(
                 store_root_hash,
                 device_id,
@@ -848,7 +850,7 @@ async fn prepare_circle_operation(
                     previous_commit_hash: base.as_ref().map(|position| position.commit_hash),
                 },
                 None,
-                Some(authorization),
+                Some(snapshot.authorization),
             )
         }
     };
@@ -1108,6 +1110,7 @@ async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, CircleOpe
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::*;
@@ -1115,9 +1118,14 @@ mod tests {
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::SequentialCopyIdGenerator;
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-    use crate::sync::membership::{founder_entry, MembershipChain};
-    use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
-    use crate::sync::store_commit::{serial_head_key, StoreBatchCommit, StoreCommitOrder};
+    use crate::sync::membership::{founder_entry, MemberRole, MembershipChain};
+    use crate::sync::storage::{
+        CoordinationError, CoordinationStorage, CreateHeadError, ProtocolObjectContext,
+        ProtocolObjectDomain, ReplaceHeadError, VersionToken, VersionedObject,
+    };
+    use crate::sync::store_commit::{
+        serial_head_key, StoreBatchCommit, StoreCommitOrder, StoreControl,
+    };
     use crate::sync::test_helpers::{
         open_serial_test_db, open_test_db, publish_test_serial_store_protocol_root,
         publish_test_store_protocol_root, test_migrations, test_synced_tables,
@@ -1144,6 +1152,44 @@ mod tests {
         name: &str,
     ) -> CloudSyncStorage {
         merge_storage(home, signer, name).with_test_serial_coordination(Arc::new(home.clone()))
+    }
+
+    struct HeadChangesAfterAuthorization<'a> {
+        inner: &'a dyn CoordinationStorage,
+        authorization_head: Vec<u8>,
+        reads: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CoordinationStorage for HeadChangesAfterAuthorization<'_> {
+        async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
+            let mut current = self.inner.read_head(key).await?;
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                current.bytes.clone_from(&self.authorization_head);
+            }
+            Ok(current)
+        }
+
+        async fn create_head(
+            &self,
+            key: &str,
+            bytes: &[u8],
+        ) -> Result<VersionedObject, CreateHeadError> {
+            self.inner.create_head(key, bytes).await
+        }
+
+        async fn replace_head(
+            &self,
+            key: &str,
+            expected: &VersionToken,
+            bytes: &[u8],
+        ) -> Result<VersionedObject, ReplaceHeadError> {
+            self.inner.replace_head(key, expected, bytes).await
+        }
+
+        async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError> {
+            self.inner.delete_probe_head(key).await
+        }
     }
 
     async fn persist_merge_operation(
@@ -1460,6 +1506,129 @@ mod tests {
             .await
             .expect("read rejected operation")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn serial_circle_cannot_activate_from_authorization_before_a_removal_head() {
+        let home = InMemoryCloudHome::new();
+        let founder = UserKeypair::generate();
+        let successor = UserKeypair::generate();
+        let storage = serial_storage(&home, &founder, "circle-serial-authority-race");
+        let db = open_serial_test_db();
+        publish_test_serial_store_protocol_root(
+            &db,
+            &storage,
+            "circle-serial-authority-race",
+            "founder-device",
+            &founder,
+        )
+        .await;
+        let coordination = storage.serial_coordination().expect("Serial coordination");
+
+        let authorization =
+            super::super::store_outbound::current_serial_authorization(&db, &storage, coordination)
+                .await
+                .expect("founder authorization");
+        let add_successor = authorization
+            .membership
+            .signed_set_member(
+                &founder,
+                keys::public_key_hex(&successor),
+                None,
+                MemberRole::Owner,
+                "0000000000001-0000-founder".to_string(),
+            )
+            .expect("add successor owner");
+        let prepared = super::super::store_outbound::prepare_serial_control(
+            &db,
+            &storage,
+            coordination,
+            "founder-device",
+            StoreControl::SerialMembership {
+                entry: add_successor,
+            },
+            &founder,
+        )
+        .await
+        .expect("prepare successor addition");
+        super::super::store_outbound::activate_serial_control(
+            &db,
+            &storage,
+            coordination,
+            &prepared,
+        )
+        .await
+        .expect("activate successor addition");
+        let authorization_head = coordination
+            .read_head(serial_head_key())
+            .await
+            .expect("read authorization head")
+            .bytes;
+
+        let authorization =
+            super::super::store_outbound::current_serial_authorization(&db, &storage, coordination)
+                .await
+                .expect("authorization before removal");
+        let remove_founder = authorization
+            .membership
+            .signed_remove_member(
+                &successor,
+                keys::public_key_hex(&founder),
+                "0000000000002-0000-successor".to_string(),
+            )
+            .expect("remove founder");
+        let prepared = super::super::store_outbound::prepare_serial_control(
+            &db,
+            &storage,
+            coordination,
+            "successor-device",
+            StoreControl::SerialMembership {
+                entry: remove_founder,
+            },
+            &successor,
+        )
+        .await
+        .expect("prepare founder removal");
+        super::super::store_outbound::activate_serial_control(
+            &db,
+            &storage,
+            coordination,
+            &prepared,
+        )
+        .await
+        .expect("activate founder removal");
+
+        let changed = HeadChangesAfterAuthorization {
+            inner: coordination,
+            authorization_head,
+            reads: AtomicUsize::new(0),
+        };
+        let journal = prepare_circle_operation(
+            &db,
+            &storage,
+            Some(&changed),
+            "founder-device",
+            "0000000001000-0000-founder",
+            "Removed founder circle",
+            &founder,
+        )
+        .await
+        .expect("reproduce mismatched authorization and base snapshot");
+        db.insert_circle_operation(journal.clone())
+            .await
+            .expect("persist raced operation");
+
+        let error =
+            publish_circle_operation(&db, &storage, Some(coordination), journal.circle_id())
+                .await
+                .expect_err("a removed writer must not activate a Circle commit");
+
+        assert!(matches!(error, CircleOperationError::Blocked { .. }));
+        assert!(db
+            .get_circles(&keys::public_key_hex(&founder))
+            .await
+            .expect("read founder circles")
+            .is_empty());
     }
 
     #[tokio::test]
