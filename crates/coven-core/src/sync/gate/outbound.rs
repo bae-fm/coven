@@ -14,7 +14,23 @@ use super::model::{
     foreign_keys, gated_fk_child_edges, rows_referencing, truthy, GateColumn, Gates, TableGate,
 };
 use super::{execute_batch, query_row_optional, row_value_to_string, GateError};
+use crate::sync::circle::Audience;
 use crate::sync::session::quote_ident;
+
+#[derive(Clone, Copy)]
+enum OutboundScope {
+    EntireGate,
+    Store,
+}
+
+impl OutboundScope {
+    fn contains(self, gates: &Gates, table: &str) -> bool {
+        match self {
+            Self::EntireGate => true,
+            Self::Store => !gates.table_is_scoped(table),
+        }
+    }
+}
 
 /// Gate a captured outbound changeset: cut gated-false rows (and their gated
 /// descendants), re-emit the full subtree of any root that flipped false→true
@@ -30,7 +46,15 @@ pub fn gate_outbound(
     changeset: &[u8],
     gates: &Gates,
 ) -> Result<Vec<u8>, GateError> {
-    unsafe { gate_outbound_raw(conn, changeset, gates) }
+    unsafe { gate_outbound_raw(conn, changeset, gates, OutboundScope::EntireGate) }
+}
+
+pub(super) fn gate_store_outbound(
+    conn: &Connection,
+    changeset: &[u8],
+    gates: &Gates,
+) -> Result<Vec<u8>, GateError> {
+    unsafe { gate_outbound_raw(conn, changeset, gates, OutboundScope::Store) }
 }
 
 /// # Safety
@@ -40,6 +64,7 @@ unsafe fn gate_outbound_raw(
     conn: &Connection,
     changeset: &[u8],
     gates: &Gates,
+    scope: OutboundScope,
 ) -> Result<Vec<u8>, GateError> {
     let db = conn.handle();
     let group = Changegroup::new()?;
@@ -70,6 +95,9 @@ unsafe fn gate_outbound_raw(
 
     // Pass 1: walk the captured changeset, keep gated-true rows, note flips.
     for_each_change(changeset, |iter, row| {
+        if !scope.contains(gates, &row.table) {
+            return Ok(());
+        }
         // A root whose gate flips false→true this cycle has its whole now-visible
         // subtree re-emitted as full-state INSERTs below. Record it and skip the
         // captured row: an UPDATE(false→true) is wrong for a peer that never had
@@ -135,6 +163,7 @@ unsafe fn gate_outbound_raw(
                     pk,
                     &mut shared_memo,
                     &mut shared_visiting,
+                    scope,
                 )?,
                 None => {
                     debug!(table = %row.table, "gate: delete row has no primary key; treating as not shared");
@@ -148,20 +177,20 @@ unsafe fn gate_outbound_raw(
             group.add_change(iter)?;
             // A kept row that repoints an FK onto a gated parent drags that parent's
             // (possibly never-shared) subtree into visibility.
-            reparent_seeds.extend(reparent_targets(conn, gates, &row)?);
+            reparent_seeds.extend(reparent_targets(conn, gates, &row, scope)?);
         }
         Ok(())
     })?;
 
     // Pass 2: re-emit full subtrees for flipped roots and reparent targets.
     if !flipped_roots.is_empty() || !reparent_seeds.is_empty() {
-        reemit_subtrees(conn, gates, &flipped_roots, &reparent_seeds, &group)?;
+        reemit_subtrees(conn, gates, &flipped_roots, &reparent_seeds, &group, scope)?;
     }
 
     // Pass 2 (retract): emit DELETEs for the rows leaving the shared set of any
     // root that flipped true→false this cycle. The mirror of reemit_subtrees.
     if !retracted_roots.is_empty() {
-        reemit_retract_deletes(conn, gates, &retracted_roots, &group)?;
+        reemit_retract_deletes(conn, gates, &retracted_roots, &group, scope)?;
     }
 
     group.output()
@@ -178,6 +207,7 @@ fn reparent_targets(
     conn: &Connection,
     gates: &Gates,
     row: &ChangeRow,
+    scope: OutboundScope,
 ) -> Result<Vec<(String, String)>, GateError> {
     // Only an UPDATE repoints an existing row's FK. An INSERT of a managed root is
     // already re-emitted via the gate flip; a new child under an already-shared
@@ -188,7 +218,10 @@ fn reparent_targets(
     let cols = super::gate_table_columns(conn, &row.table)?;
     let mut out = Vec::new();
     for (fk_col, parent, parent_col) in foreign_keys(conn, &row.table)? {
-        if parent == row.table || !gates.tables.contains_key(&parent) {
+        if parent == row.table
+            || !gates.tables.contains_key(&parent)
+            || !scope.contains(gates, &parent)
+        {
             continue;
         }
         let Some(idx) = cols.iter().position(|c| c == &fk_col) else {
@@ -234,6 +267,7 @@ unsafe fn reemit_subtrees(
     flipped_roots: &HashSet<(String, String)>,
     reparent_seeds: &HashSet<(String, String)>,
     group: &Changegroup,
+    scope: OutboundScope,
 ) -> Result<(), GateError> {
     // Compute the whole connected kept component of every flipped root: its
     // ancestors (album, artist), the kept children of those ancestors
@@ -245,7 +279,7 @@ unsafe fn reemit_subtrees(
     // parent's whole kept component lands on peers.
     let mut seeds = flipped_roots.clone();
     seeds.extend(reparent_seeds.iter().cloned());
-    let component = connected_component(conn, gates, &seeds, true)?;
+    let component = connected_component(conn, gates, &seeds, true, scope)?;
 
     // Filter the component by the live kept-state, mirroring the retract path's
     // symmetric `!row_kept` filter. `connected_component` inserts every seed
@@ -268,6 +302,9 @@ unsafe fn reemit_subtrees(
     }
 
     for_each_change(&diff_bytes, |iter, row| {
+        if !scope.contains(gates, &row.table) {
+            return Ok(());
+        }
         let in_descendants =
             gated_root_id(conn, gates, &row)?.is_some_and(|key| flipped_roots.contains(&key));
         let in_kept_component = row
@@ -308,8 +345,9 @@ unsafe fn reemit_retract_deletes(
     gates: &Gates,
     retracted_roots: &HashSet<(String, String)>,
     group: &Changegroup,
+    scope: OutboundScope,
 ) -> Result<(), GateError> {
-    let component = connected_component(conn, gates, retracted_roots, false)?;
+    let component = connected_component(conn, gates, retracted_roots, false, scope)?;
 
     // Keep only the rows no longer kept under the post-flip live state. The live db
     // already reflects the gate flip when gate_outbound runs, so the retracted
@@ -331,6 +369,9 @@ unsafe fn reemit_retract_deletes(
     }
 
     for_each_change(&delete_bytes, |iter, row| {
+        if !scope.contains(gates, &row.table) {
+            return Ok(());
+        }
         let in_to_delete = row
             .pk()
             .is_some_and(|pk| to_delete.contains(&(row.table.clone(), pk.to_string())));
@@ -373,6 +414,7 @@ fn connected_component(
     gates: &Gates,
     seeds: &HashSet<(String, String)>,
     restrict_to_kept: bool,
+    scope: OutboundScope,
 ) -> Result<HashSet<(String, String)>, GateError> {
     // Down-edges: for each gated table, the gated tables that hold an FK
     // referencing it, paired with the referrer's FK column name. Built once from
@@ -383,12 +425,18 @@ fn connected_component(
     let mut out: HashSet<(String, String)> = HashSet::new();
     let mut work: Vec<(String, String)> = seeds.iter().cloned().collect();
     while let Some((table, id)) = work.pop() {
+        if !scope.contains(gates, &table) {
+            continue;
+        }
         if !out.insert((table.clone(), id.clone())) {
             continue; // already visited: cycle-guard and dedup.
         }
         // Up: every gated FK parent of this row.
         for (fk_col_name, parent, parent_col) in foreign_keys(conn, &table)? {
-            if parent == table || !gates.tables.contains_key(&parent) {
+            if parent == table
+                || !gates.tables.contains_key(&parent)
+                || !scope.contains(gates, &parent)
+            {
                 continue;
             }
             if let Some(parent_key) = query_column_text(conn, &table, &fk_col_name, &id)? {
@@ -403,6 +451,9 @@ fn connected_component(
         // for re-emit, taken structurally (every live FK edge) for retract.
         if let Some(children) = down_edges.get(table.as_str()) {
             for edge in children {
+                if !scope.contains(gates, &edge.child_table) {
+                    continue;
+                }
                 let Some(parent_key) = query_column_text(conn, &table, &edge.parent_column, &id)?
                 else {
                     continue;
@@ -668,6 +719,7 @@ unsafe fn was_shared(
     id: &str,
     memo: &mut HashMap<(String, String), bool>,
     visiting: &mut HashSet<(String, String)>,
+    scope: OutboundScope,
 ) -> Result<bool, GateError> {
     let key = (table.to_string(), id.to_string());
     if let Some(&v) = memo.get(&key) {
@@ -706,7 +758,12 @@ unsafe fn was_shared(
                 }
             },
         },
-        Some(TableGate::ScopedRoot { .. }) => false,
+        Some(TableGate::ScopedRoot { audience_col }) => match scope {
+            OutboundScope::EntireGate => false,
+            OutboundScope::Store => {
+                scoped_root_was_store_shared(conn, deleted, &key, audience_col)?
+            }
+        },
         Some(TableGate::RemoteRoot) => true,
         Some(TableGate::Child {
             fk_col,
@@ -728,9 +785,9 @@ unsafe fn was_shared(
                 None => None,
             };
             match parent_id {
-                Some(parent_id) => {
-                    was_shared(conn, gates, deleted, parent, &parent_id, memo, visiting)?
-                }
+                Some(parent_id) => was_shared(
+                    conn, gates, deleted, parent, &parent_id, memo, visiting, scope,
+                )?,
                 None => {
                     warn!(table, id, "gate: child has no FK parent while resolving pre-delete share; treating as not shared");
                     false
@@ -759,7 +816,16 @@ unsafe fn was_shared(
                     for ((dt, dpk), drow) in deleted {
                         if dt == child_table
                             && drow.fk_value(child_fk_col.index) == Some(parent_key.as_str())
-                            && was_shared(conn, gates, deleted, child_table, dpk, memo, visiting)?
+                            && was_shared(
+                                conn,
+                                gates,
+                                deleted,
+                                child_table,
+                                dpk,
+                                memo,
+                                visiting,
+                                scope,
+                            )?
                         {
                             found = true;
                             break 'children;
@@ -774,6 +840,41 @@ unsafe fn was_shared(
     visiting.remove(&key);
     memo.insert(key, shared);
     Ok(shared)
+}
+
+fn scoped_root_was_store_shared(
+    conn: &Connection,
+    deleted: &HashMap<(String, String), ChangeRow>,
+    key: &(String, String),
+    audience_col: &GateColumn,
+) -> Result<bool, GateError> {
+    let value = if let Some(row) = deleted.get(key) {
+        row.old
+            .get(audience_col.index)
+            .ok_or_else(|| GateError::MissingAudienceRow {
+                table: key.0.clone(),
+                row_id: key.1.clone(),
+            })?
+            .clone()
+    } else {
+        let sql = format!(
+            "SELECT {} FROM {} WHERE id = ?1",
+            quote_ident(&audience_col.name),
+            quote_ident(&key.0),
+        );
+        query_row_optional(conn, &sql, [&key.1], |row| row.get::<_, Option<String>>(0))?
+            .ok_or_else(|| GateError::MissingAudienceRow {
+                table: key.0.clone(),
+                row_id: key.1.clone(),
+            })?
+    };
+    let audience =
+        Audience::from_column(value.as_deref()).map_err(|error| GateError::InvalidAudience {
+            table: key.0.clone(),
+            value,
+            reason: error.to_string(),
+        })?;
+    Ok(audience != Audience::Local)
 }
 
 /// The flipped-root key this row belongs to (for re-emit scoping): the

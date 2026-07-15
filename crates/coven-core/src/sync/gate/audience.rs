@@ -8,7 +8,8 @@ use rusqlite::Connection;
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
 use super::model::{foreign_keys, rows_referencing, GateColumn, Gates, TableGate};
 use super::outbound::{
-    effective_gate, full_state_diff, query_column_text, row_id_for_column_value, FullStateDirection,
+    full_state_diff, gate_store_outbound, query_column_text, row_id_for_column_value,
+    FullStateDirection,
 };
 use super::{query_row_optional, GateError};
 use crate::sync::circle::{row_routing_id, Audience, CircleControlCoord, CircleId, RowRoutingKey};
@@ -101,7 +102,17 @@ unsafe fn partition_outbound_raw(
     } else {
         BTreeMap::new()
     };
+    let store_changeset = gate_store_outbound(conn, changeset, gates)?;
+    for_each_change(&store_changeset, |iter, _row| {
+        partition_group(conn, &mut groups, Audience::Store, write_policy)?
+            .group
+            .add_change(iter)?;
+        Ok(())
+    })?;
     for_each_change(changeset, |iter, row| {
+        if !gates.table_is_scoped(&row.table) {
+            return Ok(());
+        }
         validate_outgoing_synced_fk_audiences(conn, gates, &row)?;
         if let Some((source, destination)) = scoped_row_move(conn, gates, &row)? {
             let row_id = row
@@ -124,7 +135,7 @@ unsafe fn partition_outbound_raw(
         } else {
             change_audience(conn, gates, &row)?
         };
-        if table_is_scoped(gates, &row.table) && audience != Audience::Local {
+        if audience != Audience::Local {
             let row_id = row
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
@@ -232,7 +243,7 @@ fn validate_outgoing_synced_fk_audiences(
     gates: &Gates,
     row: &ChangeRow,
 ) -> Result<(), GateError> {
-    if row.op == ffi::SQLITE_DELETE || !table_is_scoped(gates, &row.table) {
+    if row.op == ffi::SQLITE_DELETE || !gates.table_is_scoped(&row.table) {
         return Ok(());
     }
     let row_id = row
@@ -286,7 +297,7 @@ fn captured_deleted_audiences(
     let mut audiences = BTreeMap::new();
     for key in deleted
         .keys()
-        .filter(|(table, _)| table_is_scoped(gates, table))
+        .filter(|(table, _)| gates.table_is_scoped(table))
     {
         let audience = resolve_deleted_audience(conn, gates, deleted, key, &mut HashSet::new())?;
         audiences.insert(key.clone(), audience);
@@ -472,7 +483,7 @@ fn routing_transitions(
     let mut transitions = BTreeMap::new();
     unsafe {
         for_each_change(changeset, |_iter, row| {
-            if !table_is_scoped(gates, &row.table) {
+            if !gates.table_is_scoped(&row.table) {
                 return Ok(());
             }
             let row_id = row
@@ -501,7 +512,7 @@ fn routing_transitions(
             let component =
                 scoped_materialization_rows(conn, gates, (row.table.clone(), row_id.to_string()))?;
             for (table, id) in component {
-                if table_is_scoped(gates, &table) {
+                if gates.table_is_scoped(&table) {
                     transitions.insert(
                         (table, id),
                         RoutingTransition::Set {
@@ -645,21 +656,6 @@ fn required_store_ancestors_for_deleted_rows(
         }
     }
     required_store_ancestors(conn, gates, &live_seeds)
-}
-
-fn table_is_scoped(gates: &Gates, table: &str) -> bool {
-    let mut current = table;
-    let mut seen = HashSet::new();
-    loop {
-        if !seen.insert(current.to_string()) {
-            return false;
-        }
-        match gates.tables.get(current) {
-            Some(TableGate::ScopedRoot { .. }) => return true,
-            Some(TableGate::Child { parent, .. }) => current = parent,
-            _ => return false,
-        }
-    }
 }
 
 fn live_row_stamp(conn: &Connection, table: &str, row_id: &str) -> Result<String, GateError> {
@@ -844,14 +840,6 @@ fn change_audience(
     gates: &Gates,
     row: &ChangeRow,
 ) -> Result<Audience, GateError> {
-    if !table_is_scoped(gates, &row.table) {
-        let kept = effective_gate(conn, gates, row)?;
-        return Ok(if kept {
-            Audience::Store
-        } else {
-            Audience::Local
-        });
-    }
     match gates.tables.get(&row.table) {
         Some(TableGate::ScopedRoot { audience_col }) => {
             let value = match row.op {
@@ -935,7 +923,7 @@ fn live_row_audience(
     table: &str,
     id: &str,
 ) -> Result<Audience, GateError> {
-    if !table_is_scoped(gates, table) {
+    if !gates.table_is_scoped(table) {
         if !gates.tables.contains_key(table) {
             return Ok(Audience::Store);
         }

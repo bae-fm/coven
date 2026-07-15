@@ -18,6 +18,7 @@ use crate::clock::ClockRef;
 use crate::config::{Config, HomeStorage};
 use crate::coven::StoreOpenGuard;
 use crate::database::{Database, DbError};
+use crate::encryption::EncryptionService;
 use crate::keys::{DeviceIdentityCustody, KeyError, MasterKeyCustody, StoreKeys};
 use crate::storage::cloud::setup::{SetupError, StorageSetupError};
 use crate::storage::cloud::{CloudHome, CloudHomeError};
@@ -74,10 +75,10 @@ pub enum SyncError {
 
 /// High-level sync manager.
 ///
-/// Holds the store's master-key custody; the at-rest cipher is resolved from
-/// it per [`start_sync`](Self::start_sync) call, chosen from the home's
-/// [`HomeStorage`](crate::config::HomeStorage) — custody is consulted only on
-/// an opaque home, never a browsable one.
+/// Holds the store's master-key custody. The at-rest cipher is resolved from
+/// it per [`start_sync`](Self::start_sync) call for an opaque home; a Merge
+/// store with scoped rows also loads generation 1 for stable row routing,
+/// independent of the home's storage representation.
 pub(crate) struct SyncManager {
     config_provider: ConfigProvider,
     key_service: StoreKeys,
@@ -251,6 +252,14 @@ impl SyncManager {
         }
     }
 
+    fn routing_encryption(&self) -> Result<Option<EncryptionService>, SyncError> {
+        (self.db.write_policy() == crate::WritePolicy::MergeConcurrent
+            && self.db.gates().has_scoped_graph())
+        .then(|| crate::handle::routing_encryption_from_custody(self.custody.as_ref()))
+        .transpose()
+        .map_err(SyncError::from)
+    }
+
     /// Initialize cloud home and sync loop from current config.
     /// Called at startup (if already configured) and after connecting a provider.
     ///
@@ -272,6 +281,8 @@ impl SyncManager {
         }
 
         self.require_configured_coordination(&config)?;
+
+        let routing_encryption = self.routing_encryption()?;
 
         self.stop_current_connection()?;
 
@@ -316,10 +327,14 @@ impl SyncManager {
         })?;
 
         let initialization = self.store_initialization().await?;
-        let components =
-            crate::sync::cycle::init_sync_over_storage(&self.db, storage, initialization)
-                .await
-                .map_err(SyncError::from)?;
+        let components = crate::sync::cycle::init_sync_over_storage(
+            &self.db,
+            storage,
+            initialization,
+            routing_encryption,
+        )
+        .await
+        .map_err(SyncError::from)?;
 
         let _handle = self.install_sync_loop(components, config)?;
         *self.cloud_home.write().unwrap() = Some(cloud_home);
@@ -383,6 +398,7 @@ impl SyncManager {
         cipher: CloudCipher,
     ) -> Result<(), SyncError> {
         let config = (self.config_provider)();
+        let routing_encryption = self.routing_encryption()?;
         self.stop_current_connection()?;
 
         let keypair = crate::keys::require_identity(self.identity_custody.as_ref())?;
@@ -401,10 +417,14 @@ impl SyncManager {
         .with_copy_ids(Arc::new(crate::storage::cloud::RandomCopyIdGenerator));
 
         let initialization = self.store_initialization().await?;
-        let components =
-            crate::sync::cycle::init_sync_over_storage(&self.db, storage, initialization)
-                .await
-                .map_err(SyncError::from)?;
+        let components = crate::sync::cycle::init_sync_over_storage(
+            &self.db,
+            storage,
+            initialization,
+            routing_encryption,
+        )
+        .await
+        .map_err(SyncError::from)?;
 
         let _handle = self.install_sync_loop(components, config)?;
         *self.cloud_home.write().unwrap() = Some(home);
@@ -587,6 +607,7 @@ impl SyncManager {
         root_id: &str,
         dest: &HashMap<String, PathBuf>,
         cancel: &watch::Receiver<bool>,
+        routing_encryption: Option<EncryptionService>,
     ) -> Result<(), MakeLocalError> {
         if !self.is_sync_ready() {
             return Err(MakeLocalError::SyncNotReady);
@@ -601,6 +622,7 @@ impl SyncManager {
             sync_loop.store_dir(),
             sync_loop.blob_path_scheme(),
             sync_loop.hlc(),
+            routing_encryption,
             self.observer.as_deref(),
             root_table,
             root_id,

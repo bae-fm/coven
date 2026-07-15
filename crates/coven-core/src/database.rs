@@ -721,6 +721,13 @@ pub(crate) struct PreparedStoreWritePartitions {
     pub circles: Vec<gate::AudiencePartition>,
 }
 
+#[derive(Clone, Copy)]
+enum StoreWriteRouting<'a> {
+    Unscoped,
+    MergeScoped(&'a EncryptionService),
+    SerialScoped,
+}
+
 impl PreparedStoreWritePartitions {
     #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &gate::AudiencePartition> {
@@ -2244,50 +2251,78 @@ impl Database {
         captured: &[u8],
         gates: &Gates,
         write_policy: WritePolicy,
-        routing_encryption: Option<&EncryptionService>,
+        routing: StoreWriteRouting<'_>,
     ) -> Result<Vec<gate::AudiencePartition>, DbError> {
-        if gates.has_scoped_graph() {
-            let routing_changeset = match write_policy {
-                WritePolicy::MergeConcurrent => {
-                    let encryption = routing_encryption.ok_or_else(|| {
-                        DbError(
-                            "Merge scoped write requires the Store generation-1 routing key"
-                                .to_string(),
-                        )
+        match routing {
+            StoreWriteRouting::MergeScoped(encryption) => {
+                let store_root_hash = tx
+                    .query_row(
+                        "SELECT value FROM protocol_state WHERE key = ?1",
+                        [STORE_ROOT_HASH_STATE_KEY],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(DbError::from)?
+                    .parse::<ObjectHash>()
+                    .map_err(|error| {
+                        DbError(format!("parse Store root for row routing: {error}"))
                     })?;
-                    let store_root_hash = tx
-                        .query_row(
-                            "SELECT value FROM protocol_state WHERE key = ?1",
-                            [STORE_ROOT_HASH_STATE_KEY],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .map_err(DbError::from)?
-                        .parse::<ObjectHash>()
-                        .map_err(|error| {
-                            DbError(format!("parse Store root for row routing: {error}"))
-                        })?;
-                    let key =
-                        crate::sync::circle::derive_row_routing_key(encryption, store_root_hash)
-                            .map_err(|error| DbError(format!("derive row routing key: {error}")))?;
-                    gate::capture_routing_changes(tx, captured, gates, &key).map_err(|error| {
-                        DbError(format!("capture scoped routing changes: {error}"))
-                    })?
-                }
-                WritePolicy::Serial => gate::RoutingChanges::empty(),
-            };
-            return gate::partition_outbound(tx, captured, &routing_changeset, gates, write_policy)
-                .map_err(|error| DbError(format!("partition scoped host transaction: {error}")));
+                let key = crate::sync::circle::derive_row_routing_key(encryption, store_root_hash)
+                    .map_err(|error| DbError(format!("derive row routing key: {error}")))?;
+                let routing_changeset = gate::capture_routing_changes(tx, captured, gates, &key)
+                    .map_err(|error| DbError(format!("capture scoped routing changes: {error}")))?;
+                gate::partition_outbound(tx, captured, &routing_changeset, gates, write_policy)
+                    .map_err(|error| DbError(format!("partition scoped host transaction: {error}")))
+            }
+            StoreWriteRouting::SerialScoped => gate::partition_outbound(
+                tx,
+                captured,
+                &gate::RoutingChanges::empty(),
+                gates,
+                write_policy,
+            )
+            .map_err(|error| DbError(format!("partition scoped host transaction: {error}"))),
+            StoreWriteRouting::Unscoped => {
+                let changeset = gate::gate_outbound(tx, captured, gates)
+                    .map_err(|error| DbError(format!("gate host transaction: {error}")))?;
+                Ok((!changeset.is_empty())
+                    .then_some(gate::AudiencePartition {
+                        audience: crate::sync::circle::Audience::Store,
+                        control: None,
+                        changeset,
+                    })
+                    .into_iter()
+                    .collect())
+            }
         }
-        let changeset = gate::gate_outbound(tx, captured, gates)
-            .map_err(|error| DbError(format!("gate host transaction: {error}")))?;
-        Ok((!changeset.is_empty())
-            .then_some(gate::AudiencePartition {
-                audience: crate::sync::circle::Audience::Store,
-                control: None,
-                changeset,
-            })
-            .into_iter()
-            .collect())
+    }
+
+    fn store_write_routing<'a>(
+        gates: &Gates,
+        write_policy: WritePolicy,
+        routing_encryption: Option<&'a EncryptionService>,
+    ) -> Result<StoreWriteRouting<'a>, DbError> {
+        if !gates.has_scoped_graph() {
+            return Ok(StoreWriteRouting::Unscoped);
+        }
+        match write_policy {
+            WritePolicy::MergeConcurrent => routing_encryption
+                .map(StoreWriteRouting::MergeScoped)
+                .ok_or_else(|| {
+                    DbError(
+                        "Merge scoped write requires the Store generation-1 routing key"
+                            .to_string(),
+                    )
+                }),
+            WritePolicy::Serial => Ok(StoreWriteRouting::SerialScoped),
+        }
+    }
+
+    pub(crate) fn validate_store_write_routing(
+        gates: &Gates,
+        write_policy: WritePolicy,
+        routing_encryption: Option<&EncryptionService>,
+    ) -> Result<(), DbError> {
+        Self::store_write_routing(gates, write_policy, routing_encryption).map(drop)
     }
 
     fn insert_store_write_on(
@@ -2434,20 +2469,17 @@ impl Database {
         E: From<DbError>,
     {
         (|| {
+            let routing = Self::store_write_routing(gates, write_policy, routing_encryption)
+                .map_err(E::from)?;
             let changes_before = conn.total_changes();
             let tx = conn
                 .unchecked_transaction()
                 .map_err(DbError::from)
                 .map_err(E::from)?;
             let (value, captured) = Self::capture_host_changes_on(&tx, synced_tables, || f(&tx))?;
-            let partitions = Self::partition_captured_write_on(
-                &tx,
-                &captured,
-                gates,
-                write_policy,
-                routing_encryption,
-            )
-            .map_err(E::from)?;
+            let partitions =
+                Self::partition_captured_write_on(&tx, &captured, gates, write_policy, routing)
+                    .map_err(E::from)?;
             let blob_facts =
                 Self::capture_partition_blob_facts_on(&tx, &partitions, gates, blob_decls)
                     .map_err(E::from)?;
@@ -2518,6 +2550,7 @@ impl Database {
         conn: &Connection,
         synced_tables: &[SyncedTable],
         write_policy: WritePolicy,
+        routing_encryption: Option<&EncryptionService>,
         write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<R, E>
@@ -2536,7 +2569,7 @@ impl Database {
             &gates,
             &blob_decls,
             write_policy,
-            None,
+            routing_encryption,
             write_id,
             f,
         )
@@ -4215,7 +4248,7 @@ impl Database {
                         &captured,
                         &gates,
                         WritePolicy::Serial,
-                        None,
+                        StoreWriteRouting::SerialScoped,
                     )
                     .map_err(E::from)?;
                     let blob_facts = Self::capture_partition_blob_facts_on(
@@ -7235,6 +7268,7 @@ mod tests {
                     conn,
                     &tables,
                     crate::WritePolicy::MergeConcurrent,
+                    None,
                     write_id,
                     |tx| {
                         tx.execute(
@@ -7308,6 +7342,7 @@ mod tests {
                 conn,
                 &update_tables,
                 crate::WritePolicy::MergeConcurrent,
+                None,
                 update_write_id,
                 |tx| {
                 tx.execute(
@@ -7329,6 +7364,7 @@ mod tests {
                 conn,
                 &replace_tables,
                 crate::WritePolicy::MergeConcurrent,
+                None,
                 replace_write_id,
                 |tx| {
                     tx.execute("DELETE FROM things WHERE id = ?1", [renamed])?;
@@ -7350,6 +7386,7 @@ mod tests {
                 conn,
                 &ordinary_tables,
                 crate::WritePolicy::MergeConcurrent,
+                None,
                 ordinary_write_id,
                 |tx| {
                 tx.execute(
@@ -7390,6 +7427,7 @@ mod tests {
                     conn,
                     &invalid_tables,
                     crate::WritePolicy::MergeConcurrent,
+                    None,
                     invalid_write_id,
                     |tx| {
                         tx.execute(
@@ -7991,6 +8029,7 @@ mod tests {
                     conn,
                     &tables,
                     crate::WritePolicy::Serial,
+                    None,
                     write_id,
                     |tx| tx.execute_batch(sql).map_err(DbError::from),
                 )

@@ -37,6 +37,7 @@ use crate::blob::decl::BlobDecls;
 use crate::blob::{BlobScope, BlobTransitionObserver, Provenance};
 use crate::database::{Database, DbError};
 use crate::db::{OutboxEntry, OutboxOperation};
+use crate::encryption::EncryptionService;
 use crate::storage::cloud::{BlobBody, CloudHome, CloudHomeError};
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{CloudCipherAccess, PendingRotation};
@@ -290,8 +291,14 @@ pub async fn drain_uploads(
     store_dir: &StoreDir,
     clock: &dyn crate::clock::Clock,
     hlc: &Hlc,
+    routing_encryption: Option<&EncryptionService>,
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<DrainOutcome, DbError> {
+    Database::validate_store_write_routing(
+        db.gates().as_ref(),
+        db.write_policy(),
+        routing_encryption,
+    )?;
     let uploads = db.get_pending_cloud_uploads().await?;
 
     let now = clock.now();
@@ -357,6 +364,7 @@ pub async fn drain_uploads(
                 now,
                 &now_rfc,
                 hlc,
+                routing_encryption.cloned(),
                 observer,
                 gates.clone(),
                 blob_decls.clone(),
@@ -448,6 +456,7 @@ async fn upload_entry(
     now: chrono::DateTime<chrono::Utc>,
     now_rfc: &str,
     hlc: &Hlc,
+    routing_encryption: Option<EncryptionService>,
     observer: Option<&dyn BlobTransitionObserver>,
     gates: Arc<Gates>,
     blob_decls: Arc<BlobDecls>,
@@ -600,6 +609,7 @@ async fn upload_entry(
         entry.id,
         stamp,
         now_rfc.to_string(),
+        routing_encryption,
     )
     .await
     {
@@ -693,6 +703,7 @@ async fn commit_after_upload(
     final_outbox_id: i64,
     stamp: String,
     now_rfc: String,
+    routing_encryption: Option<EncryptionService>,
 ) -> Result<PostUpload, DbError> {
     let tables = db.synced_tables().to_vec();
     let write_id = db.new_write_id();
@@ -775,6 +786,7 @@ async fn commit_after_upload(
             conn,
             &tables,
             write_policy,
+            routing_encryption.as_ref(),
             write_id,
             &root_table,
             gate_col,

@@ -84,6 +84,18 @@ pub(crate) fn app_data_cipher(
     Ok(EncryptionService::from(keyring))
 }
 
+pub(crate) fn routing_encryption_from_custody(
+    custody: &dyn MasterKeyCustody,
+) -> Result<EncryptionService, DbError> {
+    let keyring = custody
+        .unlock()
+        .map_err(|error| DbError(format!("unlock Store key for row routing: {error}")))?
+        .ok_or_else(|| {
+            DbError("Merge scoped write requires an established Store key".to_string())
+        })?;
+    Ok(EncryptionService::from(keyring))
+}
+
 /// The handle over one coven store.
 ///
 /// Open it once with [`Coven::builder`](crate::Coven::builder), then call methods. Cheap to
@@ -265,14 +277,7 @@ impl CovenHandle {
     }
 
     pub(crate) fn routing_encryption(&self) -> Result<EncryptionService, DbError> {
-        let keyring = self
-            .key_custody
-            .unlock()
-            .map_err(|error| DbError(format!("unlock Store key for row routing: {error}")))?
-            .ok_or_else(|| {
-                DbError("Merge scoped write requires an established Store key".to_string())
-            })?;
-        Ok(EncryptionService::from(keyring))
+        routing_encryption_from_custody(self.key_custody.as_ref())
     }
 
     // =========================================================================
@@ -927,10 +932,14 @@ impl CovenHandle {
         dest: &HashMap<String, PathBuf>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(), MakeLocalError> {
-        match self.sync_manager() {
-            Some(manager) => manager.make_local(root_table, root_id, dest, cancel).await,
-            None => Err(MakeLocalError::SyncNotReady),
-        }
+        let manager = self.sync_manager().ok_or(MakeLocalError::SyncNotReady)?;
+        let routing_encryption = (self.db.write_policy() == crate::WritePolicy::MergeConcurrent
+            && self.db.gates().has_scoped_graph())
+        .then(|| self.routing_encryption())
+        .transpose()?;
+        manager
+            .make_local(root_table, root_id, dest, cancel, routing_encryption)
+            .await
     }
 
     /// Drain pending blob uploads now: read each local file, seal it under its
@@ -2212,7 +2221,7 @@ mod tests {
 
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let make_local = manager
-            .make_local("notes", "note-1", &HashMap::new(), &cancel_rx)
+            .make_local("notes", "note-1", &HashMap::new(), &cancel_rx, None)
             .await;
         assert!(matches!(make_local, Err(MakeLocalError::SyncNotReady)));
     }

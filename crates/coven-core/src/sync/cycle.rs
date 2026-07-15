@@ -450,6 +450,7 @@ pub(crate) async fn run_single_sync_cycle(
         pending_rotation,
         user_keypair,
         custody,
+        None,
         store_dir,
         cloud_home,
         observer,
@@ -470,6 +471,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     pending_rotation: &PendingRotation,
     user_keypair: &UserKeypair,
     custody: Option<&dyn MasterKeyCustody>,
+    routing_encryption: Option<&crate::encryption::EncryptionService>,
     store_dir: &StoreDir,
     cloud_home: Option<&dyn CloudHome>,
     observer: Option<&dyn BlobTransitionObserver>,
@@ -676,6 +678,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
                 store_dir,
                 clock,
                 hlc,
+                routing_encryption,
                 observer,
             )
             .await
@@ -784,6 +787,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
         &timestamp,
         store_dir,
         local_seq_before_stage,
+        routing_encryption,
         host_upload_cancel.as_ref(),
     )
     .await
@@ -1317,6 +1321,8 @@ pub enum InitSyncError {
     NoSyncedTables,
     #[error("cloud cipher and blob path scheme describe different storage modes")]
     IncoherentStorageRepresentation,
+    #[error("Store row routing initialization failed: {0}")]
+    RowRouting(String),
     #[error("Store protocol root failed: {0}")]
     StoreProtocolRoot(String),
     #[error("membership chain bootstrap/anchor failed: {0}")]
@@ -1340,6 +1346,7 @@ pub async fn init_sync_over_storage(
     db: &Database,
     storage: CloudSyncStorage,
     initialization: StoreInitialization,
+    routing_encryption: Option<crate::encryption::EncryptionService>,
 ) -> Result<SyncComponents, InitSyncError> {
     // Integration guard. The host declared its synced tables on the builder; an
     // empty set means a synced store would attach nothing, every changeset would
@@ -1348,6 +1355,12 @@ pub async fn init_sync_over_storage(
     if db.synced_tables().is_empty() {
         return Err(InitSyncError::NoSyncedTables);
     }
+    Database::validate_store_write_routing(
+        db.gates().as_ref(),
+        db.write_policy(),
+        routing_encryption.as_ref(),
+    )
+    .map_err(|error| InitSyncError::RowRouting(error.0))?;
 
     let cipher = storage.cipher_state().clone();
     let cipher_is_plaintext = cipher.is_plaintext();
@@ -1427,6 +1440,7 @@ pub async fn init_sync_over_storage(
         cipher,
         pending_rotation,
         user_keypair,
+        routing_encryption,
     })
 }
 
@@ -1628,6 +1642,7 @@ pub struct SyncComponents {
     cipher: std::sync::Arc<CloudCipherState>,
     pending_rotation: std::sync::Arc<PendingRotation>,
     user_keypair: UserKeypair,
+    routing_encryption: Option<crate::encryption::EncryptionService>,
 }
 
 struct MembershipOperationContext<'a> {
@@ -1713,6 +1728,7 @@ impl SyncComponents {
             store_dir,
             clock,
             &self.hlc,
+            self.routing_encryption.as_ref(),
             observer,
         )
         .await
@@ -1810,6 +1826,7 @@ impl SyncComponents {
             &self.pending_rotation,
             &self.user_keypair,
             custody,
+            self.routing_encryption.as_ref(),
             store_dir,
             Some(self.storage.cloud_home()),
             observer,

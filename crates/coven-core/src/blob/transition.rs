@@ -523,6 +523,7 @@ pub(crate) fn commit_make_remote_flip(
     conn: &Connection,
     tables: &[SyncedTable],
     write_policy: crate::WritePolicy,
+    routing_encryption: Option<&crate::encryption::EncryptionService>,
     write_id: crate::WriteId,
     root_table: &str,
     gate_column: &str,
@@ -531,24 +532,35 @@ pub(crate) fn commit_make_remote_flip(
     user_blob_ids: &[String],
     completion: MakeRemoteCompletion,
 ) -> Result<(), DbError> {
-    Database::run_internal_store_write_transaction_on(conn, tables, write_policy, write_id, |tx| {
-        crate::sync::gate::write_gate(tx, root_table, gate_column, true, stamp, root_id)
-            .map_err(DbError::from)?;
-        for id in user_blob_ids {
-            Database::clear_external_blob_on(tx, id)?;
-        }
-        match &completion {
-            MakeRemoteCompletion::FinalOutboxRow { id } => {
-                crate::blob::upload::finish_outbox_row(tx, *id)?;
+    Database::run_internal_store_write_transaction_on(
+        conn,
+        tables,
+        write_policy,
+        routing_encryption,
+        write_id,
+        |tx| {
+            crate::sync::gate::write_gate(tx, root_table, gate_column, true, stamp, root_id)
+                .map_err(DbError::from)?;
+            for id in user_blob_ids {
+                Database::clear_external_blob_on(tx, id)?;
             }
-            MakeRemoteCompletion::Dispositions { intent_seq, drops } => {
-                for drop in drops {
-                    crate::sync::cycle::insert_published_blob_drop_intent(tx, *intent_seq, drop)?;
+            match &completion {
+                MakeRemoteCompletion::FinalOutboxRow { id } => {
+                    crate::blob::upload::finish_outbox_row(tx, *id)?;
+                }
+                MakeRemoteCompletion::Dispositions { intent_seq, drops } => {
+                    for drop in drops {
+                        crate::sync::cycle::insert_published_blob_drop_intent(
+                            tx,
+                            *intent_seq,
+                            drop,
+                        )?;
+                    }
                 }
             }
-        }
-        Database::delete_make_remote_intent_on(tx, root_table, root_id)
-    })
+            Database::delete_make_remote_intent_on(tx, root_table, root_id)
+        },
+    )
 }
 
 // ===========================================================================
@@ -604,6 +616,7 @@ pub async fn make_local(
     store_dir: &StoreDir,
     scheme: BlobPathScheme,
     hlc: &Hlc,
+    routing_encryption: Option<crate::encryption::EncryptionService>,
     observer: Option<&dyn BlobTransitionObserver>,
     root_table: &str,
     root_id: &str,
@@ -612,6 +625,11 @@ pub async fn make_local(
 ) -> Result<(), MakeLocalError> {
     let tables = db.synced_tables().to_vec();
     let write_policy = db.write_policy();
+    Database::validate_store_write_routing(
+        db.gates().as_ref(),
+        write_policy,
+        routing_encryption.as_ref(),
+    )?;
     if is_remote_root(&tables, root_table) {
         return Err(MakeLocalError::RemoteRoot(root_table.to_string()));
     }
@@ -745,6 +763,7 @@ pub async fn make_local(
             conn,
             &tables,
             write_policy,
+            routing_encryption.as_ref(),
             write_id,
             |tx| {
                 crate::sync::gate::write_gate(

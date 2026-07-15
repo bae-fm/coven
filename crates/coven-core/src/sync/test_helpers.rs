@@ -425,6 +425,7 @@ pub async fn host_exec(db: &Database, sql: &str) {
             conn,
             &tables,
             write_policy,
+            None,
             write_id,
             |tx| tx.execute_batch(&sql).map(|_| ()).map_err(DbError::from),
         )

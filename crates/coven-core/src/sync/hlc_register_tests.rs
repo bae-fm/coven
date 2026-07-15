@@ -297,6 +297,7 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
                 conn,
                 &tables,
                 crate::WritePolicy::MergeConcurrent,
+                None,
                 write_id,
                 |tx| {
                     let stamp = stamper.stamp();

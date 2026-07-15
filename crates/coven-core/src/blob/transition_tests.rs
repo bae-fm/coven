@@ -28,12 +28,13 @@ use crate::blob::{
 use crate::clock::SystemClock;
 use crate::database::Database;
 use crate::keys::UserKeypair;
+use crate::migration::Migration;
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, PendingRotation};
 use crate::sync::cycle::{ensure_owner_anchored_chain, run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
-use crate::sync::session::{BlobDecl, SyncedTable};
+use crate::sync::session::{BlobDecl, RowIdentity, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     bind_mock_store_protocol, host_exec as exec, open_test_db, open_test_db_schema,
@@ -76,6 +77,29 @@ fn remote_root_db(decl: BlobDecl) -> Database {
                 .carries_blob(decl),
         ],
         test_migrations(),
+    )
+}
+
+fn scoped_blob_transition_db() -> Database {
+    open_test_db_schema(
+        vec![
+            SyncedTable::new("notes", RowIdentity::SharedKey).gated_by("shared"),
+            SyncedTable::new("note_tags", RowIdentity::SharedKey),
+            SyncedTable::new("note_photos", RowIdentity::SharedKey).carries_blob(photo_decl()),
+            SyncedTable::new("note_covers", RowIdentity::SharedKey).carries_blob(cover_decl()),
+            SyncedTable::new("accounts", RowIdentity::SharedKey).scoped_by("audience"),
+        ],
+        vec![Migration::run(1, "scoped-blob-transition", |conn| {
+            crate::sync::test_helpers::create_synced_schema(conn)?;
+            conn.execute_batch(
+                "CREATE TABLE accounts (
+                    id TEXT PRIMARY KEY,
+                    audience TEXT,
+                    _updated_at TEXT NOT NULL
+                ) STRICT;",
+            )
+            .map_err(crate::database::DbError::from)
+        })],
     )
 }
 
@@ -380,6 +404,74 @@ async fn has_intent(db: &Database, root_table: &str, root_id: &str) -> bool {
     db.call(move |conn| Database::make_remote_intent_exists(conn, &rt, &ri))
         .await
         .unwrap()
+}
+
+async fn assert_no_scoped_store_write(db: &Database) {
+    for table in [
+        "store_writes",
+        "store_write_partitions",
+        "_coven_row_routes",
+        "_coven_audience",
+    ] {
+        assert!(
+            !row_exists(db, &format!("SELECT 1 FROM {table} LIMIT 1")).await,
+            "{table} remains untouched",
+        );
+    }
+}
+
+async fn assert_scoped_flip_journaled_atomically(
+    db: &Database,
+    expected_changes: &[(&str, crate::changeset::ChangeOp)],
+) {
+    assert!(
+        row_exists(
+            db,
+            "SELECT 1 FROM store_write_partitions AS partition \
+             JOIN store_writes AS write USING (write_id) \
+             WHERE partition.audience = 'store'",
+        )
+        .await,
+        "the audience partition and its parent write commit together",
+    );
+    assert!(
+        !row_exists(db, "SELECT 1 FROM _coven_row_routes LIMIT 1").await
+            && !row_exists(db, "SELECT 1 FROM _coven_audience LIMIT 1").await,
+        "a boolean-gated Store row does not invent scoped row routes or mirrors",
+    );
+    let changeset = db
+        .call(|conn| {
+            conn.query_row(
+                "SELECT changeset FROM store_write_partitions WHERE audience = 'store'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("read routed Store partition");
+    let changes = crate::changeset::walk(&changeset).expect("walk routed Store partition");
+    for (table, op) in expected_changes {
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.table == *table && change.op == *op),
+            "the partition contains {op:?} for the {table} subtree; changes were {changes:?}",
+        );
+    }
+    let mut tables: Vec<String> = changes.into_iter().map(|row| row.table).collect();
+    tables.sort();
+    tables.dedup();
+    assert!(
+        tables.iter().any(|table| table == "notes"),
+        "the partition contains the flipped root; tables were {tables:?}",
+    );
+    assert!(
+        !tables
+            .iter()
+            .any(|table| matches!(table.as_str(), "_coven_audience" | "_coven_row_routes")),
+        "the Store partition contains no unrelated scoped routing rows: {tables:?}",
+    );
 }
 
 /// Insert a `published_blob_drop_intents` row directly, to reconstruct the durable
@@ -967,6 +1059,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
         &lib_a,
         BlobPathScheme::Plain,
         &hlc_a,
+        None,
         Some(&recorder),
         "notes",
         "n1",
@@ -1035,6 +1128,397 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     .await
     .expect("A reads from its external file");
     assert_eq!(read, bytes, "A plays its own local file");
+}
+
+#[tokio::test]
+async fn scoped_make_local_without_routing_encryption_mutates_nothing() {
+    let storage = MockSyncStorage::new();
+    let hlc = Hlc::new("A".to_string());
+    let db = scoped_blob_transition_db();
+    bind_mock_store_protocol(&db, &storage, "A").await;
+    let (tmp, lib) = temp_store_dir();
+    let bytes = b"scoped-managed-photo".to_vec();
+
+    crate::sync::test_helpers::exec(
+        &db,
+        &format!(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n-scoped', 'Scoped fixture', NULL, 1, '0000000001000-0000-A', '2026-01-01'); \
+             INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES \
+                 ('photoscoped', 'n-scoped', 'image', {}, '{}', \
+                  '0000000001000-0000-A', '2026-01-01', 'cv/photoscoped.jpg');",
+            bytes.len(),
+            crate::blob::content_hash(&bytes),
+        ),
+    )
+    .await;
+    storage
+        .put_blob(
+            "photos",
+            "photoscoped",
+            BlobScope::Master,
+            Some("cv/photoscoped.jpg"),
+            bytes,
+        )
+        .await
+        .expect("seed the remote blob");
+    let uploader = storage.own_uploader().expect("mock uploader");
+    db.record_blob_uploader("photos", "photoscoped", &uploader)
+        .await
+        .expect("record the seeded blob uploader");
+
+    let gate_stamp_before = gate_stamp(&db, "n-scoped").await;
+    let dest_dir = tmp.path().join("destination");
+    let dest_path = dest_dir.join("photoscoped.jpg");
+    let dest: HashMap<String, PathBuf> = [("photoscoped".to_string(), dest_path.clone())].into();
+    let (_cancel_tx, cancel) = watch::channel(false);
+    let recorder = Recorder::default();
+
+    let error = make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        None,
+        Some(&recorder),
+        "notes",
+        "n-scoped",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect_err("a scoped MergeConcurrent transition requires routing encryption");
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires the Store generation-1 routing key"),
+        "the missing routing key is surfaced: {error}"
+    );
+    assert_eq!(
+        storage.blob_read_to_file_count(),
+        0,
+        "the transition must reject before reading or materializing the cloud blob",
+    );
+    assert!(
+        !dest_dir.exists() && !dest_path.exists(),
+        "the transition must reject before creating the host destination",
+    );
+    assert!(
+        recorder.materialized.lock().unwrap().is_empty()
+            && recorder.made_local.lock().unwrap().is_empty(),
+        "the host observer sees no progress or completion",
+    );
+    assert_eq!(
+        shared_flag(&db, "n-scoped").await,
+        1,
+        "the root remains Remote",
+    );
+    assert_eq!(
+        gate_stamp(&db, "n-scoped").await,
+        gate_stamp_before,
+        "the gate and its causal stamp are untouched",
+    );
+    assert!(
+        db.external_blob("photoscoped").await.unwrap().is_none(),
+        "no external reference is registered",
+    );
+    assert!(
+        pending_deletes(&db).await.is_empty(),
+        "no cloud deletion is enqueued",
+    );
+    assert_no_scoped_store_write(&db).await;
+
+    let routing_encryption = crate::encryption::EncryptionService::from_key([5; 32]);
+    make_local(
+        &db,
+        &storage,
+        &lib,
+        BlobPathScheme::Plain,
+        &hlc,
+        Some(routing_encryption),
+        Some(&recorder),
+        "notes",
+        "n-scoped",
+        &dest,
+        &cancel,
+    )
+    .await
+    .expect("retry scoped make_local with routing encryption");
+    assert_eq!(storage.blob_read_to_file_count(), 1);
+    assert_eq!(std::fs::read(&dest_path).unwrap(), b"scoped-managed-photo");
+    assert_eq!(shared_flag(&db, "n-scoped").await, 0);
+    assert!(
+        db.external_blob("photoscoped").await.unwrap().is_some(),
+        "the successful flip registers the materialized external file",
+    );
+    assert_eq!(
+        recorder.materialized.lock().unwrap().as_slice(),
+        [("photoscoped".to_string(), 1, 1)]
+    );
+    assert_eq!(
+        recorder.made_local.lock().unwrap().as_slice(),
+        [("notes".to_string(), "n-scoped".to_string())],
+    );
+    assert_scoped_flip_journaled_atomically(
+        &db,
+        &[
+            ("notes", crate::changeset::ChangeOp::Delete),
+            ("note_photos", crate::changeset::ChangeOp::Delete),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn scoped_user_upload_completion_without_routing_encryption_mutates_nothing() {
+    let storage = MockSyncStorage::new();
+    let db = scoped_blob_transition_db();
+    bind_mock_store_protocol(&db, &storage, "A").await;
+    let hlc = Hlc::new("A".to_string());
+    let (tmp, lib) = temp_store_dir();
+    let bytes = b"scoped-user-photo";
+    crate::sync::test_helpers::exec(
+        &db,
+        &format!(
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('n-user-scoped', 'Scoped user fixture', NULL, 0, \
+                     '0000000001000-0000-A', '2026-01-01'); \
+             INSERT INTO note_photos \
+                 (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('photo-user-scoped', 'n-user-scoped', 'image', {}, '{}', \
+                     '0000000001000-0000-A', '2026-01-01', 'cv/photo-user-scoped.jpg');",
+            bytes.len(),
+            crate::blob::content_hash(bytes),
+        ),
+    )
+    .await;
+    let user_dir = tmp.path().join("user");
+    std::fs::create_dir_all(&user_dir).unwrap();
+    let source = user_dir.join("photo-user-scoped.jpg");
+    std::fs::write(&source, bytes).unwrap();
+    db.register_external_blob("photo-user-scoped", "photos", &source, bytes.len() as u64)
+        .await
+        .expect("register scoped user-provided fixture");
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n-user-scoped",
+        false,
+    )
+    .await
+    .expect("queue scoped user-provided make_remote");
+    let stamp_before = gate_stamp(&db, "n-user-scoped").await;
+
+    let error = match drain_uploads(
+        &db,
+        &storage,
+        &plaintext(),
+        &PendingRotation::none(),
+        "test-lib",
+        &lib,
+        &SystemClock,
+        &hlc,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(_) => panic!("a scoped upload completion requires routing encryption before upload"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires the Store generation-1 routing key"),
+        "the missing routing key is surfaced: {error}",
+    );
+    assert_eq!(
+        storage.blob_put_from_file_count(),
+        0,
+        "the blob is not uploaded before routing validation",
+    );
+    assert!(
+        !storage
+            .exists("photos/cv/photo-user-scoped.jpg")
+            .await
+            .unwrap(),
+        "the cloud is untouched",
+    );
+    assert!(source.exists(), "the user-owned source remains in place");
+    assert!(
+        db.external_blob("photo-user-scoped")
+            .await
+            .unwrap()
+            .is_some(),
+        "the external reference remains registered",
+    );
+    assert_eq!(pending_uploads(&db).await, 1, "the upload remains queued");
+    assert!(
+        has_intent(&db, "notes", "n-user-scoped").await,
+        "the transition intent remains queued",
+    );
+    assert_eq!(shared_flag(&db, "n-user-scoped").await, 0);
+    assert_eq!(gate_stamp(&db, "n-user-scoped").await, stamp_before);
+    assert_no_scoped_store_write(&db).await;
+
+    let routing_encryption = crate::encryption::EncryptionService::from_key([7; 32]);
+    let outcome = drain_uploads(
+        &db,
+        &storage,
+        &plaintext(),
+        &PendingRotation::none(),
+        "test-lib",
+        &lib,
+        &SystemClock,
+        &hlc,
+        Some(&routing_encryption),
+        None,
+    )
+    .await
+    .expect("retry scoped upload completion with routing encryption");
+    assert_eq!(outcome.uploaded, 1);
+    assert!(outcome.yielded_for_publish);
+    assert_eq!(shared_flag(&db, "n-user-scoped").await, 1);
+    assert_eq!(pending_uploads(&db).await, 0);
+    assert!(!has_intent(&db, "notes", "n-user-scoped").await);
+    assert!(
+        db.external_blob("photo-user-scoped")
+            .await
+            .unwrap()
+            .is_none(),
+        "the successful flip drops the external reference",
+    );
+    assert_scoped_flip_journaled_atomically(
+        &db,
+        &[
+            ("notes", crate::changeset::ChangeOp::Insert),
+            ("note_photos", crate::changeset::ChangeOp::Insert),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn scoped_host_completion_without_routing_encryption_mutates_nothing() {
+    let storage = MockSyncStorage::new();
+    let db = scoped_blob_transition_db();
+    bind_mock_store_protocol(&db, &storage, "A").await;
+    let hlc = Hlc::new("A".to_string());
+    let (_tmp, lib) = temp_store_dir();
+    let bytes = b"scoped-host-cover";
+    crate::sync::test_helpers::exec(
+        &db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n-host-scoped', 'Scoped host fixture', NULL, 0, \
+                 '0000000001000-0000-A', '2026-01-01')",
+    )
+    .await;
+    crate::sync::test_helpers::exec(
+        &db,
+        &format!(
+            "INSERT INTO note_covers \
+             (id, note_id, size, hash, _updated_at, created_at, cloud_path) \
+             VALUES ('cover-host-scoped', 'n-host-scoped', {}, '{}', \
+                     '0000000001000-0000-A', '2026-01-01', 'cv/cover-host-scoped.jpg')",
+            bytes.len(),
+            crate::blob::content_hash(bytes),
+        ),
+    )
+    .await;
+    local_files::store(&lib, "covers", "cover-host-scoped", bytes)
+        .await
+        .expect("store host-provided fixture");
+    make_remote(
+        &db,
+        BlobPathScheme::Plain,
+        SELF_UPLOADER,
+        &hlc,
+        "notes",
+        "n-host-scoped",
+        false,
+    )
+    .await
+    .expect("queue scoped host-provided make_remote");
+    let stamp_before = gate_stamp(&db, "n-host-scoped").await;
+
+    let error = crate::sync::service::complete_host_provided_make_remotes(
+        &db,
+        db.synced_tables(),
+        &storage,
+        &hlc.now().to_string(),
+        &lib,
+        0,
+        None,
+        None,
+    )
+    .await
+    .expect_err("a scoped host completion requires routing encryption before upload");
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires the Store generation-1 routing key"),
+        "the missing routing key is surfaced: {error}",
+    );
+    assert_eq!(
+        storage.blob_put_from_file_count(),
+        0,
+        "the host-provided blob is not uploaded before routing validation",
+    );
+    assert!(
+        !storage
+            .exists("covers/cv/cover-host-scoped.jpg")
+            .await
+            .unwrap(),
+        "the cloud is untouched",
+    );
+    assert!(
+        lib.local_blob_path("covers", "cover-host-scoped")
+            .unwrap()
+            .exists(),
+        "the local-store blob remains in place",
+    );
+    assert_eq!(shared_flag(&db, "n-host-scoped").await, 0);
+    assert_eq!(gate_stamp(&db, "n-host-scoped").await, stamp_before);
+    assert!(
+        has_intent(&db, "notes", "n-host-scoped").await,
+        "the transition intent remains queued",
+    );
+    assert_no_scoped_store_write(&db).await;
+
+    let routing_encryption = crate::encryption::EncryptionService::from_key([9; 32]);
+    let completed = crate::sync::service::complete_host_provided_make_remotes(
+        &db,
+        db.synced_tables(),
+        &storage,
+        &hlc.now().to_string(),
+        &lib,
+        0,
+        Some(&routing_encryption),
+        None,
+    )
+    .await
+    .expect("retry scoped host completion with routing encryption");
+    assert!(completed);
+    assert_eq!(storage.blob_put_from_file_count(), 1);
+    assert_eq!(shared_flag(&db, "n-host-scoped").await, 1);
+    assert!(!has_intent(&db, "notes", "n-host-scoped").await);
+    assert_scoped_flip_journaled_atomically(
+        &db,
+        &[
+            ("notes", crate::changeset::ChangeOp::Insert),
+            ("note_covers", crate::changeset::ChangeOp::Insert),
+        ],
+    )
+    .await;
 }
 
 // ===========================================================================
@@ -1170,6 +1654,7 @@ async fn host_provided_cover_rides_the_inline_push_through_both_transitions() {
         &lib_a,
         BlobPathScheme::Plain,
         &hlc_a,
+        None,
         None,
         "notes",
         "n1",
@@ -1733,6 +2218,7 @@ async fn make_local_rejects_remote_root() {
         BlobPathScheme::Plain,
         &hlc,
         None,
+        None,
         "notes",
         "n-remote-root",
         &dest,
@@ -1949,6 +2435,7 @@ async fn make_local_rejects_already_local_root() {
         BlobPathScheme::Plain,
         &hlc,
         None,
+        None,
         "notes",
         "n1",
         &dest,
@@ -2020,6 +2507,7 @@ async fn cancel_make_remote_clears_pending_and_tombstones_uploaded() {
         &lib,
         &SystemClock,
         &hlc,
+        None,
         None,
     )
     .await
@@ -2111,6 +2599,7 @@ async fn drain_orphan_upload_is_tombstoned_when_intent_gone() {
         &SystemClock,
         &hlc,
         None,
+        None,
     )
     .await
     .expect("drain");
@@ -2150,6 +2639,7 @@ async fn cancel_make_local_before_commit_stays_remote() {
         &lib,
         BlobPathScheme::Plain,
         &hlc,
+        None,
         None,
         "notes",
         "n1",
@@ -2197,6 +2687,7 @@ async fn make_local_dest_failure_stays_remote_no_tombstones() {
         &lib,
         BlobPathScheme::Plain,
         &hlc,
+        None,
         None,
         "notes",
         "n1",
@@ -2262,6 +2753,7 @@ async fn make_local_non_utf8_dest_stays_remote_no_tombstones() {
         &lib,
         BlobPathScheme::Plain,
         &hlc,
+        None,
         None,
         "notes",
         "n1",
@@ -2340,6 +2832,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
         &SystemClock,
         &hlc,
         None,
+        None,
     )
     .await
     .expect("partial drain");
@@ -2368,6 +2861,7 @@ async fn make_remote_crash_before_flip_redrain_converges() {
         &lib,
         &SystemClock,
         &hlc,
+        None,
         None,
     )
     .await
@@ -2407,6 +2901,7 @@ async fn make_local_abort_then_retry_converges() {
         BlobPathScheme::Plain,
         &hlc,
         None,
+        None,
         "notes",
         "n1",
         &dest,
@@ -2433,6 +2928,7 @@ async fn make_local_abort_then_retry_converges() {
         &lib,
         BlobPathScheme::Plain,
         &hlc,
+        None,
         None,
         "notes",
         "n1",
@@ -2500,6 +2996,7 @@ async fn round_trip_make_remote_make_local_make_remote() {
         &lib,
         BlobPathScheme::Plain,
         &hlc,
+        None,
         None,
         "notes",
         "n1",
@@ -2627,6 +3124,7 @@ async fn tombstoned_host_cover(
         lib,
         BlobPathScheme::Plain,
         hlc,
+        None,
         None,
         "notes",
         "n1",

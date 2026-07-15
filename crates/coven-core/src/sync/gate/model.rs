@@ -79,6 +79,21 @@ impl Gates {
             .any(|gate| matches!(gate, TableGate::ScopedRoot { .. }))
     }
 
+    pub(super) fn table_is_scoped(&self, table: &str) -> bool {
+        let mut current = table;
+        let mut seen = HashSet::new();
+        loop {
+            if !seen.insert(current.to_string()) {
+                return false;
+            }
+            match self.tables.get(current) {
+                Some(TableGate::ScopedRoot { .. }) => return true,
+                Some(TableGate::Child { parent, .. }) => current = parent,
+                _ => return false,
+            }
+        }
+    }
+
     pub(super) fn is_synced_table(&self, table: &str) -> bool {
         self.synced_tables.contains(table)
     }

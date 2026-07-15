@@ -575,6 +575,7 @@ async fn host_write_after_remote_apply_observes_the_matching_position() {
                 conn,
                 &tables,
                 crate::WritePolicy::MergeConcurrent,
+                None,
                 write_id,
                 |tx| {
                     let remote_row: bool = tx
@@ -3713,6 +3714,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
                 conn,
                 &tables,
                 crate::WritePolicy::MergeConcurrent,
+                None,
                 insert_write_id,
                 |tx| {
                     tx.execute(
@@ -3734,6 +3736,7 @@ async fn host_write_cannot_make_a_blob_live_during_its_filesystem_cleanup() {
                 conn,
                 &update_tables,
                 crate::WritePolicy::MergeConcurrent,
+                None,
                 update_write_id,
                 |tx| {
                     tx.execute(
@@ -3837,6 +3840,7 @@ async fn concurrent_local_cleanup_drains_share_one_intent_owner() {
                 conn,
                 &tables,
                 crate::WritePolicy::MergeConcurrent,
+                None,
                 write_id,
                 |tx| {
                     tx.execute(

@@ -857,7 +857,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         owner.clone(),
     );
 
-    cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
+    cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore, None)
         .await
         .expect("initialize plaintext storage");
 
@@ -936,7 +936,7 @@ async fn initializing_serial_storage_uses_only_the_root_authorization_state() {
     .with_test_serial_coordination(Arc::new(home.clone()));
 
     let components =
-        cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
+        cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore, None)
             .await
             .expect("initialize Serial storage");
     let (_temp, store_dir) = temp_store_dir();
@@ -1146,6 +1146,7 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
         pending_rotation.as_ref(),
         &founder,
         None,
+        None,
         &store_dir,
         Some(&home),
         None,
@@ -1267,6 +1268,7 @@ async fn serial_cycle_marks_a_stale_provisional_branch_before_materializing_remo
         storage.shared_pending_rotation().as_ref(),
         &owner,
         None,
+        None,
         &local_store_dir,
         Some(&home),
         None,
@@ -1362,6 +1364,7 @@ async fn serial_cycle_publishes_a_suffix_rebased_by_its_initial_drain() {
         storage.shared_pending_rotation().as_ref(),
         &owner,
         None,
+        None,
         &store_dir,
         Some(&home),
         None,
@@ -1419,13 +1422,17 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
     .await
     .unwrap();
 
-    let error =
-        match cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
-            .await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("a nonempty Store layout without a Store protocol root must fail loud"),
-        };
+    let error = match cycle::init_sync_over_storage(
+        &db,
+        storage,
+        cycle::StoreInitialization::CreateStore,
+        None,
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("a nonempty Store layout without a Store protocol root must fail loud"),
+    };
     assert!(
         matches!(error, cycle::InitSyncError::StoreProtocolRoot(ref message) if message.contains("nonempty but has no supported Store protocol root")),
         "{error}"
@@ -1488,13 +1495,17 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
         owner,
     );
     let db = open_test_db();
-    let error =
-        match cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
-            .await
-        {
-            Err(error) => error,
-            Ok(_) => panic!("a nonempty Store layout without a Store protocol root must fail loud"),
-        };
+    let error = match cycle::init_sync_over_storage(
+        &db,
+        storage,
+        cycle::StoreInitialization::CreateStore,
+        None,
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("a nonempty Store layout without a Store protocol root must fail loud"),
+    };
     assert!(
         matches!(error, cycle::InitSyncError::StoreProtocolRoot(ref message) if message.contains("nonempty but has no supported Store protocol root")),
         "{error}"
@@ -1574,7 +1585,7 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
         .expect("publish protocol founder head");
     let cloud_before = cloud_objects(&home);
 
-    cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
+    cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore, None)
         .await
         .expect("accept the identity's committed founder");
 
@@ -1632,9 +1643,14 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
     );
 
     assert!(
-        cycle::init_sync_over_storage(&db, victim_storage, cycle::StoreInitialization::CreateStore)
-            .await
-            .is_err(),
+        cycle::init_sync_over_storage(
+            &db,
+            victim_storage,
+            cycle::StoreInitialization::CreateStore,
+            None,
+        )
+        .await
+        .is_err(),
         "a committed foreign founder prevents initialization",
     );
     assert_eq!(
@@ -1676,9 +1692,14 @@ async fn initialization_rejects_incoherent_cipher_and_blob_path_scheme() {
         let pending_rotation = storage.shared_pending_rotation();
 
         assert!(
-            cycle::init_sync_over_storage(&db, storage, cycle::StoreInitialization::CreateStore)
-                .await
-                .is_err(),
+            cycle::init_sync_over_storage(
+                &db,
+                storage,
+                cycle::StoreInitialization::CreateStore,
+                None,
+            )
+            .await
+            .is_err(),
             "incoherent at-rest representation must be refused",
         );
         assert!(home.is_empty(), "the cloud is unchanged");

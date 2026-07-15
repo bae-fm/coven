@@ -25,6 +25,7 @@ use crate::database::{
     StoreConsumedMakeRemoteIntent, StoreWriteBlobFact, StoreWriteBlobFacts,
     StoreWriteHostBlobState, StoreWriteUserBlobState,
 };
+use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
 use crate::sync::session::SyncedTable;
@@ -157,8 +158,15 @@ pub async fn complete_host_provided_make_remotes(
     timestamp: &str,
     store_dir: &StoreDir,
     local_seq: u64,
+    routing_encryption: Option<&EncryptionService>,
     cancel: Option<&HostUploadCloud<'_>>,
 ) -> Result<bool, SyncCycleError> {
+    Database::validate_store_write_routing(
+        db.gates().as_ref(),
+        db.write_policy(),
+        routing_encryption,
+    )
+    .map_err(|error| SyncCycleError::AssetUpload(error.0))?;
     let roots = ready_host_provided_make_remotes(db, tables).await?;
     let mut completed = false;
     for root in roots {
@@ -186,8 +194,15 @@ pub async fn complete_host_provided_make_remotes(
             }
         }
 
-        finish_host_provided_make_remote(db, root.clone(), local_seq, drops, timestamp.to_string())
-            .await?;
+        finish_host_provided_make_remote(
+            db,
+            root.clone(),
+            local_seq,
+            drops,
+            timestamp.to_string(),
+            routing_encryption.cloned(),
+        )
+        .await?;
         completed = true;
     }
     Ok(completed)
@@ -682,6 +697,7 @@ async fn finish_host_provided_make_remote(
     local_seq: u64,
     drops: Vec<DeferredLocalBlobDrop>,
     stamp: String,
+    routing_encryption: Option<EncryptionService>,
 ) -> Result<(), SyncCycleError> {
     let tables = db.synced_tables().to_vec();
     // The flip's changeset is published at the next sequence, so the local-store
@@ -695,6 +711,7 @@ async fn finish_host_provided_make_remote(
             conn,
             &tables,
             write_policy,
+            routing_encryption.as_ref(),
             write_id,
             &root.intent.root_table,
             &root.gate_column,

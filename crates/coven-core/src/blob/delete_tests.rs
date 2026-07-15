@@ -1955,6 +1955,7 @@ async fn reupload_through_the_drain_cancels_a_prior_cycle_tombstone() {
         &clock,
         &crate::sync::hlc::Hlc::new("test-device".to_string()),
         None,
+        None,
     )
     .await
     .expect("drain")
@@ -2133,6 +2134,7 @@ async fn a_failed_completion_cancel_is_retried_until_the_tombstone_is_gone() {
         &StoreDir::new(tmp.path()),
         &clock,
         &crate::sync::hlc::Hlc::new("test-device".to_string()),
+        None,
         None,
     )
     .await
@@ -2370,6 +2372,7 @@ async fn a_tombstone_left_by_a_failed_delete_is_harmless() {
         &StoreDir::new(tmp.path()),
         &clock,
         &crate::sync::hlc::Hlc::new("test-device".to_string()),
+        None,
         None,
     )
     .await

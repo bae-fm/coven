@@ -45,6 +45,7 @@ async fn run_drain(
         store_dir,
         clock,
         &hlc,
+        None,
         observer,
     )
     .await
@@ -488,6 +489,7 @@ async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
         &StoreDir::new(tmp.path()),
         &fixed_clock(T0),
         &Hlc::new("test-device".to_string()),
+        None,
         None,
     )
     .await
