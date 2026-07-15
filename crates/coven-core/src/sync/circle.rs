@@ -25,7 +25,7 @@ const METADATA_DOMAIN: &str = "coven.circle-metadata.v1";
 const ACCESS_DOMAIN: &str = "coven.circle-access-leaf.v1";
 const CONTROL_DOMAIN: &str = "coven.circle-control.v1";
 const ENVELOPE_DOMAIN: &str = "coven.circle-access-envelope.v1";
-const CIRCLE_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-id-generation.v1\0";
+const CIRCLE_ID_FOUNDER_DOMAIN: &str = "coven.circle-id-founder.v1";
 const CIRCLE_EPOCH_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-epoch-id-generation.v1\0";
 const ACCESS_LEAF_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-access-leaf-id-generation.v1\0";
 const OWNER_GRANT_ID_GENERATION_DOMAIN: &[u8] = b"coven.circle-owner-grant-id-generation.v1\0";
@@ -36,13 +36,35 @@ pub const CIRCLE_METADATA_PREFIX: &str = "circles/";
 pub const CIRCLE_ACCESS_LEAF_PREFIX: &str = "circles/";
 pub const CIRCLE_ACCESS_ENVELOPE_PREFIX: &str = "circles/";
 
-/// A generated 128-bit circle identity encoded as canonical lowercase base32.
+/// A self-certifying 128-bit circle identity encoded as canonical lowercase base32.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CircleId([u8; 16]);
 
 impl CircleId {
-    fn generate(ids: &dyn crate::id_provider::IdProvider) -> Self {
-        Self(generated_id_bytes(ids, CIRCLE_ID_GENERATION_DOMAIN))
+    pub(crate) fn founder(
+        store_root_hash: ObjectHash,
+        author_pubkey: &str,
+        owner_grant: &OwnerGrantId,
+    ) -> Self {
+        #[derive(Serialize)]
+        struct Founder<'a> {
+            domain: &'static str,
+            store_root_hash: ObjectHash,
+            author_pubkey: &'a str,
+            owner_grant: &'a OwnerGrantId,
+        }
+        let digest = ObjectHash::digest(
+            &serde_json::to_vec(&Founder {
+                domain: CIRCLE_ID_FOUNDER_DOMAIN,
+                store_root_hash,
+                author_pubkey,
+                owner_grant,
+            })
+            .expect("Circle ID founder serialization cannot fail"),
+        );
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest.as_bytes()[..16]);
+        Self(bytes)
     }
 
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
@@ -599,23 +621,25 @@ fn merkle_root_and_proofs(hashes: &[ObjectHash]) -> (ObjectHash, Vec<Vec<MerkleS
         .map(|(index, hash)| (hash, vec![index]))
         .collect::<Vec<_>>();
     while layer.len() > 1 {
-        if layer.len() % 2 == 1 {
-            let duplicate = layer.last().expect("nonempty Merkle layer").clone();
-            layer.push(duplicate);
-        }
-        let mut next = Vec::with_capacity(layer.len() / 2);
-        for pair in layer.chunks_exact(2) {
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+        for pair in layer.chunks(2) {
             let (left_hash, left_indices) = &pair[0];
-            let (right_hash, right_indices) = &pair[1];
-            for index in left_indices {
-                proofs[*index].push(MerkleStep::Right(*right_hash));
+            if let Some((right_hash, right_indices)) = pair.get(1) {
+                for index in left_indices {
+                    proofs[*index].push(MerkleStep::Right(*right_hash));
+                }
+                for index in right_indices {
+                    proofs[*index].push(MerkleStep::Left(*left_hash));
+                }
+                let mut indices = left_indices.clone();
+                indices.extend(right_indices);
+                next.push((merkle_parent(*left_hash, *right_hash), indices));
+            } else {
+                for index in left_indices {
+                    proofs[*index].push(MerkleStep::Right(*left_hash));
+                }
+                next.push((merkle_parent(*left_hash, *left_hash), left_indices.clone()));
             }
-            for index in right_indices {
-                proofs[*index].push(MerkleStep::Left(*left_hash));
-            }
-            let mut indices = left_indices.clone();
-            indices.extend(right_indices);
-            next.push((merkle_parent(*left_hash, *right_hash), indices));
         }
         layer = next;
     }
@@ -637,6 +661,37 @@ pub enum CircleControlOrder {
         previous_control_hash: Option<ObjectHash>,
         roster: CircleRoster,
     },
+}
+
+impl CircleControlOrder {
+    pub(crate) fn previous_control_hash(&self) -> Option<ObjectHash> {
+        match self {
+            Self::MergeConcurrent {
+                previous_control_hash,
+                ..
+            }
+            | Self::Serial {
+                previous_control_hash,
+                ..
+            } => *previous_control_hash,
+        }
+    }
+
+    pub(crate) fn ordinal(&self) -> u64 {
+        match self {
+            Self::MergeConcurrent { seq, .. } => *seq,
+            Self::Serial { generation, .. } => *generation,
+        }
+    }
+
+    fn owner_grant(&self) -> &OwnerGrantId {
+        match self {
+            Self::MergeConcurrent {
+                author_owner_grant, ..
+            } => author_owner_grant,
+            Self::Serial { roster, .. } => &roster.owner_grant,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -727,9 +782,22 @@ impl CircleControl {
             }
             _ => false,
         };
+        let continuity_is_valid = match self.order.previous_control_hash() {
+            None => {
+                self.order.ordinal() == 1
+                    && self.circle_id
+                        == CircleId::founder(
+                            self.store_root_hash,
+                            &self.author_pubkey,
+                            self.order.owner_grant(),
+                        )
+            }
+            Some(_) => self.order.ordinal() > 1,
+        };
         self.version == STORE_PROTOCOL_VERSION
             && owners_are_canonical
             && order_is_valid
+            && continuity_is_valid
             && keys::verify_signature_hex(
                 &self.author_pubkey,
                 &self.signature,
@@ -925,9 +993,9 @@ impl CircleCreation {
         {
             return Err(CircleCreateError::AuthorNotStoreWriter);
         }
-        let circle_id = CircleId::generate(ids);
-        let epoch_id = CircleEpochId::generate(ids);
         let owner_grant = OwnerGrantId(generated_id_digest(ids, OWNER_GRANT_ID_GENERATION_DOMAIN));
+        let circle_id = CircleId::founder(store_root_hash, &author_pubkey, &owner_grant);
+        let epoch_id = CircleEpochId::generate(ids);
         let keyring = MasterKeyring::generate();
         let encryption = EncryptionService::from(keyring.clone());
         let key_fingerprint = encryption.seal_key_fingerprint();
@@ -1324,6 +1392,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn merkle_proofs_verify_for_every_leaf_in_even_and_odd_layers() {
+        for leaf_count in 1..=9 {
+            let leaves = (0..leaf_count)
+                .map(|index| ObjectHash::digest(format!("leaf-{index}").as_bytes()))
+                .collect::<Vec<_>>();
+            let (root, proofs) = merkle_root_and_proofs(&leaves);
+            assert_eq!(proofs.len(), leaves.len());
+            for (index, (leaf, proof)) in leaves.iter().zip(&proofs).enumerate() {
+                assert!(
+                    verify_merkle_proof(*leaf, proof, root),
+                    "leaf {index} of {leaf_count} failed its canonical proof"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn founder_payload_is_complete_and_acyclic_for_both_store_policies() {
         let owner = crate::keys::UserKeypair::generate();
         let peer = crate::keys::UserKeypair::generate();
@@ -1408,6 +1493,32 @@ mod tests {
                     .disposition,
                 CircleAccessDisposition::Inactive
             ));
+
+            if matches!(
+                creation.control.value.order,
+                CircleControlOrder::MergeConcurrent { .. }
+            ) {
+                let mut seized = creation.control.value.clone();
+                seized.circle_id = CircleId::from_bytes([0x5a; 16]);
+                seized.signature = keys::sign_hex(&owner, &seized.canonical_bytes()).1;
+                assert!(
+                    !seized.verify(),
+                    "a founder control must not choose an arbitrary Circle ID"
+                );
+
+                let mut discontinuous = creation.control.value.clone();
+                let CircleControlOrder::MergeConcurrent { seq, .. } = &mut discontinuous.order
+                else {
+                    unreachable!()
+                };
+                *seq = 2;
+                discontinuous.signature =
+                    keys::sign_hex(&owner, &discontinuous.canonical_bytes()).1;
+                assert!(
+                    !discontinuous.verify(),
+                    "a control without a predecessor must be genesis"
+                );
+            }
         }
     }
 
@@ -1558,5 +1669,171 @@ mod tests {
             derive_row_routing_key(&ambiguous, root),
             Err(RowRoutingKeyError::AmbiguousGenerationOne)
         ));
+    }
+
+    #[tokio::test]
+    async fn control_history_caches_the_verified_access_owner_and_rejects_second_genesis() {
+        let author = crate::keys::UserKeypair::generate();
+        let author_pubkey = crate::keys::public_key_hex(&author);
+        let earlier_owner = loop {
+            let candidate = crate::keys::UserKeypair::generate();
+            if crate::keys::public_key_hex(&candidate) < author_pubkey {
+                break candidate;
+            }
+        };
+        let earlier_owner_pubkey = crate::keys::public_key_hex(&earlier_owner);
+        let members = vec![
+            (
+                author_pubkey.clone(),
+                super::super::membership::MemberRole::Owner,
+            ),
+            (
+                earlier_owner_pubkey.clone(),
+                super::super::membership::MemberRole::Owner,
+            ),
+        ];
+        let store_root_hash = ObjectHash::digest(b"multi-owner-store-root");
+        let grant = super::super::membership::MembershipCoord {
+            author_pubkey: author_pubkey.clone(),
+            author_owner_grant: OwnerGrantId(ObjectHash::digest(b"store-owner-grant")),
+            seq: 1,
+            entry_hash: ObjectHash::digest(b"store-founder"),
+        };
+        let membership = StoreMembershipStateRef::merge_concurrent(vec![grant.clone()], &members);
+        let ids = crate::id_provider::SequentialIdProvider::new("multi-owner-control");
+        let creation = CircleCreation::founder(
+            store_root_hash,
+            "device-a",
+            "Household",
+            "0000000001000-0000-device-a",
+            membership,
+            Some(grant.clone()),
+            members,
+            &ids,
+            &author,
+        )
+        .expect("construct founder circle");
+        let mut control = creation.control.value.clone();
+        control.owners = vec![earlier_owner_pubkey, author_pubkey.clone()];
+        control.owners.sort();
+        assert_ne!(control.owners[0], control.author_pubkey);
+        control.signature = keys::sign_hex(&author, &control.canonical_bytes()).1;
+        let control = PreparedCircleControl {
+            coord: control.coord(),
+            bytes: serde_json::to_vec(&control).expect("serialize control"),
+            value: control,
+        };
+        let reference = super::super::store_commit::CircleControlRef {
+            circle_id: creation.circle_id,
+            control: control.coord.clone(),
+        };
+        let commit = super::super::store_commit::StoreBatchCommit::signed_batch(
+            store_root_hash,
+            crate::WriteId::from_generated("multi-owner-control-commit".to_string()),
+            "device-a".to_string(),
+            super::super::store_commit::StoreCommitOrder::MergeConcurrent {
+                seq: 1,
+                previous_commit_hash: None,
+                dependencies: BTreeMap::new(),
+            },
+            Some(grant),
+            None,
+            Vec::new(),
+            vec![reference],
+            None,
+            &[],
+            &author,
+        )
+        .expect("sign Store commit");
+        let own_access = creation
+            .access
+            .iter()
+            .find(|access| access.recipient_pubkey == author_pubkey)
+            .expect("author access");
+        let verified = super::super::circle_ops::VerifiedCircleReference {
+            circle_id: creation.circle_id,
+            control: control.clone(),
+            local_access: Some(super::super::circle_ops::VerifiedCircleAccess {
+                owner_pubkey: author_pubkey.clone(),
+                access_bytes: own_access.leaf.bytes.clone(),
+                disposition: own_access.disposition.clone(),
+                active: Some(super::super::circle_ops::VerifiedCircleActive {
+                    roster: creation.roster.clone(),
+                    metadata: creation.metadata.clone(),
+                }),
+            }),
+        };
+        let db = super::super::test_helpers::open_test_db();
+        let first_commit = commit.clone();
+        db.call(move |conn| {
+            crate::database::Database::record_verified_circle_activations_on(
+                conn,
+                &first_commit,
+                &[verified],
+            )
+        })
+        .await
+        .expect("record multi-Owner control");
+        let circle_id = creation.circle_id.to_string();
+        let cached_owner = db
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT owner_pubkey FROM circle_access_cache WHERE circle_id = ?1",
+                    [circle_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(crate::database::DbError::from)
+            })
+            .await
+            .expect("read cached access owner");
+        assert_eq!(cached_owner, author_pubkey);
+
+        let mut second_value = control.value.clone();
+        second_value.metadata_hash = ObjectHash::digest(b"different founder metadata");
+        second_value.signature = keys::sign_hex(&author, &second_value.canonical_bytes()).1;
+        let second_control = PreparedCircleControl {
+            coord: second_value.coord(),
+            bytes: serde_json::to_vec(&second_value).expect("serialize second founder control"),
+            value: second_value,
+        };
+        let second_commit = super::super::store_commit::StoreBatchCommit::signed_batch(
+            store_root_hash,
+            crate::WriteId::from_generated("second-founder-control-commit".to_string()),
+            "device-a".to_string(),
+            super::super::store_commit::StoreCommitOrder::MergeConcurrent {
+                seq: 2,
+                previous_commit_hash: Some(commit.commit_hash()),
+                dependencies: BTreeMap::new(),
+            },
+            control.value.membership_grant.clone(),
+            None,
+            Vec::new(),
+            vec![super::super::store_commit::CircleControlRef {
+                circle_id: creation.circle_id,
+                control: second_control.coord.clone(),
+            }],
+            None,
+            &[],
+            &author,
+        )
+        .expect("sign second founder Store commit");
+        let error = db
+            .call(move |conn| {
+                crate::database::Database::record_verified_circle_activations_on(
+                    conn,
+                    &second_commit,
+                    &[super::super::circle_ops::VerifiedCircleReference {
+                        circle_id: creation.circle_id,
+                        control: second_control,
+                        local_access: None,
+                    }],
+                )
+            })
+            .await
+            .expect_err("a Circle cannot accept a second founder control");
+        assert!(
+            error.to_string().contains("already has a founder"),
+            "{error}"
+        );
     }
 }

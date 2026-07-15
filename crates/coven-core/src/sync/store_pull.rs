@@ -178,7 +178,7 @@ struct Candidate {
     commit: StoreBatchCommit,
     package: Option<Vec<u8>>,
     registrations: Vec<StoreDeviceRegistration>,
-    circle_activations: Vec<super::circle_ops::VerifiedCircleActivation>,
+    circle_activations: Vec<super::circle_ops::VerifiedCircleReference>,
 }
 
 struct AuthorizedSerialCommit {
@@ -214,6 +214,7 @@ pub struct SerialResolutionCommit {
     pub(crate) uploads: Vec<(String, String, String)>,
     pub(crate) cleanup: Vec<LocalBlobCleanupIntent>,
     pub(crate) registrations: Vec<StoreDeviceRegistration>,
+    pub(crate) circle_activations: Vec<super::circle_ops::VerifiedCircleReference>,
     pub(crate) authorization_after: SerialAuthorizationState,
 }
 
@@ -1032,6 +1033,7 @@ pub async fn prepare_serial_resolution(
     store_root_hash: ObjectHash,
     store_dir: &StoreDir,
     branch_base: Option<CommitPosition>,
+    identity: &crate::keys::UserKeypair,
 ) -> Result<SerialResolutionPlan, StorePullError> {
     let object = coordination
         .read_head(serial_head_key())
@@ -1068,6 +1070,14 @@ pub async fn prepare_serial_resolution(
         let commit = authorized.commit.clone();
         let authorization_after = authorized.authorization_after.clone();
         let package = load_serial_store_package(db, storage, &commit).await?;
+        let circle_activations =
+            match load_pull_circle_activations(db, storage, &commit, Some(identity)).await {
+                Ok(activations) => activations,
+                Err(PullCircleActivationError::Database(error)) => return Err(error.into()),
+                Err(PullCircleActivationError::Invalid(error)) => {
+                    return Err(StorePullError::Serial(error));
+                }
+            };
         expected = commit
             .previous_commit_hash()
             .map(|commit_hash| CommitPosition {
@@ -1079,7 +1089,7 @@ pub async fn prepare_serial_resolution(
                 commit,
                 package,
                 registrations: authorized.registrations.clone(),
-                circle_activations: Vec::new(),
+                circle_activations,
             },
             authorization_after,
         ));
@@ -1094,14 +1104,21 @@ pub async fn prepare_serial_resolution(
     };
     let mut commits = Vec::with_capacity(reverse.len());
     for (candidate, authorization_after) in reverse {
-        let prepared =
-            prepare_serial_candidate(db, storage, store_dir, schema.clone(), &candidate).await?;
+        let (uploads, cleanup) = if candidate.package.is_some() {
+            let prepared =
+                prepare_serial_candidate(db, storage, store_dir, schema.clone(), &candidate)
+                    .await?;
+            (prepared.uploads, prepared.cleanup)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         commits.push(SerialResolutionCommit {
             commit: candidate.commit,
             package: candidate.package,
-            uploads: prepared.uploads,
-            cleanup: prepared.cleanup,
+            uploads,
+            cleanup,
             registrations: candidate.registrations,
+            circle_activations: candidate.circle_activations,
             authorization_after,
         });
     }
@@ -1292,7 +1309,7 @@ async fn load_pull_circle_activations(
     storage: &dyn SyncStorage,
     commit: &StoreBatchCommit,
     identity: Option<&crate::keys::UserKeypair>,
-) -> Result<Vec<super::circle_ops::VerifiedCircleActivation>, PullCircleActivationError> {
+) -> Result<Vec<super::circle_ops::VerifiedCircleReference>, PullCircleActivationError> {
     if !carries_circle_payload(commit) {
         return Ok(Vec::new());
     }
@@ -1889,6 +1906,7 @@ mod tests {
         local_dir: StoreDir,
         storage: CloudSyncStorage,
         local: Database,
+        remote: Database,
         keypair: UserKeypair,
         root: ObjectHash,
         branch: crate::PendingBranch,
@@ -1905,6 +1923,13 @@ mod tests {
                 .await;
         let remote = open_serial_test_db();
         bind_database(&remote, "remote", root).await;
+        remote
+            .set_protocol_state(
+                super::super::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                &crate::keys::public_key_hex(&keypair),
+            )
+            .await
+            .expect("pin Store founder on remote");
         host_exec(
             &local,
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
@@ -1990,6 +2015,7 @@ mod tests {
             local_dir,
             storage,
             local,
+            remote,
             keypair,
             root,
             branch,
@@ -2005,6 +2031,7 @@ mod tests {
             fixture.root,
             &fixture.local_dir,
             fixture.branch.base.clone(),
+            &fixture.keypair,
         )
         .await
         .expect("prepare verified Serial resolution")
@@ -2020,6 +2047,20 @@ mod tests {
         )
         .await
         .expect("bind store protocol root");
+    }
+
+    async fn activation_count_for_circle(db: &Database, circle_id: CircleId) -> i64 {
+        let circle_id = circle_id.to_string();
+        db.call(move |conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                [circle_id],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("count circle activations")
     }
 
     async fn publish_pending(
@@ -2361,6 +2402,16 @@ mod tests {
         )
         .await
         .expect("publish circle creation");
+        let registrations = source
+            .activated_store_device_registrations()
+            .await
+            .expect("read Circle publisher registration");
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].device_id, "source");
+        assert_eq!(
+            registrations[0].state,
+            crate::sync::store_commit::StoreDeviceRegistrationState::Active
+        );
 
         let peer = open_test_db();
         bind_database(&peer, "peer", root).await;
@@ -2399,6 +2450,85 @@ mod tests {
             .await
             .expect("read remote circle activation");
         assert_eq!(activated, 1);
+
+        let later_member = UserKeypair::generate();
+        let later_peer = open_test_db();
+        bind_database(&later_peer, "later-peer", root).await;
+        later_peer
+            .set_protocol_state(
+                crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                &crate::keys::public_key_hex(&keypair),
+            )
+            .await
+            .expect("pin later peer founder");
+        let (_later_temp, later_peer_dir) = temp_store_dir();
+
+        let later_result = pull_store_commits_with_identity(
+            &later_peer,
+            later_peer.synced_tables(),
+            &storage,
+            None,
+            root,
+            "later-peer",
+            &later_peer_dir,
+            None,
+            Some(&later_member),
+        )
+        .await
+        .expect("pull checkpoint created before this identity joined");
+
+        assert!(later_result.frontier.contains_key("source"));
+        assert_eq!(activation_count_for_circle(&later_peer, circle_id).await, 1);
+        assert!(later_peer
+            .get_circles(&crate::keys::public_key_hex(&later_member))
+            .await
+            .expect("read circles without local checkpoint access")
+            .is_empty());
+
+        let registration_objects = home
+            .list_appended("store-v1/devices/source/")
+            .await
+            .expect("list publisher registration objects");
+        assert!(!registration_objects.objects.is_empty());
+        for object in registration_objects.objects {
+            home.remove_appended_candidate(&object);
+        }
+        let unregistered_peer = open_test_db();
+        bind_database(&unregistered_peer, "unregistered-peer", root).await;
+        unregistered_peer
+            .set_protocol_state(
+                crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                &crate::keys::public_key_hex(&keypair),
+            )
+            .await
+            .expect("pin unregistered peer founder");
+        let (_unregistered_temp, unregistered_dir) = temp_store_dir();
+        let unregistered = pull_store_commits_with_identity(
+            &unregistered_peer,
+            unregistered_peer.synced_tables(),
+            &storage,
+            None,
+            root,
+            "unregistered-peer",
+            &unregistered_dir,
+            None,
+            Some(&keypair),
+        )
+        .await
+        .expect("hold Circle whose publisher registration disappeared");
+        assert!(!unregistered.frontier.contains_key("source"));
+        assert!(unregistered.held_positions.iter().any(|held| {
+            matches!(
+                &held.reason,
+                HeldStorePositionReason::InvalidObject(message)
+                    if message.contains("no preceding Active Store device registration")
+                        || message.contains("registration")
+            )
+        }));
+        assert_eq!(
+            activation_count_for_circle(&unregistered_peer, circle_id).await,
+            0
+        );
     }
 
     #[tokio::test]
@@ -3427,6 +3557,22 @@ mod tests {
     #[tokio::test]
     async fn discarding_serial_conflict_reverses_branch_and_applies_remote_chain_atomically() {
         let fixture = serial_conflict_fixture("serial-discard").await;
+        let circle_id = super::super::circle_ops::create_circle(
+            &fixture.remote,
+            &fixture.storage,
+            Some(
+                fixture
+                    .storage
+                    .serial_coordination()
+                    .expect("Serial coordination"),
+            ),
+            "remote",
+            "0000000001003-0000-remote",
+            "Remote circle",
+            &fixture.keypair,
+        )
+        .await
+        .expect("publish remote Circle control on the winning Serial branch");
         host_exec(
             &fixture.local,
             "INSERT INTO notes (id, title, body, shared, _updated_at, created_at)
@@ -3468,10 +3614,25 @@ mod tests {
         assert_eq!(
             fixture
                 .local
+                .get_circles(&crate::keys::public_key_hex(&fixture.keypair))
+                .await
+                .expect("read Circle activated by Serial resolution")
+                .into_iter()
+                .map(|circle| circle.id)
+                .collect::<Vec<_>>(),
+            vec![circle_id]
+        );
+        assert_eq!(
+            fixture
+                .local
                 .latest_outbound_store_position()
                 .await
                 .unwrap(),
-            Some(fixture.remote_position)
+            fixture
+                .remote
+                .latest_outbound_store_position()
+                .await
+                .unwrap()
         );
         for write_id in old_write_ids {
             assert_eq!(

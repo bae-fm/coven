@@ -1840,6 +1840,9 @@ impl SyncComponents {
         &self,
         name: &str,
     ) -> Result<super::circle::CircleId, super::circle_ops::CircleOperationError> {
+        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
+            return Err(super::circle_ops::CircleOperationError::BrowsableStorage);
+        }
         let coordination = match self.db.write_policy() {
             crate::WritePolicy::MergeConcurrent => None,
             crate::WritePolicy::Serial => {

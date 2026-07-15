@@ -8,16 +8,17 @@ use super::circle::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
     circle_control_semantic_prefix, circle_metadata_semantic_prefix, circle_roster_semantic_prefix,
     recipient_slot_with_peer, AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf,
-    CircleControl, CircleControlOrder, CircleCreation, CircleId, CircleMetadata, CircleRoster,
-    PreparedAccessLeaf, PreparedCircleControl, StoreMembershipStateRef,
+    CircleControl, CircleControlOrder, CircleCreation, CircleId, CircleMetadata, CircleRole,
+    CircleRoster, PreparedAccessLeaf, PreparedCircleControl, StoreMembershipStateRef,
 };
 use super::membership::SerialAuthorizationState;
 use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     commit_semantic_prefix, head_semantic_prefix, CircleControlRef, CommitPosition, ObjectHash,
-    StoreBatchCommit, StoreCommitOrder, StoreDeviceHead, StoreProtocolError, StoreSerialHead,
+    StoreBatchCommit, StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistrationState,
+    StoreProtocolError, StoreSerialHead,
 };
-use super::store_objects::append_and_verify;
+use super::store_objects::{append_and_verify, load_commit_slot, load_registration_ref};
 use crate::database::Database;
 use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::keys::{self, UserKeypair};
@@ -50,13 +51,24 @@ pub(crate) struct CircleOperationJournal {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct VerifiedCircleActivation {
+pub(crate) struct VerifiedCircleReference {
     pub circle_id: CircleId,
     pub control: PreparedCircleControl,
+    pub local_access: Option<VerifiedCircleAccess>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedCircleAccess {
+    pub owner_pubkey: String,
     pub access_bytes: Vec<u8>,
     pub disposition: CircleAccessDisposition,
-    pub roster: Option<CircleRoster>,
-    pub metadata: Option<CircleMetadata>,
+    pub active: Option<VerifiedCircleActive>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedCircleActive {
+    pub roster: CircleRoster,
+    pub metadata: CircleMetadata,
 }
 
 impl CircleOperationJournal {
@@ -84,6 +96,10 @@ pub enum CircleOperationError {
     Object(#[from] super::store_objects::StoreObjectError),
     #[error("Store publication: {0}")]
     StoreOutbound(#[from] super::store_outbound::StoreOutboundError),
+    #[error("Store device registration: {0}")]
+    StoreRegistration(#[from] super::store_registration::StoreRegistrationError),
+    #[error("circles require opaque cloud storage")]
+    BrowsableStorage,
     #[error("circle operation journal: {0}")]
     Journal(String),
     #[error("circle operation {circle_id} is blocked: {reason}")]
@@ -109,6 +125,15 @@ pub(crate) async fn create_circle(
     name: &str,
     signer: &UserKeypair,
 ) -> Result<CircleId, CircleOperationError> {
+    super::store_registration::ensure_active_registration_with_coordination(
+        db,
+        storage,
+        coordination,
+        signer,
+        None,
+        metadata_stamp,
+    )
+    .await?;
     let journal = prepare_circle_operation(
         db,
         storage,
@@ -130,18 +155,14 @@ pub(crate) async fn resume_circle_operations(
     storage: &dyn SyncStorage,
     coordination: Option<&dyn super::storage::CoordinationStorage>,
 ) -> Result<(), CircleOperationError> {
-    while let Some(journal) = db.oldest_circle_operation().await? {
-        match journal.status {
-            CircleOperationStatus::Pending => {
-                publish_circle_operation(db, storage, coordination, journal.circle_id()).await?;
-            }
-            CircleOperationStatus::Blocked { ref reason } => {
-                return Err(CircleOperationError::Blocked {
-                    circle_id: journal.circle_id(),
-                    reason: reason.clone(),
-                });
-            }
+    while let Some(journal) = db.oldest_pending_circle_operation().await? {
+        if !matches!(journal.status, CircleOperationStatus::Pending) {
+            return Err(CircleOperationError::Journal(format!(
+                "pending circle operation {} contains a blocked payload",
+                journal.circle_id()
+            )));
         }
+        publish_circle_operation(db, storage, coordination, journal.circle_id()).await?;
     }
     Ok(())
 }
@@ -151,7 +172,7 @@ pub(crate) async fn load_circle_activations(
     commit: &StoreBatchCommit,
     identity: &UserKeypair,
     founder_pubkey: &str,
-) -> Result<Vec<VerifiedCircleActivation>, CircleOperationError> {
+) -> Result<Vec<VerifiedCircleReference>, CircleOperationError> {
     let mut activations = Vec::with_capacity(commit.circle_controls.len());
     for reference in &commit.circle_controls {
         let control_prefix =
@@ -191,13 +212,23 @@ pub(crate) async fn load_circle_activations(
             bytes: loaded.bytes,
             value: loaded.value,
         };
-        verify_control_membership(storage, &control, founder_pubkey).await?;
+        verify_control_context(reference, &control, commit)?;
+        verify_preceding_merge_registration(storage, commit).await?;
+        let checkpoint_members =
+            verify_control_membership(storage, &control, founder_pubkey).await?;
         let own_pubkey = keys::public_key_hex(identity);
-        let owner_pubkey = control.value.owners.first().ok_or_else(|| {
-            CircleOperationError::InvalidState(
-                "circle control has no Owner recipient slot".to_string(),
-            )
-        })?;
+        if !checkpoint_members
+            .iter()
+            .any(|(pubkey, _)| pubkey == &own_pubkey)
+        {
+            activations.push(VerifiedCircleReference {
+                circle_id: reference.circle_id,
+                control,
+                local_access: None,
+            });
+            continue;
+        }
+        let owner_pubkey = &control.value.author_pubkey;
         let owner = (
             owner_pubkey.clone(),
             recipient_slot_with_peer(identity, owner_pubkey, reference.circle_id).map_err(
@@ -286,7 +317,7 @@ pub(crate) async fn load_circle_activations(
                 "circle access leaf failed context verification".to_string(),
             ));
         }
-        let (roster, metadata) = match &leaf.disposition {
+        let active = match &leaf.disposition {
             CircleAccessDisposition::Active {
                 keyring,
                 key_fingerprint,
@@ -433,17 +464,19 @@ pub(crate) async fn load_circle_activations(
                         "circle metadata author is not an Owner in its roster".to_string(),
                     ));
                 }
-                (Some(roster), Some(metadata))
+                Some(VerifiedCircleActive { roster, metadata })
             }
-            CircleAccessDisposition::Inactive => (None, None),
+            CircleAccessDisposition::Inactive => None,
         };
-        activations.push(VerifiedCircleActivation {
+        activations.push(VerifiedCircleReference {
             circle_id: reference.circle_id,
             control,
-            access_bytes: loaded_leaf.bytes,
-            disposition: leaf.disposition,
-            roster,
-            metadata,
+            local_access: Some(VerifiedCircleAccess {
+                owner_pubkey: leaf.owner_pubkey,
+                access_bytes: loaded_leaf.bytes,
+                disposition: leaf.disposition,
+                active,
+            }),
         });
     }
     Ok(activations)
@@ -453,7 +486,7 @@ async fn verify_control_membership(
     storage: &dyn SyncStorage,
     control: &PreparedCircleControl,
     founder_pubkey: &str,
-) -> Result<(), CircleOperationError> {
+) -> Result<Vec<(String, super::membership::MemberRole)>, CircleOperationError> {
     let members = match &control.value.store_membership {
         StoreMembershipStateRef::MergeConcurrent { heads, .. } => {
             let chain = super::membership_ops::load_anchored_chain_at_exact_heads(
@@ -502,7 +535,193 @@ async fn verify_control_membership(
             "circle control Store membership state hash is invalid".to_string(),
         ));
     }
+    Ok(members)
+}
+
+fn verify_control_context(
+    reference: &CircleControlRef,
+    control: &PreparedCircleControl,
+    commit: &StoreBatchCommit,
+) -> Result<(), CircleOperationError> {
+    let policy_matches = control.value.store_membership.write_policy() == commit.policy();
+    let device_matches = match &control.value.order {
+        CircleControlOrder::MergeConcurrent { device_id, .. } => {
+            commit.policy() == crate::WritePolicy::MergeConcurrent && device_id == &commit.device_id
+        }
+        CircleControlOrder::Serial { .. } => commit.policy() == crate::WritePolicy::Serial,
+    };
+    if !control.verify()
+        || reference.circle_id != control.value.circle_id
+        || reference.control != control.coord
+        || control.value.store_root_hash != commit.store_root_hash
+        || control.value.author_pubkey != commit.author_pubkey
+        || !policy_matches
+        || !device_matches
+    {
+        return Err(CircleOperationError::InvalidState(
+            "circle control context differs from its Store reference and commit".to_string(),
+        ));
+    }
     Ok(())
+}
+
+async fn verify_preceding_merge_registration(
+    storage: &dyn SyncStorage,
+    circle_commit: &StoreBatchCommit,
+) -> Result<(), CircleOperationError> {
+    if circle_commit.policy() == crate::WritePolicy::Serial {
+        return Ok(());
+    }
+    let mut expected = circle_commit
+        .previous_commit_hash()
+        .map(|commit_hash| CommitPosition {
+            seq: circle_commit.seq() - 1,
+            commit_hash,
+        });
+    while let Some(position) = expected {
+        let predecessor = load_commit_slot(
+            storage,
+            circle_commit.store_root_hash,
+            &circle_commit.device_id,
+            position.seq,
+        )
+        .await?
+        .ok_or_else(|| {
+            CircleOperationError::InvalidState(format!(
+                "Circle publisher registration predecessor {} is absent",
+                position.seq
+            ))
+        })?
+        .value;
+        if predecessor.commit_hash() != position.commit_hash {
+            return Err(CircleOperationError::InvalidState(format!(
+                "Circle publisher predecessor {} has a different hash",
+                position.seq
+            )));
+        }
+        if let Some(reference) = predecessor
+            .device_registrations
+            .iter()
+            .find(|reference| reference.device_id == circle_commit.device_id)
+        {
+            let registration =
+                load_registration_ref(storage, circle_commit.store_root_hash, reference)
+                    .await?
+                    .ok_or_else(|| {
+                        CircleOperationError::InvalidState(format!(
+                            "Circle publisher registration {:?}/{} is absent",
+                            reference.device_id, reference.revision
+                        ))
+                    })?
+                    .value;
+            if registration.author_pubkey != circle_commit.author_pubkey
+                || registration.state != StoreDeviceRegistrationState::Active
+            {
+                return Err(CircleOperationError::InvalidState(
+                    "Circle publisher has no preceding Active registration bound to its author"
+                        .to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        expected = predecessor
+            .previous_commit_hash()
+            .map(|commit_hash| CommitPosition {
+                seq: predecessor.seq() - 1,
+                commit_hash,
+            });
+    }
+    Err(CircleOperationError::InvalidState(
+        "Circle publisher has no preceding Active Store device registration".to_string(),
+    ))
+}
+
+pub(crate) fn verify_local_circle_activation(
+    journal: &CircleOperationJournal,
+    commit: &StoreBatchCommit,
+) -> Result<VerifiedCircleReference, CircleOperationError> {
+    let creation = &journal.creation;
+    let control = &creation.control;
+    verify_control_context(
+        &CircleControlRef {
+            circle_id: creation.circle_id,
+            control: control.coord.clone(),
+        },
+        control,
+        commit,
+    )?;
+    let own_access = creation
+        .access
+        .iter()
+        .find(|access| access.recipient_pubkey == commit.author_pubkey)
+        .ok_or_else(|| {
+            CircleOperationError::InvalidState(
+                "circle creator has no access disposition".to_string(),
+            )
+        })?;
+    let leaf = &own_access.leaf.value;
+    let envelope = &own_access.envelope;
+    if own_access.disposition != leaf.disposition
+        || own_access.recipient_pubkey != leaf.recipient_pubkey
+        || leaf.recipient_pubkey != commit.author_pubkey
+        || leaf.owner_pubkey != control.value.author_pubkey
+        || leaf.store_membership != control.value.store_membership
+        || envelope.owner_pubkey != control.value.author_pubkey
+        || !own_access.leaf.verify_envelope(control, envelope)
+    {
+        return Err(CircleOperationError::InvalidState(
+            "local circle access failed leaf and envelope verification".to_string(),
+        ));
+    }
+    let CircleAccessDisposition::Active {
+        key_fingerprint,
+        roster_hash,
+        ..
+    } = &own_access.disposition
+    else {
+        return Err(CircleOperationError::InvalidState(
+            "circle creator access is inactive".to_string(),
+        ));
+    };
+    let roster_owners = creation
+        .roster
+        .members
+        .iter()
+        .filter_map(|(pubkey, role)| (*role == CircleRole::Owner).then_some(pubkey.clone()))
+        .collect::<Vec<_>>();
+    if *key_fingerprint != control.value.key_fingerprint
+        || *roster_hash != control.value.roster_hash
+        || creation.roster.roster_hash() != *roster_hash
+        || creation.roster.store_root_hash != commit.store_root_hash
+        || creation.roster.circle_id != creation.circle_id
+        || creation.roster.members.get(&commit.author_pubkey) != Some(&CircleRole::Owner)
+        || roster_owners != control.value.owners
+        || !creation.roster.verify()
+        || creation.metadata.store_root_hash != commit.store_root_hash
+        || creation.metadata.circle_id != creation.circle_id
+        || creation.metadata.epoch_id != control.value.epoch_id
+        || creation.metadata.metadata_hash() != control.value.metadata_hash
+        || creation.metadata.author_pubkey != commit.author_pubkey
+        || creation.metadata.owner_grant != creation.roster.owner_grant
+        || !creation.metadata.verify()
+    {
+        return Err(CircleOperationError::InvalidState(
+            "local circle roster or metadata failed context verification".to_string(),
+        ));
+    }
+    Ok(VerifiedCircleReference {
+        circle_id: creation.circle_id,
+        control: control.clone(),
+        local_access: Some(VerifiedCircleAccess {
+            owner_pubkey: leaf.owner_pubkey.clone(),
+            access_bytes: own_access.leaf.bytes.clone(),
+            disposition: own_access.disposition.clone(),
+            active: Some(VerifiedCircleActive {
+                roster: creation.roster.clone(),
+                metadata: creation.metadata.clone(),
+            }),
+        }),
+    })
 }
 
 async fn load_exact_slot_bytes(
@@ -718,6 +937,16 @@ async fn publish_circle_operation(
         MasterKeyring::from_serialized(&creation.keyring)
             .map_err(|error| CircleOperationError::Journal(format!("circle keyring: {error}")))?,
     );
+    let commit = journal.commit()?;
+    verify_control_context(
+        &CircleControlRef {
+            circle_id: creation.circle_id,
+            control: creation.control.coord.clone(),
+        },
+        &creation.control,
+        &commit,
+    )?;
+    verify_preceding_merge_registration(storage, &commit).await?;
 
     append_step(
         db,
@@ -795,7 +1024,6 @@ async fn publish_circle_operation(
         )
         .await?;
     }
-    let commit = journal.commit()?;
     let activation_head = journal.head.clone();
     match activation_head {
         CircleActivationHead::MergeConcurrent(head) => {
@@ -867,6 +1095,12 @@ async fn append_step(
     bytes: &[u8],
 ) -> Result<(), CircleOperationError> {
     if journal.uploaded.contains(step) {
+        let persisted = load_exact_slot_bytes(storage, context, semantic_prefix).await?;
+        if persisted != bytes {
+            return Err(CircleOperationError::InvalidState(format!(
+                "circle upload step {step:?} differs from its durable journal bytes"
+            )));
+        }
         return Ok(());
     }
     append_and_verify(storage, context, semantic_prefix, extension, bytes).await?;
@@ -964,6 +1198,16 @@ mod tests {
         )
         .await
         .expect("pin Store founder");
+        super::super::store_registration::ensure_active_registration_with_coordination(
+            db,
+            &storage,
+            None,
+            &signer,
+            Some(&chain),
+            "0000000000999-0000-creator",
+        )
+        .await
+        .expect("publish Circle creator registration");
         let journal = prepare_circle_operation(
             db,
             &storage,
@@ -1127,6 +1371,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uploaded_circle_steps_are_read_back_after_restart_before_activation() {
+        for corrupt in [false, true] {
+            let temp = tempfile::tempdir().expect("create database directory");
+            let path = temp.path().join(if corrupt {
+                "circle-corrupt-upload.sqlite3"
+            } else {
+                "circle-missing-upload.sqlite3"
+            });
+            let (db, _stamper) = Database::open(
+                &path,
+                test_synced_tables(),
+                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                crate::WritePolicy::MergeConcurrent,
+                "creator".to_string(),
+                &test_migrations(),
+            )
+            .expect("open circle database");
+            let (home, storage, _signer, expected) =
+                persist_merge_operation(&db, if corrupt { "corrupt" } else { "missing" }).await;
+            home.fail_append_before_call(2);
+            resume_circle_operations(&db, &storage, None)
+                .await
+                .expect_err("roster append failure interrupts publication");
+            let persisted = db
+                .circle_operation(expected.circle_id())
+                .await
+                .expect("read interrupted circle operation")
+                .expect("interrupted circle operation remains durable");
+            assert!(persisted.uploaded.contains("metadata"));
+
+            let metadata_prefix = circle_metadata_semantic_prefix(&expected.creation.metadata);
+            let listing = storage
+                .list_protocol_objects(&format!("{metadata_prefix}/copies/"))
+                .await
+                .expect("list uploaded metadata");
+            assert_eq!(listing.objects.len(), 1);
+            if corrupt {
+                home.replace_appended_candidate(
+                    listing.objects[0].physical(),
+                    b"corrupt metadata bytes".to_vec(),
+                );
+            } else {
+                home.remove_appended_candidate(listing.objects[0].physical());
+            }
+            std::thread::spawn(move || drop(db))
+                .join()
+                .expect("close circle database");
+
+            let (reopened, _stamper) = Database::open(
+                &path,
+                test_synced_tables(),
+                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                crate::WritePolicy::MergeConcurrent,
+                "creator".to_string(),
+                &test_migrations(),
+            )
+            .expect("reopen circle database");
+            resume_circle_operations(&reopened, &storage, None)
+                .await
+                .expect_err("durable upload marker must not bypass readback");
+            assert_eq!(activation_count(&reopened, expected.circle_id()).await, 0);
+            assert!(reopened
+                .circle_operation(expected.circle_id())
+                .await
+                .expect("read rejected circle operation")
+                .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn local_activation_rejects_a_journal_disposition_that_differs_from_its_leaf() {
+        let db = open_test_db();
+        let (_home, storage, signer, mut journal) =
+            persist_merge_operation(&db, "circle-tampered-local-access").await;
+        let author = keys::public_key_hex(&signer);
+        let own_access = journal
+            .creation
+            .access
+            .iter_mut()
+            .find(|access| access.recipient_pubkey == author)
+            .expect("founder access");
+        assert!(matches!(
+            own_access.disposition,
+            CircleAccessDisposition::Active { .. }
+        ));
+        own_access.disposition = CircleAccessDisposition::Inactive;
+        db.update_circle_operation(journal.clone())
+            .await
+            .expect("persist tampered journal");
+
+        resume_circle_operations(&db, &storage, None)
+            .await
+            .expect_err("local activation must verify journal access context");
+
+        assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+        assert!(db
+            .circle_operation(journal.circle_id())
+            .await
+            .expect("read rejected operation")
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn stale_serial_head_blocks_the_exact_operation_without_activation() {
         let home = InMemoryCloudHome::new();
         let signer = UserKeypair::generate();
@@ -1250,6 +1599,30 @@ mod tests {
             .materialized_frontier()
             .await
             .expect("read frontier")
+            .is_empty());
+
+        resume_circle_operations(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().expect("Serial coordination")),
+        )
+        .await
+        .expect("blocked circle operation remains inert during resume");
+        db.discard_blocked_circle_operation(expected.circle_id())
+            .await
+            .expect("discard blocked circle operation");
+        db.discard_blocked_circle_operation(expected.circle_id())
+            .await
+            .expect("repeated discard remains idempotent");
+        assert!(db
+            .circle_operation(expected.circle_id())
+            .await
+            .expect("read discarded circle operation")
+            .is_none());
+        assert!(db
+            .get_circle_operations()
+            .await
+            .expect("read circle operations after discard")
             .is_empty());
     }
 }

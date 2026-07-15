@@ -221,6 +221,7 @@ impl SyncManager {
             .ok_or_else(|| SyncError::Protocol("store protocol root is absent".to_string()))?
             .parse()
             .map_err(|error| SyncError::Protocol(format!("store protocol root: {error}")))?;
+        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
         crate::sync::store_pull::prepare_serial_resolution(
             &self.db,
             &**storage,
@@ -228,6 +229,7 @@ impl SyncManager {
             store_root_hash,
             store_dir,
             branch_base,
+            &identity,
         )
         .await
         .map_err(|error| SyncError::Protocol(error.to_string()))

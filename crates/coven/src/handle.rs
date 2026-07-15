@@ -1056,6 +1056,18 @@ impl CovenHandle {
             .await
             .map_err(SyncError::from)
     }
+
+    /// Discard a blocked circle command. Repeating the discard is a no-op;
+    /// pending commands must finish or become blocked before they can be discarded.
+    pub async fn discard_circle_operation(
+        &self,
+        circle_id: crate::CircleId,
+    ) -> Result<(), SyncError> {
+        self.db
+            .discard_blocked_circle_operation(circle_id)
+            .await
+            .map_err(SyncError::from)
+    }
 }
 
 #[cfg(test)]
@@ -2146,9 +2158,16 @@ mod tests {
             .invite_member(&public_key_hex, None, MemberRole::Member)
             .await;
         let remove = handle.remove_member(&public_key_hex).await;
+        let circle = handle.create_circle("Household").await;
 
         assert!(matches!(invite, Err(SyncError::NotEncryptedHome)));
         assert!(matches!(remove, Err(SyncError::NotEncryptedHome)));
+        assert!(matches!(
+            circle,
+            Err(SyncError::Circle(
+                crate::sync::circle_ops::CircleOperationError::BrowsableStorage
+            ))
+        ));
     }
 
     #[tokio::test]
