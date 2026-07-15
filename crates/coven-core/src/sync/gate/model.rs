@@ -17,6 +17,10 @@ use crate::sync::session::{foreign_key_edges, quote_ident, ForeignKeyEdge, Synce
 pub(super) enum TableGate {
     /// A gated root: the boolean gate lives at this column.
     Root { gate_col: GateColumn },
+    /// A scoped root: this column names Store (`NULL`), one circle, or the
+    /// local device (`local`). Descendants inherit the same audience through
+    /// their selected foreign-key parent.
+    ScopedRoot { audience_col: GateColumn },
     /// A root whose rows sync unconditionally and whose blob subtree is always
     /// Remote.
     RemoteRoot,
@@ -68,6 +72,12 @@ pub(crate) fn from_tables_call_count() -> usize {
 }
 
 impl Gates {
+    pub fn has_scoped_graph(&self) -> bool {
+        self.tables
+            .values()
+            .any(|gate| matches!(gate, TableGate::ScopedRoot { .. }))
+    }
+
     /// Build the gate model from the declared [`SyncedTable`]s and the live
     /// schema (`PRAGMA table_info` for gate-column indices, `PRAGMA
     /// foreign_key_list` for FK edges).
@@ -80,14 +90,6 @@ impl Gates {
     }
 
     fn from_tables_conn(conn: &Connection, tables: &[SyncedTable]) -> Result<Self, GateError> {
-        if let Some(table) = tables
-            .iter()
-            .find(|table| table.audience_column().is_some())
-        {
-            return Err(GateError::UnsupportedScopedRoot {
-                table: table.name().to_string(),
-            });
-        }
         let ancestors: HashSet<&str> = tables
             .iter()
             .filter(|t| t.is_gated_by_descendants())
@@ -124,6 +126,12 @@ impl Gates {
             if let Some(gate) = t.gate_column() {
                 let gate_col = gate_column(&cols, t.name(), gate)?;
                 gate_map.insert(t.name().to_string(), TableGate::Root { gate_col });
+                continue;
+            }
+
+            if let Some(audience) = t.audience_column() {
+                let audience_col = gate_column(&cols, t.name(), audience)?;
+                gate_map.insert(t.name().to_string(), TableGate::ScopedRoot { audience_col });
                 continue;
             }
 
@@ -204,7 +212,10 @@ impl Gates {
             .cloned()
             .collect();
         gate_map.retain(|name, tg| match tg {
-            TableGate::Root { .. } | TableGate::RemoteRoot | TableGate::Parent { .. } => true,
+            TableGate::Root { .. }
+            | TableGate::ScopedRoot { .. }
+            | TableGate::RemoteRoot
+            | TableGate::Parent { .. } => true,
             TableGate::Child { .. } => reaches_gate.contains(name),
         });
 
@@ -314,6 +325,11 @@ impl Gates {
                 quote_ident(tbl),
                 quote_ident(&gate_col.name)
             )),
+            Some(TableGate::ScopedRoot { audience_col }) => format!(
+                "{}.{} IS NULL",
+                quote_ident(tbl),
+                quote_ident(&audience_col.name)
+            ),
             Some(TableGate::RemoteRoot) => "TRUE".to_string(),
             Some(TableGate::Child {
                 fk_col,
@@ -534,6 +550,7 @@ fn reaches_gate_terminus(gate_map: &HashMap<String, TableGate>, name: &str) -> b
         }
         match gate_map.get(cur) {
             Some(TableGate::Root { .. })
+            | Some(TableGate::ScopedRoot { .. })
             | Some(TableGate::RemoteRoot)
             | Some(TableGate::Parent { .. }) => return true,
             Some(TableGate::Child { parent, .. }) => {
@@ -863,7 +880,11 @@ fn parent_reaches_root(
     }
     let decl = tables.iter().find(|t| t.name() == parent);
     let reaches = match decl {
-        Some(t) if t.gate_column().is_some() || t.is_remote_root() => true,
+        Some(t)
+            if t.gate_column().is_some() || t.audience_column().is_some() || t.is_remote_root() =>
+        {
+            true
+        }
         // An ancestor is not a downward root path.
         Some(t) if t.is_gated_by_descendants() => false,
         // A plain (or unknown) parent reaches a root iff its own chain does.

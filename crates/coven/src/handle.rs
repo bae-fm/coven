@@ -39,7 +39,7 @@ use crate::blob::{BlobRef, BlobTransitionObserver};
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::StoreOpenGuard;
-use crate::database::Database;
+use crate::database::{Database, DbError};
 use crate::encryption::{EncryptionService, MasterKeyring, SealError};
 use crate::keys::{
     DeviceIdentityCustody, IdentityError, KeyError, MasterKeyCustody, MasterKeyError, StoreKeys,
@@ -262,6 +262,17 @@ impl CovenHandle {
 
     pub(crate) fn store_dir(&self) -> StoreDir {
         self.store_dir.clone()
+    }
+
+    pub(crate) fn routing_encryption(&self) -> Result<EncryptionService, DbError> {
+        let keyring = self
+            .key_custody
+            .unlock()
+            .map_err(|error| DbError(format!("unlock Store key for row routing: {error}")))?
+            .ok_or_else(|| {
+                DbError("Merge scoped write requires an established Store key".to_string())
+            })?;
+        Ok(EncryptionService::from(keyring))
     }
 
     // =========================================================================

@@ -580,6 +580,10 @@ impl CovenHandle {
         let gates = self.db().gates();
         let blob_decls = self.db().blob_decls();
         let write_policy = self.db().write_policy();
+        let routing_encryption = (write_policy == WritePolicy::MergeConcurrent
+            && gates.has_scoped_graph())
+        .then(|| self.routing_encryption())
+        .transpose()?;
         let write_id = self.db().new_write_id();
         let outcome = self
             .db()
@@ -590,6 +594,7 @@ impl CovenHandle {
                     &gates,
                     &blob_decls,
                     write_policy,
+                    routing_encryption.as_ref(),
                     write_id,
                     |tx| f(SqlContext::new(tx, stamper)),
                 ))
@@ -684,6 +689,10 @@ impl CovenHandle {
         let gates = self.db().gates();
         let blob_decls = self.db().blob_decls();
         let write_policy = self.db().write_policy();
+        let routing_encryption = (write_policy == WritePolicy::MergeConcurrent
+            && gates.has_scoped_graph())
+        .then(|| self.routing_encryption())
+        .transpose()?;
         let write_id = self.db().new_write_id();
         let deleted = batch.deleted_blobs;
         let store_dir = self.store_dir();
@@ -699,6 +708,7 @@ impl CovenHandle {
                     gates,
                     blob_decls,
                     write_policy,
+                    routing_encryption,
                     write_id,
                     sql,
                 ))
@@ -906,6 +916,7 @@ fn run_write_batch_on_connection<R>(
     gates: Arc<crate::sync::gate::Gates>,
     decls: Arc<crate::blob::decl::BlobDecls>,
     write_policy: WritePolicy,
+    routing_encryption: Option<crate::encryption::EncryptionService>,
     write_id: WriteId,
     sql: WriteSql<R>,
 ) -> CovenResult<WriteReceipt<R>> {
@@ -916,6 +927,7 @@ fn run_write_batch_on_connection<R>(
         &gates,
         &decls,
         write_policy,
+        routing_encryption.as_ref(),
         write_id,
         |tx| -> CovenResult<R> {
             for blob in &staged {

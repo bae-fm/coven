@@ -3,24 +3,18 @@
 use std::fmt;
 use std::str::FromStr;
 
-#[cfg(test)]
 use hkdf::Hkdf;
-#[cfg(test)]
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-#[cfg(test)]
 use sha2::Sha256;
 
 use super::membership::OwnerGrantId;
 use super::store_commit::ObjectHash;
-#[cfg(test)]
 use crate::encryption::EncryptionService;
 
 const CIRCLE_ID_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 const CIRCLE_ID_LENGTH: usize = 26;
-#[cfg(test)]
 const ROW_ROUTING_KEY_DOMAIN: &[u8] = b"coven.row-routing.v1";
-#[cfg(test)]
 const ROW_ROUTING_ID_DOMAIN: &[u8] = b"coven.row-routing-id.v1\0";
 
 /// A random 128-bit circle identity encoded as canonical lowercase base32.
@@ -231,8 +225,7 @@ impl<'de> Deserialize<'de> for RowRoutingId {
 pub struct RowRoutingIdError(String);
 
 #[derive(Clone)]
-#[cfg(test)]
-struct RowRoutingKey([u8; 32]);
+pub(crate) struct RowRoutingKey([u8; 32]);
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RowRoutingKeyError {
@@ -242,8 +235,7 @@ pub enum RowRoutingKeyError {
     AmbiguousGenerationOne,
 }
 
-#[cfg(test)]
-fn derive_row_routing_key(
+pub(crate) fn derive_row_routing_key(
     encryption: &EncryptionService,
     store_root_hash: ObjectHash,
 ) -> Result<RowRoutingKey, RowRoutingKeyError> {
@@ -264,8 +256,7 @@ fn derive_row_routing_key(
     Ok(RowRoutingKey(derived))
 }
 
-#[cfg(test)]
-fn row_routing_id(key: &RowRoutingKey, table: &str, row_id: &str) -> RowRoutingId {
+pub(crate) fn row_routing_id(key: &RowRoutingKey, table: &str, row_id: &str) -> RowRoutingId {
     let mut mac = Hmac::<Sha256>::new_from_slice(&key.0).expect("HMAC accepts a 32-byte key");
     mac.update(ROW_ROUTING_ID_DOMAIN);
     mac.update(&(table.len() as u64).to_be_bytes());

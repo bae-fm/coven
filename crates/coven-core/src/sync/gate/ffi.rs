@@ -29,15 +29,21 @@ unsafe fn value_to_string(val: *mut ffi::sqlite3_value) -> Option<String> {
     )
 }
 
-/// The new value at `col` for the change at the iterator's current position
-/// (`None` if absent — e.g. an unchanged column in an update — or NULL).
-unsafe fn extract_new_value(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) -> Option<String> {
+/// The new value at `col` for the change at the iterator's current position.
+/// The boolean distinguishes an absent unchanged column from a present SQL NULL.
+unsafe fn extract_new_value(
+    iter: *mut ffi::sqlite3_changeset_iter,
+    col: c_int,
+) -> (bool, Option<String>) {
     extract_value(iter, col, ffi::sqlite3changeset_new)
 }
 
-/// The old value at `col` for the change at the iterator's current position
-/// (`None` if absent — e.g. an unchanged column in an update — or NULL).
-unsafe fn extract_old_value(iter: *mut ffi::sqlite3_changeset_iter, col: c_int) -> Option<String> {
+/// The old value at `col` for the change at the iterator's current position.
+/// The boolean distinguishes an absent unchanged column from a present SQL NULL.
+unsafe fn extract_old_value(
+    iter: *mut ffi::sqlite3_changeset_iter,
+    col: c_int,
+) -> (bool, Option<String>) {
     extract_value(iter, col, ffi::sqlite3changeset_old)
 }
 
@@ -51,13 +57,13 @@ unsafe fn extract_value(
     iter: *mut ffi::sqlite3_changeset_iter,
     col: c_int,
     read_value: ChangesetValueReader,
-) -> Option<String> {
+) -> (bool, Option<String>) {
     let mut val: *mut ffi::sqlite3_value = ptr::null_mut();
     let rc = read_value(iter, col, &mut val);
     if rc != ffi::SQLITE_OK as c_int || val.is_null() {
-        return None;
+        return (rc == ffi::SQLITE_OK as c_int, None);
     }
-    value_to_string(val)
+    (true, value_to_string(val))
 }
 
 /// A changegroup: accumulates changes by iterator position and deduplicates them
@@ -222,13 +228,18 @@ pub(super) unsafe fn collect_deletes(
 /// A single change at a changeset iterator's current position, with its table,
 /// op, and the columns needed for gating. We read columns eagerly so the
 /// iterator can advance.
+#[derive(Clone)]
 pub(super) struct ChangeRow {
     pub(super) table: String,
     pub(super) op: c_int,
-    /// New values (insert/update); `None` per column = absent or NULL.
+    /// New values (insert/update); presence is recorded separately so `None`
+    /// means SQL NULL when the corresponding presence entry is true.
     pub(super) new: Vec<Option<String>>,
-    /// Old values (delete/update); `None` per column = absent or NULL.
+    new_present: Vec<bool>,
+    /// Old values (delete/update); presence is recorded separately so `None`
+    /// means SQL NULL when the corresponding presence entry is true.
     pub(super) old: Vec<Option<String>>,
+    old_present: Vec<bool>,
 }
 
 impl ChangeRow {
@@ -245,17 +256,37 @@ impl ChangeRow {
             .to_string();
 
         let mut new = Vec::with_capacity(ncol as usize);
+        let mut new_present = Vec::with_capacity(ncol as usize);
         let mut old = Vec::with_capacity(ncol as usize);
+        let mut old_present = Vec::with_capacity(ncol as usize);
         for c in 0..ncol {
-            new.push(extract_new_value(iter, c));
-            old.push(extract_old_value(iter, c));
+            let (present, value) = extract_new_value(iter, c);
+            new_present.push(present);
+            new.push(value);
+            let (present, value) = extract_old_value(iter, c);
+            old_present.push(present);
+            old.push(value);
         }
         ChangeRow {
             table,
             op,
             new,
+            new_present,
             old,
+            old_present,
         }
+    }
+
+    pub(super) fn new_value(&self, col: usize) -> Option<Option<&str>> {
+        self.new_present.get(col).and_then(|present| {
+            present.then(|| self.new.get(col).and_then(|value| value.as_deref()))
+        })
+    }
+
+    pub(super) fn old_value(&self, col: usize) -> Option<Option<&str>> {
+        self.old_present.get(col).and_then(|present| {
+            present.then(|| self.old.get(col).and_then(|value| value.as_deref()))
+        })
     }
 
     /// Primary key (column 0), following op semantics.

@@ -63,11 +63,16 @@ use std::ffi::c_int;
 
 use rusqlite::{Connection, OptionalExtension, Params};
 
+mod audience;
 mod create_table;
 mod ffi;
 mod model;
 mod outbound;
 
+pub(crate) use audience::{
+    capture_routing_changes, is_routing_table, partition_outbound, AudiencePartition,
+    RoutingChanges,
+};
 pub(crate) use model::write_gate;
 pub use model::Gates;
 #[cfg(test)]
@@ -147,8 +152,36 @@ pub enum GateError {
         table: String,
         parent: String,
     },
-    UnsupportedScopedRoot {
+    ScopedOutboundRequiresPartitioning {
         table: String,
+    },
+    InvalidAudience {
+        table: String,
+        value: Option<String>,
+        reason: String,
+    },
+    MissingChangesetPrimaryKey(String),
+    MissingAudienceRow {
+        table: String,
+        row_id: String,
+    },
+    MissingAudienceParent {
+        table: String,
+        row_id: Option<String>,
+        parent: String,
+    },
+    CircleAuthority {
+        circle_id: crate::sync::circle::CircleId,
+        active_records: usize,
+    },
+    InvalidCircleControl {
+        circle_id: crate::sync::circle::CircleId,
+        reason: String,
+    },
+    CircleControlPolicy {
+        circle_id: crate::sync::circle::CircleId,
+        expected: crate::WritePolicy,
+        actual: crate::WritePolicy,
     },
     /// A `gated_by_descendants` ancestor (the table) has no inferred gated
     /// descendant — no synced table has a foreign key into it after the
@@ -187,9 +220,46 @@ impl std::fmt::Display for GateError {
                 f,
                 "table {table} inherits its gate through a composite foreign key to {parent}, but gate inheritance requires one child column"
             ),
-            GateError::UnsupportedScopedRoot { table } => write!(
+            GateError::ScopedOutboundRequiresPartitioning { table } => write!(
                 f,
-                "scoped root {table} requires audience-partitioned Store and circle routing"
+                "scoped root {table} must use audience-partitioned outbound capture"
+            ),
+            GateError::InvalidAudience {
+                table,
+                value,
+                reason,
+            } => write!(f, "scoped table {table} has invalid audience {value:?}: {reason}"),
+            GateError::MissingChangesetPrimaryKey(table) => {
+                write!(f, "scoped changeset row in {table} has no primary key")
+            }
+            GateError::MissingAudienceRow { table, row_id } => {
+                write!(f, "scoped row {table}.{row_id} is absent while resolving its audience")
+            }
+            GateError::MissingAudienceParent {
+                table,
+                row_id,
+                parent,
+            } => write!(
+                f,
+                "scoped row {table}.{row_id:?} has no audience parent in {parent}"
+            ),
+            GateError::CircleAuthority {
+                circle_id,
+                active_records,
+            } => write!(
+                f,
+                "circle {circle_id} has {active_records} active local access records; expected exactly one"
+            ),
+            GateError::InvalidCircleControl { circle_id, reason } => {
+                write!(f, "circle {circle_id} has invalid active control: {reason}")
+            }
+            GateError::CircleControlPolicy {
+                circle_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "circle {circle_id} control uses {actual:?}, expected Store policy {expected:?}"
             ),
             GateError::NoGatedDescendants(tbl) => {
                 write!(
@@ -254,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_root_is_rejected_until_audience_partitioning_is_installed() {
+    fn scoped_root_and_descendant_build_one_inheritance_graph() {
         let c = conn();
         exec(
             &c,
@@ -262,19 +332,23 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 audience TEXT,
                 _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE note_tags (
+                id TEXT PRIMARY KEY,
+                note_id TEXT NOT NULL REFERENCES notes(id),
+                _updated_at TEXT NOT NULL
              ) STRICT;",
         );
         let tables = vec![
             SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey)
                 .scoped_by("audience"),
+            SyncedTable::new("note_tags", crate::sync::session::RowIdentity::SharedKey),
         ];
 
-        let error = match Gates::from_tables(&c, &tables) {
-            Ok(_) => panic!("a scoped root must not fall through to the unpartitioned Store gate"),
-            Err(error) => error,
-        };
+        let gates = Gates::from_tables(&c, &tables).expect("build audience inheritance graph");
 
-        assert!(error.to_string().contains("scoped root notes"), "{error}");
+        assert!(gates.tables.contains_key("notes"));
+        assert!(gates.tables.contains_key("note_tags"));
     }
 
     #[test]

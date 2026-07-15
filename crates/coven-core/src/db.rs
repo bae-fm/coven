@@ -127,6 +127,22 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            store_write_partitions,
+            "
+    write_id TEXT NOT NULL,
+    audience TEXT NOT NULL,
+    control_coord TEXT,
+    changeset BLOB NOT NULL,
+    PRIMARY KEY (write_id, audience),
+    FOREIGN KEY (write_id) REFERENCES store_writes(write_id) ON DELETE CASCADE,
+    CHECK (
+        (audience = 'store' AND control_coord IS NULL)
+        OR
+        (audience NOT IN ('store', 'local') AND json_valid(control_coord))
+    )
+"
+        );
+        $visit!(
             outbound_membership_mutation,
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

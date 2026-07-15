@@ -21,6 +21,7 @@ use crate::blob::{BlobRef, Provenance};
 use crate::db::{
     apply_coven_schema, is_reserved_table_name, ExternalBlob, OutboxEntry, OutboxOperation,
 };
+use crate::encryption::EncryptionService;
 use crate::migration::{run_migrations_in_transaction, Migration, MigrationError};
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
@@ -2192,16 +2193,99 @@ impl Database {
         })
     }
 
+    fn capture_partition_blob_facts_on(
+        tx: &rusqlite::Transaction<'_>,
+        partitions: &[gate::AudiencePartition],
+        gates: &Gates,
+        blob_decls: &BlobDecls,
+    ) -> Result<StoreWriteBlobFacts, DbError> {
+        let mut facts = BTreeMap::new();
+        for partition in partitions {
+            for fact in Self::capture_store_write_blob_facts_on(
+                tx,
+                &partition.changeset,
+                gates,
+                blob_decls,
+            )?
+            .blobs
+            {
+                let key = (fact.blob().namespace.clone(), fact.blob().id.clone());
+                if let Some(prior) = facts.insert(key.clone(), fact.clone()) {
+                    if prior != fact {
+                        return Err(DbError(format!(
+                            "audience partitions give blob {}/{} conflicting publication facts",
+                            key.0, key.1
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(StoreWriteBlobFacts {
+            blobs: facts.into_values().collect(),
+        })
+    }
+
+    fn partition_captured_write_on(
+        tx: &rusqlite::Transaction<'_>,
+        captured: &[u8],
+        gates: &Gates,
+        write_policy: WritePolicy,
+        routing_encryption: Option<&EncryptionService>,
+    ) -> Result<Vec<gate::AudiencePartition>, DbError> {
+        if gates.has_scoped_graph() {
+            let routing_changeset = match write_policy {
+                WritePolicy::MergeConcurrent => {
+                    let encryption = routing_encryption.ok_or_else(|| {
+                        DbError(
+                            "Merge scoped write requires the Store generation-1 routing key"
+                                .to_string(),
+                        )
+                    })?;
+                    let store_root_hash = tx
+                        .query_row(
+                            "SELECT value FROM protocol_state WHERE key = ?1",
+                            [STORE_ROOT_HASH_STATE_KEY],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .map_err(DbError::from)?
+                        .parse::<ObjectHash>()
+                        .map_err(|error| {
+                            DbError(format!("parse Store root for row routing: {error}"))
+                        })?;
+                    let key =
+                        crate::sync::circle::derive_row_routing_key(encryption, store_root_hash)
+                            .map_err(|error| DbError(format!("derive row routing key: {error}")))?;
+                    gate::capture_routing_changes(tx, captured, gates, &key).map_err(|error| {
+                        DbError(format!("capture scoped routing changes: {error}"))
+                    })?
+                }
+                WritePolicy::Serial => gate::RoutingChanges::empty(),
+            };
+            return gate::partition_outbound(tx, captured, &routing_changeset, gates, write_policy)
+                .map_err(|error| DbError(format!("partition scoped host transaction: {error}")));
+        }
+        let changeset = gate::gate_outbound(tx, captured, gates)
+            .map_err(|error| DbError(format!("gate host transaction: {error}")))?;
+        Ok((!changeset.is_empty())
+            .then_some(gate::AudiencePartition {
+                audience: crate::sync::circle::Audience::Store,
+                control_coord_json: None,
+                changeset,
+            })
+            .into_iter()
+            .collect())
+    }
+
     fn insert_store_write_on(
         tx: &rusqlite::Transaction<'_>,
         write_id: &WriteId,
-        changeset: &[u8],
+        partitions: &[gate::AudiencePartition],
         inverse_changeset: &[u8],
         base: &StoreWriteBase,
         blob_facts: &StoreWriteBlobFacts,
         rows_changed: u64,
     ) -> Result<WriteStatus, DbError> {
-        let affected_rows = if changeset.is_empty() {
+        let affected_rows = if partitions.is_empty() {
             // A tripwire, not a routine event. An empty capture from a transaction
             // that also CHANGED NO ROWS is a pure read left on the write path —
             // warn so it gets moved to the journal-free read path
@@ -2225,27 +2309,33 @@ impl Database {
             }
             Vec::new()
         } else {
-            let mut affected = crate::changeset::walk(changeset)
-                .map_err(|error| DbError(format!("read affected write rows: {error}")))?
-                .into_iter()
-                .map(|row| {
-                    let primary_key = row.pk().map(str::to_owned).ok_or_else(|| {
-                        DbError(format!(
-                            "shared write row in {:?} has no primary key",
-                            row.table
-                        ))
-                    })?;
-                    Ok(AffectedRow {
-                        table: row.table,
-                        primary_key,
-                    })
-                })
-                .collect::<Result<Vec<_>, DbError>>()?;
+            let mut affected = Vec::new();
+            for partition in partitions {
+                affected.extend(
+                    crate::changeset::walk(&partition.changeset)
+                        .map_err(|error| DbError(format!("read affected write rows: {error}")))?
+                        .into_iter()
+                        .filter(|row| !gate::is_routing_table(&row.table))
+                        .map(|row| {
+                            let primary_key = row.pk().map(str::to_owned).ok_or_else(|| {
+                                DbError(format!(
+                                    "shared write row in {:?} has no primary key",
+                                    row.table
+                                ))
+                            })?;
+                            Ok(AffectedRow {
+                                table: row.table,
+                                primary_key,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, DbError>>()?,
+                );
+            }
             affected.sort();
             affected.dedup();
             affected
         };
-        let status = if changeset.is_empty() {
+        let status = if partitions.is_empty() {
             WriteStatus::LocalOnly
         } else {
             WriteStatus::Pending
@@ -2258,6 +2348,11 @@ impl Database {
             .map_err(|error| DbError(format!("serialize affected rows: {error}")))?;
         let blob_facts_json = serde_json::to_string(blob_facts)
             .map_err(|error| DbError(format!("serialize Store write blob facts: {error}")))?;
+        let store_changeset = partitions
+            .iter()
+            .find(|partition| partition.audience == crate::sync::circle::Audience::Store)
+            .map(|partition| partition.changeset.as_slice())
+            .unwrap_or_default();
         tx.execute(
             "INSERT INTO store_writes
              (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
@@ -2266,13 +2361,36 @@ impl Database {
                 write_id.as_str(),
                 status_json,
                 affected_rows,
-                changeset,
+                store_changeset,
                 inverse_changeset,
                 base,
                 blob_facts_json,
             ],
         )
         .map_err(DbError::from)?;
+        for partition in partitions {
+            let audience = match partition.audience {
+                crate::sync::circle::Audience::Store => "store".to_string(),
+                crate::sync::circle::Audience::Local => {
+                    return Err(DbError(
+                        "Local audience must not enter the durable outbound journal".to_string(),
+                    ));
+                }
+                crate::sync::circle::Audience::Circle(circle_id) => circle_id.to_string(),
+            };
+            tx.execute(
+                "INSERT INTO store_write_partitions
+                 (write_id, audience, control_coord, changeset)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    write_id.as_str(),
+                    audience,
+                    partition.control_coord_json,
+                    partition.changeset,
+                ],
+            )
+            .map_err(DbError::from)?;
+        }
         if status == WriteStatus::Pending {
             for fact in &blob_facts.blobs {
                 let StoreWriteBlobFact::HostProvided { blob, .. } = fact else {
@@ -2295,6 +2413,7 @@ impl Database {
         gates: &Gates,
         blob_decls: &BlobDecls,
         write_policy: WritePolicy,
+        routing_encryption: Option<&EncryptionService>,
         write_id: WriteId,
         f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<R, E>,
     ) -> Result<WriteReceipt<R>, E>
@@ -2308,11 +2427,16 @@ impl Database {
                 .map_err(DbError::from)
                 .map_err(E::from)?;
             let (value, captured) = Self::capture_host_changes_on(&tx, synced_tables, || f(&tx))?;
-            let changeset = gate::gate_outbound(&tx, &captured, gates)
-                .map_err(|error| DbError(format!("gate host transaction: {error}")))
-                .map_err(E::from)?;
+            let partitions = Self::partition_captured_write_on(
+                &tx,
+                &captured,
+                gates,
+                write_policy,
+                routing_encryption,
+            )
+            .map_err(E::from)?;
             let blob_facts =
-                Self::capture_store_write_blob_facts_on(&tx, &changeset, gates, blob_decls)
+                Self::capture_partition_blob_facts_on(&tx, &partitions, gates, blob_decls)
                     .map_err(E::from)?;
             let rows_changed = conn.total_changes().saturating_sub(changes_before);
             let local_device_id: String = tx
@@ -2323,7 +2447,7 @@ impl Database {
                 )
                 .map_err(DbError::from)
                 .map_err(E::from)?;
-            let inverse_changeset = Self::invert_changeset(&changeset).map_err(E::from)?;
+            let inverse_changeset = Self::invert_changeset(&captured).map_err(E::from)?;
             let base = match write_policy {
                 WritePolicy::MergeConcurrent => StoreWriteBase::MergeConcurrent {
                     dependencies: Self::materialized_frontier_on(&tx, Some(&local_device_id))
@@ -2361,7 +2485,7 @@ impl Database {
             let status = Self::insert_store_write_on(
                 &tx,
                 &write_id,
-                &changeset,
+                &partitions,
                 &inverse_changeset,
                 &base,
                 &blob_facts,
@@ -2399,6 +2523,7 @@ impl Database {
             &gates,
             &blob_decls,
             write_policy,
+            None,
             write_id,
             f,
         )
@@ -2601,12 +2726,17 @@ impl Database {
                 },
             };
             let inverse_changeset = Self::invert_changeset(&changeset)?;
+            let partitions = vec![gate::AudiencePartition {
+                audience: crate::sync::circle::Audience::Store,
+                control_coord_json: None,
+                changeset,
+            }];
             let blob_facts =
-                Self::capture_store_write_blob_facts_on(&tx, &changeset, &gates, &blob_decls)?;
+                Self::capture_partition_blob_facts_on(&tx, &partitions, &gates, &blob_decls)?;
             Self::insert_store_write_on(
                 &tx,
                 &write_id,
-                &changeset,
+                &partitions,
                 &inverse_changeset,
                 &base,
                 &blob_facts,
@@ -3951,18 +4081,23 @@ impl Database {
                     let changes_before = tx.total_changes();
                     let (value, captured) =
                         Self::capture_host_changes_on(&tx, &synced_tables, || f(&tx))?;
-                    let changeset = gate::gate_outbound(&tx, &captured, &gates)
-                        .map_err(|error| DbError(format!("gate replacement transaction: {error}")))
-                        .map_err(E::from)?;
-                    let blob_facts = Self::capture_store_write_blob_facts_on(
+                    let partitions = Self::partition_captured_write_on(
                         &tx,
-                        &changeset,
+                        &captured,
+                        &gates,
+                        WritePolicy::Serial,
+                        None,
+                    )
+                    .map_err(E::from)?;
+                    let blob_facts = Self::capture_partition_blob_facts_on(
+                        &tx,
+                        &partitions,
                         &gates,
                         &blob_decls,
                     )
                     .map_err(E::from)?;
                     let rows_changed = tx.total_changes().saturating_sub(changes_before);
-                    let inverse_changeset = Self::invert_changeset(&changeset).map_err(E::from)?;
+                    let inverse_changeset = Self::invert_changeset(&captured).map_err(E::from)?;
                     let base = StoreWriteBase::Serial {
                         branch_id: PendingBranchId::from_first_write(replacement_write_id.clone()),
                         base: Self::latest_position_for_device_on(&tx, SERIAL_STREAM_ID)
@@ -3971,7 +4106,7 @@ impl Database {
                     let status = Self::insert_store_write_on(
                         &tx,
                         &replacement_write_id,
-                        &changeset,
+                        &partitions,
                         &inverse_changeset,
                         &base,
                         &blob_facts,

@@ -512,7 +512,7 @@ fn empty_clone_attached(conn: &Connection) -> Result<bool, GateError> {
 /// transform the `from_db` table into the session-bound table, so the
 /// bind/`from` pairing — not a flag inside SQLite — is what sets the direction
 /// (verified by the retract peer-apply tests).
-enum FullStateDirection {
+pub(super) enum FullStateDirection {
     /// Bind the session to `main`, diff `from = empty`: empty → main yields a
     /// full-state INSERT per current row (the re-emit, false→true).
     Inserts,
@@ -527,7 +527,7 @@ enum FullStateDirection {
 /// full-state changeset for all currently-present rows of those tables —
 /// [`FullStateDirection::Inserts`] for the re-emit, [`FullStateDirection::Deletes`]
 /// for the retract.
-fn full_state_diff(
+pub(super) fn full_state_diff(
     conn: &Connection,
     gates: &Gates,
     direction: FullStateDirection,
@@ -600,6 +600,9 @@ unsafe fn effective_gate(
                 }
             },
         },
+        Some(TableGate::ScopedRoot { .. }) => Err(GateError::ScopedOutboundRequiresPartitioning {
+            table: row.table.clone(),
+        }),
         Some(TableGate::RemoteRoot) => Ok(true),
         Some(TableGate::Child {
             fk_col,
@@ -703,6 +706,7 @@ unsafe fn was_shared(
                 }
             },
         },
+        Some(TableGate::ScopedRoot { .. }) => false,
         Some(TableGate::RemoteRoot) => true,
         Some(TableGate::Child {
             fk_col,
@@ -789,6 +793,9 @@ unsafe fn gated_root_id(
                 Ok(None)
             }
         }
+        Some(TableGate::ScopedRoot { .. }) => Err(GateError::ScopedOutboundRequiresPartitioning {
+            table: row.table.clone(),
+        }),
         Some(TableGate::RemoteRoot) => Ok(row.pk().map(|pk| (row.table.clone(), pk.to_string()))),
         Some(TableGate::Child {
             fk_col,
@@ -896,6 +903,9 @@ pub(super) fn resolve_root(
                 Ok(None)
             }
         },
+        Some(TableGate::ScopedRoot { .. }) => Err(GateError::ScopedOutboundRequiresPartitioning {
+            table: table.to_string(),
+        }),
         Some(TableGate::RemoteRoot) => match query_column_text(conn, table, "id", id)? {
             Some(_) => Ok(Some(ResolvedGate {
                 terminus_table: table.to_string(),
