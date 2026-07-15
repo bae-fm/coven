@@ -38,6 +38,7 @@ pub(crate) struct CircleOperationJournal {
     pub status: CircleOperationState,
     pub creation: CircleCreation,
     pub store_base: Option<CommitPosition>,
+    pub serial_base_head_bytes: Option<Vec<u8>>,
     pub commit_bytes: Vec<u8>,
     pub head: CircleActivationHead,
     pub serial_authorization: Option<SerialAuthorizationState>,
@@ -759,104 +760,110 @@ async fn prepare_circle_operation(
         .ok_or(CircleOperationError::MissingState("Store founder"))?;
     let author_pubkey = keys::public_key_hex(signer);
     let operation_id = db.new_write_id();
-    let (creation, base, order, membership_grant, serial_authorization) = match db.write_policy() {
-        crate::WritePolicy::MergeConcurrent => {
-            let entries = super::membership_ops::list_membership_entries(storage, store_root_hash)
+    let (creation, base, serial_base_head_bytes, order, membership_grant, serial_authorization) =
+        match db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => {
+                let entries =
+                    super::membership_ops::list_membership_entries(storage, store_root_hash)
+                        .await
+                        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                let current = super::membership_ops::load_anchored_chain(
+                    storage,
+                    store_root_hash,
+                    &entries,
+                    Some(&founder),
+                    Some(db),
+                )
                 .await
                 .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let current = super::membership_ops::load_anchored_chain(
-                storage,
-                store_root_hash,
-                &entries,
-                Some(&founder),
-                Some(db),
-            )
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let heads = current.author_heads();
-            let exact = super::membership_ops::load_anchored_chain_at_exact_heads(
-                storage,
-                store_root_hash,
-                &founder,
-                &heads,
-            )
-            .await
-            .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
-            let members = exact.current_members();
-            let membership_grant = exact.write_grant_coord(&author_pubkey).ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "circle creator is not a current Store writer".to_string(),
+                let heads = current.author_heads();
+                let exact = super::membership_ops::load_anchored_chain_at_exact_heads(
+                    storage,
+                    store_root_hash,
+                    &founder,
+                    &heads,
                 )
-            })?;
-            let creation = CircleCreation::founder(
-                store_root_hash,
-                device_id,
-                name,
-                metadata_stamp,
-                StoreMembershipStateRef::merge_concurrent(heads, &members),
-                Some(membership_grant.clone()),
-                members,
-                db.id_provider(),
-                signer,
-            )?;
-            let base = db.latest_local_store_position().await?;
-            let seq = base.as_ref().map_or(1, |position| position.seq + 1);
-            let mut dependencies = db.materialized_frontier().await?;
-            dependencies.remove(device_id);
-            (
-                creation,
-                base.clone(),
-                StoreCommitOrder::MergeConcurrent {
-                    seq,
-                    previous_commit_hash: base.map(|position| position.commit_hash),
-                    dependencies,
-                },
-                Some(membership_grant),
-                None,
-            )
-        }
-        crate::WritePolicy::Serial => {
-            let coordination = coordination.ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "Serial circle creation requires coordination storage".to_string(),
+                .await
+                .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+                let members = exact.current_members();
+                let membership_grant =
+                    exact.write_grant_coord(&author_pubkey).ok_or_else(|| {
+                        CircleOperationError::InvalidState(
+                            "circle creator is not a current Store writer".to_string(),
+                        )
+                    })?;
+                let creation = CircleCreation::founder(
+                    store_root_hash,
+                    device_id,
+                    name,
+                    metadata_stamp,
+                    StoreMembershipStateRef::merge_concurrent(heads, &members),
+                    Some(membership_grant.clone()),
+                    members,
+                    db.id_provider(),
+                    signer,
+                )?;
+                let base = db.latest_local_store_position().await?;
+                let seq = base.as_ref().map_or(1, |position| position.seq + 1);
+                let mut dependencies = db.materialized_frontier().await?;
+                dependencies.remove(device_id);
+                (
+                    creation,
+                    base.clone(),
+                    None,
+                    StoreCommitOrder::MergeConcurrent {
+                        seq,
+                        previous_commit_hash: base.map(|position| position.commit_hash),
+                        dependencies,
+                    },
+                    Some(membership_grant),
+                    None,
                 )
-            })?;
-            let snapshot = super::store_outbound::current_serial_authorization_snapshot(
-                db,
-                storage,
-                coordination,
-            )
-            .await?;
-            if !snapshot.authorization.membership.can_write(&author_pubkey) {
-                return Err(CircleOperationError::InvalidState(
-                    "circle creator is not a current Store writer".to_string(),
-                ));
             }
-            let base = snapshot.base;
-            let members = snapshot.authorization.membership.current_members();
-            let creation = CircleCreation::founder(
-                store_root_hash,
-                device_id,
-                name,
-                metadata_stamp,
-                StoreMembershipStateRef::serial(base.clone(), &members),
-                None,
-                members,
-                db.id_provider(),
-                signer,
-            )?;
-            (
-                creation,
-                base.clone(),
-                StoreCommitOrder::Serial {
-                    seq: base.as_ref().map_or(1, |position| position.seq + 1),
-                    previous_commit_hash: base.as_ref().map(|position| position.commit_hash),
-                },
-                None,
-                Some(snapshot.authorization),
-            )
-        }
-    };
+            crate::WritePolicy::Serial => {
+                let coordination = coordination.ok_or_else(|| {
+                    CircleOperationError::InvalidState(
+                        "Serial circle creation requires coordination storage".to_string(),
+                    )
+                })?;
+                let snapshot = super::store_outbound::current_serial_authorization_snapshot(
+                    db,
+                    storage,
+                    coordination,
+                )
+                .await?;
+                if !snapshot.authorization.membership.can_write(&author_pubkey) {
+                    return Err(CircleOperationError::InvalidState(
+                        "circle creator is not a current Store writer".to_string(),
+                    ));
+                }
+                let base = snapshot.base;
+                let base_head_bytes = snapshot.base_head_bytes;
+                let members = snapshot.authorization.membership.current_members();
+                let creation = CircleCreation::founder(
+                    store_root_hash,
+                    device_id,
+                    name,
+                    metadata_stamp,
+                    StoreMembershipStateRef::serial(base.clone(), &members),
+                    None,
+                    members,
+                    db.id_provider(),
+                    signer,
+                )?;
+                (
+                    creation,
+                    base.clone(),
+                    base_head_bytes,
+                    StoreCommitOrder::Serial {
+                        seq: base.as_ref().map_or(1, |position| position.seq + 1),
+                        previous_commit_hash: base.as_ref().map(|position| position.commit_hash),
+                    },
+                    None,
+                    Some(snapshot.authorization),
+                )
+            }
+        };
     let commit = StoreBatchCommit::signed_batch(
         store_root_hash,
         operation_id.clone(),
@@ -900,6 +907,7 @@ async fn prepare_circle_operation(
         status: CircleOperationState::Pending,
         creation,
         store_base: base,
+        serial_base_head_bytes,
         commit_bytes: commit.to_bytes(),
         head,
         serial_authorization,
@@ -1062,6 +1070,7 @@ async fn publish_circle_operation(
                 storage,
                 coordination,
                 journal.store_base.clone(),
+                journal.serial_base_head_bytes.as_deref(),
                 &commit,
                 &head,
             )
@@ -1314,6 +1323,10 @@ mod tests {
         assert_eq!(actual.operation_id, expected.operation_id);
         assert_eq!(actual.creation, expected.creation);
         assert_eq!(actual.store_base, expected.store_base);
+        assert_eq!(
+            actual.serial_base_head_bytes,
+            expected.serial_base_head_bytes
+        );
         assert_eq!(actual.commit_bytes, expected.commit_bytes);
         assert_eq!(actual.head, expected.head);
         assert_eq!(actual.serial_authorization, expected.serial_authorization);
@@ -1842,6 +1855,170 @@ mod tests {
             .get_circles(&keys::public_key_hex(&founder))
             .await
             .expect("read founder circles")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn serial_circle_rejects_different_head_bytes_at_the_same_commit_position_before_upload()
+    {
+        let home = InMemoryCloudHome::new();
+        let founder = UserKeypair::generate();
+        let successor = UserKeypair::generate();
+        let storage = serial_storage(&home, &founder, "circle-serial-head-bytes");
+        let db = open_serial_test_db();
+        let root = publish_test_serial_store_protocol_root(
+            &db,
+            &storage,
+            "circle-serial-head-bytes",
+            "founder-device",
+            &founder,
+        )
+        .await;
+        let coordination = storage.serial_coordination().expect("Serial coordination");
+        let authorization =
+            super::super::store_outbound::current_serial_authorization(&db, &storage, coordination)
+                .await
+                .expect("founder authorization");
+        let entry = authorization
+            .membership
+            .signed_set_member(
+                &founder,
+                keys::public_key_hex(&successor),
+                None,
+                MemberRole::Member,
+                "0000000000001-0000-founder".to_string(),
+            )
+            .expect("sign membership entry");
+        let prepared = super::super::store_outbound::prepare_serial_control(
+            &db,
+            &storage,
+            coordination,
+            "founder-device",
+            StoreControl::SerialMembership { entry },
+            &founder,
+        )
+        .await
+        .expect("prepare serial control");
+        super::super::store_outbound::activate_serial_control(
+            &db,
+            &storage,
+            coordination,
+            &prepared,
+        )
+        .await
+        .expect("activate serial control");
+
+        let journal = prepare_circle_operation(
+            &db,
+            &storage,
+            Some(coordination),
+            "founder-device",
+            "0000000001000-0000-founder",
+            "Same-position conflict",
+            &founder,
+        )
+        .await
+        .expect("prepare Circle operation at the first exact head");
+        let base = journal.store_base.clone().expect("Circle base");
+        let competing = StoreSerialHead::signed(
+            root,
+            Some(base),
+            Some(crate::WriteId::from_generated(
+                "different-tip-at-same-position".to_string(),
+            )),
+            &founder,
+        )
+        .expect("sign different same-position head");
+        let current = coordination
+            .read_head(serial_head_key())
+            .await
+            .expect("read first head");
+        coordination
+            .replace_head(serial_head_key(), &current.version, &competing.to_bytes())
+            .await
+            .expect("install different same-position head");
+        let commit = journal.commit().expect("parse Circle commit");
+        let commit_prefix = commit_semantic_prefix(
+            super::super::store_commit::SERIAL_STREAM_ID,
+            commit.seq(),
+            commit.commit_hash(),
+        );
+        db.insert_circle_operation(journal.clone())
+            .await
+            .expect("persist Circle operation");
+
+        let error =
+            publish_circle_operation(&db, &storage, Some(coordination), journal.circle_id())
+                .await
+                .expect_err("same-position head substitution must block activation");
+
+        assert!(matches!(error, CircleOperationError::Blocked { .. }));
+        assert!(storage
+            .list_protocol_objects(&format!("{commit_prefix}/copies/"))
+            .await
+            .expect("list Circle commit slot")
+            .objects
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn serial_circle_matching_head_without_its_commit_does_not_activate_or_reappend() {
+        let home = InMemoryCloudHome::new();
+        let founder = UserKeypair::generate();
+        let storage = serial_storage(&home, &founder, "circle-serial-missing-commit");
+        let db = open_serial_test_db();
+        publish_test_serial_store_protocol_root(
+            &db,
+            &storage,
+            "circle-serial-missing-commit",
+            "founder-device",
+            &founder,
+        )
+        .await;
+        let coordination = storage.serial_coordination().expect("Serial coordination");
+        let journal = prepare_circle_operation(
+            &db,
+            &storage,
+            Some(coordination),
+            "founder-device",
+            "0000000001000-0000-founder",
+            "Missing commit",
+            &founder,
+        )
+        .await
+        .expect("prepare Circle operation");
+        let CircleActivationHead::Serial(head) = &journal.head else {
+            panic!("expected Serial Circle head")
+        };
+        coordination
+            .create_head(serial_head_key(), &head.to_bytes())
+            .await
+            .expect("publish head without commit");
+        let commit = journal.commit().expect("parse Circle commit");
+        let commit_prefix = commit_semantic_prefix(
+            super::super::store_commit::SERIAL_STREAM_ID,
+            commit.seq(),
+            commit.commit_hash(),
+        );
+        db.insert_circle_operation(journal.clone())
+            .await
+            .expect("persist Circle operation");
+
+        publish_circle_operation(&db, &storage, Some(coordination), journal.circle_id())
+            .await
+            .expect_err("an activated head cannot repair or trust an absent commit");
+
+        assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+        assert!(db
+            .circle_operation(journal.circle_id())
+            .await
+            .expect("read Circle journal")
+            .is_some());
+        assert!(storage
+            .list_protocol_objects(&format!("{commit_prefix}/copies/"))
+            .await
+            .expect("list absent commit slot")
+            .objects
             .is_empty());
     }
 

@@ -860,6 +860,7 @@ pub(crate) struct PreparedSerialStoreWriteCommit {
 pub(crate) struct PreparedSerialStoreBranch {
     pub branch_id: PendingBranchId,
     pub base: Option<CommitPosition>,
+    pub base_head_bytes: Option<Vec<u8>>,
     pub writes: Vec<PreparedSerialStoreWriteCommit>,
     pub head: ExactProtocolObject<StoreSerialHead>,
 }
@@ -893,6 +894,7 @@ pub(crate) struct DurableDeviceRegistration {
     pub previous_registration_hash: Option<ObjectHash>,
     pub state: StoreDeviceRegistrationState,
     pub registration_bytes: Vec<u8>,
+    pub activation_base_head_bytes: Option<Vec<u8>>,
     pub activation_commit_bytes: Option<Vec<u8>>,
     pub activation_head_bytes: Option<Vec<u8>>,
     pub published: bool,
@@ -900,6 +902,7 @@ pub(crate) struct DurableDeviceRegistration {
 
 struct StoredDeviceRegistrationActivation {
     registration_bytes: Vec<u8>,
+    base_head_bytes: Option<Vec<u8>>,
     commit_bytes: Option<Vec<u8>>,
     head_bytes: Option<Vec<u8>>,
     published: i64,
@@ -933,6 +936,7 @@ pub(crate) struct StoreWritePreparation {
 pub(crate) struct SerialStoreWritePreparation {
     pub branch_id: PendingBranchId,
     pub base: Option<CommitPosition>,
+    pub base_head_bytes: Option<Vec<u8>>,
     pub writes: Vec<SerialStoreWritePreparationEntry>,
     pub head: StoreSerialHead,
 }
@@ -958,6 +962,7 @@ enum PreparedStoreWriteState {
     },
     SerialPreparing,
     Serial {
+        base_head_bytes: Option<Vec<u8>>,
         commit_bytes: Vec<u8>,
         tip_head_bytes: Option<Vec<u8>>,
         blob_manifest: StoreBlobManifest,
@@ -3281,6 +3286,7 @@ impl Database {
                 }
                 let tip_head_bytes = (index + 1 == stage.writes.len()).then(|| head_bytes.clone());
                 let durable = PreparedStoreWriteState::Serial {
+                    base_head_bytes: stage.base_head_bytes.clone(),
                     commit_bytes: write.commit.to_bytes(),
                     tip_head_bytes,
                     blob_manifest: write.blob_manifest.clone(),
@@ -3600,6 +3606,7 @@ impl Database {
                 .map_err(DbError::from)?;
             let mut branch_id = None;
             let mut base = None;
+            let mut base_head_bytes: Option<Option<Vec<u8>>> = None;
             let mut writes = Vec::new();
             let mut head = None;
             for row in rows {
@@ -3615,6 +3622,7 @@ impl Database {
                     ));
                 }
                 let PreparedStoreWriteState::Serial {
+                    base_head_bytes: row_base_head_bytes,
                     commit_bytes,
                     tip_head_bytes,
                     blob_manifest,
@@ -3639,6 +3647,9 @@ impl Database {
                     .as_ref()
                     .is_some_and(|value| value != &row_branch_id)
                     || base.as_ref().is_some_and(|value| value != &row_base)
+                    || base_head_bytes
+                        .as_ref()
+                        .is_some_and(|value| value != &row_base_head_bytes)
                 {
                     return Err(DbError::Message(
                         "prepared Serial writes do not share one branch base".to_string(),
@@ -3646,6 +3657,7 @@ impl Database {
                 }
                 branch_id.get_or_insert(row_branch_id);
                 base.get_or_insert(row_base);
+                base_head_bytes.get_or_insert(row_base_head_bytes);
                 let commit: StoreBatchCommit =
                     serde_json::from_slice(&commit_bytes).map_err(|error| {
                         DbError::Message(format!("prepared Serial commit: {error}"))
@@ -3694,6 +3706,7 @@ impl Database {
             Ok(Some(PreparedSerialStoreBranch {
                 branch_id: branch_id.expect("nonempty branch"),
                 base: base.expect("nonempty branch"),
+                base_head_bytes: base_head_bytes.expect("nonempty branch"),
                 writes,
                 head,
             }))
@@ -5000,7 +5013,7 @@ impl Database {
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
         self.read_local_store_device_registration(
             "SELECT revision, registration_hash, previous_registration_hash, state, \
-                    registration_bytes, activation_commit_bytes, activation_head_bytes, published \
+                    registration_bytes, activation_base_head_bytes, activation_commit_bytes, activation_head_bytes, published \
              FROM local_store_device_registration ORDER BY revision DESC LIMIT 1",
         )
         .await
@@ -5011,7 +5024,7 @@ impl Database {
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
         self.read_local_store_device_registration(
             "SELECT revision, registration_hash, previous_registration_hash, state, \
-                    registration_bytes, activation_commit_bytes, activation_head_bytes, published \
+                    registration_bytes, activation_base_head_bytes, activation_commit_bytes, activation_head_bytes, published \
              FROM local_store_device_registration WHERE published = 0 \
              ORDER BY revision LIMIT 1",
         )
@@ -5032,7 +5045,8 @@ impl Database {
                     row.get::<_, Vec<u8>>(4)?,
                     row.get::<_, Option<Vec<u8>>>(5)?,
                     row.get::<_, Option<Vec<u8>>>(6)?,
-                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<Vec<u8>>>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             })
             .optional()
@@ -5044,6 +5058,7 @@ impl Database {
                     previous_hash,
                     state,
                     bytes,
+                    activation_base_head_bytes,
                     activation_commit_bytes,
                     activation_head_bytes,
                     published,
@@ -5084,6 +5099,7 @@ impl Database {
                             }
                         },
                         registration_bytes: bytes,
+                        activation_base_head_bytes,
                         activation_commit_bytes,
                         activation_head_bytes,
                         published: match published {
@@ -5222,8 +5238,8 @@ impl Database {
             conn.execute(
                 "INSERT INTO local_store_device_registration \
                  (revision, registration_hash, previous_registration_hash, state, \
-                  registration_bytes, activation_commit_bytes, activation_head_bytes, published) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, 0)",
+                  registration_bytes, activation_base_head_bytes, activation_commit_bytes, activation_head_bytes, published) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, 0)",
                 (
                     revision,
                     hash.to_string(),
@@ -5260,6 +5276,7 @@ impl Database {
                 conn,
                 revision,
                 registration_hash,
+                None,
                 &commit,
                 &head.to_bytes(),
             )
@@ -5271,6 +5288,7 @@ impl Database {
         &self,
         revision: u64,
         registration_hash: ObjectHash,
+        base_head_bytes: Option<Vec<u8>>,
         commit: StoreBatchCommit,
         head: StoreSerialHead,
     ) -> Result<(), DbError> {
@@ -5287,6 +5305,7 @@ impl Database {
                 conn,
                 revision,
                 registration_hash,
+                base_head_bytes.as_deref(),
                 &commit,
                 &head.to_bytes(),
             )
@@ -5298,6 +5317,7 @@ impl Database {
         conn: &Connection,
         revision: u64,
         registration_hash: ObjectHash,
+        base_head_bytes: Option<&[u8]>,
         commit: &StoreBatchCommit,
         head_bytes: &[u8],
     ) -> Result<(), DbError> {
@@ -5308,16 +5328,17 @@ impl Database {
         })?;
         let stored = conn
             .query_row(
-                "SELECT registration_bytes, activation_commit_bytes, activation_head_bytes, published \
+                "SELECT registration_bytes, activation_base_head_bytes, activation_commit_bytes, activation_head_bytes, published \
                  FROM local_store_device_registration \
                  WHERE revision = ?1 AND registration_hash = ?2",
                 (revision, registration_hash.to_string()),
                 |row| {
                     Ok(StoredDeviceRegistrationActivation {
                         registration_bytes: row.get(0)?,
-                        commit_bytes: row.get(1)?,
-                        head_bytes: row.get(2)?,
-                        published: row.get(3)?,
+                        base_head_bytes: row.get(1)?,
+                        commit_bytes: row.get(2)?,
+                        head_bytes: row.get(3)?,
+                        published: row.get(4)?,
                     })
                 },
             )
@@ -5345,15 +5366,21 @@ impl Database {
             ));
         }
         let commit_bytes = commit.to_bytes();
-        match (stored.commit_bytes, stored.head_bytes, stored.published) {
-            (None, None, 0) => {
+        match (
+            stored.base_head_bytes,
+            stored.commit_bytes,
+            stored.head_bytes,
+            stored.published,
+        ) {
+            (_, None, None, 0) => {
                 conn.execute(
                     "UPDATE local_store_device_registration \
-                     SET activation_commit_bytes = ?3, activation_head_bytes = ?4 \
+                     SET activation_base_head_bytes = ?3, activation_commit_bytes = ?4, activation_head_bytes = ?5 \
                      WHERE revision = ?1 AND registration_hash = ?2 AND published = 0",
                     rusqlite::params![
                         revision,
                         registration_hash.to_string(),
+                        base_head_bytes,
                         commit_bytes,
                         head_bytes,
                     ],
@@ -5361,13 +5388,17 @@ impl Database {
                 .map_err(DbError::from)?;
                 Ok(())
             }
-            (Some(existing_commit), Some(existing_head), 0)
-                if existing_commit == commit_bytes && existing_head == head_bytes =>
+            (existing_base, Some(existing_commit), Some(existing_head), 0)
+                if existing_base.as_deref() == base_head_bytes
+                    && existing_commit == commit_bytes
+                    && existing_head == head_bytes =>
             {
                 Ok(())
             }
-            (Some(existing_commit), Some(existing_head), 1)
-                if existing_commit == commit_bytes && existing_head == head_bytes =>
+            (existing_base, Some(existing_commit), Some(existing_head), 1)
+                if existing_base.as_deref() == base_head_bytes
+                    && existing_commit == commit_bytes
+                    && existing_head == head_bytes =>
             {
                 Ok(())
             }

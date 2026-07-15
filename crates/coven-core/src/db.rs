@@ -194,6 +194,7 @@ macro_rules! coven_tables {
     previous_registration_hash TEXT,
     state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
     registration_bytes BLOB NOT NULL,
+    activation_base_head_bytes BLOB,
     activation_commit_bytes BLOB,
     activation_head_bytes BLOB,
     published INTEGER NOT NULL CHECK (published IN (0, 1)),

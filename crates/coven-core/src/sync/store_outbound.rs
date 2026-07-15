@@ -303,6 +303,7 @@ enum SerialHeadObservation {
     Absent,
     Present {
         head: StoreSerialHead,
+        bytes: Vec<u8>,
         version: VersionToken,
     },
 }
@@ -311,6 +312,7 @@ enum SerialHeadObservation {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparedSerialControl {
     pub base: Option<crate::sync::store_commit::CommitPosition>,
+    pub base_head_bytes: Option<Vec<u8>>,
     pub commit: StoreBatchCommit,
     pub head: StoreSerialHead,
     pub authorization_after: SerialAuthorizationState,
@@ -318,6 +320,7 @@ pub(crate) struct PreparedSerialControl {
 
 pub(crate) struct SerialAuthorizationSnapshot {
     pub base: Option<crate::sync::store_commit::CommitPosition>,
+    pub base_head_bytes: Option<Vec<u8>>,
     pub authorization: SerialAuthorizationState,
 }
 
@@ -368,6 +371,7 @@ pub(crate) async fn current_serial_authorization_snapshot(
     }?;
     Ok(SerialAuthorizationSnapshot {
         base: observed.position(),
+        base_head_bytes: observed.bytes().map(<[u8]>::to_vec),
         authorization,
     })
 }
@@ -383,6 +387,7 @@ pub(crate) async fn prepare_serial_control(
     let store_root_hash = required_store_root_hash(db).await?;
     let snapshot = current_serial_authorization_snapshot(db, storage, coordination).await?;
     let base = snapshot.base;
+    let base_head_bytes = snapshot.base_head_bytes;
     let seq = base.as_ref().map_or(1, |position| position.seq + 1);
     let commit = StoreBatchCommit::signed_with_control(
         store_root_hash,
@@ -412,6 +417,7 @@ pub(crate) async fn prepare_serial_control(
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     Ok(PreparedSerialControl {
         base,
+        base_head_bytes,
         commit,
         head,
         authorization_after,
@@ -429,6 +435,7 @@ pub(crate) async fn activate_serial_control(
         storage,
         coordination,
         prepared.base.clone(),
+        prepared.base_head_bytes.as_deref(),
         &prepared.commit,
         &prepared.head,
     )
@@ -446,9 +453,38 @@ pub(crate) async fn activate_serial_commit_head(
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,
     base: Option<crate::sync::store_commit::CommitPosition>,
+    base_head_bytes: Option<&[u8]>,
     commit: &StoreBatchCommit,
     head: &StoreSerialHead,
 ) -> Result<(), StoreOutboundError> {
+    let observed = observe_serial_head(db, coordination).await?;
+    let head_bytes = head.to_bytes();
+    if observed.bytes() == Some(head_bytes.as_slice()) {
+        let persisted = super::store_objects::load_commit_slot(
+            storage,
+            commit.store_root_hash,
+            SERIAL_STREAM_ID,
+            commit.seq(),
+        )
+        .await?
+        .ok_or_else(|| {
+            StoreOutboundError::InvalidOutbound(
+                "activated Serial head names an absent commit".to_string(),
+            )
+        })?;
+        if persisted.value != *commit || persisted.bytes != commit.to_bytes() {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "activated Serial head names different commit bytes".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    if observed.bytes() != base_head_bytes {
+        return Err(StoreOutboundError::SerialControlConflict {
+            expected: base.clone(),
+            current: observed.position(),
+        });
+    }
     append_and_verify(
         storage,
         &super::storage::ProtocolObjectContext::store(
@@ -460,19 +496,9 @@ pub(crate) async fn activate_serial_commit_head(
         &commit.to_bytes(),
     )
     .await?;
-    let observed = observe_serial_head(db, coordination).await?;
-    if observed.head() == Some(head) {
-        return Ok(());
-    }
-    if observed.position() != base {
-        return Err(StoreOutboundError::SerialControlConflict {
-            expected: base.clone(),
-            current: observed.position(),
-        });
-    }
     let activation = match observed.version() {
         None => coordination
-            .create_head(serial_head_key(), &head.to_bytes())
+            .create_head(serial_head_key(), &head_bytes)
             .await
             .map_err(|error| match error {
                 CreateHeadError::AlreadyExists => None,
@@ -481,7 +507,7 @@ pub(crate) async fn activate_serial_commit_head(
                 }
             }),
         Some(version) => coordination
-            .replace_head(serial_head_key(), version, &head.to_bytes())
+            .replace_head(serial_head_key(), version, &head_bytes)
             .await
             .map_err(|error| match error {
                 ReplaceHeadError::VersionMismatch => None,
@@ -492,12 +518,12 @@ pub(crate) async fn activate_serial_commit_head(
     };
     if activation
         .as_ref()
-        .is_ok_and(|activated| activated.bytes == head.to_bytes())
+        .is_ok_and(|activated| activated.bytes == head_bytes)
     {
         return Ok(());
     }
     let after = observe_serial_head(db, coordination).await?;
-    if after.head() == Some(head) {
+    if after.bytes() == Some(head_bytes.as_slice()) {
         return Ok(());
     }
     if let Err(Some(error)) = activation {
@@ -521,6 +547,13 @@ impl SerialHeadObservation {
         match self {
             Self::Absent => None,
             Self::Present { version, .. } => Some(version),
+        }
+    }
+
+    fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Absent => None,
+            Self::Present { bytes, .. } => Some(bytes),
         }
     }
 
@@ -552,6 +585,7 @@ async fn observe_serial_head(
             })?;
             Ok(SerialHeadObservation::Present {
                 head,
+                bytes: object.bytes,
                 version: object.version,
             })
         }
@@ -658,6 +692,7 @@ async fn prepare_serial_store_branch(
         db.prepare_serial_store_branch_commit(SerialStoreWritePreparation {
             branch_id: branch.branch_id,
             base: branch.base,
+            base_head_bytes: snapshot.base_head_bytes,
             writes: prepared,
             head,
         })
@@ -692,10 +727,7 @@ fn serial_head_activates_branch(
     observed: &SerialHeadObservation,
     branch: &PreparedSerialStoreBranch,
 ) -> bool {
-    observed.head().is_some_and(|head| {
-        head.commit == branch.head.value.commit
-            && head.tip_write_id == branch.head.value.tip_write_id
-    })
+    observed.bytes() == Some(branch.head.bytes.as_slice())
 }
 
 async fn conflict_serial_branch(
@@ -730,7 +762,7 @@ async fn drain_serial_store_branch(
             .await
             .map_err(Into::into);
     }
-    if observed.position() != branch.base {
+    if observed.bytes() != branch.base_head_bytes.as_deref() {
         let current = observed.position();
         return conflict_serial_branch(db, branch, current).await;
     }

@@ -310,11 +310,13 @@ async fn prepare_registration_activation(
                     "Serial registration activation requires coordination".to_string(),
                 )
             })?;
-            let base =
-                super::store_outbound::current_serial_head_position(db, coordination).await?;
-            let authorization =
-                super::store_outbound::current_serial_authorization(db, storage, coordination)
-                    .await?;
+            let snapshot = super::store_outbound::current_serial_authorization_snapshot(
+                db,
+                storage,
+                coordination,
+            )
+            .await?;
+            let base = snapshot.base;
             let commit = StoreBatchCommit::signed_with_registrations(
                 registration.store_root_hash,
                 db.new_write_id(),
@@ -328,7 +330,8 @@ async fn prepare_registration_activation(
                 signer,
             )
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-            authorization
+            snapshot
+                .authorization
                 .authorize_and_apply_with_registrations(&commit, std::slice::from_ref(registration))
                 .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
             let head = StoreSerialHead::signed(
@@ -341,6 +344,7 @@ async fn prepare_registration_activation(
             db.stage_serial_store_device_registration_activation(
                 registration.revision,
                 registration.registration_hash(),
+                snapshot.base_head_bytes,
                 commit,
                 head,
             )
@@ -458,6 +462,7 @@ async fn publish_registration_activation(
                 storage,
                 coordination,
                 base,
+                prepared.activation_base_head_bytes.as_deref(),
                 &commit,
                 &head,
             )

@@ -254,13 +254,7 @@ pub fn ed25519_to_x25519_public_key(
             "weak Ed25519 public key point cannot identify a recipient".to_string(),
         ));
     }
-    let public_key = vk.to_montgomery().to_bytes();
-    if public_key == [0; CURVE25519_PUBLICKEYBYTES] {
-        return Err(KeyError::Crypto(
-            "Ed25519 recipient converts to the all-zero X25519 public key".to_string(),
-        ));
-    }
-    Ok(public_key)
+    Ok(vk.to_montgomery().to_bytes())
 }
 
 /// Derive an X25519 shared secret after rejecting public inputs that cannot
