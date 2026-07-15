@@ -99,7 +99,7 @@ unsafe fn partition_outbound_raw(
     };
     for_each_change(changeset, |iter, row| {
         validate_outgoing_synced_fk_audiences(conn, gates, &row)?;
-        if let Some((source, destination)) = scoped_root_move(gates, &row)? {
+        if let Some((source, destination)) = scoped_row_move(conn, gates, &row)? {
             let row_id = row
                 .pk()
                 .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
@@ -444,7 +444,7 @@ fn routing_transitions(
                 );
                 return Ok(());
             }
-            let Some((_source, destination)) = scoped_root_move(gates, &row)? else {
+            let Some((_source, destination)) = scoped_row_move(conn, gates, &row)? else {
                 return Ok(());
             };
             let stamp = live_row_stamp(conn, &row.table, row_id)?;
@@ -611,29 +611,68 @@ unsafe fn partition_group<'a>(
     }
 }
 
-fn scoped_root_move(
+fn scoped_row_move(
+    conn: &Connection,
     gates: &Gates,
     row: &ChangeRow,
 ) -> Result<Option<(Audience, Audience)>, GateError> {
     if row.op != ffi::SQLITE_UPDATE {
         return Ok(None);
     }
-    let Some(TableGate::ScopedRoot { audience_col }) = gates.tables.get(&row.table) else {
-        return Ok(None);
+    let (source, destination) = match gates.tables.get(&row.table) {
+        Some(TableGate::ScopedRoot { audience_col }) => {
+            let Some(destination_value) = row.new_value(audience_col.index) else {
+                return Ok(None);
+            };
+            let source_value = row.old_value(audience_col.index).unwrap_or(None);
+            let parse = |value: Option<&str>| {
+                Audience::from_column(value).map_err(|error| GateError::InvalidAudience {
+                    table: row.table.clone(),
+                    value: value.map(str::to_string),
+                    reason: error.to_string(),
+                })
+            };
+            (parse(source_value)?, parse(destination_value)?)
+        }
+        Some(TableGate::Child {
+            fk_col,
+            parent,
+            parent_col,
+        }) => {
+            let Some(destination_key) = row.new_value(fk_col.index) else {
+                return Ok(None);
+            };
+            let row_id = row.pk().map(str::to_string);
+            let source_key = row.old_value(fk_col.index).flatten().ok_or_else(|| {
+                GateError::MissingAudienceParent {
+                    table: row.table.clone(),
+                    row_id: row_id.clone(),
+                    parent: parent.clone(),
+                }
+            })?;
+            let destination_key =
+                destination_key.ok_or_else(|| GateError::MissingAudienceParent {
+                    table: row.table.clone(),
+                    row_id: row_id.clone(),
+                    parent: parent.clone(),
+                })?;
+            let resolve = |parent_key: &str| {
+                let parent_id =
+                    row_id_for_column_value(conn, parent, &parent_col.name, parent_key)?
+                        .ok_or_else(|| GateError::MissingAudienceParent {
+                            table: row.table.clone(),
+                            row_id: row_id.clone(),
+                            parent: parent.clone(),
+                        })?;
+                live_row_audience(conn, gates, parent, &parent_id)
+            };
+            (resolve(source_key)?, resolve(destination_key)?)
+        }
+        None
+        | Some(TableGate::Root { .. })
+        | Some(TableGate::RemoteRoot)
+        | Some(TableGate::Parent { .. }) => return Ok(None),
     };
-    let Some(destination_value) = row.new_value(audience_col.index) else {
-        return Ok(None);
-    };
-    let source_value = row.old_value(audience_col.index).unwrap_or(None);
-    let parse = |value: Option<&str>| {
-        Audience::from_column(value).map_err(|error| GateError::InvalidAudience {
-            table: row.table.clone(),
-            value: value.map(str::to_string),
-            reason: error.to_string(),
-        })
-    };
-    let source = parse(source_value)?;
-    let destination = parse(destination_value)?;
     Ok((source != destination).then_some((source, destination)))
 }
 
