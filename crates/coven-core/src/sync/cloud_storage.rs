@@ -14,8 +14,8 @@ use tracing::warn;
 
 use super::storage::{
     CoordinationError, CoordinationStorage, CreateHeadError, ProtocolObjectContext,
-    ProtocolObjectListing, ProtocolObjectLocator, ProtocolObjectProtection, ReplaceHeadError,
-    StorageError, SyncStorage, VersionToken, VersionedObject,
+    ProtocolObjectListing, ProtocolObjectLocator, ReplaceHeadError, StorageError, SyncStorage,
+    VersionToken, VersionedObject,
 };
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
@@ -1299,10 +1299,7 @@ impl SyncStorage for CloudSyncStorage {
         let logical_key = format!("{semantic_prefix}/copies/{copy_id}{extension}");
         let physical_key = format!("{logical_key}{}", self.suffix());
         let aad = protocol_object_aad_context(context, semantic_prefix);
-        let stored = match context.protection() {
-            ProtocolObjectProtection::Store => self.cipher_for_seal()?.seal(data, &aad),
-            ProtocolObjectProtection::RecipientSealed => data,
-        };
+        let stored = self.cipher_for_seal()?.seal(data, &aad);
         let physical = self
             .home
             .append_object(
@@ -1318,9 +1315,7 @@ impl SyncStorage for CloudSyncStorage {
         &self,
         prefix: &str,
     ) -> Result<ProtocolObjectListing, StorageError> {
-        if !prefix.starts_with(crate::sync::store_commit::protocol_prefix())
-            && !prefix.starts_with("circles/")
-        {
+        if !prefix.starts_with(crate::sync::store_commit::protocol_prefix()) {
             return Err(StorageError::Parse(format!(
                 "invalid protocol listing prefix {prefix:?}"
             )));
@@ -1364,11 +1359,7 @@ impl SyncStorage for CloudSyncStorage {
         }
         let stored = self.home.read_appended(object.physical()).await?;
         let aad = protocol_object_aad_context(context, semantic_prefix);
-        match context.protection() {
-            ProtocolObjectProtection::Store => self.cipher().open(stored, &aad),
-            ProtocolObjectProtection::RecipientSealed => return Ok(stored),
-        }
-        .map_err(|error| {
+        self.cipher().open(stored, &aad).map_err(|error| {
             StorageError::Decryption(format!("protocol object {}: {error}", object.logical_key()))
         })
     }
@@ -2087,22 +2078,54 @@ mod tests {
             2,
             second_coord.entry_hash,
         );
-        let generation_two_key = home
-            .appended_keys()
+        let context = ProtocolObjectContext::store(
+            store_root_hash,
+            super::super::storage::ProtocolObjectDomain::StoreMembershipEntry,
+        );
+        let generation_two = storage
+            .list_protocol_objects(&semantic_prefix)
+            .await
+            .expect("list generation two membership")
+            .objects
             .into_iter()
-            .find(|key| key.starts_with(&semantic_prefix))
+            .next()
             .expect("generation two object exists");
-        let generation_two = home
-            .get_appended(&generation_two_key)
-            .expect("generation two object exists");
+        assert_eq!(
+            storage
+                .read_protocol_object(&context, &generation_two, &semantic_prefix)
+                .await
+                .expect("generation two key opens through protocol storage"),
+            serde_json::to_vec(&second).unwrap(),
+        );
+
+        let generation_one_storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key_at_generation(1, [1u8; 32])),
+            BlobPathScheme::Hashed,
+            "test-lib",
+            owner.clone(),
+        );
         assert!(
-            CloudCipher::Encrypted(EncryptionService::from_key_at_generation(1, [1u8; 32]))
-                .open(
-                    generation_two,
-                    &cloud_aad_context("test-lib", &semantic_prefix),
-                )
+            generation_one_storage
+                .read_protocol_object(&context, &generation_two, &semantic_prefix)
+                .await
                 .is_err(),
             "a generation one key must not open a generation two object",
+        );
+
+        let old_key_labeled_generation_two = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Encrypted(EncryptionService::from_key_at_generation(2, [1u8; 32])),
+            BlobPathScheme::Hashed,
+            "test-lib",
+            owner,
+        );
+        assert!(
+            old_key_labeled_generation_two
+                .read_protocol_object(&context, &generation_two, &semantic_prefix)
+                .await
+                .is_err(),
+            "renumbering the old key cannot open content sealed with generation-two key material",
         );
     }
 

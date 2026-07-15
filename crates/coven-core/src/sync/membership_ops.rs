@@ -421,9 +421,18 @@ pub async fn invite_member_with_coordination(
     // heads are the floor the joiner seeds its watermark from, so a provider
     // can never roll the joiner back to a state before this invite.
     let membership_floor = chain.author_heads();
-    let store_protocol_root =
-        super::store_objects::discover_store_protocol_root(storage, store_id, Some(&owner_pubkey))
-            .await?;
+    let store_protocol_root = super::store_objects::load_pinned_store_protocol_root(
+        storage,
+        store_root_hash,
+        store_id,
+        &owner_pubkey,
+    )
+    .await?
+    .ok_or_else(|| {
+        MembershipOpsError::Storage(StorageError::NotFound(format!(
+            "Store protocol root {store_root_hash}"
+        )))
+    })?;
 
     // Build the invite code
     Ok(crate::join_code::InviteCode {
@@ -1723,12 +1732,19 @@ async fn validate_anchored_chain(
     let store_id = chain.store_id().ok_or_else(|| {
         AnchoredChainError::LoadFailed("membership chain has no store id".to_string())
     })?;
-    let store_protocol_root =
-        super::store_objects::discover_store_protocol_root(storage, store_id, owner_pubkey)
-            .await
-            .map_err(map_membership_object_error)?;
     let founder_coord = chain.founder_coord().ok_or_else(|| {
         AnchoredChainError::LoadFailed("membership chain has no founder root".to_string())
+    })?;
+    let store_protocol_root = super::store_objects::load_pinned_store_protocol_root(
+        storage,
+        store_root_hash,
+        store_id,
+        &founder_coord.author_pubkey,
+    )
+    .await
+    .map_err(map_membership_object_error)?
+    .ok_or_else(|| {
+        AnchoredChainError::LoadFailed(format!("Store protocol root {store_root_hash} is absent"))
     })?;
     if store_protocol_root.value.founder.coord() != *founder_coord {
         return Err(AnchoredChainError::LoadFailed(format!(
@@ -2273,6 +2289,54 @@ mod tests {
             .expect("anchor test membership")
             .expect("test membership exists");
         db
+    }
+
+    async fn append_alternative_store_protocol_root(
+        storage: &MockSyncStorage,
+        founder: &UserKeypair,
+    ) -> ObjectHash {
+        let pinned = storage.store_protocol_root();
+        let alternative = super::super::store_commit::StoreProtocolRoot::signed(
+            pinned.store_id,
+            pinned.founder,
+            pinned.schema_version + 1,
+            pinned.sync_routing_hash,
+            pinned.write_policy,
+            founder,
+        )
+        .expect("sign alternative Store protocol root");
+        let hash = alternative.object_hash();
+        storage
+            .append_protocol_object(
+                &super::super::storage::ProtocolObjectContext::store(
+                    hash,
+                    super::super::storage::ProtocolObjectDomain::StoreProtocolRoot,
+                ),
+                &super::super::store_commit::store_protocol_root_semantic_prefix(hash),
+                ".json",
+                alternative.to_bytes(),
+            )
+            .await
+            .expect("append alternative Store protocol root");
+        hash
+    }
+
+    #[tokio::test]
+    async fn anchored_chain_loads_the_root_named_by_its_authoritative_hash() {
+        let founder = UserKeypair::generate();
+        let storage = MockSyncStorage::with_store_and_keypair("pinned-root", founder.clone());
+        let founder_pubkey = pubkey_hex(&founder);
+        let chain = storage.publish_protocol_founder_membership().await;
+        let pinned_hash = storage.store_root_hash();
+        let alternative_hash = append_alternative_store_protocol_root(&storage, &founder).await;
+        assert_ne!(alternative_hash, pinned_hash);
+        let entries = storage.discover_membership_entries().await;
+
+        let loaded = load_anchored_chain(&storage, &entries, Some(&founder_pubkey), None)
+            .await
+            .expect("the authoritative root hash selects the pinned root");
+
+        assert_eq!(loaded.founder_coord(), chain.founder_coord());
     }
 
     async fn serial_mutation_fixture(
@@ -2983,6 +3047,37 @@ mod tests {
             pubkey_hex(&second_owner),
             "not the inviting owner's pubkey",
         );
+    }
+
+    #[tokio::test]
+    async fn invite_carries_the_root_named_by_the_authoritative_hash() {
+        let founder = UserKeypair::generate();
+        let invitee = UserKeypair::generate();
+        let storage = MockSyncStorage::with_store_and_keypair("pinned-invite", founder.clone());
+        let founder_pubkey = pubkey_hex(&founder);
+        storage.publish_protocol_founder_membership().await;
+        let db = anchored_db(&storage, &founder_pubkey).await;
+        let pinned_hash = storage.store_root_hash();
+        let alternative_hash = append_alternative_store_protocol_root(&storage, &founder).await;
+        assert_ne!(alternative_hash, pinned_hash);
+
+        let invite = invite_member(
+            &storage,
+            &storage,
+            &founder,
+            &Hlc::new("founder".to_string()),
+            &pubkey_hex(&invitee),
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([7u8; 32]),
+            "pinned-invite",
+            "Pinned invite",
+            &db,
+        )
+        .await
+        .expect("invite uses the root already pinned in database state");
+
+        assert_eq!(invite.store_root_hash, pinned_hash);
     }
 
     #[tokio::test]

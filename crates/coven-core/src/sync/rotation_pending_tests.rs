@@ -513,6 +513,8 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
         &cipher_lock,
         old_key,
         store_root_hash,
+        &owner,
+        &member,
     )
     .await;
 }
@@ -596,6 +598,8 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
         &cipher_lock,
         old_key,
         store_root_hash,
+        &owner,
+        &member,
     )
     .await;
 }
@@ -610,6 +614,8 @@ async fn assert_generation_two_opens_but_generation_one_does_not(
     cipher: &dyn CloudCipherAccess,
     old_key: [u8; 32],
     store_root_hash: ObjectHash,
+    current_reader: &UserKeypair,
+    removed_reader: &UserKeypair,
 ) {
     let semantic_prefix = key
         .split_once("/copies/")
@@ -621,7 +627,7 @@ async fn assert_generation_two_opens_but_generation_one_does_not(
         cipher.snapshot(),
         BlobPathScheme::Hashed,
         LIB_ID,
-        UserKeypair::generate(),
+        current_reader.clone(),
     );
     let object = current_storage
         .list_protocol_objects(semantic_prefix)
@@ -641,7 +647,7 @@ async fn assert_generation_two_opens_but_generation_one_does_not(
         CloudCipher::Encrypted(EncryptionService::from_key(old_key)),
         BlobPathScheme::Hashed,
         LIB_ID,
-        UserKeypair::generate(),
+        removed_reader.clone(),
     );
     assert!(
         removed_member_storage

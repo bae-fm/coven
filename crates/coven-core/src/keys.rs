@@ -252,32 +252,6 @@ pub fn ed25519_to_x25519_public_key(
     Ok(vk.to_montgomery().to_bytes())
 }
 
-/// Derive the raw X25519 agreement shared by this identity and one remote
-/// Ed25519 identity. The conversion stays beside the existing key-conversion
-/// helpers so callers cannot accidentally agree over unvalidated wire bytes.
-pub(crate) fn x25519_shared_secret(
-    identity: &UserKeypair,
-    remote_ed25519_pubkey_hex: &str,
-) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {
-    let remote_ed25519: [u8; SIGN_PUBLICKEYBYTES] = hex::decode(remote_ed25519_pubkey_hex)
-        .map_err(|_| KeyError::Crypto("invalid hex Ed25519 public key".to_string()))?
-        .try_into()
-        .map_err(|_| KeyError::Crypto("Ed25519 public key must be 32 bytes".to_string()))?;
-    if hex::encode(remote_ed25519) != remote_ed25519_pubkey_hex {
-        return Err(KeyError::Crypto(
-            "Ed25519 public key must use canonical lowercase hex".to_string(),
-        ));
-    }
-    let remote_x25519 = ed25519_to_x25519_public_key(&remote_ed25519)?;
-    let shared = x25519_dalek::x25519(identity.to_x25519_secret_key(), remote_x25519);
-    if shared == [0; CURVE25519_PUBLICKEYBYTES] {
-        return Err(KeyError::Crypto(
-            "X25519 agreement produced the all-zero secret".to_string(),
-        ));
-    }
-    Ok(shared)
-}
-
 use crate::encryption::MasterKeyring;
 
 /// A store's master keyring's custody: who unlocks it, where a newly
