@@ -1214,7 +1214,8 @@ pub fn recipient_slot_with_peer(
         .map_err(|_| CircleCreateError::InvalidRecipient(peer_pubkey.to_string()))?;
     let peer_x25519 = keys::ed25519_to_x25519_public_key(&peer_ed25519)
         .map_err(|_| CircleCreateError::InvalidRecipient(peer_pubkey.to_string()))?;
-    let shared = x25519_dalek::x25519(local_identity.to_x25519_secret_key(), peer_x25519);
+    let shared = keys::x25519_shared_secret(local_identity.to_x25519_secret_key(), peer_x25519)
+        .map_err(|_| CircleCreateError::InvalidRecipient(peer_pubkey.to_string()))?;
     let mut mac = Hmac::<Sha256>::new_from_slice(&shared).expect("HMAC accepts X25519 output");
     mac.update(RECIPIENT_SLOT_DOMAIN);
     mac.update(circle_id.as_bytes());
@@ -1625,6 +1626,19 @@ mod tests {
         assert!(encoded.to_uppercase().parse::<CircleId>().is_err());
         assert!("local".parse::<CircleId>().is_err());
         assert!(format!("{}b", &encoded[..25]).parse::<CircleId>().is_err());
+    }
+
+    #[test]
+    fn recipient_slot_rejects_the_ed25519_identity_point() {
+        let local = UserKeypair::generate();
+        let mut identity = [0; keys::SIGN_PUBLICKEYBYTES];
+        identity[0] = 1;
+        let recipient = hex::encode(identity);
+
+        assert_eq!(
+            recipient_slot_with_peer(&local, &recipient, CircleId::from_bytes([9; 16])),
+            Err(CircleCreateError::InvalidRecipient(recipient))
+        );
     }
 
     #[test]

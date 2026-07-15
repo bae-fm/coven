@@ -249,7 +249,39 @@ pub fn ed25519_to_x25519_public_key(
 ) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {
     let vk = ed25519_dalek::VerifyingKey::from_bytes(ed25519_pk)
         .map_err(|_| KeyError::Crypto("invalid Ed25519 public key point".to_string()))?;
-    Ok(vk.to_montgomery().to_bytes())
+    if vk.is_weak() {
+        return Err(KeyError::Crypto(
+            "weak Ed25519 public key point cannot identify a recipient".to_string(),
+        ));
+    }
+    let public_key = vk.to_montgomery().to_bytes();
+    if public_key == [0; CURVE25519_PUBLICKEYBYTES] {
+        return Err(KeyError::Crypto(
+            "Ed25519 recipient converts to the all-zero X25519 public key".to_string(),
+        ));
+    }
+    Ok(public_key)
+}
+
+/// Derive an X25519 shared secret after rejecting public inputs that cannot
+/// identify a peer. Low-order public keys produce the all-zero shared secret;
+/// that result is never usable as recipient identity material.
+pub fn x25519_shared_secret(
+    local_secret: [u8; CURVE25519_SECRETKEYBYTES],
+    peer_public: [u8; CURVE25519_PUBLICKEYBYTES],
+) -> Result<[u8; CURVE25519_PUBLICKEYBYTES], KeyError> {
+    if peer_public == [0; CURVE25519_PUBLICKEYBYTES] {
+        return Err(KeyError::Crypto(
+            "all-zero X25519 public key cannot identify a recipient".to_string(),
+        ));
+    }
+    let shared = x25519_dalek::x25519(local_secret, peer_public);
+    if shared == [0; CURVE25519_PUBLICKEYBYTES] {
+        return Err(KeyError::Crypto(
+            "all-zero X25519 shared secret cannot identify a recipient".to_string(),
+        ));
+    }
+    Ok(shared)
 }
 
 use crate::encryption::MasterKeyring;
@@ -400,6 +432,28 @@ mod tests {
         assert!(error
             .to_string()
             .contains("invalid Ed25519 public key point"));
+    }
+
+    #[test]
+    fn ed25519_to_x25519_rejects_the_identity_point() {
+        let mut identity = [0; SIGN_PUBLICKEYBYTES];
+        identity[0] = 1;
+
+        let error = ed25519_to_x25519_public_key(&identity)
+            .expect_err("a weak recipient point must not produce a shared key");
+
+        assert!(matches!(error, KeyError::Crypto(_)));
+    }
+
+    #[test]
+    fn x25519_shared_secret_rejects_the_all_zero_public_key() {
+        let local = UserKeypair::generate();
+
+        let error =
+            x25519_shared_secret(local.to_x25519_secret_key(), [0; CURVE25519_PUBLICKEYBYTES])
+                .expect_err("an all-zero public key must not produce recipient identity material");
+
+        assert!(matches!(error, KeyError::Crypto(_)));
     }
 
     #[test]

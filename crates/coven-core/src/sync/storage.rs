@@ -50,10 +50,10 @@ use crate::sync::store_commit::{
     STORE_SNAPSHOT_META_PREFIX,
 };
 
-/// Signed object kind bound into symmetric-protection AAD and checked against
-/// the semantic path before storage I/O.
+/// Signed object kind bound into protection AAD and checked against the
+/// semantic path before storage I/O.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProtocolObjectDomain {
+pub(crate) enum ProtectedObjectDomain {
     StoreProtocolRoot,
     StoreCommit,
     StoreHead,
@@ -79,7 +79,7 @@ struct ProtocolObjectMetadata {
     extension: &'static str,
 }
 
-impl ProtocolObjectDomain {
+impl ProtectedObjectDomain {
     fn metadata(self) -> ProtocolObjectMetadata {
         match self {
             Self::StoreProtocolRoot => ProtocolObjectMetadata {
@@ -184,10 +184,79 @@ impl ProtocolObjectDomain {
     }
 }
 
+/// A domain protected by the Store key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoreProtocolObjectDomain(ProtectedObjectDomain);
+
+/// A domain protected by a Circle epoch key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CircleProtocolObjectDomain(ProtectedObjectDomain);
+
+/// Typed protocol-object domain names. Each name's value carries the only
+/// protection class its object kind permits.
+pub struct ProtocolObjectDomain;
+
+#[allow(non_upper_case_globals)]
+impl ProtocolObjectDomain {
+    pub const StoreProtocolRoot: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreProtocolRoot);
+    pub const StoreCommit: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreCommit);
+    pub const StoreHead: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreHead);
+    pub const StoreAck: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreAck);
+    pub const StoreDeviceRegistration: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceRegistration);
+    pub const StoreSnapshotMeta: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreSnapshotMeta);
+    pub const StoreSnapshotImage: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreSnapshotImage);
+    pub const StoreMembershipEntry: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipEntry);
+    pub const StoreMembershipHead: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipHead);
+    pub const StorePackage: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StorePackage);
+    pub const CircleControl: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::CircleControl);
+    pub const CircleAccessEnvelope: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::CircleAccessEnvelope);
+    pub const CircleRoster: CircleProtocolObjectDomain =
+        CircleProtocolObjectDomain(ProtectedObjectDomain::CircleRoster);
+    pub const CircleMetadata: CircleProtocolObjectDomain =
+        CircleProtocolObjectDomain(ProtectedObjectDomain::CircleMetadata);
+}
+
 /// Authenticated storage context for one immutable semantic object.
+///
+/// Store protection cannot be paired with a Circle-encrypted domain:
+///
+/// ```compile_fail
+/// use coven_core::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+/// use coven_core::ObjectHash;
+///
+/// let root = ObjectHash::digest(b"store");
+/// let _ = ProtocolObjectContext::store(root, ProtocolObjectDomain::CircleMetadata);
+/// ```
+///
+/// Circle protection cannot be paired with a Store domain:
+///
+/// ```compile_fail
+/// use coven_core::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
+/// use coven_core::{EncryptionService, ObjectHash};
+///
+/// let root = ObjectHash::digest(b"store");
+/// let encryption = EncryptionService::from_key([7; 32]);
+/// let _ = ProtocolObjectContext::circle(
+///     root,
+///     ProtocolObjectDomain::StoreCommit,
+///     encryption,
+/// );
+/// ```
 pub struct ProtocolObjectContext {
     store_root_hash: ObjectHash,
-    domain: ProtocolObjectDomain,
+    domain: ProtectedObjectDomain,
     protection: ProtocolObjectProtection,
 }
 
@@ -199,22 +268,22 @@ pub(crate) enum ProtocolObjectProtection {
 }
 
 impl ProtocolObjectContext {
-    pub fn store(store_root_hash: ObjectHash, domain: ProtocolObjectDomain) -> Self {
+    pub fn store(store_root_hash: ObjectHash, domain: StoreProtocolObjectDomain) -> Self {
         Self {
             store_root_hash,
-            domain,
+            domain: domain.0,
             protection: ProtocolObjectProtection::Store,
         }
     }
 
     pub fn circle(
         store_root_hash: ObjectHash,
-        domain: ProtocolObjectDomain,
+        domain: CircleProtocolObjectDomain,
         encryption: crate::encryption::EncryptionService,
     ) -> Self {
         Self {
             store_root_hash,
-            domain,
+            domain: domain.0,
             protection: ProtocolObjectProtection::Circle(encryption),
         }
     }
@@ -222,7 +291,7 @@ impl ProtocolObjectContext {
     pub fn recipient_sealed(store_root_hash: ObjectHash) -> Self {
         Self {
             store_root_hash,
-            domain: ProtocolObjectDomain::CircleAccessLeaf,
+            domain: ProtectedObjectDomain::CircleAccessLeaf,
             protection: ProtocolObjectProtection::RecipientSealed,
         }
     }
@@ -231,7 +300,7 @@ impl ProtocolObjectContext {
         self.store_root_hash
     }
 
-    pub fn domain(&self) -> ProtocolObjectDomain {
+    pub(crate) fn domain(&self) -> ProtectedObjectDomain {
         self.domain
     }
 
