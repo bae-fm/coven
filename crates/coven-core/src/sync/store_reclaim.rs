@@ -11,9 +11,8 @@ use super::store_commit::{
     StoreDeviceRegistrationRef, StoreDeviceRegistrationState, SERIAL_STREAM_ID,
 };
 use super::store_objects::{
-    list_latest_ack_chains, list_latest_registration_chains, list_reclaimable_store_packages,
-    list_snapshot_metas, load_commit_slot, load_registration_ref, load_serial_commit_at_position,
-    load_snapshot_image, StoreObjectError,
+    list_latest_ack_chains, list_reclaimable_store_packages, list_snapshot_metas, load_commit_slot,
+    load_registration_ref, load_serial_commit_at_position, load_snapshot_image, StoreObjectError,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -143,17 +142,6 @@ pub async fn reclaim_store_packages(
     )
     .await?;
 
-    let registration_listing = list_latest_registration_chains(storage, store_root_hash).await?;
-    require_complete(registration_listing.coverage, "device registration")?;
-    if registration_listing
-        .latest_by_device
-        .values()
-        .any(|registration| registration.coverage != ListingCoverage::CompleteAtScan)
-    {
-        return Err(StoreReclaimError::IncompleteListing {
-            listing: "device registration proof",
-        });
-    }
     let ack_chains = list_latest_ack_chains(storage, store_root_hash).await?;
     require_complete(ack_chains.coverage, "acknowledgement")?;
     let activated_registrations = db
@@ -905,6 +893,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unactivated_registration_gap_cannot_veto_reclamation() {
+        let setup = setup(false).await;
+        let unactivated = StoreDeviceRegistration::signed(
+            setup.store_root_hash,
+            "never-activated".to_string(),
+            2,
+            Some(ObjectHash::digest(b"absent registration revision one")),
+            StoreDeviceRegistrationState::Retired,
+            &setup.owner,
+        )
+        .unwrap();
+        append_and_verify(
+            &setup.storage,
+            &registration_semantic_prefix(
+                &unactivated.device_id,
+                unactivated.revision,
+                unactivated.registration_hash(),
+            ),
+            ".json",
+            &unactivated.to_bytes(),
+        )
+        .await
+        .unwrap();
+        publish_ack(
+            &setup,
+            "dev-owner",
+            1,
+            None,
+            setup.coverage.clone(),
+            &setup.owner,
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        let reclaimed = reclaim_store_packages(
+            &setup.db,
+            &setup.storage,
+            setup.store_root_hash,
+            &setup.chain,
+            super::super::pull::MembershipListingProof::complete_for_test(),
+        )
+        .await
+        .expect("only commit-activated registrations participate in reclamation proof");
+
+        assert_eq!(reclaimed.packages_deleted, 1);
+        assert_eq!(package_count(&setup), 0);
+    }
+
+    #[tokio::test]
     async fn active_member_without_registration_history_refuses_and_removal_drops_the_obligation() {
         let mut setup = setup(true).await;
         publish_ack(
@@ -949,7 +986,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incomplete_registration_listing_refuses_before_any_package_delete() {
+    async fn incomplete_protocol_listing_refuses_before_any_package_delete() {
         let setup = setup(false).await;
         publish_ack(
             &setup,
