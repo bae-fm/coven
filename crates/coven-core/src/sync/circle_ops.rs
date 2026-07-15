@@ -154,7 +154,10 @@ pub(crate) async fn resume_circle_operations(
                 journal.circle_id()
             )));
         }
-        publish_circle_operation(db, storage, coordination, journal.circle_id()).await?;
+        match publish_circle_operation(db, storage, coordination, journal.circle_id()).await {
+            Ok(()) | Err(CircleOperationError::Blocked { .. }) => {}
+            Err(error) => return Err(error),
+        }
     }
     Ok(())
 }
@@ -936,6 +939,14 @@ async fn publish_circle_operation(
         &commit,
     )?;
     verify_preceding_merge_registration(storage, &commit).await?;
+    if commit.policy() == crate::WritePolicy::MergeConcurrent
+        && !has_current_merge_authority(db, storage, &commit).await?
+    {
+        let reason = "circle operation author is not a current Store writer under its exact grant"
+            .to_string();
+        db.block_circle_operation(circle_id, reason.clone()).await?;
+        return Err(CircleOperationError::Blocked { circle_id, reason });
+    }
 
     append_step(
         db,
@@ -1072,6 +1083,33 @@ async fn publish_circle_operation(
     Ok(())
 }
 
+async fn has_current_merge_authority(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    commit: &StoreBatchCommit,
+) -> Result<bool, CircleOperationError> {
+    let founder = db
+        .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
+        .await?
+        .ok_or(CircleOperationError::MissingState("Store founder"))?;
+    let entries = super::membership_ops::list_membership_entries(storage, commit.store_root_hash)
+        .await
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    let current = super::membership_ops::load_anchored_chain(
+        storage,
+        commit.store_root_hash,
+        &entries,
+        Some(&founder),
+        Some(db),
+    )
+    .await
+    .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+    Ok(commit
+        .membership_grant
+        .as_ref()
+        .is_some_and(|grant| current.authorizes_write_at(grant, &commit.author_pubkey)))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn append_step(
     db: &Database,
@@ -1128,7 +1166,7 @@ mod tests {
     };
     use crate::sync::test_helpers::{
         open_serial_test_db, open_test_db, publish_test_serial_store_protocol_root,
-        publish_test_store_protocol_root, test_migrations, test_synced_tables,
+        publish_test_store_protocol_root, temp_store_dir, test_migrations, test_synced_tables,
     };
 
     fn merge_storage(
@@ -1506,6 +1544,182 @@ mod tests {
             .await
             .expect("read rejected operation")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations() {
+        let db = open_test_db();
+        let (_home, storage, founder, journal) =
+            persist_merge_operation(&db, "circle-merge-revoked-grant").await;
+        let successor = UserKeypair::generate();
+        let store_root_hash = journal.creation.control.value.store_root_hash;
+        let founder_pubkey = keys::public_key_hex(&founder);
+        let entries =
+            super::super::membership_ops::list_membership_entries(&storage, store_root_hash)
+                .await
+                .expect("list founder membership");
+        let mut chain = super::super::membership_ops::load_anchored_chain(
+            &storage,
+            store_root_hash,
+            &entries,
+            Some(&founder_pubkey),
+            None,
+        )
+        .await
+        .expect("load founder chain");
+        let add_successor = chain
+            .signed_set_member(
+                &founder,
+                keys::public_key_hex(&successor),
+                None,
+                MemberRole::Owner,
+                "0000000001001-0000-founder".to_string(),
+            )
+            .expect("add successor owner");
+        super::super::store_objects::append_membership_entry_object(
+            &storage,
+            store_root_hash,
+            &add_successor.coord(),
+            &add_successor,
+        )
+        .await
+        .expect("publish successor grant");
+        chain
+            .add_entry(add_successor)
+            .expect("apply successor grant");
+        super::super::store_objects::append_membership_head_object(
+            &storage,
+            store_root_hash,
+            &chain
+                .signed_head(&founder)
+                .expect("sign successor-grant membership head"),
+        )
+        .await
+        .expect("publish successor-grant membership head");
+        let remove_founder = chain
+            .signed_remove_member(
+                &successor,
+                founder_pubkey.clone(),
+                "0000000001002-0000-successor".to_string(),
+            )
+            .expect("remove founder");
+        super::super::store_objects::append_membership_entry_object(
+            &storage,
+            store_root_hash,
+            &remove_founder.coord(),
+            &remove_founder,
+        )
+        .await
+        .expect("publish founder removal");
+        chain
+            .add_entry(remove_founder)
+            .expect("apply founder removal");
+        super::super::store_objects::append_membership_head_object(
+            &storage,
+            store_root_hash,
+            &chain
+                .signed_head(&successor)
+                .expect("sign successor membership head"),
+        )
+        .await
+        .expect("publish successor membership head");
+
+        let (successor_db, _stamper) = Database::open(
+            std::path::Path::new(":memory:"),
+            test_synced_tables(),
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
+            "successor-device".to_string(),
+            &test_migrations(),
+        )
+        .expect("open successor database");
+        assert_eq!(
+            publish_test_store_protocol_root(
+                &successor_db,
+                &storage,
+                "circle-merge-revoked-grant",
+                "successor-device",
+                &founder,
+            )
+            .await,
+            store_root_hash
+        );
+        successor_db
+            .set_protocol_state(
+                super::super::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                &founder_pubkey,
+            )
+            .await
+            .expect("pin founder on successor database");
+        super::super::store_registration::ensure_active_registration_with_coordination(
+            &successor_db,
+            &storage,
+            None,
+            &successor,
+            Some(&chain),
+            "0000000001003-0000-successor",
+        )
+        .await
+        .expect("publish successor device registration");
+        let (_store_temp, store_dir) = temp_store_dir();
+        super::super::store_pull::pull_store_commits_with_identity(
+            &db,
+            &test_synced_tables(),
+            &storage,
+            None,
+            store_root_hash,
+            "creator",
+            &store_dir,
+            Some(&chain),
+            Some(&successor),
+        )
+        .await
+        .expect("materialize successor registration before its Circle operation");
+        let later = prepare_circle_operation(
+            &successor_db,
+            &storage,
+            None,
+            "successor-device",
+            "0000000001004-0000-successor",
+            "Later Circle",
+            &successor,
+        )
+        .await
+        .expect("prepare still-authorized operation");
+        db.insert_circle_operation(later.clone())
+            .await
+            .expect("persist still-authorized operation");
+
+        resume_circle_operations(&db, &storage, None)
+            .await
+            .expect("revoked journal is blocked without interrupting the resume loop");
+
+        let blocked = db
+            .circle_operation(journal.circle_id())
+            .await
+            .expect("read revoked journal")
+            .expect("revoked journal remains durable");
+        assert!(matches!(
+            blocked.status,
+            CircleOperationState::Blocked { .. }
+        ));
+        assert!(db
+            .circle_operation(later.circle_id())
+            .await
+            .expect("read later journal")
+            .is_none());
+        assert_eq!(
+            db.get_circles(&keys::public_key_hex(&successor))
+                .await
+                .expect("read successor circles"),
+            vec![crate::sync::circle::CircleInfo {
+                id: later.circle_id(),
+                name: "Later Circle".to_string(),
+                role: CircleRole::Owner,
+            }]
+        );
+        assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
     }
 
     #[tokio::test]
