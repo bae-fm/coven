@@ -5372,7 +5372,7 @@ impl Database {
             stored.head_bytes,
             stored.published,
         ) {
-            (_, None, None, 0) => {
+            (None, None, None, 0) => {
                 conn.execute(
                     "UPDATE local_store_device_registration \
                      SET activation_base_head_bytes = ?3, activation_commit_bytes = ?4, activation_head_bytes = ?5 \
