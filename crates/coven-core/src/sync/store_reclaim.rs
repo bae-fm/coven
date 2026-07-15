@@ -264,8 +264,13 @@ async fn choose_snapshot(
         if !author_is_owner {
             continue;
         }
-        let Some(image) =
-            load_snapshot_image(storage, &meta.value.author_pubkey, meta.value.image_hash).await?
+        let Some(image) = load_snapshot_image(
+            storage,
+            store_root_hash,
+            &meta.value.author_pubkey,
+            meta.value.image_hash,
+        )
+        .await?
         else {
             continue;
         };
@@ -504,6 +509,7 @@ mod tests {
     use crate::storage::cloud::{CopyId, SequentialCopyIdGenerator};
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::membership::{founder_entry, MemberRole};
+    use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::store_commit::{
         ack_copy_key, ack_semantic_prefix, registration_semantic_prefix, StoreAck,
         StoreBatchCommit, StoreDeviceRegistration, StoreDeviceRegistrationState,
@@ -699,6 +705,10 @@ mod tests {
         .unwrap();
         append_and_verify(
             &setup.storage,
+            &ProtocolObjectContext::store(
+                setup.store_root_hash,
+                ProtocolObjectDomain::StoreDeviceRegistration,
+            ),
             &registration_semantic_prefix(device_id, 1, registration.registration_hash()),
             ".json",
             &registration.to_bytes(),
@@ -733,6 +743,10 @@ mod tests {
         .unwrap();
         append_and_verify(
             &setup.storage,
+            &ProtocolObjectContext::store(
+                setup.store_root_hash,
+                ProtocolObjectDomain::StoreDeviceRegistration,
+            ),
             &registration_semantic_prefix(device_id, 2, retired.registration_hash()),
             ".json",
             &retired.to_bytes(),
@@ -773,6 +787,7 @@ mod tests {
         .unwrap();
         append_and_verify(
             &setup.storage,
+            &ProtocolObjectContext::store(setup.store_root_hash, ProtocolObjectDomain::StoreAck),
             &ack_semantic_prefix(device_id, revision, ack.ack_hash()),
             ".json",
             &ack.to_bytes(),
@@ -906,6 +921,10 @@ mod tests {
         .unwrap();
         append_and_verify(
             &setup.storage,
+            &ProtocolObjectContext::store(
+                setup.store_root_hash,
+                ProtocolObjectDomain::StoreDeviceRegistration,
+            ),
             &registration_semantic_prefix(
                 &unactivated.device_id,
                 unactivated.revision,
@@ -1264,6 +1283,7 @@ mod tests {
         .unwrap();
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StorePackage),
             &loser
                 .store_package
                 .as_ref()
@@ -1276,6 +1296,7 @@ mod tests {
         .unwrap();
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
             &super::super::store_commit::commit_semantic_prefix(
                 SERIAL_STREAM_ID,
                 1,
@@ -1314,6 +1335,10 @@ mod tests {
         .unwrap();
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(
+                store_root_hash,
+                ProtocolObjectDomain::StoreDeviceRegistration,
+            ),
             &registration_semantic_prefix(
                 "serial-owner-device",
                 1,
@@ -1359,6 +1384,7 @@ mod tests {
         .unwrap();
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreAck),
             &ack_semantic_prefix("serial-owner-device", 1, ack.ack_hash()),
             ".json",
             &ack.to_bytes(),
@@ -1508,6 +1534,7 @@ mod tests {
         .unwrap();
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StoreSnapshotImage),
             &super::super::store_commit::snapshot_image_semantic_prefix(
                 &pubkey_hex(&later_owner),
                 image_hash,
@@ -1519,6 +1546,7 @@ mod tests {
         .unwrap();
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StoreSnapshotMeta),
             &super::super::store_commit::snapshot_semantic_prefix(
                 &pubkey_hex(&later_owner),
                 meta.snapshot_hash(),
@@ -1583,6 +1611,10 @@ mod tests {
             .unwrap();
         append_and_verify(
             &setup.storage,
+            &ProtocolObjectContext::store(
+                setup.store_root_hash,
+                ProtocolObjectDomain::StorePackage,
+            ),
             &commit
                 .value
                 .store_package

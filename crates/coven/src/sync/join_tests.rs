@@ -205,6 +205,10 @@ async fn serial_join_receives_the_exact_invite_floor() {
     .unwrap();
     crate::sync::store_objects::append_and_verify(
         &owner_storage,
+        &crate::sync::storage::ProtocolObjectContext::store(
+            store_root_hash,
+            crate::sync::storage::ProtocolObjectDomain::StorePackage,
+        ),
         &loser
             .store_package
             .as_ref()
@@ -217,6 +221,10 @@ async fn serial_join_receives_the_exact_invite_floor() {
     .unwrap();
     crate::sync::store_objects::append_and_verify(
         &owner_storage,
+        &crate::sync::storage::ProtocolObjectContext::store(
+            store_root_hash,
+            crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+        ),
         &crate::sync::store_commit::commit_semantic_prefix(
             crate::sync::store_commit::SERIAL_STREAM_ID,
             floor.seq,
@@ -870,6 +878,15 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
     .with_copy_ids(Arc::new(
         crate::storage::cloud::SequentialCopyIdGenerator::new("join-custody-owner"),
     ));
+    let db = open_test_db();
+    let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
+        &db,
+        &owner_storage,
+        store_id,
+        "owner-device",
+        &owner_keypair,
+    )
+    .await;
 
     // `BootstrapContext::Join` pins the owner before the pull, so
     // `bootstrap_from_snapshot`'s authorization check needs a real,
@@ -884,26 +901,23 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         .expect("valid founder entry");
     crate::sync::test_helpers::append_membership_entry_bytes(
         &owner_storage,
+        store_root_hash,
         &owner_pk,
         1,
         serde_json::to_vec(&founder).expect("serialize founder entry"),
     )
     .await
     .expect("upload founder entry");
-    crate::sync::membership_ops::publish_membership_head(&owner_storage, &chain, &owner_keypair)
-        .await
-        .expect("publish founder membership head");
-
-    let tables = test_synced_tables();
-    let db = open_test_db();
-    let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
-        &db,
+    crate::sync::membership_ops::publish_membership_head(
         &owner_storage,
-        store_id,
-        "owner-device",
+        store_root_hash,
+        &chain,
         &owner_keypair,
     )
-    .await;
+    .await
+    .expect("publish founder membership head");
+
+    let tables = test_synced_tables();
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
     let tables_c = tables.clone();
@@ -955,15 +969,21 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         .expect("valid joined-member entry");
     crate::sync::test_helpers::append_membership_entry_bytes(
         &owner_storage,
+        store_root_hash,
         &owner_pk,
         2,
         serde_json::to_vec(&add_joiner).expect("serialize joined-member entry"),
     )
     .await
     .expect("publish joined-member entry");
-    crate::sync::membership_ops::publish_membership_head(&owner_storage, &chain, &owner_keypair)
-        .await
-        .expect("publish joined-member head");
+    crate::sync::membership_ops::publish_membership_head(
+        &owner_storage,
+        store_root_hash,
+        &chain,
+        &owner_keypair,
+    )
+    .await
+    .expect("publish joined-member head");
     let join_info = CloudHomeJoinInfo::CloudKit;
 
     crate::sync::join::bootstrap_and_save_store(
@@ -1339,6 +1359,7 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
     let mut chain = MembershipChain::from_entries(vec![founder.clone()]).unwrap();
     crate::sync::store_objects::append_membership_entry_object(
         &storage,
+        storage.store_root_hash(),
         &founder.coord(),
         &founder,
     )
@@ -1371,6 +1392,13 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
         .set_protocol_state(
             crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
             &owner_pk,
+        )
+        .await
+        .unwrap();
+    membership_db
+        .set_protocol_state(
+            crate::database::STORE_ROOT_HASH_STATE_KEY,
+            &storage.store_root_hash().to_string(),
         )
         .await
         .unwrap();
@@ -1486,6 +1514,7 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
     let chain = MembershipChain::from_entries(vec![founder.clone()]).unwrap();
     crate::sync::store_objects::append_membership_entry_object(
         &storage,
+        storage.store_root_hash(),
         &founder.coord(),
         &founder,
     )
@@ -1500,6 +1529,13 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
         .set_protocol_state(
             crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
             &owner_pk,
+        )
+        .await
+        .unwrap();
+    membership_db
+        .set_protocol_state(
+            crate::database::STORE_ROOT_HASH_STATE_KEY,
+            &storage.store_root_hash().to_string(),
         )
         .await
         .unwrap();
@@ -1534,9 +1570,10 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
     // before appending further, so the next entry's `prev_hash` links to the
     // invitee's Add rather than skipping over it.
     let visible = storage.discover_membership_entries().await;
-    let mut chain = crate::sync::membership_ops::download_chain(&storage, &visible)
-        .await
-        .expect("chain including the invite's own Add");
+    let mut chain =
+        crate::sync::membership_ops::download_chain(&storage, storage.store_root_hash(), &visible)
+            .await
+            .expect("chain including the invite's own Add");
 
     // Between mint and this device's first sync, the chain moved forward
     // further: the owner adds a second member, advancing the real head to
@@ -1992,6 +2029,15 @@ async fn joiner_fixture() -> JoinerFixture {
     .with_copy_ids(Arc::new(
         crate::storage::cloud::SequentialCopyIdGenerator::new(&format!("{store_id}-owner")),
     ));
+    let db = open_test_db();
+    let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
+        &db,
+        &owner_storage,
+        &store_id,
+        "owner-device",
+        &owner_keypair,
+    )
+    .await;
 
     // `BootstrapContext::Join` pins the owner before the pull, so bootstrap's
     // authorization check needs a real, owner-anchored chain.
@@ -2005,15 +2051,21 @@ async fn joiner_fixture() -> JoinerFixture {
         .expect("valid founder entry");
     crate::sync::test_helpers::append_membership_entry_bytes(
         &owner_storage,
+        store_root_hash,
         &owner_pk,
         1,
         serde_json::to_vec(&founder).expect("serialize founder entry"),
     )
     .await
     .expect("upload founder entry");
-    crate::sync::membership_ops::publish_membership_head(&owner_storage, &chain, &owner_keypair)
-        .await
-        .expect("publish founder membership head");
+    crate::sync::membership_ops::publish_membership_head(
+        &owner_storage,
+        store_root_hash,
+        &chain,
+        &owner_keypair,
+    )
+    .await
+    .expect("publish founder membership head");
     let joiner_identity = UserKeypair::generate();
     let add_joiner = chain
         .signed_set_member(
@@ -2029,26 +2081,23 @@ async fn joiner_fixture() -> JoinerFixture {
         .expect("valid joined-member entry");
     crate::sync::test_helpers::append_membership_entry_bytes(
         &owner_storage,
+        store_root_hash,
         &owner_pk,
         2,
         serde_json::to_vec(&add_joiner).expect("serialize joined-member entry"),
     )
     .await
     .expect("publish joined-member entry");
-    crate::sync::membership_ops::publish_membership_head(&owner_storage, &chain, &owner_keypair)
-        .await
-        .expect("publish joined-member head");
-
-    let tables = test_synced_tables();
-    let db = open_test_db();
-    let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
-        &db,
+    crate::sync::membership_ops::publish_membership_head(
         &owner_storage,
-        &store_id,
-        "owner-device",
+        store_root_hash,
+        &chain,
         &owner_keypair,
     )
-    .await;
+    .await
+    .expect("publish joined-member head");
+
+    let tables = test_synced_tables();
     let snap_tmp = tempfile::tempdir().expect("snapshot temp dir");
     let snap_dir = snap_tmp.path().to_path_buf();
     let tables_c = tables.clone();

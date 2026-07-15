@@ -69,7 +69,7 @@ fn open_outbox_db() -> Database {
 /// `Err`), mirroring the cycle aborting before the GC ever runs.
 async fn gc_tombstones_anchored(
     db: &Database,
-    storage: &dyn crate::sync::storage::SyncStorage,
+    storage: &MockSyncStorage,
     cloud_home: &dyn CloudHome,
     cipher: &RwLock<CloudCipher>,
     store_id: &str,
@@ -102,7 +102,7 @@ async fn gc_tombstones_anchored(
 async fn gc_tombstones_as(
     self_pubkey: &str,
     db: &Database,
-    storage: &dyn crate::sync::storage::SyncStorage,
+    storage: &MockSyncStorage,
     cloud_home: &dyn CloudHome,
     cipher: &RwLock<CloudCipher>,
     store_id: &str,
@@ -110,6 +110,12 @@ async fn gc_tombstones_as(
     clock: &dyn crate::clock::Clock,
     grace: chrono::Duration,
 ) -> Result<usize, String> {
+    db.set_protocol_state(
+        crate::database::STORE_ROOT_HASH_STATE_KEY,
+        &storage.store_root_hash().to_string(),
+    )
+    .await
+    .expect("bind GC fixture to its Store protocol root");
     if let Some(owner) = pinned_owner {
         db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, owner)
             .await
@@ -133,7 +139,7 @@ async fn gc_tombstones_as(
 }
 
 async fn gc_tombstones_without_live_refs(
-    storage: &dyn crate::sync::storage::SyncStorage,
+    storage: &MockSyncStorage,
     cloud_home: &dyn CloudHome,
     cipher: &RwLock<CloudCipher>,
     store_id: &str,

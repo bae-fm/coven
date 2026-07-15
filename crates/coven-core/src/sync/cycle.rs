@@ -1515,7 +1515,8 @@ pub async fn ensure_owner_anchored_chain(
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|e| format!("read pinned owner: {e}"))?;
-    let entries = super::membership_ops::list_membership_entries(storage)
+    let store_root_hash = store_protocol_root.object_hash();
+    let entries = super::membership_ops::list_membership_entries(storage, store_root_hash)
         .await
         .map_err(|e| format!("list membership entries: {e}"))?;
     if pinned
@@ -1529,10 +1530,15 @@ pub async fn ensure_owner_anchored_chain(
         ));
     }
     let expected_owner = &store_protocol_root.author_pubkey;
-    let loaded =
-        super::membership_ops::load_and_persist_owner_anchor(storage, &entries, expected_owner, db)
-            .await
-            .map_err(|error| error.to_string())?;
+    let loaded = super::membership_ops::load_and_persist_owner_anchor(
+        storage,
+        store_root_hash,
+        &entries,
+        expected_owner,
+        db,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     if let Some(chain) = loaded {
         if chain.entries().first() != Some(&store_protocol_root.founder) {
             return Err("membership founder does not match store protocol root".to_string());
@@ -1553,22 +1559,34 @@ pub async fn ensure_owner_anchored_chain(
         ));
     }
 
-    publish_or_complete_founder(storage, &store_protocol_root.founder, owner_keypair).await?;
-    let committed_entries = super::membership_ops::list_membership_entries(storage)
-        .await
-        .map_err(|e| format!("list membership entries after founder publish: {e}"))?;
-    super::membership_ops::load_and_persist_owner_anchor(storage, &committed_entries, &our_pk, db)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| {
-            "founder publish produced no signed committed membership head".to_string()
-        })?;
+    publish_or_complete_founder(
+        storage,
+        store_root_hash,
+        &store_protocol_root.founder,
+        owner_keypair,
+    )
+    .await?;
+    let committed_entries =
+        super::membership_ops::list_membership_entries(storage, store_root_hash)
+            .await
+            .map_err(|e| format!("list membership entries after founder publish: {e}"))?;
+    super::membership_ops::load_and_persist_owner_anchor(
+        storage,
+        store_root_hash,
+        &committed_entries,
+        &our_pk,
+        db,
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "founder publish produced no signed committed membership head".to_string())?;
     info!(owner = %our_pk, "Founded store: wrote owner-anchored founder entry");
     Ok(())
 }
 
 async fn publish_or_complete_founder(
     storage: &dyn SyncStorage,
+    store_root_hash: super::store_commit::ObjectHash,
     store_protocol_root_founder: &super::membership::MembershipEntry,
     owner_keypair: &UserKeypair,
 ) -> Result<(), String> {
@@ -1577,8 +1595,14 @@ async fn publish_or_complete_founder(
 
     let owner_pubkey = hex::encode(owner_keypair.public_key());
     let founder_coord = store_protocol_root_founder.coord();
-    match load_membership_entry_slot(storage, &owner_pubkey, &founder_coord.author_owner_grant, 1)
-        .await
+    match load_membership_entry_slot(
+        storage,
+        store_root_hash,
+        &owner_pubkey,
+        &founder_coord.author_owner_grant,
+        1,
+    )
+    .await
     {
         Ok(Some(verified)) => {
             let bytes = verified.bytes;
@@ -1598,28 +1622,43 @@ async fn publish_or_complete_founder(
                     "interrupted founder entry does not match store protocol root".to_string(),
                 );
             }
-            append_membership_entry_object(storage, &coord, &entry)
+            append_membership_entry_object(storage, store_root_hash, &coord, &entry)
                 .await
                 .map_err(|error| format!("re-publish interrupted founder entry: {error}"))?;
-            super::membership_ops::publish_membership_head(storage, &chain, owner_keypair)
-                .await
-                .map_err(|error| format!("publish interrupted founder head: {error}"))?;
+            super::membership_ops::publish_membership_head(
+                storage,
+                store_root_hash,
+                &chain,
+                owner_keypair,
+            )
+            .await
+            .map_err(|error| format!("publish interrupted founder head: {error}"))?;
             Ok(())
         }
         Ok(None) => {
             let coord = founder_coord;
-            append_membership_entry_object(storage, &coord, store_protocol_root_founder)
-                .await
-                .map_err(|error| format!("publish store protocol root founder entry: {error}"))?;
+            append_membership_entry_object(
+                storage,
+                store_root_hash,
+                &coord,
+                store_protocol_root_founder,
+            )
+            .await
+            .map_err(|error| format!("publish store protocol root founder entry: {error}"))?;
             let chain = MembershipChain::from_entries_with_coords(vec![(
                 coord,
                 store_protocol_root_founder.clone(),
             )])
             .map_err(|error| format!("store protocol root founder is invalid: {error}"))?;
-            super::membership_ops::publish_membership_head(storage, &chain, owner_keypair)
-                .await
-                .map(|_| ())
-                .map_err(|error| format!("publish store protocol root founder head: {error}"))
+            super::membership_ops::publish_membership_head(
+                storage,
+                store_root_hash,
+                &chain,
+                owner_keypair,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("publish store protocol root founder head: {error}"))
         }
         Err(error) => Err(format!("read interrupted founder entry: {error}")),
     }

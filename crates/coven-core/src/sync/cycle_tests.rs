@@ -205,11 +205,17 @@ async fn publish_mock_founder_membership(
     chain
         .add_entry_at(founder_coord.clone(), founder.clone())
         .expect("valid protocol founder membership");
-    crate::sync::store_objects::append_membership_entry_object(storage, &founder_coord, &founder)
-        .await
-        .expect("publish protocol founder membership");
+    crate::sync::store_objects::append_membership_entry_object(
+        storage,
+        storage.store_root_hash(),
+        &founder_coord,
+        &founder,
+    )
+    .await
+    .expect("publish protocol founder membership");
     crate::sync::membership_ops::publish_membership_head(
         storage,
+        storage.store_root_hash(),
         &chain,
         &storage.protocol_founder_keypair(),
     )
@@ -234,6 +240,10 @@ async fn append_active_store_device(
     .expect("sign active Store device registration");
     crate::sync::store_objects::append_and_verify(
         storage,
+        &crate::sync::storage::ProtocolObjectContext::store(
+            storage.store_root_hash(),
+            crate::sync::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+        ),
         &crate::sync::store_commit::registration_semantic_prefix(
             device_id,
             1,
@@ -268,6 +278,10 @@ async fn append_active_store_device(
     .expect("sign Store device registration activation head");
     crate::sync::store_objects::append_and_verify(
         storage,
+        &crate::sync::storage::ProtocolObjectContext::store(
+            storage.store_root_hash(),
+            crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+        ),
         &crate::sync::store_commit::commit_semantic_prefix(device_id, 1, commit.commit_hash()),
         ".json",
         &commit.to_bytes(),
@@ -276,6 +290,10 @@ async fn append_active_store_device(
     .expect("append Store device registration activation");
     crate::sync::store_objects::append_and_verify(
         storage,
+        &crate::sync::storage::ProtocolObjectContext::store(
+            storage.store_root_hash(),
+            crate::sync::storage::ProtocolObjectDomain::StoreHead,
+        ),
         &crate::sync::store_commit::head_semantic_prefix(device_id, 1, head.head_hash()),
         ".json",
         &head.to_bytes(),
@@ -302,6 +320,10 @@ async fn append_store_ack(
     .expect("sign Store acknowledgement");
     crate::sync::store_objects::append_and_verify(
         storage,
+        &crate::sync::storage::ProtocolObjectContext::store(
+            storage.store_root_hash(),
+            crate::sync::storage::ProtocolObjectDomain::StoreAck,
+        ),
         &crate::sync::store_commit::ack_semantic_prefix(device_id, 1, ack.ack_hash()),
         ".json",
         &ack.to_bytes(),
@@ -664,7 +686,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     let entries = storage.discover_membership_entries().await;
     assert_eq!(entries.len(), 1, "the founder entry is written to storage");
     assert!(
-        download_chain(&storage, &entries)
+        download_chain(&storage, storage.store_root_hash(), &entries)
             .await
             .unwrap()
             .is_founded_by(&owner_pk),
@@ -677,7 +699,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         .expect("re-connect anchors to the pinned owner");
     let entries = storage.discover_membership_entries().await;
     assert!(
-        download_chain(&storage, &entries)
+        download_chain(&storage, storage.store_root_hash(), &entries)
             .await
             .unwrap()
             .is_founded_by(&owner_pk),
@@ -737,6 +759,7 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
     let committed_foreign_store_protocol_root = committed_foreign.store_protocol_root();
     write_founder_entry(
         &committed_foreign,
+        committed_foreign.store_root_hash(),
         "test-store",
         &attacker,
         "0000000001000-0000-attacker",
@@ -785,6 +808,7 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
     let store_protocol_root = storage.store_protocol_root();
     write_founder_entry(
         &storage,
+        storage.store_root_hash(),
         "test-store",
         &owner,
         &store_protocol_root.founder.created_at,
@@ -801,7 +825,7 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
     );
     let entries = storage.discover_membership_entries().await;
     assert!(
-        download_chain(&storage, &entries)
+        download_chain(&storage, storage.store_root_hash(), &entries)
             .await
             .unwrap()
             .is_founded_by(&owner_pk),
@@ -816,6 +840,7 @@ async fn ensure_owner_anchored_chain_completes_own_founding_but_refuses_foreign(
     let seeded_store_protocol_root = seeded.store_protocol_root();
     write_founder_entry(
         &seeded,
+        seeded.store_root_hash(),
         "test-store",
         &attacker,
         "0000000001000-0000-attacker",
@@ -1409,12 +1434,14 @@ async fn initialization_refuses_a_founder_entry_without_its_store_protocol_root(
         &owner,
     )
     .expect("sign interrupted store protocol root");
+    let store_root_hash = store_protocol_root.object_hash();
     db.stage_store_protocol_root(store_protocol_root)
         .await
         .expect("stage interrupted store protocol root");
     let founder_bytes = serde_json::to_vec(&founder).expect("serialize founder");
     crate::sync::test_helpers::append_membership_entry_bytes(
         &storage,
+        store_root_hash,
         &owner_pk,
         1,
         founder_bytes.clone(),
@@ -1471,14 +1498,24 @@ async fn initialization_refuses_a_foreign_founder_without_store_protocol_root() 
         "test-lib",
         attacker.clone(),
     );
-    let foreign_bytes = serde_json::to_vec(&founder_entry(
+    let foreign_founder = founder_entry(
         "test-lib",
         &attacker,
         "0000000001000-0000-uncommitted-foreign-founder",
-    ))
-    .unwrap();
+    );
+    let foreign_store_protocol_root = StoreProtocolRoot::signed(
+        "test-lib".to_string(),
+        foreign_founder.clone(),
+        1,
+        crate::sync::test_helpers::test_sync_routing_hash(),
+        crate::WritePolicy::MergeConcurrent,
+        &attacker,
+    )
+    .expect("sign unpublished attacker Store protocol root");
+    let foreign_bytes = serde_json::to_vec(&foreign_founder).unwrap();
     crate::sync::test_helpers::append_membership_entry_bytes(
         &attacker_storage,
+        foreign_store_protocol_root.object_hash(),
         &attacker_pk,
         1,
         foreign_bytes.clone(),
@@ -1557,6 +1594,10 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
         .expect("stage store protocol root");
     crate::sync::store_objects::append_and_verify(
         &storage,
+        &crate::sync::storage::ProtocolObjectContext::store(
+            store_root_hash,
+            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
+        ),
         &crate::sync::store_commit::store_protocol_root_semantic_prefix(store_root_hash),
         ".json",
         &store_protocol_root.to_bytes(),
@@ -1574,13 +1615,14 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
         .expect("add protocol founder");
     crate::sync::test_helpers::append_membership_entry_bytes(
         &storage,
+        store_root_hash,
         &owner_pk,
         1,
         serde_json::to_vec(&founder).expect("serialize protocol founder"),
     )
     .await
     .expect("publish protocol founder");
-    publish_membership_head(&storage, &chain, &owner)
+    publish_membership_head(&storage, store_root_hash, &chain, &owner)
         .await
         .expect("publish protocol founder head");
     let cloud_before = cloud_objects(&home);
@@ -1620,8 +1662,23 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
         "test-lib",
         attacker.clone(),
     );
+    let attacker_founder = crate::sync::membership::founder_entry(
+        "test-lib",
+        &attacker,
+        "0000000001000-0000-attacker",
+    );
+    let attacker_store_protocol_root = StoreProtocolRoot::signed(
+        "test-lib".to_string(),
+        attacker_founder,
+        1,
+        crate::sync::test_helpers::test_sync_routing_hash(),
+        crate::WritePolicy::MergeConcurrent,
+        &attacker,
+    )
+    .expect("sign unpublished attacker Store protocol root");
     write_founder_entry(
         &attacker_storage,
+        attacker_store_protocol_root.object_hash(),
         "test-lib",
         &attacker,
         "0000000001000-0000-attacker",
@@ -1764,12 +1821,13 @@ impl HostWriteInjector {
 impl SyncStorage for HostWriteInjector {
     async fn append_protocol_object(
         &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
         data: Vec<u8>,
     ) -> Result<crate::sync::storage::ProtocolObjectLocator, StorageError> {
         self.inner
-            .append_protocol_object(semantic_prefix, extension, data)
+            .append_protocol_object(context, semantic_prefix, extension, data)
             .await
     }
 
@@ -1782,6 +1840,7 @@ impl SyncStorage for HostWriteInjector {
 
     async fn read_protocol_object(
         &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
         object: &crate::sync::storage::ProtocolObjectLocator,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError> {
@@ -1791,7 +1850,7 @@ impl SyncStorage for HostWriteInjector {
             host_exec(&self.db, &self.write_sql).await;
         }
         self.inner
-            .read_protocol_object(object, semantic_prefix)
+            .read_protocol_object(context, object, semantic_prefix)
             .await
     }
 

@@ -1094,6 +1094,7 @@ async fn restore_pins_the_chain_founder_as_owner() {
     let chain = MembershipChain::from_entries(vec![founder.clone()]).unwrap();
     crate::sync::store_objects::append_membership_entry_object(
         &storage,
+        storage.store_root_hash(),
         &founder.coord(),
         &founder,
     )
@@ -1199,6 +1200,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let mut chain = MembershipChain::from_entries(vec![founder.clone()]).unwrap();
     crate::sync::store_objects::append_membership_entry_object(
         &storage,
+        storage.store_root_hash(),
         &founder.coord(),
         &founder,
     )

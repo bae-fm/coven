@@ -55,9 +55,14 @@ async fn upload_chain(storage: &MockSyncStorage, chain: &MembershipChain, signer
             .await
             .expect("upload membership entry");
     }
-    crate::sync::membership_ops::publish_membership_head(storage, chain, signer)
-        .await
-        .expect("publish membership head");
+    crate::sync::membership_ops::publish_membership_head(
+        storage,
+        storage.store_root_hash(),
+        chain,
+        signer,
+    )
+    .await
+    .expect("publish membership head");
 }
 
 /// Run one real sync cycle for `device_id` over an encrypted home, with the mock
@@ -143,11 +148,23 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     }
     upload_chain(&storage, &chain, &owner).await;
     let db = open_test_db();
+    db.set_protocol_state(
+        crate::database::STORE_ROOT_HASH_STATE_KEY,
+        &storage.store_root_hash().to_string(),
+    )
+    .await
+    .expect("bind refresh fixture to its Store protocol root");
     let listed = storage.discover_membership_entries().await;
-    crate::sync::membership_ops::load_and_persist_owner_anchor(&storage, &listed, &owner_pk, &db)
-        .await
-        .unwrap()
-        .unwrap();
+    crate::sync::membership_ops::load_and_persist_owner_anchor(
+        &storage,
+        storage.store_root_hash(),
+        &listed,
+        &owner_pk,
+        &db,
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     // The owner wraps the OLD key for B (what B adopted at join), signed by the
     // owner B pins, so B's refresh can authenticate it.
@@ -194,6 +211,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let new_key = revoke_member(
         &storage,
         &storage,
+        storage.store_root_hash(),
         &mut chain,
         &owner,
         &pubkey_hex(&victim),
@@ -460,6 +478,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     let new_key = revoke_member(
         &storage,
         &storage,
+        storage.store_root_hash(),
         &mut chain,
         &owner,
         &pubkey_hex(&victim),
@@ -647,6 +666,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let new_key = revoke_member(
         &storage,
         &storage,
+        storage.store_root_hash(),
         &mut chain,
         &second_owner,
         &pubkey_hex(&victim),
@@ -1041,11 +1061,23 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     upload_chain(&storage, &chain, &owner).await;
 
     let db = open_test_db();
+    db.set_protocol_state(
+        crate::database::STORE_ROOT_HASH_STATE_KEY,
+        &storage.store_root_hash().to_string(),
+    )
+    .await
+    .expect("bind removal fixture to its Store protocol root");
     let listed = storage.discover_membership_entries().await;
-    crate::sync::membership_ops::load_and_persist_owner_anchor(&storage, &listed, &owner_pk, &db)
-        .await
-        .unwrap()
-        .unwrap();
+    crate::sync::membership_ops::load_and_persist_owner_anchor(
+        &storage,
+        storage.store_root_hash(),
+        &listed,
+        &owner_pk,
+        &db,
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     // This device's steady state: keyring and live cipher hold the pre-rotation key.
     let ks = TestCustody::default();
@@ -1083,9 +1115,15 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     // The cloud rotation committed: the member is durably removed from the
     // committed chain even though this device could not adopt the new key.
     let entries = storage.discover_membership_entries().await;
-    let committed = load_anchored_chain(&storage, &entries, Some(&owner_pk), None)
-        .await
-        .expect("committed chain loads");
+    let committed = load_anchored_chain(
+        &storage,
+        storage.store_root_hash(),
+        &entries,
+        Some(&owner_pk),
+        None,
+    )
+    .await
+    .expect("committed chain loads");
     assert!(
         !committed
             .current_members()

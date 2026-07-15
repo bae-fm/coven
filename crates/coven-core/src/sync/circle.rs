@@ -8,8 +8,8 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Sha256;
 
-use super::membership::OwnerGrantId;
-use super::store_commit::ObjectHash;
+use super::membership::{MembershipCoord, OwnerGrantId};
+use super::store_commit::{CommitPosition, ObjectHash};
 use crate::encryption::EncryptionService;
 
 const CIRCLE_ID_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -79,6 +79,235 @@ impl<'de> Deserialize<'de> for CircleId {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("circle id must be canonical 128-bit lowercase base32: {0:?}")]
 pub struct CircleIdError(String);
+
+macro_rules! circle_id_newtype {
+    ($name:ident, $error:ident, $message:literal) => {
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(CircleId);
+
+        impl $name {
+            pub fn from_bytes(bytes: [u8; 16]) -> Self {
+                Self(CircleId::from_bytes(bytes))
+            }
+
+            pub fn as_bytes(&self) -> &[u8; 16] {
+                self.0.as_bytes()
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Display::fmt(self, formatter)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Display::fmt(&self.0, formatter)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = $error;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                value
+                    .parse::<CircleId>()
+                    .map(Self)
+                    .map_err(|_| $error(value.to_string()))
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(&self.to_string())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                String::deserialize(deserializer)?
+                    .parse()
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+        #[error($message)]
+        pub struct $error(String);
+    };
+}
+
+circle_id_newtype!(
+    CircleEpochId,
+    CircleEpochIdError,
+    "circle epoch id must be canonical 128-bit lowercase base32: {0:?}"
+);
+circle_id_newtype!(
+    AccessLeafId,
+    AccessLeafIdError,
+    "access leaf id must be canonical 128-bit lowercase base32: {0:?}"
+);
+
+/// Exact Store membership materialization named by a circle control or access
+/// leaf. The inner policy shape is private so non-canonical Merge heads and
+/// zero Serial positions cannot be constructed or deserialized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct StoreMembershipStateRef(StoreMembershipStateRefKind);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum StoreMembershipStateRefKind {
+    MergeConcurrent {
+        heads: Vec<MembershipCoord>,
+        state_hash: ObjectHash,
+    },
+    Serial {
+        position: CommitPosition,
+        state_hash: ObjectHash,
+    },
+}
+
+impl<'de> Deserialize<'de> for StoreMembershipStateRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let reference = Self(StoreMembershipStateRefKind::deserialize(deserializer)?);
+        reference
+            .validate_shape()
+            .map_err(serde::de::Error::custom)?;
+        Ok(reference)
+    }
+}
+
+impl StoreMembershipStateRef {
+    pub fn merge(
+        mut heads: Vec<MembershipCoord>,
+        state_hash: ObjectHash,
+    ) -> Result<Self, StoreMembershipStateRefError> {
+        heads.sort();
+        let reference = Self(StoreMembershipStateRefKind::MergeConcurrent { heads, state_hash });
+        reference.validate_shape()?;
+        Ok(reference)
+    }
+
+    pub fn serial(
+        position: CommitPosition,
+        state_hash: ObjectHash,
+    ) -> Result<Self, StoreMembershipStateRefError> {
+        let reference = Self(StoreMembershipStateRefKind::Serial {
+            position,
+            state_hash,
+        });
+        reference.validate_shape()?;
+        Ok(reference)
+    }
+
+    pub fn state_hash(&self) -> ObjectHash {
+        match &self.0 {
+            StoreMembershipStateRefKind::MergeConcurrent { state_hash, .. }
+            | StoreMembershipStateRefKind::Serial { state_hash, .. } => *state_hash,
+        }
+    }
+
+    pub fn merge_heads(&self) -> Result<&[MembershipCoord], StoreMembershipStateRefError> {
+        match &self.0 {
+            StoreMembershipStateRefKind::MergeConcurrent { heads, .. } => Ok(heads),
+            StoreMembershipStateRefKind::Serial { .. } => {
+                Err(StoreMembershipStateRefError::PolicyMismatch {
+                    expected: crate::WritePolicy::MergeConcurrent,
+                    actual: crate::WritePolicy::Serial,
+                })
+            }
+        }
+    }
+
+    pub fn serial_position(&self) -> Result<&CommitPosition, StoreMembershipStateRefError> {
+        match &self.0 {
+            StoreMembershipStateRefKind::Serial { position, .. } => Ok(position),
+            StoreMembershipStateRefKind::MergeConcurrent { .. } => {
+                Err(StoreMembershipStateRefError::PolicyMismatch {
+                    expected: crate::WritePolicy::Serial,
+                    actual: crate::WritePolicy::MergeConcurrent,
+                })
+            }
+        }
+    }
+
+    pub fn for_policy(
+        &self,
+        expected: crate::WritePolicy,
+    ) -> Result<&Self, StoreMembershipStateRefError> {
+        let actual = match self.0 {
+            StoreMembershipStateRefKind::MergeConcurrent { .. } => {
+                crate::WritePolicy::MergeConcurrent
+            }
+            StoreMembershipStateRefKind::Serial { .. } => crate::WritePolicy::Serial,
+        };
+        if actual != expected {
+            return Err(StoreMembershipStateRefError::PolicyMismatch { expected, actual });
+        }
+        Ok(self)
+    }
+
+    fn validate_shape(&self) -> Result<(), StoreMembershipStateRefError> {
+        match &self.0 {
+            StoreMembershipStateRefKind::MergeConcurrent { heads, .. } => {
+                if heads.is_empty() {
+                    return Err(StoreMembershipStateRefError::EmptyMergeHeads);
+                }
+                if heads
+                    .iter()
+                    .any(|head| head.author_pubkey.is_empty() || head.seq == 0)
+                {
+                    return Err(StoreMembershipStateRefError::InvalidMergeHead);
+                }
+                if !heads.windows(2).all(|pair| pair[0] < pair[1]) {
+                    return Err(StoreMembershipStateRefError::NonCanonicalMergeHeads);
+                }
+                let streams = heads
+                    .iter()
+                    .map(|head| (&head.author_pubkey, &head.author_owner_grant))
+                    .collect::<std::collections::BTreeSet<_>>();
+                if streams.len() != heads.len() {
+                    return Err(StoreMembershipStateRefError::DuplicateMergeStream);
+                }
+            }
+            StoreMembershipStateRefKind::Serial { position, .. } if position.seq == 0 => {
+                return Err(StoreMembershipStateRefError::InvalidSerialPosition);
+            }
+            StoreMembershipStateRefKind::Serial { .. } => {}
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StoreMembershipStateRefError {
+    #[error("Merge membership reference has no heads")]
+    EmptyMergeHeads,
+    #[error("Merge membership reference contains an empty author or zero sequence")]
+    InvalidMergeHead,
+    #[error("Merge membership heads are not strictly sorted")]
+    NonCanonicalMergeHeads,
+    #[error("Merge membership reference contains more than one head for an author grant stream")]
+    DuplicateMergeStream,
+    #[error("Serial membership reference has a zero commit sequence")]
+    InvalidSerialPosition,
+    #[error("membership reference uses {actual:?}, expected {expected:?}")]
+    PolicyMismatch {
+        expected: crate::WritePolicy,
+        actual: crate::WritePolicy,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -317,6 +546,15 @@ fn decode_base32(value: &str) -> Result<[u8; 16], CircleIdError> {
 mod tests {
     use super::*;
 
+    fn membership_coord(author: &str, seq: u64) -> super::super::membership::MembershipCoord {
+        super::super::membership::MembershipCoord {
+            author_pubkey: author.to_string(),
+            author_owner_grant: OwnerGrantId(ObjectHash::digest(author.as_bytes())),
+            seq,
+            entry_hash: ObjectHash::digest(format!("{author}-{seq}").as_bytes()),
+        }
+    }
+
     #[test]
     fn circle_id_round_trips_only_its_canonical_lowercase_base32() {
         let id = CircleId::from_bytes([0; 16]);
@@ -326,6 +564,57 @@ mod tests {
         assert!(encoded.to_uppercase().parse::<CircleId>().is_err());
         assert!("local".parse::<CircleId>().is_err());
         assert!(format!("{}b", &encoded[..25]).parse::<CircleId>().is_err());
+    }
+
+    #[test]
+    fn circle_epoch_and_access_leaf_ids_preserve_distinct_canonical_types() {
+        let epoch = CircleEpochId::from_bytes([6; 16]);
+        let leaf = AccessLeafId::from_bytes([7; 16]);
+        assert_eq!(epoch.to_string().parse::<CircleEpochId>().unwrap(), epoch);
+        assert_eq!(leaf.to_string().parse::<AccessLeafId>().unwrap(), leaf);
+        assert!(epoch
+            .to_string()
+            .to_uppercase()
+            .parse::<CircleEpochId>()
+            .is_err());
+        assert!(format!("{}b", &leaf.to_string()[..25])
+            .parse::<AccessLeafId>()
+            .is_err());
+        assert_ne!(epoch.to_string(), leaf.to_string());
+    }
+
+    #[test]
+    fn membership_state_reference_enforces_policy_and_canonical_merge_heads() {
+        let first = membership_coord("author-a", 1);
+        let second = membership_coord("author-b", 2);
+        let state_hash = ObjectHash::digest(b"membership-state");
+        let merge = StoreMembershipStateRef::merge(vec![second.clone(), first.clone()], state_hash)
+            .unwrap();
+        assert_eq!(merge.merge_heads().unwrap(), &[first, second]);
+        assert!(merge
+            .for_policy(crate::WritePolicy::MergeConcurrent)
+            .is_ok());
+        assert!(merge.for_policy(crate::WritePolicy::Serial).is_err());
+
+        let serial = StoreMembershipStateRef::serial(
+            super::super::store_commit::CommitPosition {
+                seq: 3,
+                commit_hash: ObjectHash::digest(b"membership-commit"),
+            },
+            state_hash,
+        )
+        .unwrap();
+        assert!(serial.for_policy(crate::WritePolicy::Serial).is_ok());
+        assert!(serial
+            .for_policy(crate::WritePolicy::MergeConcurrent)
+            .is_err());
+
+        let mut value = serde_json::to_value(&merge).unwrap();
+        value["merge_concurrent"]["heads"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        assert!(serde_json::from_value::<StoreMembershipStateRef>(value).is_err());
     }
 
     #[test]

@@ -43,6 +43,192 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::storage::cloud::{AppendedObject, CloudHeadVersion, ListingCoverage};
+use crate::sync::store_commit::ObjectHash;
+
+/// Signed object kind bound into symmetric-protection AAD and checked against
+/// the semantic path before storage I/O.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtocolObjectDomain {
+    StoreProtocolRoot,
+    StoreCommit,
+    StoreHead,
+    StoreAck,
+    StoreDeviceRegistration,
+    StoreSnapshotMeta,
+    StoreSnapshotImage,
+    StoreMembershipEntry,
+    StoreMembershipHead,
+    StorePackage,
+    CircleAccessLeaf,
+    CircleAccessEnvelope,
+}
+
+impl ProtocolObjectDomain {
+    pub(crate) fn aad_label(self) -> &'static [u8] {
+        match self {
+            Self::StoreProtocolRoot => b"store-protocol-root",
+            Self::StoreCommit => b"store-commit",
+            Self::StoreHead => b"store-head",
+            Self::StoreAck => b"store-ack",
+            Self::StoreDeviceRegistration => b"store-device-registration",
+            Self::StoreSnapshotMeta => b"store-snapshot-meta",
+            Self::StoreSnapshotImage => b"store-snapshot-image",
+            Self::StoreMembershipEntry => b"store-membership-entry",
+            Self::StoreMembershipHead => b"store-membership-head",
+            Self::StorePackage => b"store-package",
+            Self::CircleAccessLeaf => b"circle-access-leaf",
+            Self::CircleAccessEnvelope => b"circle-access-envelope",
+        }
+    }
+
+    fn accepts_path(self, semantic_prefix: &str) -> bool {
+        match self {
+            Self::StoreProtocolRoot => semantic_prefix.starts_with("store-v1/store-protocol-root/"),
+            Self::StoreCommit => semantic_prefix.starts_with("store-v1/commits/"),
+            Self::StoreHead => semantic_prefix.starts_with("store-v1/heads/"),
+            Self::StoreAck => semantic_prefix.starts_with("store-v1/acks/"),
+            Self::StoreDeviceRegistration => semantic_prefix.starts_with("store-v1/devices/"),
+            Self::StoreSnapshotMeta => semantic_prefix.starts_with("store-v1/snapshots/"),
+            Self::StoreSnapshotImage => semantic_prefix.starts_with("store-v1/snapshot-images/"),
+            Self::StoreMembershipEntry => {
+                semantic_prefix.starts_with("store-v1/membership/entries/")
+            }
+            Self::StoreMembershipHead => semantic_prefix.starts_with("store-v1/membership/heads/"),
+            Self::StorePackage => semantic_prefix.starts_with("store-v1/packages/"),
+            Self::CircleAccessLeaf => matches_circle_path(semantic_prefix, "access-leaves", 7),
+            Self::CircleAccessEnvelope => {
+                matches_circle_path(semantic_prefix, "access-envelopes", 6)
+            }
+        }
+    }
+
+    pub(crate) fn accepts_extension(self, extension: &str) -> bool {
+        match self {
+            Self::StoreSnapshotImage => extension == ".db",
+            Self::StorePackage => extension == ".pkg",
+            Self::CircleAccessLeaf => extension.is_empty(),
+            Self::StoreProtocolRoot
+            | Self::StoreCommit
+            | Self::StoreHead
+            | Self::StoreAck
+            | Self::StoreDeviceRegistration
+            | Self::StoreSnapshotMeta
+            | Self::StoreMembershipEntry
+            | Self::StoreMembershipHead
+            | Self::CircleAccessEnvelope => extension == ".json",
+        }
+    }
+}
+
+fn matches_circle_path(semantic_prefix: &str, namespace: &str, segment_count: usize) -> bool {
+    let segments = semantic_prefix.split('/').collect::<Vec<_>>();
+    segments.len() == segment_count
+        && segments[0] == "circles"
+        && !segments[1].is_empty()
+        && segments[2] == namespace
+        && segments[3..].iter().all(|segment| !segment.is_empty())
+}
+
+/// How one immutable object is protected before the provider stores it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtocolObjectProtection {
+    Store,
+    RecipientSealed,
+}
+
+/// Authenticated storage context for one immutable semantic object.
+pub struct ProtocolObjectContext {
+    store_root_hash: ObjectHash,
+    domain: ProtocolObjectDomain,
+    protection: ProtocolObjectProtection,
+}
+
+impl ProtocolObjectContext {
+    pub fn store(store_root_hash: ObjectHash, domain: ProtocolObjectDomain) -> Self {
+        Self {
+            store_root_hash,
+            domain,
+            protection: ProtocolObjectProtection::Store,
+        }
+    }
+
+    pub fn recipient_sealed(store_root_hash: ObjectHash, domain: ProtocolObjectDomain) -> Self {
+        Self {
+            store_root_hash,
+            domain,
+            protection: ProtocolObjectProtection::RecipientSealed,
+        }
+    }
+
+    pub fn store_root_hash(&self) -> ObjectHash {
+        self.store_root_hash
+    }
+
+    pub fn domain(&self) -> ProtocolObjectDomain {
+        self.domain
+    }
+
+    pub fn protection(&self) -> ProtocolObjectProtection {
+        self.protection
+    }
+
+    pub fn validate_path(&self, semantic_prefix: &str) -> Result<(), StorageError> {
+        let protection_matches = match self.domain {
+            ProtocolObjectDomain::CircleAccessLeaf => {
+                self.protection == ProtocolObjectProtection::RecipientSealed
+            }
+            _ => self.protection == ProtocolObjectProtection::Store,
+        };
+        if !protection_matches {
+            return Err(StorageError::Parse(format!(
+                "object domain {:?} does not accept protection {:?}",
+                self.domain, self.protection
+            )));
+        }
+        if semantic_prefix.contains("/copies/") || !self.domain.accepts_path(semantic_prefix) {
+            return Err(StorageError::Parse(format!(
+                "object domain {:?} does not accept semantic path {semantic_prefix:?}",
+                self.domain
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn validate_extension(&self, extension: &str) -> Result<(), StorageError> {
+        if !self.domain.accepts_extension(extension) {
+            return Err(StorageError::Parse(format!(
+                "object domain {:?} does not accept extension {extension:?}",
+                self.domain
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn validate_locator(
+        &self,
+        object: &ProtocolObjectLocator,
+        semantic_prefix: &str,
+    ) -> Result<(), StorageError> {
+        self.validate_path(semantic_prefix)?;
+        let copy_prefix = format!("{semantic_prefix}/copies/");
+        let copy_key = object
+            .logical_key()
+            .strip_prefix(&copy_prefix)
+            .ok_or_else(|| {
+                StorageError::Parse(format!(
+                    "protocol object {:?} is not a copy of semantic path {semantic_prefix:?}",
+                    object.logical_key()
+                ))
+            })?;
+        if copy_key.is_empty() || copy_key.contains('/') {
+            return Err(StorageError::Parse(format!(
+                "protocol object {:?} has an invalid copy key",
+                object.logical_key()
+            )));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionToken(CloudHeadVersion);
@@ -287,6 +473,7 @@ pub trait SyncStorage: Send + Sync {
     /// injects a fresh copy id and applies its at-rest suffix below this API.
     async fn append_protocol_object(
         &self,
+        context: &ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
         data: Vec<u8>,
@@ -303,6 +490,7 @@ pub trait SyncStorage: Send + Sync {
     /// semantic prefix as encryption AAD.
     async fn read_protocol_object(
         &self,
+        context: &ProtocolObjectContext,
         object: &ProtocolObjectLocator,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError>;

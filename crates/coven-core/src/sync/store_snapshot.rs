@@ -145,6 +145,10 @@ async fn publish_durable_snapshot(
     }
     append_and_verify(
         storage,
+        &super::storage::ProtocolObjectContext::store(
+            meta.store_root_hash,
+            super::storage::ProtocolObjectDomain::StoreSnapshotImage,
+        ),
         &snapshot_image_semantic_prefix(&meta.author_pubkey, pending.image_hash),
         ".db",
         &pending.image_bytes,
@@ -153,6 +157,10 @@ async fn publish_durable_snapshot(
     .map_err(SnapshotError::StoreObject)?;
     append_and_verify(
         storage,
+        &super::storage::ProtocolObjectContext::store(
+            meta.store_root_hash,
+            super::storage::ProtocolObjectDomain::StoreSnapshotMeta,
+        ),
         &snapshot_semantic_prefix(&meta.author_pubkey, pending.snapshot_hash),
         ".json",
         &pending.meta_bytes,
@@ -191,12 +199,14 @@ pub async fn select_store_snapshot(
             crate::WritePolicy::MergeConcurrent,
             crate::join_code::MembershipFloor::MergeConcurrent(floor),
         ) => {
-            let entries = super::membership_ops::list_membership_entries(storage)
-                .await
-                .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
+            let entries =
+                super::membership_ops::list_membership_entries(storage, expected_store_root_hash)
+                    .await
+                    .map_err(|error| SnapshotError::UnauthorizedAuthor(error.to_string()))?;
             Some(
                 super::membership_ops::load_anchored_chain_at_floor(
                     storage,
+                    expected_store_root_hash,
                     &entries,
                     &store_protocol_root.value.author_pubkey,
                     floor,
@@ -273,14 +283,19 @@ pub async fn select_store_snapshot(
             supported: binary_schema_version,
         });
     }
-    let image = load_snapshot_image(storage, &chosen.author_pubkey, chosen.image_hash)
-        .await
-        .map_err(snapshot_object_error)?
-        .ok_or_else(|| {
-            SnapshotError::Bucket(super::storage::StorageError::NotFound(
-                snapshot_image_semantic_prefix(&chosen.author_pubkey, chosen.image_hash),
-            ))
-        })?;
+    let image = load_snapshot_image(
+        storage,
+        expected_store_root_hash,
+        &chosen.author_pubkey,
+        chosen.image_hash,
+    )
+    .await
+    .map_err(snapshot_object_error)?
+    .ok_or_else(|| {
+        SnapshotError::Bucket(super::storage::StorageError::NotFound(
+            snapshot_image_semantic_prefix(&chosen.author_pubkey, chosen.image_hash),
+        ))
+    })?;
     Ok((
         store_protocol_root.semantic_hash,
         store_protocol_root.value.write_policy,
@@ -440,6 +455,10 @@ mod tests {
         home.fail_append_before_call(1);
         assert!(append_and_verify(
             &storage,
+            &super::super::storage::ProtocolObjectContext::store(
+                hash,
+                super::super::storage::ProtocolObjectDomain::StoreProtocolRoot,
+            ),
             &store_protocol_root_semantic_prefix(hash),
             ".json",
             &store_protocol_root.to_bytes(),
@@ -456,6 +475,10 @@ mod tests {
         home.fail_append_after_call(1);
         assert!(append_and_verify(
             &storage,
+            &super::super::storage::ProtocolObjectContext::store(
+                hash,
+                super::super::storage::ProtocolObjectDomain::StoreProtocolRoot,
+            ),
             &store_protocol_root_semantic_prefix(hash),
             ".json",
             &store_protocol_root.to_bytes(),
@@ -470,6 +493,10 @@ mod tests {
 
         append_and_verify(
             &storage,
+            &super::super::storage::ProtocolObjectContext::store(
+                hash,
+                super::super::storage::ProtocolObjectDomain::StoreProtocolRoot,
+            ),
             &store_protocol_root_semantic_prefix(hash),
             ".json",
             &store_protocol_root.to_bytes(),
@@ -515,6 +542,10 @@ mod tests {
             .unwrap();
             append_and_verify(
                 &storage,
+                &super::super::storage::ProtocolObjectContext::store(
+                    store_protocol_root.object_hash(),
+                    super::super::storage::ProtocolObjectDomain::StoreProtocolRoot,
+                ),
                 &store_protocol_root_semantic_prefix(store_protocol_root.object_hash()),
                 ".json",
                 &store_protocol_root.to_bytes(),

@@ -181,6 +181,10 @@ pub async fn drain_registration_outbox(
         }
         append_and_verify(
             storage,
+            &super::storage::ProtocolObjectContext::store(
+                store_root_hash,
+                super::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+            ),
             &registration_semantic_prefix(
                 &device_id,
                 outbound.revision,
@@ -398,6 +402,10 @@ async fn publish_registration_activation(
             }
             append_and_verify(
                 storage,
+                &super::storage::ProtocolObjectContext::store(
+                    registration.store_root_hash,
+                    super::storage::ProtocolObjectDomain::StoreCommit,
+                ),
                 &commit_semantic_prefix(
                     &registration.device_id,
                     commit.seq(),
@@ -409,6 +417,10 @@ async fn publish_registration_activation(
             .await?;
             append_and_verify(
                 storage,
+                &super::storage::ProtocolObjectContext::store(
+                    registration.store_root_hash,
+                    super::storage::ProtocolObjectDomain::StoreHead,
+                ),
                 &head_semantic_prefix(&registration.device_id, commit.seq(), head.head_hash()),
                 ".json",
                 head_bytes,
@@ -723,6 +735,10 @@ mod tests {
             .unwrap();
             append_and_verify(
                 &storage,
+                &super::super::storage::ProtocolObjectContext::store(
+                    store_root_hash,
+                    super::super::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+                ),
                 &registration_semantic_prefix("dev-reader", 1, registration.registration_hash()),
                 ".json",
                 &registration.to_bytes(),
@@ -751,6 +767,10 @@ mod tests {
         .unwrap();
         append_and_verify(
             &storage,
+            &super::super::storage::ProtocolObjectContext::store(
+                store_root_hash,
+                super::super::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+            ),
             &registration_semantic_prefix("dev-reader", 2, registration.registration_hash()),
             ".json",
             &registration.to_bytes(),

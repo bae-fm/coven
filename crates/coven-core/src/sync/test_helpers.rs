@@ -540,13 +540,19 @@ pub async fn append_membership_entry(
     chain
         .add_entry_at(coord.clone(), entry.clone())
         .expect("valid membership test chain");
-    crate::sync::store_objects::append_membership_entry_object(storage, &coord, &entry)
-        .await
-        .expect("upload membership entry");
+    crate::sync::store_objects::append_membership_entry_object(
+        storage,
+        storage.store_protocol_root().object_hash(),
+        &coord,
+        &entry,
+    )
+    .await
+    .expect("upload membership entry");
 }
 
 pub async fn append_membership_entry_bytes(
     storage: &dyn SyncStorage,
+    store_root_hash: crate::sync::store_commit::ObjectHash,
     author_pubkey: &str,
     seq: u64,
     data: Vec<u8>,
@@ -567,7 +573,15 @@ pub async fn append_membership_entry_bytes(
         hash,
     );
     storage
-        .append_protocol_object(&prefix, ".json", data)
+        .append_protocol_object(
+            &crate::sync::storage::ProtocolObjectContext::store(
+                store_root_hash,
+                crate::sync::storage::ProtocolObjectDomain::StoreMembershipEntry,
+            ),
+            &prefix,
+            ".json",
+            data,
+        )
         .await?;
     Ok(())
 }
@@ -577,9 +591,14 @@ pub async fn publish_membership_chain_head(
     chain: &MembershipChain,
     signer: &UserKeypair,
 ) {
-    crate::sync::membership_ops::publish_membership_head(storage, chain, signer)
-        .await
-        .expect("publish membership head");
+    crate::sync::membership_ops::publish_membership_head(
+        storage,
+        storage.store_protocol_root().object_hash(),
+        chain,
+        signer,
+    )
+    .await
+    .expect("publish membership head");
 }
 
 /// The object key [`MockSyncStorage`] stores a blob under. A plain-scheme blob
@@ -794,12 +813,22 @@ impl MockSyncStorage {
         let coord = founder.coord();
         let chain = crate::sync::membership::MembershipChain::from_entries(vec![founder.clone()])
             .expect("validate mock protocol founder");
-        crate::sync::store_objects::append_membership_entry_object(self, &coord, &founder)
-            .await
-            .expect("publish mock protocol founder membership");
-        crate::sync::membership_ops::publish_membership_head(self, &chain, &self.keypair)
-            .await
-            .expect("publish mock protocol founder head");
+        crate::sync::store_objects::append_membership_entry_object(
+            self,
+            self.store_protocol_root.object_hash(),
+            &coord,
+            &founder,
+        )
+        .await
+        .expect("publish mock protocol founder membership");
+        crate::sync::membership_ops::publish_membership_head(
+            self,
+            self.store_protocol_root.object_hash(),
+            &chain,
+            &self.keypair,
+        )
+        .await
+        .expect("publish mock protocol founder head");
         chain
     }
 
@@ -915,9 +944,12 @@ impl MockSyncStorage {
     }
 
     pub async fn discover_membership_entries(&self) -> Vec<MembershipCoord> {
-        crate::sync::membership_ops::list_membership_entries(self)
-            .await
-            .expect("discover membership entries")
+        crate::sync::membership_ops::list_membership_entries(
+            self,
+            self.store_protocol_root().object_hash(),
+        )
+        .await
+        .expect("discover membership entries")
     }
 
     fn membership_coords(&self, author_pubkey: &str, seq: u64) -> Vec<MembershipCoord> {
@@ -968,6 +1000,7 @@ impl MockSyncStorage {
         let coord = self.unique_membership_coord(author_pubkey, seq).await?;
         crate::sync::store_objects::load_membership_entry_slot(
             self,
+            self.store_protocol_root().object_hash(),
             author_pubkey,
             &coord.author_owner_grant,
             seq,
@@ -999,7 +1032,17 @@ impl MockSyncStorage {
             seq,
             hash,
         );
-        SyncStorage::append_protocol_object(self, &prefix, ".json", data).await?;
+        SyncStorage::append_protocol_object(
+            self,
+            &crate::sync::storage::ProtocolObjectContext::store(
+                self.store_protocol_root().object_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StoreMembershipEntry,
+            ),
+            &prefix,
+            ".json",
+            data,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1007,15 +1050,18 @@ impl MockSyncStorage {
         &self,
         author_pubkey: &str,
     ) -> Result<Vec<u8>, StorageError> {
-        crate::sync::store_objects::list_membership_head_objects(self)
-            .await
-            .map_err(|error| StorageError::Parse(error.to_string()))?
-            .heads
-            .into_iter()
-            .filter(|head| head.value.author_pubkey == author_pubkey)
-            .max_by_key(|head| head.value.seq)
-            .map(|head| head.bytes)
-            .ok_or_else(|| StorageError::NotFound(format!("membership head {author_pubkey}")))
+        crate::sync::store_objects::list_membership_head_objects(
+            self,
+            self.store_protocol_root().object_hash(),
+        )
+        .await
+        .map_err(|error| StorageError::Parse(error.to_string()))?
+        .heads
+        .into_iter()
+        .filter(|head| head.value.author_pubkey == author_pubkey)
+        .max_by_key(|head| head.value.seq)
+        .map(|head| head.bytes)
+        .ok_or_else(|| StorageError::NotFound(format!("membership head {author_pubkey}")))
     }
 
     pub async fn append_membership_head_bytes(
@@ -1032,7 +1078,17 @@ impl MockSyncStorage {
             head.seq,
             hash,
         );
-        SyncStorage::append_protocol_object(self, &prefix, ".json", data).await?;
+        SyncStorage::append_protocol_object(
+            self,
+            &crate::sync::storage::ProtocolObjectContext::store(
+                self.store_protocol_root().object_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StoreMembershipHead,
+            ),
+            &prefix,
+            ".json",
+            data,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1325,10 +1381,13 @@ impl MockSyncStorage {
 impl SyncStorage for MockSyncStorage {
     async fn append_protocol_object(
         &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
         data: Vec<u8>,
     ) -> Result<ProtocolObjectLocator, StorageError> {
+        context.validate_path(semantic_prefix)?;
+        context.validate_extension(extension)?;
         if semantic_prefix.starts_with("store-v1/membership/entries/")
             && armed_put_failure_hits(
                 &self.membership_entry_append_count,
@@ -1437,9 +1496,11 @@ impl SyncStorage for MockSyncStorage {
 
     async fn read_protocol_object(
         &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
         object: &ProtocolObjectLocator,
-        _semantic_prefix: &str,
+        semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError> {
+        context.validate_locator(object, semantic_prefix)?;
         let bytes = self
             .protocol_objects
             .lock()
@@ -1887,6 +1948,10 @@ pub async fn publish_test_store_protocol_root(
     let hash = store_protocol_root.object_hash();
     crate::sync::store_objects::append_and_verify(
         storage,
+        &crate::sync::storage::ProtocolObjectContext::store(
+            hash,
+            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
+        ),
         &crate::sync::store_commit::store_protocol_root_semantic_prefix(hash),
         ".json",
         &store_protocol_root.to_bytes(),
@@ -1929,6 +1994,10 @@ pub async fn publish_test_serial_store_protocol_root(
     let hash = store_protocol_root.object_hash();
     crate::sync::store_objects::append_and_verify(
         storage,
+        &crate::sync::storage::ProtocolObjectContext::store(
+            hash,
+            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
+        ),
         &crate::sync::store_commit::store_protocol_root_semantic_prefix(hash),
         ".json",
         &store_protocol_root.to_bytes(),
@@ -1981,6 +2050,10 @@ pub async fn publish_test_protocol_roots(
     let hash = store_protocol_root.object_hash();
     crate::sync::store_objects::append_and_verify(
         storage,
+        &crate::sync::storage::ProtocolObjectContext::store(
+            hash,
+            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
+        ),
         &crate::sync::store_commit::store_protocol_root_semantic_prefix(hash),
         ".json",
         &store_protocol_root.to_bytes(),
@@ -1990,10 +2063,15 @@ pub async fn publish_test_protocol_roots(
     let coord = founder_entry.coord();
     let chain = crate::sync::membership::MembershipChain::from_entries(vec![founder_entry.clone()])
         .expect("validate test founder membership");
-    crate::sync::store_objects::append_membership_entry_object(storage, &coord, &founder_entry)
-        .await
-        .expect("publish test founder membership");
-    crate::sync::membership_ops::publish_membership_head(storage, &chain, founder)
+    crate::sync::store_objects::append_membership_entry_object(
+        storage,
+        hash,
+        &coord,
+        &founder_entry,
+    )
+    .await
+    .expect("publish test founder membership");
+    crate::sync::membership_ops::publish_membership_head(storage, hash, &chain, founder)
         .await
         .expect("publish test founder head");
     (store_protocol_root, chain)
@@ -2012,16 +2090,22 @@ pub async fn publish_test_founder_membership(
     .await
     .expect("load test Store protocol root")
     .value;
+    let store_root_hash = store_protocol_root.object_hash();
     let entry = store_protocol_root.founder;
     let coord = entry.coord();
     let mut chain = crate::sync::membership::MembershipChain::new();
     chain
         .add_entry_at(coord.clone(), entry.clone())
         .expect("valid test founder membership");
-    crate::sync::store_objects::append_membership_entry_object(storage, &coord, &entry)
-        .await
-        .expect("publish test founder membership");
-    crate::sync::membership_ops::publish_membership_head(storage, &chain, founder)
+    crate::sync::store_objects::append_membership_entry_object(
+        storage,
+        store_root_hash,
+        &coord,
+        &entry,
+    )
+    .await
+    .expect("publish test founder membership");
+    crate::sync::membership_ops::publish_membership_head(storage, store_root_hash, &chain, founder)
         .await
         .expect("publish test founder membership head");
     chain

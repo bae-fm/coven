@@ -7,7 +7,9 @@ use crate::storage::cloud::ListingCoverage;
 use super::membership::{
     entry_hash, verify_membership_entry, AuthorHead, MembershipCoord, MembershipEntry, OwnerGrantId,
 };
-use super::storage::{ProtocolObjectLocator, StorageError, SyncStorage};
+use super::storage::{
+    ProtocolObjectContext, ProtocolObjectDomain, ProtocolObjectLocator, StorageError, SyncStorage,
+};
 use super::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, commit_slot_prefix, head_slot_prefix,
     package_semantic_prefix, parse_ack_copy_key, parse_commit_copy_key, parse_head_copy_key,
@@ -153,15 +155,16 @@ pub enum StoreObjectError {
 /// allowing durable protocol state to advance.
 pub async fn append_and_verify(
     storage: &dyn SyncStorage,
+    context: &ProtocolObjectContext,
     semantic_prefix: &str,
     extension: &str,
     bytes: &[u8],
 ) -> Result<ProtocolObjectLocator, StoreObjectError> {
     let object = storage
-        .append_protocol_object(semantic_prefix, extension, bytes.to_vec())
+        .append_protocol_object(context, semantic_prefix, extension, bytes.to_vec())
         .await?;
     let opened = storage
-        .read_protocol_object(&object, semantic_prefix)
+        .read_protocol_object(context, &object, semantic_prefix)
         .await
         .map_err(|source| StoreObjectError::CandidateUnreadable {
             key: object.logical_key().to_string(),
@@ -184,16 +187,23 @@ pub async fn load_expected_store_protocol_root(
     expected_sync_routing_hash: ObjectHash,
 ) -> Result<Option<VerifiedCopies<StoreProtocolRoot>>, StoreObjectError> {
     let semantic_prefix = super::store_commit::store_protocol_root_semantic_prefix(expected_hash);
-    load_semantic_copies(storage, &semantic_prefix, ".json", expected_hash, |bytes| {
-        StoreProtocolRoot::parse_expected(
-            bytes,
-            expected_hash,
-            expected_store_id,
-            expected_founder,
-            expected_policy,
-            expected_sync_routing_hash,
-        )
-    })
+    load_semantic_copies(
+        storage,
+        &ProtocolObjectContext::store(expected_hash, ProtocolObjectDomain::StoreProtocolRoot),
+        &semantic_prefix,
+        ".json",
+        expected_hash,
+        |bytes| {
+            StoreProtocolRoot::parse_expected(
+                bytes,
+                expected_hash,
+                expected_store_id,
+                expected_founder,
+                expected_policy,
+                expected_sync_routing_hash,
+            )
+        },
+    )
     .await
 }
 
@@ -204,9 +214,21 @@ pub async fn load_pinned_store_protocol_root(
     expected_founder: &str,
 ) -> Result<Option<VerifiedCopies<StoreProtocolRoot>>, StoreObjectError> {
     let semantic_prefix = super::store_commit::store_protocol_root_semantic_prefix(expected_hash);
-    load_semantic_copies(storage, &semantic_prefix, ".json", expected_hash, |bytes| {
-        StoreProtocolRoot::parse_pinned(bytes, expected_hash, expected_store_id, expected_founder)
-    })
+    load_semantic_copies(
+        storage,
+        &ProtocolObjectContext::store(expected_hash, ProtocolObjectDomain::StoreProtocolRoot),
+        &semantic_prefix,
+        ".json",
+        expected_hash,
+        |bytes| {
+            StoreProtocolRoot::parse_pinned(
+                bytes,
+                expected_hash,
+                expected_store_id,
+                expected_founder,
+            )
+        },
+    )
     .await
 }
 
@@ -215,17 +237,24 @@ pub async fn load_store_protocol_root_at_hash(
     expected_hash: ObjectHash,
 ) -> Result<Option<VerifiedCopies<StoreProtocolRoot>>, StoreObjectError> {
     let semantic_prefix = super::store_commit::store_protocol_root_semantic_prefix(expected_hash);
-    load_semantic_copies(storage, &semantic_prefix, ".json", expected_hash, |bytes| {
-        let root = StoreProtocolRoot::parse(bytes)?;
-        let actual = root.object_hash();
-        if actual != expected_hash {
-            return Err(StoreProtocolError::ObjectHashMismatch {
-                expected: expected_hash,
-                actual,
-            });
-        }
-        Ok(root)
-    })
+    load_semantic_copies(
+        storage,
+        &ProtocolObjectContext::store(expected_hash, ProtocolObjectDomain::StoreProtocolRoot),
+        &semantic_prefix,
+        ".json",
+        expected_hash,
+        |bytes| {
+            let root = StoreProtocolRoot::parse(bytes)?;
+            let actual = root.object_hash();
+            if actual != expected_hash {
+                return Err(StoreProtocolError::ObjectHashMismatch {
+                    expected: expected_hash,
+                    actual,
+                });
+            }
+            Ok(root)
+        },
+    )
     .await
 }
 
@@ -254,6 +283,7 @@ pub async fn discover_store_protocol_root(
         let semantic_prefix = super::store_commit::store_protocol_root_semantic_prefix(hash);
         if let Some(store_protocol_root) = load_semantic_candidates(
             storage,
+            &ProtocolObjectContext::store(hash, ProtocolObjectDomain::StoreProtocolRoot),
             &semantic_prefix,
             ".json",
             hash,
@@ -332,6 +362,7 @@ pub async fn load_serial_commit_at_position(
     );
     load_semantic_copies(
         storage,
+        &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
         &semantic_prefix,
         ".json",
         position.commit_hash,
@@ -365,6 +396,7 @@ async fn load_commit_slot_for_policy(
     let slot = commit_slot_prefix(device_id, seq);
     load_singleton_slot(
         storage,
+        &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
         &slot,
         ".json",
         |key| Ok(parse_commit_copy_key(key)?.semantic_hash),
@@ -392,6 +424,7 @@ pub async fn load_head_slot(
     let slot = head_slot_prefix(device_id, seq);
     load_singleton_slot(
         storage,
+        &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead),
         &slot,
         ".json",
         |key| Ok(parse_head_copy_key(key)?.semantic_hash),
@@ -418,6 +451,7 @@ pub async fn load_ack_slot(
     let slot = ack_slot_prefix(device_id, revision);
     load_singleton_slot(
         storage,
+        &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreAck),
         &slot,
         ".json",
         |key| Ok(parse_ack_copy_key(key)?.semantic_hash),
@@ -449,6 +483,7 @@ pub async fn load_package(
     );
     load_semantic_copies(
         storage,
+        &ProtocolObjectContext::store(commit.store_root_hash, ProtocolObjectDomain::StorePackage),
         &semantic_prefix,
         ".pkg",
         package.content_hash,
@@ -547,6 +582,7 @@ fn parse_membership_head_at(
 
 pub async fn append_membership_entry_object(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     coord: &MembershipCoord,
     entry: &MembershipEntry,
 ) -> Result<VerifiedCopies<MembershipEntry>, StoreObjectError> {
@@ -592,9 +628,17 @@ pub async fn append_membership_entry_object(
         coord.seq,
         semantic_hash,
     );
-    append_and_verify(storage, &semantic_prefix, ".json", &bytes).await?;
+    append_and_verify(
+        storage,
+        &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipEntry),
+        &semantic_prefix,
+        ".json",
+        &bytes,
+    )
+    .await?;
     load_membership_entry_slot(
         storage,
+        store_root_hash,
         &coord.author_pubkey,
         &coord.author_owner_grant,
         coord.seq,
@@ -605,6 +649,7 @@ pub async fn append_membership_entry_object(
 
 pub async fn load_membership_entry_slot(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     author: &str,
     grant: &OwnerGrantId,
     seq: u64,
@@ -612,6 +657,7 @@ pub async fn load_membership_entry_slot(
     let slot = membership_entry_slot_prefix(author, grant, seq);
     load_singleton_slot(
         storage,
+        &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipEntry),
         &slot,
         ".json",
         |key| Ok(parse_membership_entry_copy_key(key)?.semantic_hash),
@@ -622,6 +668,7 @@ pub async fn load_membership_entry_slot(
 
 pub async fn list_membership_entry_objects(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
 ) -> Result<VerifiedMembershipEntryListing, StoreObjectError> {
     let listing = storage
         .list_protocol_objects("store-v1/membership/entries/")
@@ -646,6 +693,10 @@ pub async fn list_membership_entry_objects(
         let slot = membership_entry_slot_prefix(&author, &grant, seq);
         if let Some(entry) = load_singleton_candidates(
             storage,
+            &ProtocolObjectContext::store(
+                store_root_hash,
+                ProtocolObjectDomain::StoreMembershipEntry,
+            ),
             &slot,
             ".json",
             objects,
@@ -674,6 +725,7 @@ pub async fn list_membership_entry_objects(
 
 pub async fn append_membership_head_object(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     head: &AuthorHead,
 ) -> Result<VerifiedCopies<AuthorHead>, StoreObjectError> {
     let bytes = serde_json::to_vec(head)
@@ -714,9 +766,17 @@ pub async fn append_membership_head_object(
         head.seq,
         semantic_hash,
     );
-    append_and_verify(storage, &semantic_prefix, ".json", &bytes).await?;
+    append_and_verify(
+        storage,
+        &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipHead),
+        &semantic_prefix,
+        ".json",
+        &bytes,
+    )
+    .await?;
     load_membership_head_slot(
         storage,
+        store_root_hash,
         &head.author_pubkey,
         &head.author_owner_grant,
         head.seq,
@@ -727,6 +787,7 @@ pub async fn append_membership_head_object(
 
 pub async fn load_membership_head_slot(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     author: &str,
     grant: &OwnerGrantId,
     seq: u64,
@@ -734,6 +795,7 @@ pub async fn load_membership_head_slot(
     let slot = membership_head_slot_prefix(author, grant, seq);
     load_singleton_slot(
         storage,
+        &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipHead),
         &slot,
         ".json",
         |key| Ok(parse_membership_head_copy_key(key)?.semantic_hash),
@@ -744,6 +806,7 @@ pub async fn load_membership_head_slot(
 
 pub async fn list_membership_head_objects(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
 ) -> Result<VerifiedMembershipHeadListing, StoreObjectError> {
     let listing = storage
         .list_protocol_objects("store-v1/membership/heads/")
@@ -768,6 +831,10 @@ pub async fn list_membership_head_objects(
         let slot = membership_head_slot_prefix(&author, &grant, seq);
         if let Some(head) = load_singleton_candidates(
             storage,
+            &ProtocolObjectContext::store(
+                store_root_hash,
+                ProtocolObjectDomain::StoreMembershipHead,
+            ),
             &slot,
             ".json",
             objects,
@@ -810,6 +877,7 @@ pub async fn list_snapshot_metas(
         let semantic_prefix = super::store_commit::snapshot_semantic_prefix(&author, snapshot_hash);
         let loaded = load_semantic_candidates(
             storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreSnapshotMeta),
             &semantic_prefix,
             ".json",
             snapshot_hash,
@@ -830,19 +898,27 @@ pub async fn list_snapshot_metas(
 
 pub async fn load_snapshot_image(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     author: &str,
     image_hash: ObjectHash,
 ) -> Result<Option<VerifiedCopies<Vec<u8>>>, StoreObjectError> {
     let semantic_prefix = snapshot_image_semantic_prefix(author, image_hash);
-    load_semantic_copies(storage, &semantic_prefix, ".db", image_hash, |bytes| {
-        if ObjectHash::digest(bytes) != image_hash {
-            return Err(StoreProtocolError::ObjectHashMismatch {
-                expected: image_hash,
-                actual: ObjectHash::digest(bytes),
-            });
-        }
-        Ok(bytes.to_vec())
-    })
+    load_semantic_copies(
+        storage,
+        &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreSnapshotImage),
+        &semantic_prefix,
+        ".db",
+        image_hash,
+        |bytes| {
+            if ObjectHash::digest(bytes) != image_hash {
+                return Err(StoreProtocolError::ObjectHashMismatch {
+                    expected: image_hash,
+                    actual: ObjectHash::digest(bytes),
+                });
+            }
+            Ok(bytes.to_vec())
+        },
+    )
     .await
 }
 
@@ -881,6 +957,7 @@ pub async fn list_visible_heads(
             .collect();
         match load_singleton_candidates(
             storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead),
             &slot,
             ".json",
             objects,
@@ -940,6 +1017,7 @@ pub async fn list_latest_ack_chains(
         let slot = ack_slot_prefix(&device_id, revision);
         if let Some(ack) = load_singleton_candidates(
             storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreAck),
             &slot,
             ".json",
             objects,
@@ -1024,6 +1102,10 @@ pub async fn list_latest_registration_chains(
         let slot = registration_slot_prefix(&device_id, revision);
         if let Some(registration) = load_singleton_candidates(
             storage,
+            &ProtocolObjectContext::store(
+                store_root_hash,
+                ProtocolObjectDomain::StoreDeviceRegistration,
+            ),
             &slot,
             ".json",
             objects,
@@ -1130,6 +1212,10 @@ pub async fn load_registration_ref(
     let listing = storage.list_protocol_objects(&format!("{slot}/")).await?;
     let registration = load_singleton_candidates(
         storage,
+        &ProtocolObjectContext::store(
+            store_root_hash,
+            ProtocolObjectDomain::StoreDeviceRegistration,
+        ),
         &slot,
         ".json",
         listing.objects,
@@ -1289,6 +1375,7 @@ pub async fn list_reclaimable_store_packages(
         let semantic_prefix = package_semantic_prefix(&device_id, seq, package_hash);
         let package = load_semantic_candidates(
             storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StorePackage),
             &semantic_prefix,
             ".pkg",
             package_hash,
@@ -1319,6 +1406,7 @@ pub async fn list_reclaimable_store_packages(
 /// ciphertext is expected; every opened plaintext must be the exact same bytes.
 pub async fn load_semantic_copies<T>(
     storage: &dyn SyncStorage,
+    context: &ProtocolObjectContext,
     semantic_prefix: &str,
     extension: &str,
     semantic_hash: ObjectHash,
@@ -1328,6 +1416,7 @@ pub async fn load_semantic_copies<T>(
     let listing = storage.list_protocol_objects(&expected_copy_prefix).await?;
     load_semantic_candidates(
         storage,
+        context,
         semantic_prefix,
         extension,
         semantic_hash,
@@ -1340,6 +1429,7 @@ pub async fn load_semantic_copies<T>(
 
 async fn load_semantic_candidates<T>(
     storage: &dyn SyncStorage,
+    context: &ProtocolObjectContext,
     semantic_prefix: &str,
     extension: &str,
     semantic_hash: ObjectHash,
@@ -1353,7 +1443,7 @@ async fn load_semantic_candidates<T>(
     for object in objects {
         validate_copy_key(&object, &expected_copy_prefix, extension, semantic_prefix)?;
         let bytes = storage
-            .read_protocol_object(&object, semantic_prefix)
+            .read_protocol_object(context, &object, semantic_prefix)
             .await
             .map_err(|source| StoreObjectError::CandidateUnreadable {
                 key: object.logical_key().to_string(),
@@ -1393,6 +1483,7 @@ async fn load_semantic_candidates<T>(
 /// fail-stop fork.
 pub async fn load_singleton_slot<T>(
     storage: &dyn SyncStorage,
+    context: &ProtocolObjectContext,
     slot_prefix: &str,
     extension: &str,
     parse_hash: impl Fn(&str) -> Result<ObjectHash, StoreProtocolError>,
@@ -1403,6 +1494,7 @@ pub async fn load_singleton_slot<T>(
         .await?;
     load_singleton_candidates(
         storage,
+        context,
         slot_prefix,
         extension,
         listing.objects,
@@ -1415,6 +1507,7 @@ pub async fn load_singleton_slot<T>(
 
 async fn load_singleton_candidates<T>(
     storage: &dyn SyncStorage,
+    context: &ProtocolObjectContext,
     slot_prefix: &str,
     extension: &str,
     objects: Vec<ProtocolObjectLocator>,
@@ -1439,7 +1532,7 @@ async fn load_singleton_candidates<T>(
             &semantic_prefix,
         )?;
         let bytes = storage
-            .read_protocol_object(&object, &semantic_prefix)
+            .read_protocol_object(context, &object, &semantic_prefix)
             .await
             .map_err(|source| StoreObjectError::CandidateUnreadable {
                 key: object.logical_key().to_string(),
@@ -1555,19 +1648,21 @@ mod tests {
         let bytes = b"semantic bytes";
         let hash = ObjectHash::digest(bytes);
         let prefix = format!("store-v1/store-protocol-root/{hash}");
-        append_and_verify(&storage, &prefix, ".json", bytes)
+        let context = ProtocolObjectContext::store(hash, ProtocolObjectDomain::StoreProtocolRoot);
+        append_and_verify(&storage, &context, &prefix, ".json", bytes)
             .await
             .unwrap();
-        append_and_verify(&storage, &prefix, ".json", bytes)
+        append_and_verify(&storage, &context, &prefix, ".json", bytes)
             .await
             .unwrap();
 
-        let loaded = load_semantic_copies(&storage, &prefix, ".json", hash, |candidate| {
-            validate_digest(hash, candidate)
-        })
-        .await
-        .unwrap()
-        .unwrap();
+        let loaded =
+            load_semantic_copies(&storage, &context, &prefix, ".json", hash, |candidate| {
+                validate_digest(hash, candidate)
+            })
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.bytes, bytes);
         assert_eq!(loaded.copies.len(), 2);
     }
@@ -1579,7 +1674,8 @@ mod tests {
         let bytes = b"semantic bytes";
         let hash = ObjectHash::digest(bytes);
         let prefix = format!("store-v1/store-protocol-root/{hash}");
-        append_and_verify(&storage, &prefix, ".json", bytes)
+        let context = ProtocolObjectContext::store(hash, ProtocolObjectDomain::StoreProtocolRoot);
+        append_and_verify(&storage, &context, &prefix, ".json", bytes)
             .await
             .unwrap();
         let bad_copy = crate::storage::cloud::CopyId::random();
@@ -1588,7 +1684,7 @@ mod tests {
             b"different bytes".to_vec(),
         );
 
-        let error = load_semantic_copies(&storage, &prefix, ".json", hash, |candidate| {
+        let error = load_semantic_copies(&storage, &context, &prefix, ".json", hash, |candidate| {
             validate_digest(hash, candidate)
         })
         .await
@@ -1601,15 +1697,26 @@ mod tests {
         let home = InMemoryCloudHome::new();
         let storage = storage(&home);
         let slot = commit_slot_prefix("device-a", 1);
+        let context = ProtocolObjectContext::store(
+            ObjectHash::digest(b"store root"),
+            ProtocolObjectDomain::StoreCommit,
+        );
         for bytes in [b"first".as_slice(), b"second".as_slice()] {
             let hash = ObjectHash::digest(bytes);
-            append_and_verify(&storage, &format!("{slot}/{hash}"), ".json", bytes)
-                .await
-                .unwrap();
+            append_and_verify(
+                &storage,
+                &context,
+                &format!("{slot}/{hash}"),
+                ".json",
+                bytes,
+            )
+            .await
+            .unwrap();
         }
 
         let error = load_singleton_slot(
             &storage,
+            &context,
             &slot,
             ".json",
             |key| Ok(parse_commit_copy_key(key)?.semantic_hash),

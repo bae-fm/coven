@@ -684,6 +684,7 @@ pub(crate) async fn join_store_with_coordination(
                 unwrap_store_keyring(
                     cloud_home.clone(),
                     &user_keypair,
+                    code.store_root_hash,
                     &code.store_id,
                     &code.owner_pubkey,
                     floor,

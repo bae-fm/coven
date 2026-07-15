@@ -113,6 +113,10 @@ pub async fn create_store(
         }
         append_and_verify(
             storage,
+            &super::storage::ProtocolObjectContext::store(
+                owned.semantic_hash,
+                super::storage::ProtocolObjectDomain::StoreProtocolRoot,
+            ),
             &super::store_commit::store_protocol_root_semantic_prefix(owned.semantic_hash),
             ".json",
             &owned.bytes,

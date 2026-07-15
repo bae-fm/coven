@@ -247,9 +247,23 @@ pub(crate) async fn drain_store_writes_with_coordination(
             let commit = &batch.commit.value;
             let head = &batch.head.value;
             let package = required_store_package(commit)?;
-            append_and_verify(storage, &package.object_key, ".pkg", &batch.package_bytes).await?;
             append_and_verify(
                 storage,
+                &super::storage::ProtocolObjectContext::store(
+                    store_root_hash,
+                    super::storage::ProtocolObjectDomain::StorePackage,
+                ),
+                &package.object_key,
+                ".pkg",
+                &batch.package_bytes,
+            )
+            .await?;
+            append_and_verify(
+                storage,
+                &super::storage::ProtocolObjectContext::store(
+                    store_root_hash,
+                    super::storage::ProtocolObjectDomain::StoreCommit,
+                ),
                 &commit_semantic_prefix(&device_id, commit.seq(), commit.commit_hash()),
                 ".json",
                 &batch.commit.bytes,
@@ -257,6 +271,10 @@ pub(crate) async fn drain_store_writes_with_coordination(
             .await?;
             append_and_verify(
                 storage,
+                &super::storage::ProtocolObjectContext::store(
+                    store_root_hash,
+                    super::storage::ProtocolObjectDomain::StoreHead,
+                ),
                 &head_semantic_prefix(&device_id, commit.seq(), head.head_hash()),
                 ".json",
                 &batch.head.bytes,
@@ -412,6 +430,10 @@ pub(crate) async fn activate_serial_commit_head(
 ) -> Result<(), StoreOutboundError> {
     append_and_verify(
         storage,
+        &super::storage::ProtocolObjectContext::store(
+            commit.store_root_hash,
+            super::storage::ProtocolObjectDomain::StoreCommit,
+        ),
         &commit_semantic_prefix(SERIAL_STREAM_ID, commit.seq(), commit.commit_hash()),
         ".json",
         &commit.to_bytes(),
@@ -711,9 +733,23 @@ async fn drain_serial_store_branch(
             .verify_store_package(&write.package_bytes)
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
         let package = required_store_package(&commit)?;
-        append_and_verify(storage, &package.object_key, ".pkg", &write.package_bytes).await?;
         append_and_verify(
             storage,
+            &super::storage::ProtocolObjectContext::store(
+                store_root_hash,
+                super::storage::ProtocolObjectDomain::StorePackage,
+            ),
+            &package.object_key,
+            ".pkg",
+            &write.package_bytes,
+        )
+        .await?;
+        append_and_verify(
+            storage,
+            &super::storage::ProtocolObjectContext::store(
+                store_root_hash,
+                super::storage::ProtocolObjectDomain::StoreCommit,
+            ),
             &commit_semantic_prefix(SERIAL_STREAM_ID, commit.seq(), commit.commit_hash()),
             ".json",
             &write.commit.bytes,
@@ -1150,6 +1186,10 @@ mod tests {
         let package = commit.store_package.as_ref().expect("Store package");
         crate::sync::store_objects::append_and_verify(
             storage,
+            &crate::sync::storage::ProtocolObjectContext::store(
+                root,
+                crate::sync::storage::ProtocolObjectDomain::StorePackage,
+            ),
             &package.object_key,
             ".pkg",
             package_bytes,
@@ -1158,6 +1198,10 @@ mod tests {
         .expect("publish competing Serial package");
         crate::sync::store_objects::append_and_verify(
             storage,
+            &crate::sync::storage::ProtocolObjectContext::store(
+                root,
+                crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+            ),
             &crate::sync::store_commit::commit_semantic_prefix(
                 SERIAL_STREAM_ID,
                 1,

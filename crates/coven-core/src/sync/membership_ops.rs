@@ -23,7 +23,7 @@ use super::membership::{
     OwnerGrantId,
 };
 use super::storage::{CoordinationStorage, StorageError, SyncStorage};
-use super::store_commit::StoreControl;
+use super::store_commit::{ObjectHash, StoreControl};
 #[cfg(test)]
 use super::store_objects::append_membership_entry_object;
 use super::store_objects::{
@@ -35,8 +35,9 @@ use std::collections::BTreeMap;
 
 pub async fn list_membership_entries(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
 ) -> Result<Vec<MembershipCoord>, StoreObjectError> {
-    Ok(list_membership_entry_objects(storage)
+    Ok(list_membership_entry_objects(storage, store_root_hash)
         .await?
         .entries
         .into_iter()
@@ -46,10 +47,12 @@ pub async fn list_membership_entries(
 
 async fn read_membership_entry(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     coord: &MembershipCoord,
 ) -> Result<Vec<u8>, StoreObjectError> {
     load_membership_entry_slot(
         storage,
+        store_root_hash,
         &coord.author_pubkey,
         &coord.author_owner_grant,
         coord.seq,
@@ -72,8 +75,9 @@ struct VisibleMembershipHeads {
 
 async fn visible_membership_heads(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
 ) -> Result<VisibleMembershipHeads, StoreObjectError> {
-    let listing = list_membership_head_objects(storage).await?;
+    let listing = list_membership_head_objects(storage, store_root_hash).await?;
     let mut latest = BTreeMap::<OwnerGrantId, AuthorHead>::new();
     for verified in listing.heads {
         let head = verified.value;
@@ -146,6 +150,15 @@ pub enum MembershipOpsError {
     Serial(#[from] super::store_outbound::StoreOutboundError),
 }
 
+async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, MembershipOpsError> {
+    db.get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
+        .await
+        .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+        .ok_or(MembershipOpsError::NoFounderChain)?
+        .parse()
+        .map_err(|error| MembershipOpsError::Database(format!("Store protocol root hash: {error}")))
+}
+
 /// `protocol_state` key holding the hex Ed25519 pubkey of the store's established
 /// owner — pinned at create (the creator), join (the invite's owner), or restore.
 /// The membership chain is anchored to it: a chain whose founder differs is a
@@ -170,11 +183,19 @@ pub struct SerialMembershipContext<'a> {
 /// not silently treated as absent.
 pub async fn current_membership_floor(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     pinned_owner: Option<&str>,
     watermark_db: Option<&Database>,
 ) -> Result<Vec<super::membership::MembershipCoord>, MembershipOpsError> {
-    let entries = list_membership_entries(storage).await?;
-    let chain = load_anchored_chain_if_known(storage, &entries, pinned_owner, watermark_db).await?;
+    let entries = list_membership_entries(storage, store_root_hash).await?;
+    let chain = load_anchored_chain_if_known(
+        storage,
+        store_root_hash,
+        &entries,
+        pinned_owner,
+        watermark_db,
+    )
+    .await?;
     Ok(chain.map_or_else(Vec::new, |chain| chain.author_heads()))
 }
 
@@ -184,6 +205,7 @@ pub async fn get_members(
     user_pubkey: Option<&[u8]>,
     db: &Database,
 ) -> Result<Vec<MemberInfo>, MembershipOpsError> {
+    let store_root_hash = required_store_root_hash(db).await?;
     if db.write_policy() == crate::WritePolicy::Serial {
         let state = match db
             .serial_membership_state()
@@ -203,22 +225,18 @@ pub async fn get_members(
                             .to_string(),
                     ));
                 }
-                let root_hash = db
-                    .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
-                    .await
-                    .map_err(|error| MembershipOpsError::Database(error.to_string()))?
-                    .ok_or(MembershipOpsError::NoFounderChain)?
-                    .parse()
-                    .map_err(|error| {
-                        MembershipOpsError::Database(format!("Store protocol root hash: {error}"))
-                    })?;
-                let root =
-                    super::store_objects::load_store_protocol_root_at_hash(storage, root_hash)
-                        .await?
-                        .ok_or(MembershipOpsError::NoFounderChain)?
-                        .value;
-                super::membership::SerialMembershipState::from_founder(root_hash, &root.founder)
-                    .map_err(|error| MembershipOpsError::Database(error.to_string()))?
+                let root = super::store_objects::load_store_protocol_root_at_hash(
+                    storage,
+                    store_root_hash,
+                )
+                .await?
+                .ok_or(MembershipOpsError::NoFounderChain)?
+                .value;
+                super::membership::SerialMembershipState::from_founder(
+                    store_root_hash,
+                    &root.founder,
+                )
+                .map_err(|error| MembershipOpsError::Database(error.to_string()))?
             }
         };
         let user_pubkey_hex = user_pubkey.map(hex::encode);
@@ -232,13 +250,20 @@ pub async fn get_members(
             })
             .collect());
     }
-    let entry_keys = list_membership_entries(storage).await?;
+    let entry_keys = list_membership_entries(storage, store_root_hash).await?;
     let pinned_owner = db
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
         .ok_or(MembershipOpsError::NoFounderChain)?;
-    let chain = load_anchored_chain(storage, &entry_keys, Some(&pinned_owner), Some(db)).await?;
+    let chain = load_anchored_chain(
+        storage,
+        store_root_hash,
+        &entry_keys,
+        Some(&pinned_owner),
+        Some(db),
+    )
+    .await?;
     let user_pubkey_hex = user_pubkey.map(hex::encode);
 
     let current = chain.current_members();
@@ -337,7 +362,8 @@ pub async fn invite_member_with_coordination(
     }
 
     // Download existing membership entries
-    let entry_keys = list_membership_entries(storage).await?;
+    let store_root_hash = required_store_root_hash(db).await?;
+    let entry_keys = list_membership_entries(storage, store_root_hash).await?;
 
     // The founder is written once, when a store is created and first connects
     // its cloud (issue #102) — never lazily here. An empty listing at invite time
@@ -349,14 +375,21 @@ pub async fn invite_member_with_coordination(
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
         .ok_or(MembershipOpsError::NoFounderChain)?;
-    let mut chain =
-        load_anchored_chain(storage, &entry_keys, Some(&pinned_owner), Some(db)).await?;
+    let mut chain = load_anchored_chain(
+        storage,
+        store_root_hash,
+        &entry_keys,
+        Some(&pinned_owner),
+        Some(db),
+    )
+    .await?;
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
     let join_info = super::invite::create_invitation_with_encryption_durable(
         storage,
         cloud_home,
+        store_root_hash,
         &mut chain,
         user_keypair,
         public_key_hex,
@@ -1007,15 +1040,22 @@ pub async fn remove_member_with_coordination(
             .map_err(|source| MembershipOpsError::RotationCommittedAdoptionFailed { source });
     }
     // Download existing membership entries and build the chain.
-    let entry_keys = list_membership_entries(storage).await?;
+    let store_root_hash = required_store_root_hash(db).await?;
+    let entry_keys = list_membership_entries(storage, store_root_hash).await?;
 
     let pinned_owner = db
         .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
         .await
         .map_err(|error| MembershipOpsError::Database(error.to_string()))?
         .ok_or(MembershipOpsError::NoMembershipChain)?;
-    let mut chain =
-        load_anchored_chain(storage, &entry_keys, Some(&pinned_owner), Some(db)).await?;
+    let mut chain = load_anchored_chain(
+        storage,
+        store_root_hash,
+        &entry_keys,
+        Some(&pinned_owner),
+        Some(db),
+    )
+    .await?;
 
     // Revoke the member and rotate the cloud key. On return the rotation is
     // committed for every remaining member.
@@ -1023,6 +1063,7 @@ pub async fn remove_member_with_coordination(
     let new_key = super::invite::revoke_member_durable(
         storage,
         cloud_home,
+        store_root_hash,
         &mut chain,
         user_keypair,
         public_key_hex,
@@ -1099,6 +1140,7 @@ pub fn apply_key_rotation(
 #[cfg(test)]
 pub(crate) async fn write_founder_entry(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     store_id: &str,
     owner: &UserKeypair,
     timestamp: &str,
@@ -1109,10 +1151,10 @@ pub(crate) async fn write_founder_entry(
     chain
         .add_entry_at(coord.clone(), entry.clone())
         .map_err(|e| format!("Failed to validate founder entry: {e}"))?;
-    append_membership_entry_object(storage, &coord, &entry)
+    append_membership_entry_object(storage, store_root_hash, &coord, &entry)
         .await
         .map_err(|e| format!("Failed to upload founder entry: {e}"))?;
-    publish_membership_head(storage, &chain, owner)
+    publish_membership_head(storage, store_root_hash, &chain, owner)
         .await
         .map_err(|e| format!("Failed to upload founder membership head: {e}"))?;
     info!("Wrote founder Owner entry for the store's membership chain");
@@ -1125,11 +1167,12 @@ pub(crate) async fn write_founder_entry(
 /// [`download_chain`] drops the coordinates and builds the validated chain.
 pub async fn download_entries(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     entry_keys: &[MembershipCoord],
 ) -> Result<Vec<(MembershipCoord, MembershipEntry)>, String> {
     let mut entries = Vec::with_capacity(entry_keys.len());
     for coord in entry_keys {
-        let data = read_membership_entry(storage, coord)
+        let data = read_membership_entry(storage, store_root_hash, coord)
             .await
             .map_err(|e| format!("Failed to get membership entry {coord:?}: {e}"))?;
         let entry: MembershipEntry = serde_json::from_slice(&data)
@@ -1181,9 +1224,10 @@ fn validate_membership_entry_at(
 /// Download and build a membership chain from the storage.
 pub async fn download_chain(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     entry_keys: &[MembershipCoord],
 ) -> Result<MembershipChain, String> {
-    let raw_entries = download_entries(storage, entry_keys).await?;
+    let raw_entries = download_entries(storage, store_root_hash, entry_keys).await?;
 
     MembershipChain::from_entries_with_coords(raw_entries)
         .map_err(|e| format!("Invalid membership chain: {e}"))
@@ -1195,10 +1239,11 @@ pub async fn download_chain(
 /// loud rather than reading as `None` and being silently overwritten.
 pub(crate) async fn committed_head_seq(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     author: &str,
     grant: &OwnerGrantId,
 ) -> Result<Option<u64>, String> {
-    visible_membership_heads(storage)
+    visible_membership_heads(storage, store_root_hash)
         .await
         .map(|heads| {
             heads
@@ -1219,14 +1264,20 @@ pub(crate) async fn committed_head_seq(
 /// and are therefore an immutable fork that every reader rejects.
 pub async fn publish_membership_head(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     chain: &MembershipChain,
     signer: &UserKeypair,
 ) -> Result<AuthorHead, String> {
     let head = chain
         .signed_head(signer)
         .ok_or_else(|| "cannot publish a head for an author with no entries".to_string())?;
-    if let Some(stored_seq) =
-        committed_head_seq(storage, &head.author_pubkey, &head.author_owner_grant).await?
+    if let Some(stored_seq) = committed_head_seq(
+        storage,
+        store_root_hash,
+        &head.author_pubkey,
+        &head.author_owner_grant,
+    )
+    .await?
     {
         if stored_seq >= head.seq {
             return Err(format!(
@@ -1236,7 +1287,7 @@ pub async fn publish_membership_head(
             ));
         }
     }
-    append_membership_head_object(storage, &head)
+    append_membership_head_object(storage, store_root_hash, &head)
         .await
         .map_err(|e| format!("Failed to upload membership head: {e}"))?;
     Ok(head)
@@ -1351,15 +1402,20 @@ pub(crate) fn authorize_loaded_membership_author(
 /// a reader's committed view.
 pub(crate) async fn load_anchored_chain(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     entry_keys: &[MembershipCoord],
     owner_pubkey: Option<&str>,
     watermark_db: Option<&Database>,
 ) -> Result<MembershipChain, AnchoredChainError> {
-    load_anchored_chain_if_known(storage, entry_keys, owner_pubkey, watermark_db)
-        .await?
-        .ok_or_else(|| {
-            AnchoredChainError::LoadFailed("no membership authors are known".to_string())
-        })
+    load_anchored_chain_if_known(
+        storage,
+        store_root_hash,
+        entry_keys,
+        owner_pubkey,
+        watermark_db,
+    )
+    .await?
+    .ok_or_else(|| AnchoredChainError::LoadFailed("no membership authors are known".to_string()))
 }
 
 /// The central membership loader for callers that distinguish an absent
@@ -1367,15 +1423,20 @@ pub(crate) async fn load_anchored_chain(
 /// one already-fetched LIST result; persisted floors can supply authors it omits.
 pub(crate) async fn load_anchored_chain_if_known(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     entry_keys: &[MembershipCoord],
     owner_pubkey: Option<&str>,
     watermark_db: Option<&Database>,
 ) -> Result<Option<MembershipChain>, AnchoredChainError> {
-    Ok(
-        load_anchored_chain_if_known_with_proof(storage, entry_keys, owner_pubkey, watermark_db)
-            .await?
-            .chain,
+    Ok(load_anchored_chain_if_known_with_proof(
+        storage,
+        store_root_hash,
+        entry_keys,
+        owner_pubkey,
+        watermark_db,
     )
+    .await?
+    .chain)
 }
 
 /// Load an owner-anchored membership chain against the exact signed-head floor
@@ -1385,12 +1446,20 @@ pub(crate) async fn load_anchored_chain_if_known(
 /// same coordinates afterward for every later load.
 pub(crate) async fn load_anchored_chain_at_floor(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     entry_keys: &[MembershipCoord],
     owner_pubkey: &str,
     floor: &[MembershipCoord],
 ) -> Result<MembershipChain, AnchoredChainError> {
     let floors = membership_floor_by_grant(floor).map_err(AnchoredChainError::LoadFailed)?;
-    let loaded = validate_anchored_chain(storage, entry_keys, Some(owner_pubkey), &floors).await?;
+    let loaded = validate_anchored_chain(
+        storage,
+        store_root_hash,
+        entry_keys,
+        Some(owner_pubkey),
+        &floors,
+    )
+    .await?;
     loaded
         .validated
         .map(|validated| validated.chain)
@@ -1446,6 +1515,7 @@ pub(crate) struct AnchoredChainLoad {
 
 pub(crate) async fn load_anchored_chain_if_known_with_proof(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     entry_keys: &[MembershipCoord],
     owner_pubkey: Option<&str>,
     watermark_db: Option<&Database>,
@@ -1460,8 +1530,14 @@ pub(crate) async fn load_anchored_chain_if_known_with_proof(
             .map_err(AnchoredChainError::LoadFailed)?,
         None => BTreeMap::new(),
     };
-    let mut loaded =
-        validate_anchored_chain(storage, entry_keys, owner_pubkey, &persisted_floors).await?;
+    let mut loaded = validate_anchored_chain(
+        storage,
+        store_root_hash,
+        entry_keys,
+        owner_pubkey,
+        &persisted_floors,
+    )
+    .await?;
     if let (Some(owner), None) = (owner_pubkey, loaded.validated.as_ref()) {
         return Err(AnchoredChainError::LoadFailed(format!(
             "membership chain has no committed heads but owner {owner} is pinned"
@@ -1487,6 +1563,7 @@ pub(crate) async fn load_anchored_chain_if_known_with_proof(
 /// resulting chain's effective grant equals the named coordinate.
 pub(crate) async fn load_anchored_chain_with_candidates(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     entry_keys: &[MembershipCoord],
     candidate_coords: &[MembershipCoord],
     owner_pubkey: Option<&str>,
@@ -1494,7 +1571,14 @@ pub(crate) async fn load_anchored_chain_with_candidates(
 ) -> Result<Option<MembershipChain>, AnchoredChainError> {
     let mut augmented = entry_keys.to_vec();
     augmented.extend_from_slice(candidate_coords);
-    load_anchored_chain_if_known(storage, &augmented, owner_pubkey, watermark_db).await
+    load_anchored_chain_if_known(
+        storage,
+        store_root_hash,
+        &augmented,
+        owner_pubkey,
+        watermark_db,
+    )
+    .await
 }
 
 struct ValidatedAnchoredChain {
@@ -1509,6 +1593,7 @@ struct ValidatedAnchoredLoad {
 
 async fn validate_anchored_chain(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     entry_keys: &[MembershipCoord],
     owner_pubkey: Option<&str>,
     persisted_floors: &BTreeMap<OwnerGrantId, MembershipCoord>,
@@ -1527,7 +1612,7 @@ async fn validate_anchored_chain(
             }
         }
     }
-    let visible = visible_membership_heads(storage)
+    let visible = visible_membership_heads(storage, store_root_hash)
         .await
         .map_err(map_membership_object_error)?;
     let head_coverage = visible.coverage;
@@ -1551,9 +1636,10 @@ async fn validate_anchored_chain(
             .or_insert_with(|| (coord.author_pubkey.clone(), coord.seq));
     }
     for (grant, (author, seq)) in requested {
-        if let Some(exact) = load_membership_head_slot(storage, &author, &grant, seq)
-            .await
-            .map_err(map_membership_object_error)?
+        if let Some(exact) =
+            load_membership_head_slot(storage, store_root_hash, &author, &grant, seq)
+                .await
+                .map_err(map_membership_object_error)?
         {
             let head = exact.value;
             if visible_heads
@@ -1601,7 +1687,7 @@ async fn validate_anchored_chain(
         });
     }
 
-    let chain = download_committed_chain(storage, &heads).await?;
+    let chain = download_committed_chain(storage, store_root_hash, &heads).await?;
 
     // Each head must match the prefix it certifies: same tip seq, same tip hash.
     for head in &heads {
@@ -1677,6 +1763,7 @@ fn map_membership_object_error(error: StoreObjectError) -> AnchoredChainError {
 /// position indefinitely.
 async fn download_committed_chain(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     heads: &[AuthorHead],
 ) -> Result<MembershipChain, AnchoredChainError> {
     let capacity = heads.iter().map(|head| head.seq as usize).sum();
@@ -1685,6 +1772,7 @@ async fn download_committed_chain(
         for seq in 1..=head.seq {
             let loaded = load_membership_entry_slot(
                 storage,
+                store_root_hash,
                 &head.author_pubkey,
                 &head.author_owner_grant,
                 seq,
@@ -1720,6 +1808,7 @@ async fn download_committed_chain(
 /// persisted in that case.
 pub(crate) async fn load_and_persist_owner_anchor(
     storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
     entry_keys: &[MembershipCoord],
     owner_pubkey: &str,
     db: &Database,
@@ -1728,8 +1817,14 @@ pub(crate) async fn load_and_persist_owner_anchor(
     let persisted_floors = read_head_watermarks(db)
         .await
         .map_err(AnchoredChainError::LoadFailed)?;
-    let loaded =
-        validate_anchored_chain(storage, entry_keys, Some(owner_pubkey), &persisted_floors).await?;
+    let loaded = validate_anchored_chain(
+        storage,
+        store_root_hash,
+        entry_keys,
+        Some(owner_pubkey),
+        &persisted_floors,
+    )
+    .await?;
     if let Some(loaded) = loaded.validated {
         persist_owner_and_head_watermarks(db, owner_pubkey, &loaded.head_floor)
             .await
@@ -1946,6 +2041,67 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, RwLock};
 
+    async fn download_entries(
+        storage: &MockSyncStorage,
+        entry_keys: &[MembershipCoord],
+    ) -> Result<Vec<(MembershipCoord, MembershipEntry)>, String> {
+        super::download_entries(storage, storage.store_root_hash(), entry_keys).await
+    }
+
+    async fn publish_membership_head(
+        storage: &MockSyncStorage,
+        chain: &MembershipChain,
+        signer: &UserKeypair,
+    ) -> Result<AuthorHead, String> {
+        super::publish_membership_head(storage, storage.store_root_hash(), chain, signer).await
+    }
+
+    async fn load_anchored_chain(
+        storage: &MockSyncStorage,
+        entry_keys: &[MembershipCoord],
+        owner_pubkey: Option<&str>,
+        watermark_db: Option<&Database>,
+    ) -> Result<MembershipChain, AnchoredChainError> {
+        super::load_anchored_chain(
+            storage,
+            storage.store_root_hash(),
+            entry_keys,
+            owner_pubkey,
+            watermark_db,
+        )
+        .await
+    }
+
+    async fn load_and_persist_owner_anchor(
+        storage: &MockSyncStorage,
+        entry_keys: &[MembershipCoord],
+        owner_pubkey: &str,
+        db: &Database,
+    ) -> Result<Option<MembershipChain>, AnchoredChainError> {
+        super::load_and_persist_owner_anchor(
+            storage,
+            storage.store_root_hash(),
+            entry_keys,
+            owner_pubkey,
+            db,
+        )
+        .await
+    }
+
+    async fn current_membership_floor(
+        storage: &MockSyncStorage,
+        pinned_owner: Option<&str>,
+        watermark_db: Option<&Database>,
+    ) -> Result<Vec<MembershipCoord>, MembershipOpsError> {
+        super::current_membership_floor(
+            storage,
+            storage.store_root_hash(),
+            pinned_owner,
+            watermark_db,
+        )
+        .await
+    }
+
     #[derive(Clone)]
     struct SerialMutationHome {
         inner: InMemoryCloudHome,
@@ -2105,6 +2261,12 @@ mod tests {
 
     async fn anchored_db(storage: &MockSyncStorage, founder_pubkey: &str) -> Database {
         let db = crate::sync::test_helpers::open_test_db();
+        db.set_protocol_state(
+            crate::database::STORE_ROOT_HASH_STATE_KEY,
+            &storage.store_root_hash().to_string(),
+        )
+        .await
+        .expect("bind membership fixture to its Store protocol root");
         let entries = storage.discover_membership_entries().await;
         load_and_persist_owner_anchor(storage, &entries, founder_pubkey, &db)
             .await
@@ -2692,7 +2854,15 @@ mod tests {
             super::super::store_commit::ObjectHash::digest(&bytes),
         );
         storage
-            .append_protocol_object(&prefix, ".json", bytes)
+            .append_protocol_object(
+                &super::super::storage::ProtocolObjectContext::store(
+                    storage.store_root_hash(),
+                    super::super::storage::ProtocolObjectDomain::StoreMembershipEntry,
+                ),
+                &prefix,
+                ".json",
+                bytes,
+            )
             .await
             .unwrap();
 

@@ -707,6 +707,7 @@ impl SyncManager {
                 crate::join_code::MembershipFloor::MergeConcurrent(
                     crate::sync::membership_ops::current_membership_floor(
                         &*storage,
+                        store_root_hash,
                         pinned_owner.as_deref(),
                         Some(&self.db),
                     )

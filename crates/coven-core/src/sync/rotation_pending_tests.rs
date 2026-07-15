@@ -24,7 +24,7 @@ use crate::storage::cloud::{
     CloudHomeJoinInfo, SequentialCopyIdGenerator,
 };
 use crate::sync::cloud_storage::{
-    cloud_aad_context, BlobPathScheme, CloudCipher, CloudCipherAccess, CloudSyncStorage,
+    BlobPathScheme, CloudCipher, CloudCipherAccess, CloudSyncStorage,
 };
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
@@ -33,6 +33,8 @@ use crate::sync::membership_ops::{
     invite_member, invite_member_with_coordination, remove_member, remove_member_with_coordination,
     MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
 };
+use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
+use crate::sync::store_commit::ObjectHash;
 use crate::sync::test_helpers::{
     host_exec, open_serial_test_db, open_test_db, pubkey_hex, publish_test_founder_membership,
     publish_test_serial_store_protocol_root, publish_test_store_protocol_root, temp_store_dir,
@@ -287,9 +289,10 @@ async fn found_add_and_fail_to_adopt_a_removal(
     member: &UserKeypair,
     custody: &TestCustody,
     old_key: [u8; 32],
-) -> (CloudSyncStorage, Hlc) {
+) -> (CloudSyncStorage, Hlc, ObjectHash) {
     let storage = storage_for(home, old_key, owner);
-    publish_test_store_protocol_root(db, &storage, LIB_ID, DEVICE_ID, owner).await;
+    let store_root_hash =
+        publish_test_store_protocol_root(db, &storage, LIB_ID, DEVICE_ID, owner).await;
     publish_test_founder_membership(&storage, LIB_ID, owner).await;
     db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(owner))
         .await
@@ -339,7 +342,7 @@ async fn found_add_and_fail_to_adopt_a_removal(
         "the failure is the rotation-committed/adoption-failed variant, got {err:?}",
     );
 
-    (storage, hlc)
+    (storage, hlc, store_root_hash)
 }
 
 /// The defect this closes: today, a device whose adoption fails keeps sealing
@@ -357,7 +360,7 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
     let home = InMemoryCloudHome::new();
     let db = open_test_db();
 
-    let (storage, hlc) =
+    let (storage, hlc, _store_root_hash) =
         found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
 
     db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
@@ -422,7 +425,7 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     let home = InMemoryCloudHome::new();
     let db = open_test_db();
 
-    let (storage, hlc) =
+    let (storage, hlc, store_root_hash) =
         found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
 
     db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
@@ -504,7 +507,14 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
 
     let keys = changeset_keys(&home);
     assert_eq!(keys.len(), 1, "the pending Store write publishes: {keys:?}");
-    assert_generation_two_opens_but_generation_one_does_not(&home, &keys[0], &cipher_lock, old_key);
+    assert_generation_two_opens_but_generation_one_does_not(
+        &home,
+        &keys[0],
+        &cipher_lock,
+        old_key,
+        store_root_hash,
+    )
+    .await;
 }
 
 /// The other remedy: without ever retrying the removal, the next sync cycle's
@@ -519,7 +529,7 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     let home = InMemoryCloudHome::new();
     let db = open_test_db();
 
-    let (storage, hlc) =
+    let (storage, hlc, store_root_hash) =
         found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
 
     db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
@@ -580,36 +590,64 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
 
     let keys = changeset_keys(&home);
     assert_eq!(keys.len(), 1, "the pending Store write publishes: {keys:?}");
-    assert_generation_two_opens_but_generation_one_does_not(&home, &keys[0], &cipher_lock, old_key);
+    assert_generation_two_opens_but_generation_one_does_not(
+        &home,
+        &keys[0],
+        &cipher_lock,
+        old_key,
+        store_root_hash,
+    )
+    .await;
 }
 
 /// The removed member's generation-one key must not open the changeset now at
 /// `key`, while the current (post-rotation) cipher does — and this is checked
 /// against the one and only changeset object either test produced, so there is
 /// no generation-one object in between for the removed member to have read.
-fn assert_generation_two_opens_but_generation_one_does_not(
+async fn assert_generation_two_opens_but_generation_one_does_not(
     home: &InMemoryCloudHome,
     key: &str,
     cipher: &dyn CloudCipherAccess,
     old_key: [u8; 32],
+    store_root_hash: ObjectHash,
 ) {
-    let sealed = home
-        .get_appended(key)
-        .expect("Store package object present at rest");
     let semantic_prefix = key
         .split_once("/copies/")
         .map(|(prefix, _)| prefix)
         .expect("Store package copy path");
-    let aad = cloud_aad_context(LIB_ID, semantic_prefix);
-
-    let current = cipher.snapshot();
-    current
-        .open(sealed.clone(), &aad)
+    let context = ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StorePackage);
+    let current_storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        cipher.snapshot(),
+        BlobPathScheme::Hashed,
+        LIB_ID,
+        UserKeypair::generate(),
+    );
+    let object = current_storage
+        .list_protocol_objects(semantic_prefix)
+        .await
+        .expect("list Store package copies")
+        .objects
+        .into_iter()
+        .find(|object| object.physical().logical_key() == key)
+        .expect("Store package object present at rest");
+    current_storage
+        .read_protocol_object(&context, &object, semantic_prefix)
+        .await
         .expect("the current (post-rotation) cipher opens the changeset");
 
-    let removed_members_key = CloudCipher::Encrypted(EncryptionService::from_key(old_key));
+    let removed_member_storage = CloudSyncStorage::new(
+        Arc::new(home.clone()),
+        CloudCipher::Encrypted(EncryptionService::from_key(old_key)),
+        BlobPathScheme::Hashed,
+        LIB_ID,
+        UserKeypair::generate(),
+    );
     assert!(
-        removed_members_key.open(sealed, &aad).is_err(),
+        removed_member_storage
+            .read_protocol_object(&context, &object, semantic_prefix)
+            .await
+            .is_err(),
         "the removed member's generation-one key must not open post-adoption content",
     );
 }

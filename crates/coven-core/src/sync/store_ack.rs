@@ -96,6 +96,10 @@ pub async fn drain_outbound_store_acks(
         }
         append_and_verify(
             storage,
+            &super::storage::ProtocolObjectContext::store(
+                store_root_hash,
+                super::storage::ProtocolObjectDomain::StoreAck,
+            ),
             &ack_semantic_prefix(&device_id, outbound.revision, outbound.ack_hash),
             ".json",
             &outbound.ack_bytes,

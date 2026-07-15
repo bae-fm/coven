@@ -926,7 +926,15 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
     let mut forged: serde_json::Value = serde_json::from_slice(&commit.bytes).unwrap();
     forged["signature"] = serde_json::Value::String("0".repeat(128));
     storage
-        .append_protocol_object(&prefix, ".json", serde_json::to_vec(&forged).unwrap())
+        .append_protocol_object(
+            &crate::sync::storage::ProtocolObjectContext::store(
+                storage.store_root_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+            ),
+            &prefix,
+            ".json",
+            serde_json::to_vec(&forged).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -1246,7 +1254,15 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
         .expect("Store commit carries a Store package");
     remove_protocol_prefix(&storage, &format!("{}/", package.object_key)).await;
     storage
-        .append_protocol_object(&package.object_key, ".pkg", cs[..cs.len() - 1].to_vec())
+        .append_protocol_object(
+            &crate::sync::storage::ProtocolObjectContext::store(
+                storage.store_root_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StorePackage,
+            ),
+            &package.object_key,
+            ".pkg",
+            cs[..cs.len() - 1].to_vec(),
+        )
         .await
         .unwrap();
 
@@ -1305,7 +1321,15 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
     let relocated_commit_prefix =
         crate::sync::store_commit::commit_semantic_prefix("dev", 2, relocated_position.commit_hash);
     storage
-        .append_protocol_object(&relocated_commit_prefix, ".json", commit.bytes)
+        .append_protocol_object(
+            &crate::sync::storage::ProtocolObjectContext::store(
+                storage.store_root_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+            ),
+            &relocated_commit_prefix,
+            ".json",
+            commit.bytes,
+        )
         .await
         .unwrap();
     let relocated_head = StoreDeviceHead::signed(
@@ -1318,6 +1342,10 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
     .unwrap();
     storage
         .append_protocol_object(
+            &crate::sync::storage::ProtocolObjectContext::store(
+                storage.store_root_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StoreHead,
+            ),
             &crate::sync::store_commit::head_semantic_prefix("dev", 2, relocated_head.head_hash()),
             ".json",
             relocated_head.to_bytes(),
@@ -1372,6 +1400,10 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
     remove_protocol_prefix(&storage, "store-v1/heads/devVictim/").await;
     storage
         .append_protocol_object(
+            &crate::sync::storage::ProtocolObjectContext::store(
+                storage.store_root_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+            ),
             &crate::sync::store_commit::commit_semantic_prefix(
                 "devAttacker",
                 1,
@@ -1392,6 +1424,10 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
     .unwrap();
     storage
         .append_protocol_object(
+            &crate::sync::storage::ProtocolObjectContext::store(
+                storage.store_root_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StoreHead,
+            ),
             &crate::sync::store_commit::head_semantic_prefix(
                 "devAttacker",
                 1,
@@ -4042,7 +4078,15 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
         .expect("Store commit is a JSON object")
         .remove("signature");
     storage
-        .append_protocol_object(&prefix, ".json", serde_json::to_vec(&unsigned).unwrap())
+        .append_protocol_object(
+            &crate::sync::storage::ProtocolObjectContext::store(
+                storage.store_root_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+            ),
+            &prefix,
+            ".json",
+            serde_json::to_vec(&unsigned).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -4132,6 +4176,12 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
     let removed_member_pubkey = hex::encode(removed_member.public_key());
     let storage = MockSyncStorage::with_keypair(founder.clone());
     let db = open_test_db();
+    db.set_protocol_state(
+        crate::database::STORE_ROOT_HASH_STATE_KEY,
+        &storage.store_root_hash().to_string(),
+    )
+    .await
+    .expect("bind persisted-cycle fixture to its Store protocol root");
     if pin_owner {
         db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &founder_pubkey)
             .await
@@ -4255,6 +4305,13 @@ async fn mid_cycle_empty_membership_listing_loads_an_advanced_head_from_the_floo
     let member = UserKeypair::generate();
     let storage = MockSyncStorage::with_keypair(owner.clone());
     let target = open_test_db();
+    target
+        .set_protocol_state(
+            crate::database::STORE_ROOT_HASH_STATE_KEY,
+            &storage.store_root_hash().to_string(),
+        )
+        .await
+        .expect("bind mid-cycle fixture to its Store protocol root");
     target
         .set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pubkey)
         .await
@@ -4725,7 +4782,15 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
     let mut forged: serde_json::Value = serde_json::from_slice(&commit.bytes).unwrap();
     forged["signature"] = serde_json::Value::String("0".repeat(128));
     storage
-        .append_protocol_object(&prefix, ".json", serde_json::to_vec(&forged).unwrap())
+        .append_protocol_object(
+            &crate::sync::storage::ProtocolObjectContext::store(
+                storage.store_root_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+            ),
+            &prefix,
+            ".json",
+            serde_json::to_vec(&forged).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -5006,7 +5071,15 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         owner_grant.entry_hash,
     );
     storage
-        .append_protocol_object(&relocated_prefix, ".json", grant_bytes)
+        .append_protocol_object(
+            &crate::sync::storage::ProtocolObjectContext::store(
+                storage.store_root_hash(),
+                crate::sync::storage::ProtocolObjectDomain::StoreMembershipEntry,
+            ),
+            &relocated_prefix,
+            ".json",
+            grant_bytes,
+        )
         .await
         .expect("relocate the grant to another author's coordinate");
 

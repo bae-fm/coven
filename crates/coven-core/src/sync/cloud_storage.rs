@@ -13,9 +13,9 @@ use tokio::sync::OnceCell;
 use tracing::warn;
 
 use super::storage::{
-    CoordinationError, CoordinationStorage, CreateHeadError, ProtocolObjectListing,
-    ProtocolObjectLocator, ReplaceHeadError, StorageError, SyncStorage, VersionToken,
-    VersionedObject,
+    CoordinationError, CoordinationStorage, CreateHeadError, ProtocolObjectContext,
+    ProtocolObjectListing, ProtocolObjectLocator, ProtocolObjectProtection, ReplaceHeadError,
+    StorageError, SyncStorage, VersionToken, VersionedObject,
 };
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
@@ -800,6 +800,22 @@ pub(crate) fn cloud_aad_context(store_id: &str, cloud_key: &str) -> Vec<u8> {
     context
 }
 
+fn protocol_object_aad_context(context: &ProtocolObjectContext, semantic_prefix: &str) -> Vec<u8> {
+    let domain = context.domain().aad_label();
+    let mut aad = Vec::with_capacity(
+        context.store_root_hash().as_bytes().len()
+            + std::mem::size_of::<u64>() * 2
+            + domain.len()
+            + semantic_prefix.len(),
+    );
+    aad.extend_from_slice(context.store_root_hash().as_bytes());
+    aad.extend_from_slice(&(domain.len() as u64).to_le_bytes());
+    aad.extend_from_slice(domain);
+    aad.extend_from_slice(&(semantic_prefix.len() as u64).to_le_bytes());
+    aad.extend_from_slice(semantic_prefix.as_bytes());
+    aad
+}
+
 fn key_tag(fingerprint: &[u8; KEY_FINGERPRINT_LEN]) -> Vec<u8> {
     let mut tag = Vec::with_capacity(KEY_TAG_LEN);
     tag.extend_from_slice(KEY_TAG_MAGIC);
@@ -1264,18 +1280,13 @@ impl CoordinationStorage for CloudSyncStorage {
 impl SyncStorage for CloudSyncStorage {
     async fn append_protocol_object(
         &self,
+        context: &ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
         data: Vec<u8>,
     ) -> Result<ProtocolObjectLocator, StorageError> {
-        if !semantic_prefix.starts_with(crate::sync::store_commit::protocol_prefix())
-            || semantic_prefix.contains("/copies/")
-            || !matches!(extension, ".json" | ".pkg" | ".db")
-        {
-            return Err(StorageError::Parse(format!(
-                "invalid Store append path {semantic_prefix:?} with extension {extension:?}"
-            )));
-        }
+        context.validate_path(semantic_prefix)?;
+        context.validate_extension(extension)?;
         let copy_id = self
             .copy_ids
             .as_ref()
@@ -1287,9 +1298,11 @@ impl SyncStorage for CloudSyncStorage {
             .next_copy_id();
         let logical_key = format!("{semantic_prefix}/copies/{copy_id}{extension}");
         let physical_key = format!("{logical_key}{}", self.suffix());
-        let stored = self
-            .cipher_for_seal()?
-            .seal(data, &self.aad_context(semantic_prefix));
+        let aad = protocol_object_aad_context(context, semantic_prefix);
+        let stored = match context.protection() {
+            ProtocolObjectProtection::Store => self.cipher_for_seal()?.seal(data, &aad),
+            ProtocolObjectProtection::RecipientSealed => data,
+        };
         let physical = self
             .home
             .append_object(
@@ -1305,9 +1318,11 @@ impl SyncStorage for CloudSyncStorage {
         &self,
         prefix: &str,
     ) -> Result<ProtocolObjectListing, StorageError> {
-        if !prefix.starts_with(crate::sync::store_commit::protocol_prefix()) {
+        if !prefix.starts_with(crate::sync::store_commit::protocol_prefix())
+            && !prefix.starts_with("circles/")
+        {
             return Err(StorageError::Parse(format!(
-                "invalid Store listing prefix {prefix:?}"
+                "invalid protocol listing prefix {prefix:?}"
             )));
         }
         let suffix = self.suffix();
@@ -1334,9 +1349,11 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn read_protocol_object(
         &self,
+        context: &ProtocolObjectContext,
         object: &ProtocolObjectLocator,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError> {
+        context.validate_locator(object, semantic_prefix)?;
         let expected_physical_key = format!("{}{}", object.logical_key(), self.suffix());
         if object.physical().logical_key() != expected_physical_key {
             return Err(StorageError::Parse(format!(
@@ -1346,11 +1363,14 @@ impl SyncStorage for CloudSyncStorage {
             )));
         }
         let stored = self.home.read_appended(object.physical()).await?;
-        self.cipher()
-            .open(stored, &self.aad_context(semantic_prefix))
-            .map_err(|error| {
-                StorageError::Decryption(format!("Store object {}: {error}", object.logical_key()))
-            })
+        let aad = protocol_object_aad_context(context, semantic_prefix);
+        match context.protection() {
+            ProtocolObjectProtection::Store => self.cipher().open(stored, &aad),
+            ProtocolObjectProtection::RecipientSealed => return Ok(stored),
+        }
+        .map_err(|error| {
+            StorageError::Decryption(format!("protocol object {}: {error}", object.logical_key()))
+        })
     }
 
     async fn delete_protocol_object(
@@ -2003,13 +2023,19 @@ mod tests {
 
         let first =
             crate::sync::membership::founder_entry("test-lib", &owner, "0000000000001-0000-owner");
+        let store_root_hash = crate::sync::store_commit::ObjectHash::digest(b"test-lib-root");
         let owner_pubkey = crate::keys::public_key_hex(&owner);
         let first_coord = first.coord();
         let mut chain = crate::sync::membership::MembershipChain::from_entries(vec![first.clone()])
             .expect("found membership");
-        crate::sync::store_objects::append_membership_entry_object(&storage, &first_coord, &first)
-            .await
-            .expect("write generation one membership");
+        crate::sync::store_objects::append_membership_entry_object(
+            &storage,
+            store_root_hash,
+            &first_coord,
+            &first,
+        )
+        .await
+        .expect("write generation one membership");
 
         let keyring = EncryptionService::from_keyring([(1, [1u8; 32]), (2, [2u8; 32])]).unwrap();
         crate::sync::membership_ops::apply_key_rotation(
@@ -2023,6 +2049,7 @@ mod tests {
         assert_eq!(
             crate::sync::store_objects::load_membership_entry_slot(
                 &storage,
+                store_root_hash,
                 &owner_pubkey,
                 &first_coord.author_owner_grant,
                 1,
@@ -2048,6 +2075,7 @@ mod tests {
         let second_coord = second.coord();
         crate::sync::store_objects::append_membership_entry_object(
             &storage,
+            store_root_hash,
             &second_coord,
             &second,
         )
@@ -2160,8 +2188,12 @@ mod tests {
 
         let semantic_prefix = "store-v1/packages/dev1/1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let package = b"changeset-plaintext-bytes".to_vec();
+        let context = crate::sync::storage::ProtocolObjectContext::store(
+            crate::sync::store_commit::ObjectHash::digest(b"test-lib-root"),
+            crate::sync::storage::ProtocolObjectDomain::StorePackage,
+        );
         let object = storage
-            .append_protocol_object(semantic_prefix, ".pkg", package.clone())
+            .append_protocol_object(&context, semantic_prefix, ".pkg", package.clone())
             .await
             .expect("append Store package");
         assert_eq!(
@@ -2172,7 +2204,7 @@ mod tests {
         assert!(!object.physical().logical_key().ends_with(".enc"));
         assert_eq!(
             storage
-                .read_protocol_object(&object, semantic_prefix)
+                .read_protocol_object(&context, &object, semantic_prefix)
                 .await
                 .expect("read Store package"),
             package,
@@ -2530,26 +2562,30 @@ mod tests {
             "store-v1/store-protocol-root/{}",
             crate::sync::store_commit::ObjectHash::digest(b"store protocol root")
         );
+        let context = crate::sync::storage::ProtocolObjectContext::store(
+            crate::sync::store_commit::ObjectHash::digest(b"store protocol root"),
+            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
+        );
         let first = storage
-            .append_protocol_object(&semantic, ".json", b"same signed bytes".to_vec())
+            .append_protocol_object(&context, &semantic, ".json", b"same signed bytes".to_vec())
             .await
             .expect("first append");
         let second = storage
-            .append_protocol_object(&semantic, ".json", b"same signed bytes".to_vec())
+            .append_protocol_object(&context, &semantic, ".json", b"same signed bytes".to_vec())
             .await
             .expect("retry append");
 
         assert_ne!(first.logical_key(), second.logical_key());
         assert_eq!(
             storage
-                .read_protocol_object(&first, &semantic)
+                .read_protocol_object(&context, &first, &semantic)
                 .await
                 .unwrap(),
             b"same signed bytes"
         );
         assert_eq!(
             storage
-                .read_protocol_object(&second, &semantic)
+                .read_protocol_object(&context, &second, &semantic)
                 .await
                 .unwrap(),
             b"same signed bytes"
@@ -2563,6 +2599,69 @@ mod tests {
             crate::storage::cloud::ListingCoverage::CompleteAtScan
         );
         assert_eq!(listing.objects.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn protocol_object_read_rejects_root_domain_and_path_substitution() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Encrypted(EncryptionService::from_key([8u8; 32])),
+            BlobPathScheme::Hashed,
+            "aad-store",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("aad-copy")));
+        let root = crate::sync::store_commit::ObjectHash::digest(b"root-a");
+        let other_root = crate::sync::store_commit::ObjectHash::digest(b"root-b");
+        let commit_hash = crate::sync::store_commit::ObjectHash::digest(b"commit");
+        let semantic = crate::sync::store_commit::commit_semantic_prefix("device", 1, commit_hash);
+        let context = crate::sync::storage::ProtocolObjectContext::store(
+            root,
+            crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+        );
+        let object = storage
+            .append_protocol_object(&context, &semantic, ".json", b"signed commit".to_vec())
+            .await
+            .expect("append root-bound Store commit");
+
+        assert_eq!(
+            storage
+                .read_protocol_object(&context, &object, &semantic)
+                .await
+                .expect("read with the exact authenticated context"),
+            b"signed commit",
+        );
+        let other_root_context = crate::sync::storage::ProtocolObjectContext::store(
+            other_root,
+            crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+        );
+        assert!(matches!(
+            storage
+                .read_protocol_object(&other_root_context, &object, &semantic)
+                .await,
+            Err(crate::sync::storage::StorageError::Decryption(_))
+        ));
+
+        let other_semantic =
+            crate::sync::store_commit::commit_semantic_prefix("device", 2, commit_hash);
+        assert!(matches!(
+            storage
+                .read_protocol_object(&context, &object, &other_semantic)
+                .await,
+            Err(crate::sync::storage::StorageError::Parse(_))
+        ));
+
+        let other_domain_context = crate::sync::storage::ProtocolObjectContext::store(
+            root,
+            crate::sync::storage::ProtocolObjectDomain::StoreHead,
+        );
+        assert!(matches!(
+            storage
+                .read_protocol_object(&other_domain_context, &object, &semantic)
+                .await,
+            Err(crate::sync::storage::StorageError::Parse(_))
+        ));
     }
 
     #[tokio::test]

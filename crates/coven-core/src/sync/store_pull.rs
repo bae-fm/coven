@@ -1220,11 +1220,12 @@ async fn membership_authorizes(
     let owner = db
         .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
         .await?;
-    let entries = super::membership_ops::list_membership_entries(storage)
+    let entries = super::membership_ops::list_membership_entries(storage, commit.store_root_hash)
         .await
         .map_err(|error| StorePullError::Membership(StorePullMembershipError::Object(error)))?;
     let refreshed = super::membership_ops::load_anchored_chain_with_candidates(
         storage,
+        commit.store_root_hash,
         &entries,
         std::slice::from_ref(grant),
         owner.as_deref(),
@@ -1702,6 +1703,7 @@ mod tests {
     use crate::sync::membership::{
         founder_entry, MemberRole, OwnerGrantId, SerialAuthorizationState,
     };
+    use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::store_commit::{
         store_protocol_root_semantic_prefix, CircleControlRef, StoreControl, StoreProtocolRoot,
     };
@@ -1860,11 +1862,18 @@ mod tests {
         )
         .unwrap();
         let loser_package = loser.store_package.as_ref().expect("Store package");
-        append_and_verify(&storage, &loser_package.object_key, ".pkg", &[])
-            .await
-            .unwrap();
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StorePackage),
+            &loser_package.object_key,
+            ".pkg",
+            &[],
+        )
+        .await
+        .unwrap();
+        append_and_verify(
+            &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StoreCommit),
             &crate::sync::store_commit::commit_semantic_prefix(
                 SERIAL_STREAM_ID,
                 1,
@@ -1960,12 +1969,25 @@ mod tests {
 
     async fn append_serial_commit(storage: &CloudSyncStorage, commit: &StoreBatchCommit) {
         if let Some(package) = commit.store_package.as_ref() {
-            append_and_verify(storage, &package.object_key, ".pkg", &[])
-                .await
-                .unwrap();
+            append_and_verify(
+                storage,
+                &ProtocolObjectContext::store(
+                    commit.store_root_hash,
+                    ProtocolObjectDomain::StorePackage,
+                ),
+                &package.object_key,
+                ".pkg",
+                &[],
+            )
+            .await
+            .unwrap();
         }
         append_and_verify(
             storage,
+            &ProtocolObjectContext::store(
+                commit.store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            ),
             &crate::sync::store_commit::commit_semantic_prefix(
                 SERIAL_STREAM_ID,
                 commit.seq(),
@@ -2029,6 +2051,7 @@ mod tests {
         .expect("sign Merge head");
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StoreCommit),
             &crate::sync::store_commit::commit_semantic_prefix("source", 1, commit.commit_hash()),
             ".json",
             &commit.to_bytes(),
@@ -2037,6 +2060,7 @@ mod tests {
         .expect("publish Merge commit");
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StoreHead),
             &crate::sync::store_commit::head_semantic_prefix("source", 1, head.head_hash()),
             ".json",
             &head.to_bytes(),
@@ -2694,11 +2718,18 @@ mod tests {
         )
         .unwrap();
         let rogue_package = rogue.store_package.as_ref().expect("Store package");
-        append_and_verify(&storage, &rogue_package.object_key, ".pkg", &[])
-            .await
-            .unwrap();
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StorePackage),
+            &rogue_package.object_key,
+            ".pkg",
+            &[],
+        )
+        .await
+        .unwrap();
+        append_and_verify(
+            &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StoreCommit),
             &crate::sync::store_commit::commit_semantic_prefix(
                 SERIAL_STREAM_ID,
                 2,
@@ -2783,6 +2814,7 @@ mod tests {
         .unwrap();
         append_and_verify(
             &storage,
+            &ProtocolObjectContext::store(root, ProtocolObjectDomain::StoreCommit),
             &crate::sync::store_commit::commit_semantic_prefix(
                 SERIAL_STREAM_ID,
                 1,
@@ -2865,11 +2897,18 @@ mod tests {
         .unwrap();
         for commit in [&winner, &loser] {
             let package = commit.store_package.as_ref().expect("Store package");
-            append_and_verify(&storage, &package.object_key, ".pkg", &[])
-                .await
-                .unwrap();
             append_and_verify(
                 &storage,
+                &ProtocolObjectContext::store(root, ProtocolObjectDomain::StorePackage),
+                &package.object_key,
+                ".pkg",
+                &[],
+            )
+            .await
+            .unwrap();
+            append_and_verify(
+                &storage,
+                &ProtocolObjectContext::store(root, ProtocolObjectDomain::StoreCommit),
                 &crate::sync::store_commit::commit_semantic_prefix(
                     SERIAL_STREAM_ID,
                     1,
@@ -3351,11 +3390,18 @@ mod tests {
         )
         .expect("sign Store head");
         let store_package = commit.store_package.as_ref().expect("Store package");
-        append_and_verify(storage, &store_package.object_key, ".pkg", package)
-            .await
-            .expect("publish package");
         append_and_verify(
             storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StorePackage),
+            &store_package.object_key,
+            ".pkg",
+            package,
+        )
+        .await
+        .expect("publish package");
+        append_and_verify(
+            storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
             &crate::sync::store_commit::commit_semantic_prefix(device_id, 1, commit.commit_hash()),
             ".json",
             &commit.to_bytes(),
@@ -3364,6 +3410,7 @@ mod tests {
         .expect("publish commit");
         append_and_verify(
             storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead),
             &crate::sync::store_commit::head_semantic_prefix(device_id, 1, head.head_hash()),
             ".json",
             &head.to_bytes(),
@@ -3409,6 +3456,7 @@ mod tests {
         let store_root_hash = store_protocol_root.object_hash();
         append_and_verify(
             &storage(&home, &identity, "store-protocol-root"),
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreProtocolRoot),
             &store_protocol_root_semantic_prefix(store_root_hash),
             ".json",
             &store_protocol_root.to_bytes(),
@@ -3589,6 +3637,7 @@ mod tests {
         let setup_storage = storage(&home, &identity, "setup");
         append_and_verify(
             &setup_storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreProtocolRoot),
             &store_protocol_root_semantic_prefix(store_root_hash),
             ".json",
             &store_protocol_root.to_bytes(),
@@ -4159,6 +4208,7 @@ mod tests {
         .expect("sign dependent head");
         append_and_verify(
             &receiver_storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StorePackage),
             &commit
                 .store_package
                 .as_ref()
@@ -4171,6 +4221,7 @@ mod tests {
         .unwrap();
         append_and_verify(
             &receiver_storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
             &crate::sync::store_commit::commit_semantic_prefix(
                 "dev-dependent",
                 1,
@@ -4183,6 +4234,7 @@ mod tests {
         .unwrap();
         append_and_verify(
             &receiver_storage,
+            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead),
             &crate::sync::store_commit::head_semantic_prefix("dev-dependent", 1, head.head_hash()),
             ".json",
             &head.to_bytes(),
