@@ -6,7 +6,7 @@ use rusqlite::ffi;
 use rusqlite::Connection;
 
 use super::ffi::{for_each_change, ChangeRow, Changegroup};
-use super::model::{rows_referencing, GateColumn, Gates, TableGate};
+use super::model::{foreign_keys, rows_referencing, GateColumn, Gates, TableGate};
 use super::outbound::{
     effective_gate, full_state_diff, query_column_text, row_id_for_column_value, FullStateDirection,
 };
@@ -98,6 +98,7 @@ unsafe fn partition_outbound_raw(
         BTreeMap::new()
     };
     for_each_change(changeset, |iter, row| {
+        validate_outgoing_synced_fk_audiences(conn, gates, &row)?;
         if let Some((source, destination)) = scoped_root_move(gates, &row)? {
             let row_id = row
                 .pk()
@@ -167,6 +168,57 @@ unsafe fn partition_outbound_raw(
             })
         })
         .collect()
+}
+
+fn validate_outgoing_synced_fk_audiences(
+    conn: &Connection,
+    gates: &Gates,
+    row: &ChangeRow,
+) -> Result<(), GateError> {
+    if row.op == ffi::SQLITE_DELETE || !table_is_scoped(gates, &row.table) {
+        return Ok(());
+    }
+    let row_id = row
+        .pk()
+        .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+    let row_audience = live_row_audience(conn, gates, &row.table, row_id)?;
+    for (fk_column, parent_table, parent_column) in foreign_keys(conn, &row.table)? {
+        if !gates.is_synced_table(&parent_table) {
+            continue;
+        }
+        let sql = format!(
+            "SELECT {} FROM {} WHERE id = ?1",
+            quote_ident(&fk_column),
+            quote_ident(&row.table),
+        );
+        let parent_key = query_row_optional(conn, &sql, [row_id], |record| {
+            record.get::<_, Option<String>>(0)
+        })?
+        .ok_or_else(|| GateError::MissingAudienceRow {
+            table: row.table.clone(),
+            row_id: row_id.to_string(),
+        })?;
+        let Some(parent_key) = parent_key else {
+            continue;
+        };
+        let parent_id = row_id_for_column_value(conn, &parent_table, &parent_column, &parent_key)?
+            .ok_or_else(|| GateError::MissingAudienceParent {
+                table: row.table.clone(),
+                row_id: Some(row_id.to_string()),
+                parent: parent_table.clone(),
+            })?;
+        let parent_audience = live_row_audience(conn, gates, &parent_table, &parent_id)?;
+        if parent_audience != Audience::Store && parent_audience != row_audience {
+            return Err(GateError::InvalidAudience {
+                table: row.table.clone(),
+                value: row_audience.column_value(),
+                reason: format!(
+                    "relationship through {fk_column} references {parent_table}.{parent_id} in {parent_audience:?}"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 unsafe fn captured_deleted_audiences(

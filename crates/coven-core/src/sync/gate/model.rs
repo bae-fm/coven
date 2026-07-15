@@ -54,6 +54,7 @@ pub(super) struct GateColumn {
 /// synced table absent from this map is ungated and unconditionally shared.
 pub struct Gates {
     pub(super) tables: HashMap<String, TableGate>,
+    synced_tables: HashSet<String>,
 }
 
 #[cfg(test)]
@@ -76,6 +77,10 @@ impl Gates {
         self.tables
             .values()
             .any(|gate| matches!(gate, TableGate::ScopedRoot { .. }))
+    }
+
+    pub(super) fn is_synced_table(&self, table: &str) -> bool {
+        self.synced_tables.contains(table)
     }
 
     /// Build the gate model from the declared [`SyncedTable`]s and the live
@@ -219,7 +224,13 @@ impl Gates {
             TableGate::Child { .. } => reaches_gate.contains(name),
         });
 
-        Ok(Gates { tables: gate_map })
+        Ok(Gates {
+            tables: gate_map,
+            synced_tables: tables
+                .iter()
+                .map(|table| table.name().to_string())
+                .collect(),
+        })
     }
 
     /// Every table governed by the gate, in FK-topological order: a table comes

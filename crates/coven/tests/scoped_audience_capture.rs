@@ -32,7 +32,8 @@ fn routing_keyring() -> MasterKeyring {
 fn seed_store_root(conn: &rusqlite::Connection) {
     let store_root = coven_core::sync::store_commit::ObjectHash::digest(b"scoped-routing-root");
     conn.execute(
-        "INSERT INTO protocol_state (key, value) VALUES ('store_root_hash', ?1)",
+        "INSERT INTO protocol_state (key, value) VALUES ('store_root_hash', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [store_root.to_string()],
     )
     .expect("seed Store protocol root");
@@ -1684,4 +1685,235 @@ async fn scoped_move_does_not_cross_a_store_parent_into_a_sibling_scoped_root() 
             "moving accounts must not re-emit its Store parent to {audience}"
         );
     }
+}
+
+async fn assert_every_outgoing_synced_fk_matches_its_child_audience(policy: WritePolicy) {
+    let temp = tempfile::tempdir().expect("store directory");
+    let store_dir = StoreDir::new(temp.path());
+    let config = Config::with_defaults(
+        format!("{policy:?}-cross-audience-fk"),
+        "capture-device".to_string(),
+        store_dir.clone(),
+        "Cross-audience relationship".to_string(),
+    );
+    let mut builder = Coven::builder(config)
+        .write_policy(policy)
+        .synced_tables(vec![
+            SyncedTable::new("homes", RowIdentity::SharedKey).scoped_by("audience"),
+            SyncedTable::new("targets", RowIdentity::SharedKey).scoped_by("audience"),
+            SyncedTable::new("links", RowIdentity::SharedKey),
+        ])
+        .migrations(vec![Migration::sql(
+            1,
+            "cross-audience relationship",
+            "CREATE TABLE homes (
+                id TEXT PRIMARY KEY,
+                audience TEXT,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE targets (
+                id TEXT PRIMARY KEY,
+                audience TEXT,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE links (
+                id TEXT PRIMARY KEY,
+                home_id TEXT NOT NULL REFERENCES homes(id),
+                target_id TEXT NOT NULL REFERENCES targets(id),
+                _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )]);
+    if policy == WritePolicy::MergeConcurrent {
+        builder = builder.key_custody(KeyCustody::InMemory(routing_keyring()));
+    }
+    let handle = builder.open().expect("open cross-audience Store");
+
+    let other_circle_id = coven_core::sync::circle::CircleId::from_bytes([2; 16]).to_string();
+    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
+    seed_active_circle(&authority, CIRCLE_ID, policy);
+    seed_active_circle(&authority, &other_circle_id, policy);
+    drop(authority);
+
+    let seeded_other_circle_id = other_circle_id.clone();
+    handle
+        .sql(move |sql| {
+            for (id, audience) in [
+                ("circle-a-home", Some(CIRCLE_ID)),
+                ("store-home", None),
+                ("local-home", Some("local")),
+            ] {
+                sql.execute(
+                    "INSERT INTO homes (id, audience, _updated_at) VALUES (?1, ?2, ?3)",
+                    (id, audience, sql.stamp()),
+                )?;
+            }
+            for (id, audience) in [
+                ("circle-a-target", Some(CIRCLE_ID)),
+                ("circle-b-target", Some(seeded_other_circle_id.as_str())),
+                ("store-target", None),
+            ] {
+                sql.execute(
+                    "INSERT INTO targets (id, audience, _updated_at) VALUES (?1, ?2, ?3)",
+                    (id, audience, sql.stamp()),
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("seed Store, Circle, and Local relationship parents");
+
+    let allowed = handle
+        .sql(|sql| {
+            sql.execute(
+                "INSERT INTO links (id, home_id, target_id, _updated_at)
+                 VALUES ('same-circle-link', 'circle-a-home', 'circle-a-target', ?1)",
+                [sql.stamp()],
+            )?;
+            sql.execute(
+                "INSERT INTO links (id, home_id, target_id, _updated_at)
+                 VALUES ('store-parent-link', 'circle-a-home', 'store-target', ?1)",
+                [sql.stamp()],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("same-audience and Store-parent relationships must succeed");
+    let allowed_write_id = allowed.write_id.to_string();
+    let allowed_state = handle
+        .sql_read(move |conn| {
+            let host_rows = conn.query_row(
+                "SELECT count(*) FROM links
+                 WHERE id IN ('same-circle-link', 'store-parent-link')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let audiences = conn
+                .prepare(
+                    "SELECT audience FROM store_write_partitions
+                     WHERE write_id = ?1 ORDER BY audience",
+                )?
+                .query_map([allowed_write_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((host_rows, audiences))
+        })
+        .await
+        .expect("read allowed relationships");
+    let expected_audiences = match policy {
+        WritePolicy::MergeConcurrent => vec![CIRCLE_ID.to_string(), "store".to_string()],
+        WritePolicy::Serial => vec![CIRCLE_ID.to_string()],
+    };
+    assert_eq!(allowed_state, (2, expected_audiences));
+
+    for (id, home, target, description) in [
+        (
+            "circle-cross-link",
+            "circle-a-home",
+            "circle-b-target",
+            "Circle A child to Circle B parent",
+        ),
+        (
+            "store-private-link",
+            "store-home",
+            "circle-a-target",
+            "Store child to private parent",
+        ),
+        (
+            "local-private-link",
+            "local-home",
+            "circle-a-target",
+            "Local child to another private audience",
+        ),
+    ] {
+        let before = handle
+            .sql_read(move |conn| {
+                let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+                let partitions =
+                    conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                let (routes, mirror) = if policy == WritePolicy::MergeConcurrent {
+                    (
+                        conn.query_row("SELECT count(*) FROM _coven_row_routes", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?,
+                        conn.query_row("SELECT count(*) FROM _coven_audience", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?,
+                    )
+                } else {
+                    (0, 0)
+                };
+                Ok((writes, partitions, routes, mirror))
+            })
+            .await
+            .expect("read state before rejected relationship");
+
+        let attempted_id = id.to_string();
+        let attempted_home = home.to_string();
+        let attempted_target = target.to_string();
+        let error = handle
+            .sql(move |sql| {
+                sql.execute(
+                    "INSERT INTO links (id, home_id, target_id, _updated_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    (attempted_id, attempted_home, attempted_target, sql.stamp()),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("relationship through target_id"),
+            "{description} surfaced the wrong error: {error}"
+        );
+
+        let rejected_id = id.to_string();
+        let after = handle
+            .sql_read(move |conn| {
+                let host_rows = conn.query_row(
+                    "SELECT count(*) FROM links WHERE id = ?1",
+                    [rejected_id],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+                let partitions =
+                    conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                let (routes, mirror) = if policy == WritePolicy::MergeConcurrent {
+                    (
+                        conn.query_row("SELECT count(*) FROM _coven_row_routes", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?,
+                        conn.query_row("SELECT count(*) FROM _coven_audience", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?,
+                    )
+                } else {
+                    (0, 0)
+                };
+                Ok((host_rows, writes, partitions, routes, mirror))
+            })
+            .await
+            .expect("read state after rejected relationship");
+        assert_eq!(
+            after,
+            (0, before.0, before.1, before.2, before.3),
+            "{description} left durable state"
+        );
+    }
+}
+
+#[tokio::test]
+async fn merge_validates_every_outgoing_synced_fk_audience() {
+    assert_every_outgoing_synced_fk_matches_its_child_audience(WritePolicy::MergeConcurrent).await;
+}
+
+#[tokio::test]
+async fn serial_validates_every_outgoing_synced_fk_audience() {
+    assert_every_outgoing_synced_fk_matches_its_child_audience(WritePolicy::Serial).await;
 }
