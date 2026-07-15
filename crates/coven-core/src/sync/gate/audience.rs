@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use rusqlite::ffi;
 use rusqlite::Connection;
 
-use super::ffi::{for_each_change, ChangeRow, Changegroup};
+use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
 use super::model::{foreign_keys, rows_referencing, GateColumn, Gates, TableGate};
 use super::outbound::{
     effective_gate, full_state_diff, query_column_text, row_id_for_column_value, FullStateDirection,
@@ -92,8 +92,12 @@ unsafe fn partition_outbound_raw(
 ) -> Result<Vec<AudiencePartition>, GateError> {
     let mut groups = BTreeMap::<Audience, PartitionGroup>::new();
     let mut moves = Vec::new();
+    let mut ancestor_inserts = HashSet::new();
+    let mut ancestor_deletes = HashSet::new();
+    let captured_deletes = collect_deletes(changeset)?;
+    let mut non_local_deletes = HashSet::new();
     let serial_deleted_rows = if write_policy == WritePolicy::Serial {
-        captured_deleted_audiences(conn, changeset, gates)?
+        captured_deleted_audiences(conn, &captured_deletes, gates)?
     } else {
         BTreeMap::new()
     };
@@ -120,12 +124,47 @@ unsafe fn partition_outbound_raw(
         } else {
             change_audience(conn, gates, &row)?
         };
+        if table_is_scoped(gates, &row.table) && audience != Audience::Local {
+            let row_id = row
+                .pk()
+                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+            if row.op == ffi::SQLITE_INSERT {
+                let component = scoped_materialization_rows(
+                    conn,
+                    gates,
+                    (row.table.clone(), row_id.to_string()),
+                )?;
+                ancestor_inserts.extend(required_store_ancestors(conn, gates, &component)?);
+            } else if row.op == ffi::SQLITE_DELETE {
+                non_local_deletes.insert((row.table.clone(), row_id.to_string()));
+            }
+        }
         let partition = partition_group(conn, &mut groups, audience, write_policy)?;
         partition.group.add_change(iter)?;
         Ok(())
     })?;
+    for (table, id) in required_store_ancestors_for_deleted_rows(
+        conn,
+        gates,
+        &captured_deletes,
+        &non_local_deletes,
+    )? {
+        if !gates.row_kept(conn, &table, &id)? {
+            ancestor_deletes.insert((table, id));
+        }
+    }
     for (source, destination, seed) in moves {
         let component = scoped_materialization_rows(conn, gates, seed)?;
+        let ancestors = required_store_ancestors(conn, gates, &component)?;
+        if source == Audience::Local && destination != Audience::Local {
+            ancestor_inserts.extend(ancestors.iter().cloned());
+        } else if source != Audience::Local && destination == Audience::Local {
+            for (table, id) in ancestors {
+                if !gates.row_kept(conn, &table, &id)? {
+                    ancestor_deletes.insert((table, id));
+                }
+            }
+        }
         add_materialization(
             conn,
             gates,
@@ -139,6 +178,24 @@ unsafe fn partition_outbound_raw(
             &component,
             FullStateDirection::Inserts,
             partition_group(conn, &mut groups, destination, write_policy)?,
+        )?;
+    }
+    if !ancestor_inserts.is_empty() {
+        add_materialization(
+            conn,
+            gates,
+            &ancestor_inserts,
+            FullStateDirection::Inserts,
+            partition_group(conn, &mut groups, Audience::Store, write_policy)?,
+        )?;
+    }
+    if !ancestor_deletes.is_empty() {
+        add_materialization(
+            conn,
+            gates,
+            &ancestor_deletes,
+            FullStateDirection::Deletes,
+            partition_group(conn, &mut groups, Audience::Store, write_policy)?,
         )?;
     }
     for_each_change(&routing.changeset, |iter, row| {
@@ -221,24 +278,17 @@ fn validate_outgoing_synced_fk_audiences(
     Ok(())
 }
 
-unsafe fn captured_deleted_audiences(
+fn captured_deleted_audiences(
     conn: &Connection,
-    changeset: &[u8],
+    deleted: &HashMap<(String, String), ChangeRow>,
     gates: &Gates,
 ) -> Result<BTreeMap<(String, String), Audience>, GateError> {
-    let mut deleted = HashMap::new();
-    for_each_change(changeset, |_iter, row| {
-        if row.op == ffi::SQLITE_DELETE && table_is_scoped(gates, &row.table) {
-            let row_id = row
-                .pk()
-                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
-            deleted.insert((row.table.clone(), row_id.to_string()), row);
-        }
-        Ok(())
-    })?;
     let mut audiences = BTreeMap::new();
-    for key in deleted.keys() {
-        let audience = resolve_deleted_audience(conn, gates, &deleted, key, &mut HashSet::new())?;
+    for key in deleted
+        .keys()
+        .filter(|(table, _)| table_is_scoped(gates, table))
+    {
+        let audience = resolve_deleted_audience(conn, gates, deleted, key, &mut HashSet::new())?;
         audiences.insert(key.clone(), audience);
     }
     Ok(audiences)
@@ -501,6 +551,100 @@ fn scoped_materialization_rows(
         }
     }
     Ok(rows)
+}
+
+fn required_store_ancestors(
+    conn: &Connection,
+    gates: &Gates,
+    seeds: &HashSet<(String, String)>,
+) -> Result<HashSet<(String, String)>, GateError> {
+    let mut ancestors = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut pending = seeds.iter().cloned().collect::<Vec<_>>();
+    while let Some((table, row_id)) = pending.pop() {
+        if !visited.insert((table.clone(), row_id.clone())) {
+            continue;
+        }
+        if matches!(gates.tables.get(&table), Some(TableGate::Parent { .. })) {
+            ancestors.insert((table.clone(), row_id.clone()));
+        }
+        for (fk_column, parent, parent_column) in foreign_keys(conn, &table)? {
+            if !gates.tables.contains_key(&parent) {
+                continue;
+            }
+            let Some(parent_key) = query_column_text(conn, &table, &fk_column, &row_id)? else {
+                continue;
+            };
+            let parent_id = row_id_for_column_value(conn, &parent, &parent_column, &parent_key)?
+                .ok_or_else(|| GateError::MissingAudienceParent {
+                    table: table.clone(),
+                    row_id: Some(row_id.clone()),
+                    parent: parent.clone(),
+                })?;
+            pending.push((parent, parent_id));
+        }
+    }
+    Ok(ancestors)
+}
+
+fn required_store_ancestors_for_deleted_rows(
+    conn: &Connection,
+    gates: &Gates,
+    deleted: &HashMap<(String, String), ChangeRow>,
+    seeds: &HashSet<(String, String)>,
+) -> Result<HashSet<(String, String)>, GateError> {
+    let mut live_seeds = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut pending = seeds.iter().cloned().collect::<Vec<_>>();
+    while let Some(key) = pending.pop() {
+        if !visited.insert(key.clone()) {
+            continue;
+        }
+        let row = deleted
+            .get(&key)
+            .ok_or_else(|| GateError::MissingAudienceRow {
+                table: key.0.clone(),
+                row_id: key.1.clone(),
+            })?;
+        let columns = super::gate_table_columns(conn, &key.0)?;
+        for (fk_column, parent, parent_column) in foreign_keys(conn, &key.0)? {
+            if !gates.tables.contains_key(&parent) {
+                continue;
+            }
+            let fk_index = columns
+                .iter()
+                .position(|column| column == &fk_column)
+                .ok_or_else(|| GateError::MissingFkColumn(key.0.clone(), fk_column.clone()))?;
+            let Some(parent_key) = row.old.get(fk_index).and_then(|value| value.as_deref()) else {
+                continue;
+            };
+            let parent_columns = super::gate_table_columns(conn, &parent)?;
+            let parent_index = parent_columns
+                .iter()
+                .position(|column| column == &parent_column)
+                .ok_or_else(|| GateError::MissingFkColumn(parent.clone(), parent_column.clone()))?;
+            if let Some(deleted_parent) = deleted.iter().find_map(|(candidate, parent_row)| {
+                (candidate.0 == parent
+                    && parent_row
+                        .old
+                        .get(parent_index)
+                        .and_then(|value| value.as_deref())
+                        == Some(parent_key))
+                .then(|| candidate.clone())
+            }) {
+                pending.push(deleted_parent);
+                continue;
+            }
+            let parent_id = row_id_for_column_value(conn, &parent, &parent_column, parent_key)?
+                .ok_or_else(|| GateError::MissingAudienceParent {
+                    table: key.0.clone(),
+                    row_id: Some(key.1.clone()),
+                    parent: parent.clone(),
+                })?;
+            live_seeds.insert((parent, parent_id));
+        }
+    }
+    required_store_ancestors(conn, gates, &live_seeds)
 }
 
 fn table_is_scoped(gates: &Gates, table: &str) -> bool {

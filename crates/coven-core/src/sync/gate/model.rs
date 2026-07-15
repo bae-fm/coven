@@ -317,13 +317,14 @@ impl Gates {
     /// recursing again.
     ///
     fn keep_clause(&self, tbl: &str) -> Result<String, GateError> {
-        self.keep_clause_guarded(tbl, &mut HashSet::new())
+        self.keep_clause_guarded(tbl, &mut HashSet::new(), false)
     }
 
     fn keep_clause_guarded(
         &self,
         tbl: &str,
         visiting: &mut HashSet<String>,
+        keeps_ancestor: bool,
     ) -> Result<String, GateError> {
         if !visiting.insert(tbl.to_string()) {
             // Already on the current recursion path: refuse to loop. A row kept
@@ -336,6 +337,11 @@ impl Gates {
                 quote_ident(tbl),
                 quote_ident(&gate_col.name)
             )),
+            Some(TableGate::ScopedRoot { audience_col }) if keeps_ancestor => format!(
+                "({table}.{column} IS NULL OR {table}.{column} <> 'local')",
+                table = quote_ident(tbl),
+                column = quote_ident(&audience_col.name),
+            ),
             Some(TableGate::ScopedRoot { audience_col }) => format!(
                 "{}.{} IS NULL",
                 quote_ident(tbl),
@@ -347,7 +353,7 @@ impl Gates {
                 parent,
                 parent_col,
             }) => {
-                let inner = self.keep_clause_guarded(parent, visiting)?;
+                let inner = self.keep_clause_guarded(parent, visiting, keeps_ancestor)?;
                 fk_exists_clause(parent, &parent_col.name, tbl, &fk_col.name, &inner)
             }
             Some(TableGate::Parent { children }) => {
@@ -359,7 +365,7 @@ impl Gates {
                 }
                 let mut disjuncts = Vec::with_capacity(children.len());
                 for (child, fk_col, parent_col) in children {
-                    let inner = self.keep_clause_guarded(child, visiting)?;
+                    let inner = self.keep_clause_guarded(child, visiting, true)?;
                     disjuncts.push(fk_exists_clause(
                         child,
                         &fk_col.name,

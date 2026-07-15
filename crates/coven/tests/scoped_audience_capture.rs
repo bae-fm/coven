@@ -171,6 +171,93 @@ fn reparent_rollback_state(
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ScopedAncestorRollbackState {
+    folders: Vec<(String, String, String)>,
+    documents: Vec<(String, String, String, String)>,
+    details: Vec<(String, String, String)>,
+    writes: i64,
+    partitions: i64,
+    routes: Vec<(String, String, String)>,
+    mirror: Vec<(String, Option<String>)>,
+}
+
+fn scoped_ancestor_rollback_state(
+    conn: &rusqlite::Connection,
+    policy: WritePolicy,
+) -> rusqlite::Result<ScopedAncestorRollbackState> {
+    let folders = conn
+        .prepare("SELECT id, name, _updated_at FROM folders ORDER BY id")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let documents = conn
+        .prepare("SELECT id, folder_id, audience, _updated_at FROM documents ORDER BY id")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let details = conn
+        .prepare("SELECT id, document_id, _updated_at FROM details ORDER BY id")?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let writes = conn.query_row("SELECT count(*) FROM store_writes", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    let partitions = conn.query_row("SELECT count(*) FROM store_write_partitions", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    let (routes, mirror) = if policy == WritePolicy::MergeConcurrent {
+        let routes = conn
+            .prepare(
+                "SELECT table_name, row_id, routing_id FROM _coven_row_routes
+                 ORDER BY table_name, row_id",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mirror = conn
+            .prepare("SELECT routing_id, circle_id FROM _coven_audience ORDER BY routing_id")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        (routes, mirror)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    Ok(ScopedAncestorRollbackState {
+        folders,
+        documents,
+        details,
+        writes,
+        partitions,
+        routes,
+        mirror,
+    })
+}
+
 #[tokio::test]
 async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     let temp = tempfile::tempdir().expect("store directory");
@@ -2479,4 +2566,469 @@ async fn merge_reparenting_an_inherited_row_materializes_its_subtree() {
 #[tokio::test]
 async fn serial_reparenting_an_inherited_row_materializes_its_subtree() {
     assert_inherited_reparenting_materializes_subtree(WritePolicy::Serial).await;
+}
+
+async fn assert_non_local_scoped_descendant_keeps_store_ancestor(policy: WritePolicy) {
+    let temp = tempfile::tempdir().expect("store directory");
+    let store_dir = StoreDir::new(temp.path());
+    let config = Config::with_defaults(
+        format!("{policy:?}-scoped-ancestor"),
+        "capture-device".to_string(),
+        store_dir.clone(),
+        "Scoped descendant ancestor".to_string(),
+    );
+    let mut builder = Coven::builder(config)
+        .write_policy(policy)
+        .synced_tables(vec![
+            SyncedTable::new("folders", RowIdentity::SharedKey).gated_by_descendants(),
+            SyncedTable::new("documents", RowIdentity::SharedKey).scoped_by("audience"),
+            SyncedTable::new("details", RowIdentity::SharedKey),
+        ])
+        .migrations(vec![Migration::sql(
+            1,
+            "scoped descendant ancestor",
+            "CREATE TABLE folders (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                folder_id TEXT NOT NULL REFERENCES folders(id),
+                audience TEXT,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE details (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )]);
+    if policy == WritePolicy::MergeConcurrent {
+        builder = builder.key_custody(KeyCustody::InMemory(routing_keyring()));
+    }
+    let handle = builder.open().expect("open scoped ancestor Store");
+
+    let circle_b = coven_core::sync::circle::CircleId::from_bytes([2; 16]).to_string();
+    let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
+    seed_active_circle(&authority, CIRCLE_ID, policy);
+    seed_active_circle(&authority, &circle_b, policy);
+    drop(authority);
+
+    let seeded = handle
+        .sql(|sql| {
+            sql.execute(
+                "INSERT INTO folders (id, name, _updated_at)
+                 VALUES ('required-folder', 'Required', ?1)",
+                [sql.stamp()],
+            )?;
+            sql.execute(
+                "INSERT INTO documents (id, folder_id, audience, _updated_at)
+                 VALUES ('moving-document', 'required-folder', 'local', ?1)",
+                [sql.stamp()],
+            )?;
+            sql.execute(
+                "INSERT INTO details (id, document_id, _updated_at)
+                 VALUES ('moving-detail', 'moving-document', ?1)",
+                [sql.stamp()],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("seed Local-only ancestor subtree");
+    let seed_write_id = seeded.write_id.to_string();
+    let local_only_partitions = handle
+        .sql_read(move |conn| {
+            conn.query_row(
+                "SELECT count(*) FROM store_write_partitions WHERE write_id = ?1",
+                [seed_write_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .expect("read Local-only ancestor journal");
+    assert_eq!(local_only_partitions, 0);
+
+    let moved = handle
+        .sql(|sql| {
+            sql.execute(
+                "UPDATE documents SET audience = ?1, _updated_at = ?2
+                 WHERE id = 'moving-document'",
+                (CIRCLE_ID, sql.stamp()),
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("move Local descendant into Circle A");
+    let write_id = moved.write_id.to_string();
+    let partitions = handle
+        .sql_read(move |conn| {
+            conn.prepare(
+                "SELECT audience, changeset FROM store_write_partitions
+                 WHERE write_id = ?1 ORDER BY audience",
+            )?
+            .query_map([write_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+        })
+        .await
+        .expect("read Local-to-Circle ancestor move");
+    let partition = |audience: &str| {
+        partitions
+            .iter()
+            .find(|(candidate, _)| candidate == audience)
+            .unwrap_or_else(|| panic!("missing {audience} scoped ancestor partition"))
+    };
+    let store = coven_core::changeset::walk(&partition("store").1)
+        .expect("walk required ancestor Store partition");
+    assert!(has_change(
+        &store,
+        "folders",
+        coven_core::changeset::ChangeOp::Insert,
+        "required-folder"
+    ));
+    let circle = coven_core::changeset::walk(&partition(CIRCLE_ID).1)
+        .expect("walk Circle descendant partition");
+    for (table, id) in [
+        ("documents", "moving-document"),
+        ("details", "moving-detail"),
+    ] {
+        assert!(has_change(
+            &circle,
+            table,
+            coven_core::changeset::ChangeOp::Insert,
+            id
+        ));
+    }
+
+    let sibling_circle = circle_b.clone();
+    let inserted_sibling = handle
+        .sql(move |sql| {
+            sql.execute(
+                "INSERT INTO documents (id, folder_id, audience, _updated_at)
+                 VALUES ('sibling-document', 'required-folder', ?1, ?2)",
+                (sibling_circle, sql.stamp()),
+            )?;
+            sql.execute(
+                "INSERT INTO details (id, document_id, _updated_at)
+                 VALUES ('sibling-detail', 'sibling-document', ?1)",
+                [sql.stamp()],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("insert Circle B sibling under required ancestor");
+    let sibling_write_id = inserted_sibling.write_id.to_string();
+    let sibling_circle = circle_b.clone();
+    let sibling_partitions = handle
+        .sql_read(move |conn| {
+            conn.prepare(
+                "SELECT audience, changeset FROM store_write_partitions
+                 WHERE write_id = ?1 ORDER BY audience",
+            )?
+            .query_map([sibling_write_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+        })
+        .await
+        .expect("read Circle B sibling insert");
+    let sibling = sibling_partitions
+        .iter()
+        .find(|(audience, _)| audience == &sibling_circle)
+        .expect("Circle B sibling partition");
+    let sibling = coven_core::changeset::walk(&sibling.1).expect("walk Circle B sibling insert");
+    for (table, id) in [
+        ("documents", "sibling-document"),
+        ("details", "sibling-detail"),
+    ] {
+        assert!(has_change(
+            &sibling,
+            table,
+            coven_core::changeset::ChangeOp::Insert,
+            id
+        ));
+    }
+    let sibling_store = sibling_partitions
+        .iter()
+        .find(|(audience, _)| audience == "store")
+        .expect("Store ancestor partition for Circle B insert");
+    let sibling_store = coven_core::changeset::walk(&sibling_store.1)
+        .expect("walk Store ancestor partition for Circle B insert");
+    assert!(has_change(
+        &sibling_store,
+        "folders",
+        coven_core::changeset::ChangeOp::Insert,
+        "required-folder"
+    ));
+    for (_, changeset) in &sibling_partitions {
+        let changes = coven_core::changeset::walk(changeset).expect("walk sibling partition");
+        for (table, id) in [
+            ("documents", "moving-document"),
+            ("details", "moving-detail"),
+        ] {
+            assert!(!changes.iter().any(|change| change.table == table
+                && change
+                    .columns
+                    .iter()
+                    .any(|value| value.as_deref() == Some(id))));
+        }
+    }
+
+    let moved_local = handle
+        .sql(|sql| {
+            sql.execute(
+                "UPDATE documents SET audience = 'local', _updated_at = ?1
+                 WHERE id = 'moving-document'",
+                [sql.stamp()],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("move Circle A descendant to Local while Circle B remains");
+    let local_write_id = moved_local.write_id.to_string();
+    let local_partitions = handle
+        .sql_read(move |conn| {
+            conn.prepare(
+                "SELECT audience, changeset FROM store_write_partitions
+                 WHERE write_id = ?1 ORDER BY audience",
+            )?
+            .query_map([local_write_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+        })
+        .await
+        .expect("read Circle A to Local move");
+    assert!(local_partitions
+        .iter()
+        .all(|(audience, _)| audience != "local"));
+    let circle_source = local_partitions
+        .iter()
+        .find(|(audience, _)| audience == CIRCLE_ID)
+        .expect("Circle A source partition");
+    let circle_source =
+        coven_core::changeset::walk(&circle_source.1).expect("walk Circle A source partition");
+    for (table, id) in [
+        ("documents", "moving-document"),
+        ("details", "moving-detail"),
+    ] {
+        assert!(has_change(
+            &circle_source,
+            table,
+            coven_core::changeset::ChangeOp::Delete,
+            id
+        ));
+    }
+    for (_, changeset) in &local_partitions {
+        let changes =
+            coven_core::changeset::walk(changeset).expect("walk Circle-to-Local partition");
+        assert!(!has_change(
+            &changes,
+            "folders",
+            coven_core::changeset::ChangeOp::Delete,
+            "required-folder"
+        ));
+        for id in ["sibling-document", "sibling-detail"] {
+            assert!(!changes.iter().any(|change| change
+                .columns
+                .iter()
+                .any(|value| value.as_deref() == Some(id))));
+        }
+    }
+
+    let rollback_before = handle
+        .sql_read(move |conn| Ok(scoped_ancestor_rollback_state(conn, policy)?))
+        .await
+        .expect("read state before ancestor retraction failure");
+    let fault = rusqlite::Connection::open(store_dir.db_path()).expect("open fault injector");
+    fault
+        .execute_batch(
+            "CREATE TRIGGER fail_scoped_ancestor_partition
+             BEFORE INSERT ON store_write_partitions
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced scoped ancestor journal failure');
+             END;",
+        )
+        .expect("install scoped ancestor journal failure");
+    let failed_move = handle
+        .sql(|sql| {
+            sql.execute(
+                "UPDATE documents SET audience = 'local', _updated_at = ?1
+                 WHERE id = 'sibling-document'",
+                [sql.stamp()],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect_err("journal failure must abort final non-Local descendant move");
+    assert!(failed_move
+        .to_string()
+        .contains("forced scoped ancestor journal failure"));
+    let rollback_after = handle
+        .sql_read(move |conn| Ok(scoped_ancestor_rollback_state(conn, policy)?))
+        .await
+        .expect("read state after ancestor retraction failure");
+    assert_eq!(rollback_after, rollback_before);
+    fault
+        .execute_batch("DROP TRIGGER fail_scoped_ancestor_partition;")
+        .expect("remove scoped ancestor journal failure");
+    drop(fault);
+
+    let moved_sibling_local = handle
+        .sql(|sql| {
+            sql.execute(
+                "UPDATE documents SET audience = 'local', _updated_at = ?1
+                 WHERE id = 'sibling-document'",
+                [sql.stamp()],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("move final Circle descendant to Local");
+    let sibling_local_write_id = moved_sibling_local.write_id.to_string();
+    let sibling_local_partitions = handle
+        .sql_read(move |conn| {
+            conn.prepare(
+                "SELECT audience, changeset FROM store_write_partitions
+                 WHERE write_id = ?1 ORDER BY audience",
+            )?
+            .query_map([sibling_local_write_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+        })
+        .await
+        .expect("read final Circle descendant move to Local");
+    let store_retraction = sibling_local_partitions
+        .iter()
+        .find(|(audience, _)| audience == "store")
+        .expect("Store ancestor retraction partition");
+    let store_retraction =
+        coven_core::changeset::walk(&store_retraction.1).expect("walk Store ancestor retraction");
+    assert!(has_change(
+        &store_retraction,
+        "folders",
+        coven_core::changeset::ChangeOp::Delete,
+        "required-folder"
+    ));
+    let circle_b_source = sibling_local_partitions
+        .iter()
+        .find(|(audience, _)| audience == &circle_b)
+        .expect("Circle B source partition");
+    let circle_b_source =
+        coven_core::changeset::walk(&circle_b_source.1).expect("walk Circle B source partition");
+    for (table, id) in [
+        ("documents", "sibling-document"),
+        ("details", "sibling-detail"),
+    ] {
+        assert!(has_change(
+            &circle_b_source,
+            table,
+            coven_core::changeset::ChangeOp::Delete,
+            id
+        ));
+    }
+
+    let moved_store = handle
+        .sql(|sql| {
+            sql.execute(
+                "UPDATE documents SET audience = NULL, _updated_at = ?1
+                 WHERE id = 'moving-document'",
+                [sql.stamp()],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("move selected Local descendant to Store");
+    let store_write_id = moved_store.write_id.to_string();
+    let store_partitions = handle
+        .sql_read(move |conn| {
+            conn.prepare(
+                "SELECT audience, changeset FROM store_write_partitions
+                 WHERE write_id = ?1 ORDER BY audience",
+            )?
+            .query_map([store_write_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+        })
+        .await
+        .expect("read Local descendant move to Store");
+    let store_destination = store_partitions
+        .iter()
+        .find(|(audience, _)| audience == "store")
+        .expect("Store descendant destination partition");
+    let store_destination = coven_core::changeset::walk(&store_destination.1)
+        .expect("walk Store descendant destination");
+    for (table, id) in [
+        ("folders", "required-folder"),
+        ("documents", "moving-document"),
+        ("details", "moving-detail"),
+    ] {
+        assert!(has_change(
+            &store_destination,
+            table,
+            coven_core::changeset::ChangeOp::Insert,
+            id
+        ));
+    }
+
+    let deleted_store = handle
+        .sql(|sql| {
+            sql.execute("DELETE FROM documents WHERE id = 'moving-document'", [])?;
+            Ok(())
+        })
+        .await
+        .expect("delete final Store descendant");
+    let delete_write_id = deleted_store.write_id.to_string();
+    let delete_partitions = handle
+        .sql_read(move |conn| {
+            conn.prepare(
+                "SELECT audience, changeset FROM store_write_partitions
+                 WHERE write_id = ?1 ORDER BY audience",
+            )?
+            .query_map([delete_write_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+        })
+        .await
+        .expect("read final Store descendant delete");
+    let store_delete = delete_partitions
+        .iter()
+        .find(|(audience, _)| audience == "store")
+        .expect("Store descendant delete partition");
+    let store_delete =
+        coven_core::changeset::walk(&store_delete.1).expect("walk Store descendant delete");
+    for (table, id) in [
+        ("folders", "required-folder"),
+        ("documents", "moving-document"),
+        ("details", "moving-detail"),
+    ] {
+        assert!(has_change(
+            &store_delete,
+            table,
+            coven_core::changeset::ChangeOp::Delete,
+            id
+        ));
+    }
+}
+
+#[tokio::test]
+async fn merge_non_local_scoped_descendant_keeps_store_ancestor() {
+    assert_non_local_scoped_descendant_keeps_store_ancestor(WritePolicy::MergeConcurrent).await;
+}
+
+#[tokio::test]
+async fn serial_non_local_scoped_descendant_keeps_store_ancestor() {
+    assert_non_local_scoped_descendant_keeps_store_ancestor(WritePolicy::Serial).await;
 }
