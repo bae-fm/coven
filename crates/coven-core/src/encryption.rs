@@ -360,12 +360,6 @@ impl EncryptionService {
     }
 
     pub fn from_keyring_payload(plaintext: Vec<u8>) -> Result<Self, EncryptionError> {
-        if plaintext.len() == 32 {
-            let key: [u8; 32] = plaintext.try_into().map_err(|_| {
-                EncryptionError::KeyManagement("unwrapped key is not 32 bytes".to_string())
-            })?;
-            return Ok(EncryptionService::from_key(key));
-        }
         let keyring = String::from_utf8(plaintext).map_err(|e| {
             EncryptionError::KeyManagement(format!("keyring payload is not UTF-8: {e}"))
         })?;
@@ -1462,6 +1456,21 @@ mod tests {
     fn master_keyring_from_serialized_rejects_raw_hex() {
         let raw_hex = hex::encode(test_key());
         assert!(MasterKeyring::from_serialized(&raw_hex).is_err());
+    }
+
+    #[test]
+    fn keyring_payload_requires_the_current_json_format() {
+        let service = create_test_service()
+            .with_appended_generation(2, [9u8; 32])
+            .expect("append a generation");
+        let payload = service
+            .to_keyring_payload()
+            .expect("serialize the current keyring payload");
+        let parsed = EncryptionService::from_keyring_payload(payload)
+            .expect("parse the current keyring payload");
+
+        assert_eq!(parsed.keyring_entries(), service.keyring_entries());
+        assert!(EncryptionService::from_keyring_payload(test_key().to_vec()).is_err());
     }
 
     #[test]
