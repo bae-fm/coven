@@ -151,17 +151,12 @@ pub enum MembershipOpsError {
 }
 
 async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, MembershipOpsError> {
-    db.required_store_root_hash().await.map_err(|error| {
-        match error.into_store_root_hash_failure() {
-            Ok(crate::database::StoreRootHashFailure::Missing) => {
-                MembershipOpsError::NoFounderChain
-            }
-            Ok(crate::database::StoreRootHashFailure::Invalid { reason }) => {
-                MembershipOpsError::Database(format!("Store protocol root hash: {reason}"))
-            }
-            Err(error) => MembershipOpsError::Database(error.to_string()),
-        }
-    })
+    db.required_store_root_hash_mapped(
+        || MembershipOpsError::NoFounderChain,
+        |reason| MembershipOpsError::Database(format!("Store protocol root hash: {reason}")),
+        |error| MembershipOpsError::Database(error.to_string()),
+    )
+    .await
 }
 
 /// `protocol_state` key holding the hex Ed25519 pubkey of the store's established
@@ -3135,6 +3130,29 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(MembershipOpsError::NoFounderChain)));
+    }
+
+    #[tokio::test]
+    async fn store_root_state_failures_keep_membership_error_variants() {
+        let storage = MockSyncStorage::new();
+        let db = crate::sync::test_helpers::open_test_db();
+
+        assert!(matches!(
+            get_members(&storage, None, &db).await,
+            Err(MembershipOpsError::NoFounderChain)
+        ));
+
+        db.set_protocol_state(
+            crate::database::STORE_ROOT_HASH_STATE_KEY,
+            "not-an-object-hash",
+        )
+        .await
+        .expect("write malformed Store root");
+        assert!(matches!(
+            get_members(&storage, None, &db).await,
+            Err(MembershipOpsError::Database(reason))
+                if reason.contains("Store protocol root hash")
+        ));
     }
 
     #[tokio::test]

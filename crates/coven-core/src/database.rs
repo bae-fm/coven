@@ -87,12 +87,6 @@ pub enum DbError {
     StoreRootHashInvalid { reason: String },
 }
 
-#[derive(Debug)]
-pub(crate) enum StoreRootHashFailure {
-    Missing,
-    Invalid { reason: String },
-}
-
 impl DbError {
     pub(crate) fn into_message(self) -> String {
         match self {
@@ -101,14 +95,6 @@ impl DbError {
             Self::StoreRootHashInvalid { reason } => {
                 format!("Store protocol root hash is invalid: {reason}")
             }
-        }
-    }
-
-    pub(crate) fn into_store_root_hash_failure(self) -> Result<StoreRootHashFailure, Self> {
-        match self {
-            Self::StoreRootHashMissing => Ok(StoreRootHashFailure::Missing),
-            Self::StoreRootHashInvalid { reason } => Ok(StoreRootHashFailure::Invalid { reason }),
-            error @ Self::Message(_) => Err(error),
         }
     }
 
@@ -5494,6 +5480,21 @@ impl Database {
         self.call(Self::required_store_root_hash_on).await
     }
 
+    pub(crate) async fn required_store_root_hash_mapped<E>(
+        &self,
+        missing: impl FnOnce() -> E,
+        invalid: impl FnOnce(String) -> E,
+        other: impl FnOnce(DbError) -> E,
+    ) -> Result<ObjectHash, E> {
+        self.required_store_root_hash()
+            .await
+            .map_err(|error| match error {
+                DbError::StoreRootHashMissing => missing(),
+                DbError::StoreRootHashInvalid { reason } => invalid(reason),
+                error @ DbError::Message(_) => other(error),
+            })
+    }
+
     pub async fn get_protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
         let key = key.to_string();
         self.call(move |conn| {
@@ -6959,7 +6960,7 @@ mod tests {
             .required_store_root_hash()
             .await
             .expect_err("missing Store root must fail");
-        assert!(missing.to_string().contains("absent"), "{missing}");
+        assert!(matches!(missing, DbError::StoreRootHashMissing));
 
         db.set_protocol_state(STORE_ROOT_HASH_STATE_KEY, "not-a-root-hash")
             .await
@@ -6968,7 +6969,10 @@ mod tests {
             .required_store_root_hash()
             .await
             .expect_err("malformed Store root must fail");
-        assert!(malformed.to_string().contains("invalid"), "{malformed}");
+        assert!(matches!(
+            malformed,
+            DbError::StoreRootHashInvalid { reason } if !reason.is_empty()
+        ));
 
         let expected = ObjectHash::digest(b"required Store root");
         db.set_protocol_state(STORE_ROOT_HASH_STATE_KEY, &expected.to_string())

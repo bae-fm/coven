@@ -961,22 +961,17 @@ async fn validate_manifest(
 }
 
 async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, StoreOutboundError> {
-    db.required_store_root_hash().await.map_err(|error| {
-        match error.into_store_root_hash_failure() {
-            Ok(crate::database::StoreRootHashFailure::Missing) => {
-                StoreOutboundError::MissingState {
-                    key: crate::database::STORE_ROOT_HASH_STATE_KEY,
-                }
-            }
-            Ok(crate::database::StoreRootHashFailure::Invalid { reason }) => {
-                StoreOutboundError::InvalidState {
-                    key: crate::database::STORE_ROOT_HASH_STATE_KEY,
-                    reason,
-                }
-            }
-            Err(error) => error.into(),
-        }
-    })
+    db.required_store_root_hash_mapped(
+        || StoreOutboundError::MissingState {
+            key: crate::database::STORE_ROOT_HASH_STATE_KEY,
+        },
+        |reason| StoreOutboundError::InvalidState {
+            key: crate::database::STORE_ROOT_HASH_STATE_KEY,
+            reason,
+        },
+        StoreOutboundError::from,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1964,11 +1959,16 @@ mod tests {
 
             let reopened = open();
             let result = drain_store_writes(&reopened, &storage).await;
-            assert!(matches!(
-                result,
-                Err(StoreOutboundError::MissingState { .. })
-                    | Err(StoreOutboundError::InvalidState { .. })
-            ));
+            match (invalid_root, result) {
+                (None, Err(StoreOutboundError::MissingState { key })) => {
+                    assert_eq!(key, crate::database::STORE_ROOT_HASH_STATE_KEY);
+                }
+                (Some(_), Err(StoreOutboundError::InvalidState { key, reason })) => {
+                    assert_eq!(key, crate::database::STORE_ROOT_HASH_STATE_KEY);
+                    assert!(!reason.is_empty());
+                }
+                (_, result) => panic!("unexpected Store root failure: {result:?}"),
+            }
             assert!(matches!(
                 reopened.write_status(&write_id).await.expect("write status"),
                 crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState { reason })

@@ -478,19 +478,14 @@ async fn publish_registration_activation(
 }
 
 async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, StoreRegistrationError> {
-    db.required_store_root_hash().await.map_err(|error| {
-        match error.into_store_root_hash_failure() {
-            Ok(crate::database::StoreRootHashFailure::Missing) => {
-                StoreRegistrationError::MissingState {
-                    key: crate::database::STORE_ROOT_HASH_STATE_KEY,
-                }
-            }
-            Ok(crate::database::StoreRootHashFailure::Invalid { reason }) => {
-                StoreRegistrationError::Invalid(format!("store protocol root hash: {reason}"))
-            }
-            Err(error) => database_error(error),
-        }
-    })
+    db.required_store_root_hash_mapped(
+        || StoreRegistrationError::MissingState {
+            key: crate::database::STORE_ROOT_HASH_STATE_KEY,
+        },
+        |reason| StoreRegistrationError::Invalid(format!("store protocol root hash: {reason}")),
+        database_error,
+    )
+    .await
 }
 
 async fn require_activated_registration(
@@ -544,7 +539,8 @@ mod tests {
         StoreObjectError,
     };
     use crate::sync::test_helpers::{
-        bootstrap_chain, open_test_db, pubkey_hex, publish_test_store_protocol_root, temp_store_dir,
+        bootstrap_chain, open_test_db, pubkey_hex, publish_test_store_protocol_root,
+        temp_store_dir, MockSyncStorage,
     };
 
     async fn initialized(
@@ -576,6 +572,47 @@ mod tests {
         )
         .await;
         (home, storage, db, signer, store_root_hash)
+    }
+
+    #[tokio::test]
+    async fn store_root_state_failures_keep_registration_error_variants() {
+        let db = open_test_db();
+        let storage = MockSyncStorage::new();
+        let signer = UserKeypair::generate();
+
+        assert!(matches!(
+            drain_registration_outbox(
+                &db,
+                &storage,
+                None,
+                &signer,
+                None,
+                "2026-01-01T00:00:00Z",
+            )
+            .await,
+            Err(StoreRegistrationError::MissingState { key })
+                if key == crate::database::STORE_ROOT_HASH_STATE_KEY
+        ));
+
+        db.set_protocol_state(
+            crate::database::STORE_ROOT_HASH_STATE_KEY,
+            "not-an-object-hash",
+        )
+        .await
+        .expect("write malformed Store root");
+        assert!(matches!(
+            drain_registration_outbox(
+                &db,
+                &storage,
+                None,
+                &signer,
+                None,
+                "2026-01-01T00:00:01Z",
+            )
+            .await,
+            Err(StoreRegistrationError::Invalid(reason))
+                if reason.contains("store protocol root hash")
+        ));
     }
 
     #[tokio::test]

@@ -115,20 +115,15 @@ pub async fn drain_outbound_store_acks(
 }
 
 async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, StoreAckError> {
-    db.required_store_root_hash().await.map_err(|error| {
-        match error.into_store_root_hash_failure() {
-            Ok(crate::database::StoreRootHashFailure::Missing) => {
-                StoreAckError::MissingState(crate::database::STORE_ROOT_HASH_STATE_KEY)
-            }
-            Ok(crate::database::StoreRootHashFailure::Invalid { reason }) => {
-                StoreAckError::InvalidState {
-                    key: crate::database::STORE_ROOT_HASH_STATE_KEY,
-                    reason,
-                }
-            }
-            Err(error) => error.into(),
-        }
-    })
+    db.required_store_root_hash_mapped(
+        || StoreAckError::MissingState(crate::database::STORE_ROOT_HASH_STATE_KEY),
+        |reason| StoreAckError::InvalidState {
+            key: crate::database::STORE_ROOT_HASH_STATE_KEY,
+            reason,
+        },
+        StoreAckError::from,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -176,6 +171,43 @@ mod tests {
         )
         .await;
         (home, storage, db, signer, store_root_hash)
+    }
+
+    #[tokio::test]
+    async fn store_root_state_failures_keep_ack_error_variants() {
+        let db = open_test_db();
+        let signer = UserKeypair::generate();
+        let frontier = CommitFrontier::MergeConcurrent(BTreeMap::new());
+
+        assert!(matches!(
+            stage_store_ack(
+                &db,
+                frontier.clone(),
+                "2026-01-01T00:00:00Z".to_string(),
+                &signer,
+            )
+            .await,
+            Err(StoreAckError::MissingState(key))
+                if key == crate::database::STORE_ROOT_HASH_STATE_KEY
+        ));
+
+        db.set_protocol_state(
+            crate::database::STORE_ROOT_HASH_STATE_KEY,
+            "not-an-object-hash",
+        )
+        .await
+        .expect("write malformed Store root");
+        assert!(matches!(
+            stage_store_ack(
+                &db,
+                frontier,
+                "2026-01-01T00:00:01Z".to_string(),
+                &signer,
+            )
+            .await,
+            Err(StoreAckError::InvalidState { key, reason })
+                if key == crate::database::STORE_ROOT_HASH_STATE_KEY && !reason.is_empty()
+        ));
     }
 
     #[tokio::test]
