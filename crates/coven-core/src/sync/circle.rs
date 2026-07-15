@@ -7,7 +7,6 @@ use std::str::FromStr;
 use hkdf::Hkdf;
 #[cfg(test)]
 use hmac::{Hmac, Mac};
-use rand::RngCore;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(test)]
 use sha2::Sha256;
@@ -29,12 +28,6 @@ const ROW_ROUTING_ID_DOMAIN: &[u8] = b"coven.row-routing-id.v1\0";
 pub struct CircleId([u8; 16]);
 
 impl CircleId {
-    pub fn generate() -> Self {
-        let mut bytes = [0u8; 16];
-        rand::rng().fill_bytes(&mut bytes);
-        Self(bytes)
-    }
-
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(bytes)
     }

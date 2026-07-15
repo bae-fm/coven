@@ -26,8 +26,9 @@ use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::SyncStorage;
 use crate::sync::store_commit::{
-    CommitPosition, SnapshotMeta, StoreAck, StoreDeviceHead, StoreDeviceRegistration,
-    StoreDeviceRegistrationState, StoreProtocolRoot,
+    CommitPosition, SnapshotMeta, StoreAck, StoreBatchCommit, StoreDeviceHead,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceRegistrationState,
+    StoreProtocolRoot,
 };
 use crate::sync::test_helpers::*;
 
@@ -243,6 +244,44 @@ async fn append_active_store_device(
     )
     .await
     .expect("append active Store device registration");
+    let commit = StoreBatchCommit::signed_with_registrations(
+        storage.store_root_hash(),
+        crate::WriteId::from_generated(format!("activate-{device_id}")),
+        device_id.to_string(),
+        crate::StoreCommitOrder::MergeConcurrent {
+            seq: 1,
+            previous_commit_hash: None,
+            dependencies: BTreeMap::new(),
+        },
+        Some(storage.protocol_founder_coord()),
+        vec![StoreDeviceRegistrationRef::from_registration(&registration)],
+        signer,
+    )
+    .expect("sign Store device registration activation");
+    let head = crate::sync::store_commit::StoreDeviceHead::signed(
+        storage.store_root_hash(),
+        device_id.to_string(),
+        Some(commit.position()),
+        T0.to_string(),
+        signer,
+    )
+    .expect("sign Store device registration activation head");
+    crate::sync::store_objects::append_and_verify(
+        storage,
+        &crate::sync::store_commit::commit_semantic_prefix(device_id, 1, commit.commit_hash()),
+        ".json",
+        &commit.to_bytes(),
+    )
+    .await
+    .expect("append Store device registration activation");
+    crate::sync::store_objects::append_and_verify(
+        storage,
+        &crate::sync::store_commit::head_semantic_prefix(device_id, 1, head.head_hash()),
+        ".json",
+        &head.to_bytes(),
+    )
+    .await
+    .expect("append Store device registration activation head");
 }
 
 async fn append_store_ack(

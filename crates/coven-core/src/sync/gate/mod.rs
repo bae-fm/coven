@@ -147,6 +147,9 @@ pub enum GateError {
         table: String,
         parent: String,
     },
+    UnsupportedScopedRoot {
+        table: String,
+    },
     /// A `gated_by_descendants` ancestor (the table) has no inferred gated
     /// descendant — no synced table has a foreign key into it after the
     /// join-table back-edge is excluded. The keep would be vacuously false, so
@@ -183,6 +186,10 @@ impl std::fmt::Display for GateError {
             GateError::CompositeGateForeignKey { table, parent } => write!(
                 f,
                 "table {table} inherits its gate through a composite foreign key to {parent}, but gate inheritance requires one child column"
+            ),
+            GateError::UnsupportedScopedRoot { table } => write!(
+                f,
+                "scoped root {table} requires audience-partitioned Store and circle routing"
             ),
             GateError::NoGatedDescendants(tbl) => {
                 write!(
@@ -244,6 +251,68 @@ mod tests {
     fn query_int(c: &Connection, sql: &str) -> i64 {
         c.query_row(sql, [], |r| r.get::<_, i64>(0))
             .unwrap_or_else(|e| panic!("query_int failed for {sql}: {e}"))
+    }
+
+    #[test]
+    fn scoped_root_is_rejected_until_audience_partitioning_is_installed() {
+        let c = conn();
+        exec(
+            &c,
+            "CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                audience TEXT,
+                _updated_at TEXT NOT NULL
+             ) STRICT;",
+        );
+        let tables = vec![
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::SharedKey)
+                .scoped_by("audience"),
+        ];
+
+        let error = match Gates::from_tables(&c, &tables) {
+            Ok(_) => panic!("a scoped root must not fall through to the unpartitioned Store gate"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("scoped root notes"), "{error}");
+    }
+
+    #[test]
+    fn child_gate_follows_the_foreign_keys_named_parent_column() {
+        let c = conn();
+        exec(
+            &c,
+            "CREATE TABLE parents (
+                id TEXT PRIMARY KEY,
+                code TEXT NOT NULL UNIQUE,
+                shared INTEGER NOT NULL,
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE children (
+                id TEXT PRIMARY KEY,
+                parent_code TEXT NOT NULL REFERENCES parents(code),
+                _updated_at TEXT NOT NULL
+             ) STRICT;
+             INSERT INTO parents VALUES
+                ('code-b', 'code-a', 1, '0000000000001-0000-test'),
+                ('id-b', 'code-b', 0, '0000000000002-0000-test');
+             INSERT INTO children VALUES
+                ('child-b', 'code-b', '0000000000003-0000-test');",
+        );
+        let tables = vec![
+            SyncedTable::new("parents", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("shared"),
+            SyncedTable::new("children", crate::sync::session::RowIdentity::SharedKey),
+        ];
+
+        let gates = Gates::from_tables(&c, &tables).expect("build gate model");
+
+        assert!(
+            !gates
+                .row_kept(&c, "children", "child-b")
+                .expect("resolve child gate"),
+            "the child belongs to the gated-false row whose code the FK names, not the unrelated row whose id happens to equal that code",
+        );
     }
 
     fn row_exists(c: &Connection, sql: &str) -> bool {
@@ -922,7 +991,7 @@ mod tests {
             Some(TableGate::Parent { children }) => {
                 let mut out: Vec<(String, String)> = children
                     .iter()
-                    .map(|(ch, col)| (ch.clone(), col.name.clone()))
+                    .map(|(ch, col, _)| (ch.clone(), col.name.clone()))
                     .collect();
                 out.sort();
                 out
@@ -936,7 +1005,7 @@ mod tests {
     /// column name)`. Panics if `tbl` is not modeled as an inheriting `Child`.
     fn downward_parent(gates: &Gates, tbl: &str) -> (String, String) {
         match gates.tables.get(tbl) {
-            Some(TableGate::Child { fk_col, parent }) => (parent.clone(), fk_col.name.clone()),
+            Some(TableGate::Child { fk_col, parent, .. }) => (parent.clone(), fk_col.name.clone()),
             other => panic!(
                 "{tbl} must be an inheriting Child, got present={}",
                 other.is_some()

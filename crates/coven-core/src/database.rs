@@ -451,9 +451,9 @@ impl DatabaseCore {
         let pinned_routing_contract = initialized
             .then(|| load_coven_metadata(&conn, write_policy))
             .transpose()?;
-        let (schema_version, sync_routing_contract) = {
+        let (schema_version, sync_routing_contract, gates, blob_decls) = {
             let tx = conn.transaction().map_err(DbError::from)?;
-            let outcome = (|| -> Result<(u32, SyncRoutingContract), OpenError> {
+            let outcome = (|| -> Result<_, OpenError> {
                 let schema_version = run_migrations_in_transaction(&tx, migrations)?;
 
                 // The host ladder and routing validation share this transaction.
@@ -472,7 +472,11 @@ impl DatabaseCore {
                         write_policy == WritePolicy::MergeConcurrent && resolved.has_scoped_graph(),
                     )?;
                 }
-                Ok((schema_version, resolved))
+                let gates = Gates::from_tables(&tx, &synced_tables)
+                    .map_err(|error| DbError(error.to_string()))?;
+                let blob_decls = BlobDecls::from_tables(&tx, &synced_tables)
+                    .map_err(|error| DbError(error.to_string()))?;
+                Ok((schema_version, resolved, gates, blob_decls))
             })();
             match outcome {
                 Ok(initialized) => {
@@ -509,12 +513,8 @@ impl DatabaseCore {
 
         let stamper = UpdatedAtStamper::new(hlc.clone());
         let synced_tables = Arc::new(synced_tables);
-        let gates = Arc::new(
-            Gates::from_tables(&conn, &synced_tables).map_err(|e| DbError(e.to_string()))?,
-        );
-        let blob_decls = Arc::new(
-            BlobDecls::from_tables(&conn, &synced_tables).map_err(|e| DbError(e.to_string()))?,
-        );
+        let gates = Arc::new(gates);
+        let blob_decls = Arc::new(blob_decls);
         blob_decls
             .install_cleanup_guards(&conn)
             .map_err(|e| DbError(e.to_string()))?;
@@ -6646,7 +6646,7 @@ mod tests {
         let v1 = || {
             Migration::sql(
                 1,
-                "scoped things",
+                "gated things",
                 "CREATE TABLE things (
                     id TEXT PRIMARY KEY,
                     audience TEXT COLLATE BINARY NOT NULL,
@@ -6656,7 +6656,7 @@ mod tests {
         };
         let table = || {
             SyncedTable::new("things", crate::sync::session::RowIdentity::SharedKey)
-                .scoped_by("audience")
+                .gated_by("audience")
         };
         let (database, _) = Database::open(
             &path,
@@ -6714,6 +6714,66 @@ mod tests {
         assert_eq!(user_version, 1);
         assert_eq!(things_next, 0);
         assert_eq!(collation.unwrap().to_bytes(), b"BINARY");
+    }
+
+    #[test]
+    fn first_open_rolls_back_host_migration_when_gate_model_is_invalid() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("invalid-gate-migration.sqlite");
+        let migration = Migration::sql(
+            1,
+            "composite gate relation",
+            "CREATE TABLE parents (
+                id TEXT PRIMARY KEY,
+                code TEXT NOT NULL,
+                shared INTEGER NOT NULL,
+                _updated_at TEXT NOT NULL,
+                UNIQUE (id, code)
+             ) STRICT;
+             CREATE TABLE children (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT NOT NULL,
+                parent_code TEXT NOT NULL,
+                _updated_at TEXT NOT NULL,
+                FOREIGN KEY (parent_id, parent_code) REFERENCES parents(id, code)
+             ) STRICT;",
+        );
+        let tables = vec![
+            SyncedTable::new("parents", crate::sync::session::RowIdentity::SharedKey)
+                .gated_by("shared"),
+            SyncedTable::new("children", crate::sync::session::RowIdentity::SharedKey),
+        ];
+
+        let error = match Database::open(
+            &path,
+            tables,
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
+            "invalid-gate-open".to_string(),
+            &[migration],
+        ) {
+            Ok(_) => panic!("an invalid gate model must reject the open"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("composite foreign key"),
+            "{error}"
+        );
+
+        let conn = Connection::open(&path).expect("inspect rejected database");
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user version");
+        assert_eq!(user_version, 0);
+        let host_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('parents', 'children')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("host table count");
+        assert_eq!(host_tables, 0);
     }
 
     #[test]

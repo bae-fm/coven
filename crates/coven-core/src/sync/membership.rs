@@ -140,9 +140,10 @@ impl SerialAuthorizationState {
         if commit.membership_grant.is_some() {
             return Err(SerialMembershipError::CausalGrant);
         }
-        if !self.membership.can_write(&commit.author_pubkey)
-            && !self.authorizes_self_registration(commit, registrations)
-        {
+        let authorized = self.membership.can_write(&commit.author_pubkey)
+            || self.membership.contains(&commit.author_pubkey)
+                && is_exact_self_registration(commit, registrations);
+        if !authorized {
             return Err(SerialMembershipError::AuthorIsNotWriter(
                 commit.author_pubkey.clone(),
             ));
@@ -177,30 +178,28 @@ impl SerialAuthorizationState {
             key_generation,
         })
     }
+}
 
-    fn authorizes_self_registration(
-        &self,
-        commit: &StoreBatchCommit,
-        registrations: &[StoreDeviceRegistration],
-    ) -> bool {
-        let [reference] = commit.device_registrations.as_slice() else {
-            return false;
-        };
-        let [registration] = registrations else {
-            return false;
-        };
-        self.membership.contains(&commit.author_pubkey)
-            && commit.control.is_none()
-            && commit.store_package.is_none()
-            && commit.circle_controls.is_empty()
-            && commit.circle_packages.is_empty()
-            && registration.store_root_hash == commit.store_root_hash
-            && registration.device_id == commit.device_id
-            && registration.author_pubkey == commit.author_pubkey
-            && reference.device_id == registration.device_id
-            && reference.revision == registration.revision
-            && reference.registration_hash == registration.registration_hash()
-    }
+pub(crate) fn is_exact_self_registration(
+    commit: &StoreBatchCommit,
+    registrations: &[StoreDeviceRegistration],
+) -> bool {
+    let [reference] = commit.device_registrations.as_slice() else {
+        return false;
+    };
+    let [registration] = registrations else {
+        return false;
+    };
+    commit.control.is_none()
+        && commit.store_package.is_none()
+        && commit.circle_controls.is_empty()
+        && commit.circle_packages.is_empty()
+        && registration.store_root_hash == commit.store_root_hash
+        && registration.device_id == commit.device_id
+        && registration.author_pubkey == commit.author_pubkey
+        && reference.device_id == registration.device_id
+        && reference.revision == registration.revision
+        && reference.registration_hash == registration.registration_hash()
 }
 
 impl SerialMembershipState {
@@ -888,6 +887,10 @@ impl MembershipChain {
         self.active_grants_for(pubkey)
             .iter()
             .any(|(_, record)| record.role.can_write())
+    }
+
+    pub(crate) fn contains_member_now(&self, pubkey: &str) -> bool {
+        !self.active_grants_for(pubkey).is_empty()
     }
 
     pub fn is_owner_now(&self, pubkey: &str) -> bool {
@@ -1779,8 +1782,10 @@ mod tests {
             None,
             vec![StoreDeviceRegistrationRef::from_registration(&own)],
             Vec::new(),
-            1,
-            Some(b"row payload"),
+            Some(crate::sync::store_commit::StorePackageInput {
+                schema_version: 1,
+                bytes: b"row payload",
+            }),
             &[],
             &follower,
         )

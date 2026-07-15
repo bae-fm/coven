@@ -7,13 +7,13 @@ use crate::storage::cloud::ListingCoverage;
 use super::membership::{MemberRole, MembershipChain, SerialMembershipState};
 use super::storage::SyncStorage;
 use super::store_commit::{
-    CommitFrontier, CommitPosition, ObjectHash, SnapshotMeta, StoreAck,
-    StoreDeviceRegistrationState, SERIAL_STREAM_ID,
+    CommitFrontier, CommitPosition, ObjectHash, SnapshotMeta, StoreAck, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreDeviceRegistrationState, SERIAL_STREAM_ID,
 };
 use super::store_objects::{
     list_latest_ack_chains, list_latest_registration_chains, list_reclaimable_store_packages,
-    list_snapshot_metas, load_commit_slot, load_serial_commit_at_position, load_snapshot_image,
-    StoreObjectError,
+    list_snapshot_metas, load_commit_slot, load_registration_ref, load_serial_commit_at_position,
+    load_snapshot_image, StoreObjectError,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -110,6 +110,7 @@ impl ReclaimMembership<'_> {
 }
 
 pub async fn reclaim_store_packages(
+    db: &crate::database::Database,
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
     membership: ReclaimMembership<'_>,
@@ -155,13 +156,17 @@ pub async fn reclaim_store_packages(
     }
     let ack_chains = list_latest_ack_chains(storage, store_root_hash).await?;
     require_complete(ack_chains.coverage, "acknowledgement")?;
+    let activated_registrations = db
+        .activated_store_device_registrations()
+        .await
+        .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
     require_registered_device_acks(
         storage,
         store_root_hash,
         write_policy,
         membership,
         &snapshot,
-        &registration_listing.latest_by_device,
+        &activated_registrations,
         &ack_chains.latest_by_device,
     )
     .await?;
@@ -299,10 +304,7 @@ async fn require_registered_device_acks(
     write_policy: crate::WritePolicy,
     membership: ReclaimMembership<'_>,
     snapshot: &SnapshotMeta,
-    registrations: &BTreeMap<
-        String,
-        super::store_objects::VerifiedCopies<super::store_commit::StoreDeviceRegistration>,
-    >,
+    registrations: &[StoreDeviceRegistration],
     latest_by_device: &BTreeMap<String, super::store_objects::VerifiedCopies<StoreAck>>,
 ) -> Result<(), StoreReclaimError> {
     let active: BTreeSet<_> = membership
@@ -310,14 +312,41 @@ async fn require_registered_device_acks(
         .into_iter()
         .map(|(pubkey, _)| pubkey)
         .collect();
+    let mut latest_activated = BTreeMap::new();
+    for registration in registrations {
+        latest_activated
+            .entry(registration.device_id.clone())
+            .and_modify(|current: &mut &StoreDeviceRegistration| {
+                if registration.revision > current.revision {
+                    *current = registration;
+                }
+            })
+            .or_insert(registration);
+    }
     let mut active_registrations = BTreeMap::new();
     let mut authors_with_active_registration = BTreeSet::new();
-    for (device_id, registration) in registrations {
-        let author = registration.value.author_pubkey.clone();
+    for (device_id, registration) in latest_activated {
+        let reference = StoreDeviceRegistrationRef::from_registration(registration);
+        let listed = load_registration_ref(storage, store_root_hash, &reference)
+            .await?
+            .ok_or_else(|| {
+                StoreReclaimError::Authorization(format!(
+                    "activated Store device registration {:?}/{} is absent",
+                    registration.device_id, registration.revision
+                ))
+            })?;
+        require_complete(listed.coverage, "activated device registration")?;
+        if listed.value != *registration {
+            return Err(StoreReclaimError::Authorization(format!(
+                "activated Store device registration {:?}/{} differs from its listed exact bytes",
+                registration.device_id, registration.revision
+            )));
+        }
+        let author = registration.author_pubkey.clone();
         if !active.contains(&author) {
             continue;
         }
-        if registration.value.state == StoreDeviceRegistrationState::Active {
+        if registration.state == StoreDeviceRegistrationState::Active {
             authors_with_active_registration.insert(author);
             active_registrations.insert(device_id.clone(), registration);
         }
@@ -328,7 +357,7 @@ async fn require_registered_device_acks(
         }
     }
     for (ack_device_id, registration) in active_registrations {
-        let member = registration.value.author_pubkey.clone();
+        let member = registration.author_pubkey.clone();
         let ack = latest_by_device.get(&ack_device_id).ok_or_else(|| {
             StoreReclaimError::MissingAcknowledgement {
                 member: member.clone(),
@@ -481,6 +510,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::database::Database;
     use crate::keys::UserKeypair;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{CopyId, SequentialCopyIdGenerator};
@@ -499,10 +529,12 @@ mod tests {
         bootstrap_chain, host_exec, open_serial_test_db, open_test_db, pubkey_hex,
         publish_test_serial_store_protocol_root, publish_test_store_protocol_root, temp_store_dir,
     };
+    use rusqlite::OptionalExtension;
 
     struct ReclaimSetup {
         home: InMemoryCloudHome,
         storage: CloudSyncStorage,
+        db: Database,
         owner: UserKeypair,
         member: Option<UserKeypair>,
         chain: MembershipChain,
@@ -593,14 +625,74 @@ mod tests {
         let setup = ReclaimSetup {
             home,
             storage,
+            db,
             owner,
             member,
             chain,
             store_root_hash,
             coverage,
         };
-        register_device(&setup, "dev-owner", &setup.owner).await;
+        let owner_registration = register_device(&setup, "dev-owner", &setup.owner).await;
+        activate_registration(&setup, &owner_registration, &setup.owner).await;
         setup
+    }
+
+    async fn activate_registration(
+        setup: &ReclaimSetup,
+        registration: &StoreDeviceRegistration,
+        signer: &UserKeypair,
+    ) {
+        let device_id = registration.device_id.clone();
+        let previous = setup
+            .db
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT seq, commit_hash FROM store_device_registration_activations \
+                     WHERE device_id = ?1 ORDER BY revision DESC LIMIT 1",
+                    [device_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(crate::database::DbError::from)
+            })
+            .await
+            .unwrap();
+        let (seq, previous_commit_hash) = match previous {
+            Some((seq, hash)) => (
+                u64::try_from(seq).unwrap() + 1,
+                Some(hash.parse::<ObjectHash>().unwrap()),
+            ),
+            None => (1, None),
+        };
+        let commit = StoreBatchCommit::signed_with_registrations(
+            setup.store_root_hash,
+            crate::WriteId::from_generated(format!(
+                "activate-{}-{}",
+                registration.device_id, registration.revision
+            )),
+            registration.device_id.clone(),
+            crate::StoreCommitOrder::MergeConcurrent {
+                seq,
+                previous_commit_hash,
+                dependencies: BTreeMap::new(),
+            },
+            None,
+            vec![StoreDeviceRegistrationRef::from_registration(registration)],
+            signer,
+        )
+        .unwrap();
+        let registration = registration.clone();
+        setup
+            .db
+            .call(move |conn| {
+                Database::record_activated_store_device_registrations_on(
+                    conn,
+                    &commit,
+                    &[registration],
+                )
+            })
+            .await
+            .unwrap();
     }
 
     async fn register_device(
@@ -628,7 +720,7 @@ mod tests {
         registration
     }
 
-    async fn retire_device(
+    async fn append_raw_retirement(
         setup: &ReclaimSetup,
         device_id: &str,
         signer: &UserKeypair,
@@ -659,6 +751,16 @@ mod tests {
         )
         .await
         .unwrap();
+        retired
+    }
+
+    async fn retire_device(
+        setup: &ReclaimSetup,
+        device_id: &str,
+        signer: &UserKeypair,
+    ) -> StoreDeviceRegistration {
+        let retired = append_raw_retirement(setup, device_id, signer).await;
+        activate_registration(setup, &retired, signer).await;
         retired
     }
 
@@ -702,12 +804,14 @@ mod tests {
     }
 
     async fn reclaim_store_packages(
+        db: &Database,
         storage: &dyn SyncStorage,
         store_root_hash: ObjectHash,
         membership: &MembershipChain,
         membership_proof: super::super::pull::MembershipListingProof,
     ) -> Result<StoreReclaimResult, StoreReclaimError> {
         super::reclaim_store_packages(
+            db,
             storage,
             store_root_hash,
             ReclaimMembership::MergeConcurrent {
@@ -721,7 +825,8 @@ mod tests {
     #[tokio::test]
     async fn every_registered_device_of_a_shared_author_requires_its_own_covering_ack() {
         let setup = setup(false).await;
-        register_device(&setup, "dev-owner-sibling", &setup.owner).await;
+        let sibling = register_device(&setup, "dev-owner-sibling", &setup.owner).await;
+        activate_registration(&setup, &sibling, &setup.owner).await;
         publish_ack(
             &setup,
             "dev-owner",
@@ -733,7 +838,7 @@ mod tests {
         )
         .await;
         assert!(matches!(
-            reclaim_store_packages(&setup.storage, setup.store_root_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
+            reclaim_store_packages(&setup.db, &setup.storage, setup.store_root_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
             Err(StoreReclaimError::MissingAcknowledgement { device_id, .. })
                 if device_id == "dev-owner-sibling"
         ));
@@ -750,6 +855,7 @@ mod tests {
         )
         .await;
         let result = reclaim_store_packages(
+            &setup.db,
             &setup.storage,
             setup.store_root_hash,
             &setup.chain,
@@ -767,6 +873,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_unactivated_retirement_does_not_remove_a_device_ack_obligation() {
+        let setup = setup(false).await;
+        let sibling = register_device(&setup, "dev-owner-sibling", &setup.owner).await;
+        activate_registration(&setup, &sibling, &setup.owner).await;
+        append_raw_retirement(&setup, "dev-owner-sibling", &setup.owner).await;
+        publish_ack(
+            &setup,
+            "dev-owner",
+            1,
+            None,
+            setup.coverage.clone(),
+            &setup.owner,
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+
+        assert!(matches!(
+            reclaim_store_packages(
+                &setup.db,
+                &setup.storage,
+                setup.store_root_hash,
+                &setup.chain,
+                super::super::pull::MembershipListingProof::complete_for_test(),
+            )
+            .await,
+            Err(StoreReclaimError::MissingAcknowledgement { device_id, .. })
+                if device_id == "dev-owner-sibling"
+        ));
+        assert_eq!(package_count(&setup), 1);
+    }
+
+    #[tokio::test]
     async fn active_member_without_registration_history_refuses_and_removal_drops_the_obligation() {
         let mut setup = setup(true).await;
         publish_ack(
@@ -781,7 +919,7 @@ mod tests {
         .await;
         let member_pubkey = hex::encode(setup.member.as_ref().unwrap().public_key());
         assert!(matches!(
-            reclaim_store_packages(&setup.storage, setup.store_root_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
+            reclaim_store_packages(&setup.db, &setup.storage, setup.store_root_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
             Err(StoreReclaimError::MissingRegisteredDevice { member }) if member == member_pubkey
         ));
         assert_eq!(package_count(&setup), 1);
@@ -797,6 +935,7 @@ mod tests {
         setup.chain.add_entry(removal).unwrap();
         assert_eq!(
             reclaim_store_packages(
+                &setup.db,
                 &setup.storage,
                 setup.store_root_hash,
                 &setup.chain,
@@ -825,6 +964,7 @@ mod tests {
         setup.home.set_listing_coverage(ListingCoverage::BestEffort);
         assert!(matches!(
             reclaim_store_packages(
+                &setup.db,
                 &setup.storage,
                 setup.store_root_hash,
                 &setup.chain,
@@ -849,9 +989,14 @@ mod tests {
             ),
         ] {
             let setup = setup(false).await;
-            let result =
-                reclaim_store_packages(&setup.storage, setup.store_root_hash, &setup.chain, proof)
-                    .await;
+            let result = reclaim_store_packages(
+                &setup.db,
+                &setup.storage,
+                setup.store_root_hash,
+                &setup.chain,
+                proof,
+            )
+            .await;
             assert!(matches!(
                 result,
                 Err(StoreReclaimError::IncompleteListing {
@@ -867,6 +1012,7 @@ mod tests {
         let setup = setup(false).await;
         retire_device(&setup, "dev-owner", &setup.owner).await;
         let result = reclaim_store_packages(
+            &setup.db,
             &setup.storage,
             setup.store_root_hash,
             &setup.chain,
@@ -907,6 +1053,7 @@ mod tests {
             .await;
             assert!(matches!(
                 reclaim_store_packages(
+                    &setup.db,
                     &setup.storage,
                     setup.store_root_hash,
                     &setup.chain,
@@ -969,6 +1116,7 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(reclaim_store_packages(
+                &setup.db,
                 &setup.storage,
                 setup.store_root_hash,
                 &setup.chain,
@@ -1139,6 +1287,29 @@ mod tests {
         )
         .await
         .unwrap();
+        let registration_commit = StoreBatchCommit::signed_with_registrations(
+            store_root_hash,
+            crate::WriteId::from_generated("serial-registration-activation".to_string()),
+            "serial-owner-device".to_string(),
+            crate::StoreCommitOrder::Serial {
+                seq: 3,
+                previous_commit_hash: Some(second.commit_hash),
+            },
+            None,
+            vec![StoreDeviceRegistrationRef::from_registration(&registration)],
+            &owner,
+        )
+        .unwrap();
+        let activated_registration = registration.clone();
+        db.call(move |conn| {
+            Database::record_activated_store_device_registrations_on(
+                conn,
+                &registration_commit,
+                &[activated_registration],
+            )
+        })
+        .await
+        .unwrap();
         let ack = StoreAck::signed(
             store_root_hash,
             "serial-owner-device".to_string(),
@@ -1164,6 +1335,7 @@ mod tests {
             .unwrap()
             .expect("Serial founder membership");
         let reclaimed = super::reclaim_store_packages(
+            &db,
             &storage,
             store_root_hash,
             ReclaimMembership::Serial(&serial_membership),
@@ -1322,7 +1494,7 @@ mod tests {
         let current = db.serial_membership_state().await.unwrap().unwrap();
 
         assert!(matches!(
-            super::reclaim_store_packages(&storage, root, ReclaimMembership::Serial(&current),)
+            super::reclaim_store_packages(&db, &storage, root, ReclaimMembership::Serial(&current),)
                 .await,
             Err(StoreReclaimError::NoSnapshot)
         ));
@@ -1344,7 +1516,7 @@ mod tests {
         )
         .await;
         assert!(matches!(
-            reclaim_store_packages(&setup.storage, setup.store_root_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
+            reclaim_store_packages(&setup.db, &setup.storage, setup.store_root_hash, &setup.chain, super::super::pull::MembershipListingProof::complete_for_test()).await,
             Err(StoreReclaimError::Object(StoreObjectError::SemanticFork { slot, .. }))
                 if slot == "store-v1/devices/dev-owner/1"
         ));
@@ -1389,6 +1561,7 @@ mod tests {
         setup.home.fail_appended_delete_on_call(2);
         assert!(matches!(
             reclaim_store_packages(
+                &setup.db,
                 &setup.storage,
                 setup.store_root_hash,
                 &setup.chain,

@@ -187,7 +187,7 @@ fn reparent_targets(
     }
     let cols = super::gate_table_columns(conn, &row.table)?;
     let mut out = Vec::new();
-    for (fk_col, parent) in foreign_keys(conn, &row.table)? {
+    for (fk_col, parent, parent_col) in foreign_keys(conn, &row.table)? {
         if parent == row.table || !gates.tables.contains_key(&parent) {
             continue;
         }
@@ -205,7 +205,9 @@ fn reparent_targets(
         let new = row.new.get(idx).and_then(|v| v.as_deref());
         if let (Some(old), Some(new)) = (old, new) {
             if old != new {
-                out.push((parent, new.to_string()));
+                if let Some(parent_id) = row_id_for_column_value(conn, &parent, &parent_col, new)? {
+                    out.push((parent, parent_id));
+                }
             }
         }
     }
@@ -385,21 +387,31 @@ fn connected_component(
             continue; // already visited: cycle-guard and dedup.
         }
         // Up: every gated FK parent of this row.
-        for (fk_col_name, parent) in foreign_keys(conn, &table)? {
+        for (fk_col_name, parent, parent_col) in foreign_keys(conn, &table)? {
             if parent == table || !gates.tables.contains_key(&parent) {
                 continue;
             }
-            if let Some(parent_id) = query_column_text(conn, &table, &fk_col_name, &id)? {
-                work.push((parent, parent_id));
+            if let Some(parent_key) = query_column_text(conn, &table, &fk_col_name, &id)? {
+                if let Some(parent_id) =
+                    row_id_for_column_value(conn, &parent, &parent_col, &parent_key)?
+                {
+                    work.push((parent, parent_id));
+                }
             }
         }
         // Down: each gated child referencing this row — filtered to kept children
         // for re-emit, taken structurally (every live FK edge) for retract.
         if let Some(children) = down_edges.get(table.as_str()) {
-            for (child_table, fk) in children {
-                for child_id in rows_referencing(conn, child_table, fk, &id)? {
-                    if !restrict_to_kept || gates.row_kept(conn, child_table, &child_id)? {
-                        work.push((child_table.clone(), child_id));
+            for edge in children {
+                let Some(parent_key) = query_column_text(conn, &table, &edge.parent_column, &id)?
+                else {
+                    continue;
+                };
+                for child_id in
+                    rows_referencing(conn, &edge.child_table, &edge.child_column, &parent_key)?
+                {
+                    if !restrict_to_kept || gates.row_kept(conn, &edge.child_table, &child_id)? {
+                        work.push((edge.child_table.clone(), child_id));
                     }
                 }
             }
@@ -589,9 +601,18 @@ unsafe fn effective_gate(
             },
         },
         Some(TableGate::RemoteRoot) => Ok(true),
-        Some(TableGate::Child { fk_col, parent }) => {
-            let Some(parent_id) =
+        Some(TableGate::Child {
+            fk_col,
+            parent,
+            parent_col,
+        }) => {
+            let Some(parent_key) =
                 changeset_child_parent_id(conn, row, fk_col, ChildParentResolution::ShareDecision)?
+            else {
+                return Ok(false);
+            };
+            let Some(parent_id) =
+                row_id_for_column_value(conn, parent, &parent_col.name, &parent_key)?
             else {
                 return Ok(false);
             };
@@ -683,13 +704,29 @@ unsafe fn was_shared(
             },
         },
         Some(TableGate::RemoteRoot) => true,
-        Some(TableGate::Child { fk_col, parent }) => {
-            let parent_id = match deleted.get(&key) {
+        Some(TableGate::Child {
+            fk_col,
+            parent,
+            parent_col,
+        }) => {
+            let parent_key = match deleted.get(&key) {
                 Some(row) => row.fk_value(fk_col.index).map(str::to_string),
                 None => lookup_fk_in_db(conn, table, &fk_col.name, id)?,
             };
+            let parent_id = match parent_key {
+                Some(parent_key) => deleted_parent_id_for_column_value(
+                    conn,
+                    deleted,
+                    parent,
+                    parent_col,
+                    &parent_key,
+                )?,
+                None => None,
+            };
             match parent_id {
-                Some(pid) => was_shared(conn, gates, deleted, parent, &pid, memo, visiting)?,
+                Some(parent_id) => {
+                    was_shared(conn, gates, deleted, parent, &parent_id, memo, visiting)?
+                }
                 None => {
                     warn!(table, id, "gate: child has no FK parent while resolving pre-delete share; treating as not shared");
                     false
@@ -705,10 +742,19 @@ unsafe fn was_shared(
                 true
             } else {
                 let mut found = false;
-                'children: for (child_table, child_fk_col) in children {
+                'children: for (child_table, child_fk_col, parent_col) in children {
+                    let parent_key = deleted
+                        .get(&key)
+                        .and_then(|row| row.old.get(parent_col.index))
+                        .and_then(|value| value.as_deref())
+                        .map(str::to_string)
+                        .or(query_column_text(conn, table, &parent_col.name, id)?);
+                    let Some(parent_key) = parent_key else {
+                        continue;
+                    };
                     for ((dt, dpk), drow) in deleted {
                         if dt == child_table
-                            && drow.fk_value(child_fk_col.index) == Some(id)
+                            && drow.fk_value(child_fk_col.index) == Some(parent_key.as_str())
                             && was_shared(conn, gates, deleted, child_table, dpk, memo, visiting)?
                         {
                             found = true;
@@ -744,9 +790,18 @@ unsafe fn gated_root_id(
             }
         }
         Some(TableGate::RemoteRoot) => Ok(row.pk().map(|pk| (row.table.clone(), pk.to_string()))),
-        Some(TableGate::Child { fk_col, parent }) => {
-            let Some(parent_id) =
+        Some(TableGate::Child {
+            fk_col,
+            parent,
+            parent_col,
+        }) => {
+            let Some(parent_key) =
                 changeset_child_parent_id(conn, row, fk_col, ChildParentResolution::ReemitScope)?
+            else {
+                return Ok(None);
+            };
+            let Some(parent_id) =
+                row_id_for_column_value(conn, parent, &parent_col.name, &parent_key)?
             else {
                 return Ok(None);
             };
@@ -852,15 +907,24 @@ pub(super) fn resolve_root(
                 Ok(None)
             }
         },
-        Some(TableGate::Child { fk_col, parent }) => {
-            match query_column_text(conn, table, &fk_col.name, id)? {
-                Some(parent_id) => resolve_root(conn, gates, parent, &parent_id),
-                None => {
-                    warn!("gate: {table}.{id} has no FK parent in live db; cannot resolve gate");
-                    Ok(None)
-                }
+        Some(TableGate::Child {
+            fk_col,
+            parent,
+            parent_col,
+        }) => match query_column_text(conn, table, &fk_col.name, id)? {
+            Some(parent_key) => {
+                let Some(parent_id) =
+                    row_id_for_column_value(conn, parent, &parent_col.name, &parent_key)?
+                else {
+                    return Ok(None);
+                };
+                resolve_root(conn, gates, parent, &parent_id)
             }
-        }
+            None => {
+                warn!("gate: {table}.{id} has no FK parent in live db; cannot resolve gate");
+                Ok(None)
+            }
+        },
         // A child whose parent is an ancestor (album_artists → albums) inherits
         // the ancestor's keep: shared iff the ancestor itself is kept by one of
         // *its* children. The ancestor is the terminus.
@@ -875,7 +939,7 @@ pub(super) fn resolve_root(
     }
 }
 /// Query a single text column value for the row with id `id`.
-fn query_column_text(
+pub(super) fn query_column_text(
     conn: &Connection,
     table: &str,
     column: &str,
@@ -888,6 +952,38 @@ fn query_column_text(
         quote_ident("id"),
     );
     query_row_optional(conn, &sql, [id], |row| row_value_to_string(row, 0)).map(|row| row.flatten())
+}
+
+fn row_id_for_column_value(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    value: &str,
+) -> Result<Option<String>, GateError> {
+    let sql = format!(
+        "SELECT {} FROM {} WHERE {} = ?",
+        quote_ident("id"),
+        quote_ident(table),
+        quote_ident(column),
+    );
+    query_row_optional(conn, &sql, [value], |row| row_value_to_string(row, 0))
+        .map(|row| row.flatten())
+}
+
+fn deleted_parent_id_for_column_value(
+    conn: &Connection,
+    deleted: &HashMap<(String, String), ChangeRow>,
+    table: &str,
+    column: &GateColumn,
+    value: &str,
+) -> Result<Option<String>, GateError> {
+    if let Some(((_, id), _)) = deleted.iter().find(|((candidate_table, _), row)| {
+        candidate_table == table
+            && row.old.get(column.index).and_then(|value| value.as_deref()) == Some(value)
+    }) {
+        return Ok(Some(id.clone()));
+    }
+    row_id_for_column_value(conn, table, &column.name, value)
 }
 
 /// Query a single boolean gate column for the row with id `id`. `Some` is the

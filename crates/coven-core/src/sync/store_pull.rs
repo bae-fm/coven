@@ -7,7 +7,7 @@ use super::apply::{
     apply_changeset_strict_on, resolve_and_apply_changeset_with_schema_on, ValidatedChangeset,
 };
 use super::conflict::TableSchema;
-use super::membership::{MembershipChain, SerialAuthorizationState};
+use super::membership::{is_exact_self_registration, MembershipChain, SerialAuthorizationState};
 use super::pull::{
     advance_max_updated_at, cache_eager_blobs, download_blobs, introduced_blob_uploads,
     local_blob_cleanup_intents,
@@ -415,11 +415,13 @@ pub async fn pull_store_commits_with_coordination(
                     seq: commit.seq() - 1,
                     commit_hash,
                 });
-            if !membership_authorizes(db, storage, membership, &commit).await? {
+            if carries_circle_payload(&commit) {
                 held.push(held_commit(
                     &commit.device_id,
                     commit.position(),
-                    HeldStorePositionReason::Unauthorized,
+                    HeldStorePositionReason::InvalidObject(
+                        "circle payload cannot be materialized by Store pull".to_string(),
+                    ),
                 ));
                 let Some(predecessor) = predecessor else {
                     break;
@@ -482,6 +484,18 @@ pub async fn pull_store_commits_with_coordination(
                     continue;
                 }
             };
+            if !membership_authorizes(db, storage, membership, &commit, &registrations).await? {
+                held.push(held_commit(
+                    &commit.device_id,
+                    commit.position(),
+                    HeldStorePositionReason::Unauthorized,
+                ));
+                let Some(predecessor) = predecessor else {
+                    break;
+                };
+                expected_position = predecessor;
+                continue;
+            }
             let package = match load_package(storage, &commit).await {
                 Ok(Some(package)) => Some(package.value),
                 Ok(None) if commit.store_package.is_none() => None,
@@ -671,6 +685,12 @@ async fn load_authorized_serial_prefix(
         .map_err(|error| StorePullError::Serial(error.to_string()))?;
     let mut authorized = Vec::with_capacity(reverse.len());
     for commit in reverse {
+        if carries_circle_payload(&commit) {
+            return Err(StorePullError::Serial(format!(
+                "commit {} carries circle payload that Store pull cannot materialize",
+                commit.seq()
+            )));
+        }
         let registrations = load_commit_registrations(storage, &commit)
             .await
             .map_err(|error| match error {
@@ -863,32 +883,7 @@ async fn pull_serial_store_commits(
     let mut candidates = Vec::with_capacity(authorized_chain.len() - first_unmaterialized);
     for authorized in authorized_chain.into_iter().skip(first_unmaterialized) {
         let commit = authorized.commit;
-        if commit
-            .store_package
-            .as_ref()
-            .is_some_and(|package| package.schema_version > db.schema_version())
-        {
-            let package = commit
-                .store_package
-                .as_ref()
-                .expect("checked Store package");
-            return Err(StorePullError::Serial(format!(
-                "commit {} requires schema {}, local schema is {}",
-                commit.seq(),
-                package.schema_version,
-                db.schema_version()
-            )));
-        }
-        let package = match load_package(storage, &commit).await? {
-            Some(package) => Some(package.value),
-            None if commit.store_package.is_none() => None,
-            None => {
-                return Err(StorePullError::Serial(format!(
-                    "commit {} Store package is absent",
-                    commit.seq()
-                )))
-            }
-        };
+        let package = load_serial_store_package(db, storage, &commit).await?;
         candidates.push((
             Candidate {
                 commit,
@@ -1036,32 +1031,7 @@ pub async fn prepare_serial_resolution(
             })?;
         let commit = authorized.commit.clone();
         let authorization_after = authorized.authorization_after.clone();
-        if commit
-            .store_package
-            .as_ref()
-            .is_some_and(|package| package.schema_version > db.schema_version())
-        {
-            let package = commit
-                .store_package
-                .as_ref()
-                .expect("checked Store package");
-            return Err(StorePullError::Serial(format!(
-                "resolution commit {} requires schema {}, local schema is {}",
-                commit.seq(),
-                package.schema_version,
-                db.schema_version()
-            )));
-        }
-        let package = match load_package(storage, &commit).await? {
-            Some(package) => Some(package.value),
-            None if commit.store_package.is_none() => None,
-            None => {
-                return Err(StorePullError::Serial(format!(
-                    "resolution commit {} Store package is absent",
-                    commit.seq()
-                )))
-            }
-        };
+        let package = load_serial_store_package(db, storage, &commit).await?;
         expected = commit
             .previous_commit_hash()
             .map(|commit_hash| CommitPosition {
@@ -1235,12 +1205,14 @@ async fn membership_authorizes(
     storage: &dyn SyncStorage,
     membership: Option<&MembershipChain>,
     commit: &StoreBatchCommit,
+    registrations: &[StoreDeviceRegistration],
 ) -> Result<bool, StorePullError> {
     let Some(chain) = membership else {
         return Ok(true);
     };
     let Some(grant) = commit.membership_grant.as_ref() else {
-        return Ok(false);
+        return Ok(chain.contains_member_now(&commit.author_pubkey)
+            && is_exact_self_registration(commit, registrations));
     };
     if chain.authorizes_write_at(grant, &commit.author_pubkey) {
         return Ok(true);
@@ -1262,6 +1234,35 @@ async fn membership_authorizes(
     .map_err(|error| StorePullError::Membership(StorePullMembershipError::Chain(error)))?;
     Ok(refreshed
         .is_some_and(|refreshed| refreshed.authorizes_write_at(grant, &commit.author_pubkey)))
+}
+
+fn carries_circle_payload(commit: &StoreBatchCommit) -> bool {
+    !commit.circle_controls.is_empty() || !commit.circle_packages.is_empty()
+}
+
+async fn load_serial_store_package(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    commit: &StoreBatchCommit,
+) -> Result<Option<Vec<u8>>, StorePullError> {
+    if let Some(package) = commit.store_package.as_ref() {
+        if package.schema_version > db.schema_version() {
+            return Err(StorePullError::Serial(format!(
+                "commit {} requires schema {}, local schema is {}",
+                commit.seq(),
+                package.schema_version,
+                db.schema_version()
+            )));
+        }
+    }
+    match load_package(storage, commit).await? {
+        Some(package) => Ok(Some(package.value)),
+        None if commit.store_package.is_none() => Ok(None),
+        None => Err(StorePullError::Serial(format!(
+            "commit {} Store package is absent",
+            commit.seq()
+        ))),
+    }
 }
 
 enum Readiness {
@@ -1696,10 +1697,13 @@ mod tests {
     use crate::keys::UserKeypair;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{CloudHome, SequentialCopyIdGenerator};
+    use crate::sync::circle::{CircleControlCoord, CircleId};
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-    use crate::sync::membership::{founder_entry, MemberRole, SerialAuthorizationState};
+    use crate::sync::membership::{
+        founder_entry, MemberRole, OwnerGrantId, SerialAuthorizationState,
+    };
     use crate::sync::store_commit::{
-        store_protocol_root_semantic_prefix, StoreControl, StoreProtocolRoot,
+        store_protocol_root_semantic_prefix, CircleControlRef, StoreControl, StoreProtocolRoot,
     };
     use crate::sync::store_objects::append_and_verify;
     use crate::sync::store_outbound::{
@@ -1972,6 +1976,167 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn merge_pull_holds_circle_bearing_commit_until_circle_objects_are_materialized() {
+        let home = InMemoryCloudHome::new();
+        let keypair = UserKeypair::generate();
+        let storage = storage(&home, &keypair, "merge-circle-refusal");
+        let source = open_test_db();
+        let root = crate::sync::test_helpers::publish_test_store_protocol_root(
+            &source,
+            &storage,
+            "merge-circle-refusal",
+            "source",
+            &keypair,
+        )
+        .await;
+        let commit = StoreBatchCommit::signed_batch(
+            root,
+            crate::WriteId::from_generated("merge-circle-refusal".to_string()),
+            "source".to_string(),
+            crate::StoreCommitOrder::MergeConcurrent {
+                seq: 1,
+                previous_commit_hash: None,
+                dependencies: BTreeMap::new(),
+            },
+            None,
+            None,
+            Vec::new(),
+            vec![CircleControlRef {
+                circle_id: CircleId::from_bytes([7; 16]),
+                control: CircleControlCoord::MergeConcurrent {
+                    device_id: "source".to_string(),
+                    author_pubkey: crate::keys::public_key_hex(&keypair),
+                    author_owner_grant: OwnerGrantId(ObjectHash::digest(b"circle-owner-grant")),
+                    seq: 1,
+                    control_hash: ObjectHash::digest(b"circle-control"),
+                },
+            }],
+            None,
+            &[],
+            &keypair,
+        )
+        .expect("sign circle-bearing Merge commit");
+        let head = StoreDeviceHead::signed(
+            root,
+            "source".to_string(),
+            Some(commit.position()),
+            "2026-07-15T00:00:00Z".to_string(),
+            &keypair,
+        )
+        .expect("sign Merge head");
+        append_and_verify(
+            &storage,
+            &crate::sync::store_commit::commit_semantic_prefix("source", 1, commit.commit_hash()),
+            ".json",
+            &commit.to_bytes(),
+        )
+        .await
+        .expect("publish Merge commit");
+        append_and_verify(
+            &storage,
+            &crate::sync::store_commit::head_semantic_prefix("source", 1, head.head_hash()),
+            ".json",
+            &head.to_bytes(),
+        )
+        .await
+        .expect("publish Merge head");
+        let peer = open_test_db();
+        bind_database(&peer, "peer", root).await;
+        let (_temp, peer_dir) = temp_store_dir();
+
+        let result = pull_store_commits(
+            &peer,
+            peer.synced_tables(),
+            &storage,
+            root,
+            "peer",
+            &peer_dir,
+            None,
+        )
+        .await
+        .expect("hold unsupported circle-bearing Merge commit");
+
+        assert!(!result.frontier.contains_key("source"));
+        assert!(result.held_positions.iter().any(|held| {
+            matches!(
+                &held.reason,
+                HeldStorePositionReason::InvalidObject(message)
+                    if message.contains("circle payload")
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn serial_pull_rejects_circle_bearing_commit_until_circle_objects_are_materialized() {
+        let home = InMemoryCloudHome::new();
+        let keypair = UserKeypair::generate();
+        let storage = serial_storage(
+            &home,
+            &keypair,
+            "serial-circle-refusal",
+            "serial-circle-refusal",
+        );
+        let source = open_serial_test_db();
+        let root = publish_test_serial_store_protocol_root(
+            &source,
+            &storage,
+            "serial-circle-refusal",
+            "source",
+            &keypair,
+        )
+        .await;
+        let commit = StoreBatchCommit::signed_batch(
+            root,
+            crate::WriteId::from_generated("serial-circle-refusal".to_string()),
+            "source".to_string(),
+            crate::StoreCommitOrder::Serial {
+                seq: 1,
+                previous_commit_hash: None,
+            },
+            None,
+            None,
+            Vec::new(),
+            vec![CircleControlRef {
+                circle_id: CircleId::from_bytes([9; 16]),
+                control: CircleControlCoord::Serial {
+                    author_pubkey: crate::keys::public_key_hex(&keypair),
+                    generation: 1,
+                    control_hash: ObjectHash::digest(b"serial-circle-control"),
+                },
+            }],
+            None,
+            &[],
+            &keypair,
+        )
+        .expect("sign circle-bearing Serial commit");
+        append_serial_commit(&storage, &commit).await;
+        let head = StoreSerialHead::signed(
+            root,
+            Some(commit.position()),
+            Some(commit.write_id.clone()),
+            &keypair,
+        )
+        .expect("sign Serial head");
+        storage
+            .serial_coordination()
+            .expect("Serial coordination")
+            .create_head(serial_head_key(), &head.to_bytes())
+            .await
+            .expect("publish Serial head");
+        let peer = open_serial_test_db();
+        bind_database(&peer, "peer", root).await;
+        let (_temp, peer_dir) = temp_store_dir();
+
+        let error = match pull_serial(&peer, &storage, root, &peer_dir).await {
+            Ok(_) => panic!("circle-bearing Serial commit must not advance Store materialization"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("circle payload"), "{error}");
+        assert!(peer.materialized_frontier().await.unwrap().is_empty());
     }
 
     #[tokio::test]

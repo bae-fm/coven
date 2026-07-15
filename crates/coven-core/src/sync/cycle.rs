@@ -1118,6 +1118,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
             }
         };
         match super::store_reclaim::reclaim_store_packages(
+            db,
             storage,
             store_root_hash,
             reclaim_membership,

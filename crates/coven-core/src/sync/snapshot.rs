@@ -262,6 +262,64 @@ mod bootstrap_capability_tests {
         .expect("verify snapshot into destination")
     }
 
+    #[tokio::test]
+    async fn snapshot_preserves_commit_activated_device_registrations() {
+        let temp = tempfile::tempdir().expect("snapshot fixture directory");
+        let owner = UserKeypair::generate();
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "snapshot-registration-store",
+            owner.clone(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
+            "snapshot-registration",
+        )));
+        let source = open_test_db();
+        publish_test_store_protocol_root(
+            &source,
+            &storage,
+            "snapshot-registration-store",
+            "source",
+            &owner,
+        )
+        .await;
+        super::super::store_registration::ensure_active_registration(&source, &storage, &owner)
+            .await
+            .expect("activate source registration through a Store commit");
+        assert_eq!(
+            source
+                .activated_store_device_registrations()
+                .await
+                .expect("source activations")
+                .len(),
+            1,
+        );
+        let snapshot_dir = temp.path().to_path_buf();
+        let tables = source.synced_tables().to_vec();
+        let image = source
+            .call(move |connection| {
+                create_snapshot(connection, &snapshot_dir, &tables)
+                    .map_err(|error| crate::database::DbError(error.to_string()))
+            })
+            .await
+            .expect("create snapshot image");
+        let snapshot_path = temp.path().join("installed.sqlite");
+        write_snapshot_db(&snapshot_path, &image).expect("install snapshot image");
+        let snapshot = Connection::open(snapshot_path).expect("open snapshot image");
+
+        let activation_count: i64 = snapshot
+            .query_row(
+                "SELECT COUNT(*) FROM store_device_registration_activations",
+                [],
+                |row| row.get(0),
+            )
+            .expect("snapshot activation count");
+        assert_eq!(activation_count, 1);
+    }
+
     async fn consume(
         result: BootstrapResult,
         store_id: &str,
@@ -545,20 +603,16 @@ fn clear_local_only_tables(path: &Path, synced: &[SyncedTable]) -> Result<(), Sn
         .map_err(|(_, e)| SnapshotError::ClearFailed(format!("failed to close snapshot copy: {e}")))
 }
 
-/// The one non-synced table whose rows ride a snapshot. A blob's uploader — which
-/// member's cloud prefix holds it — is a member-global fact identical on every
-/// device (unlike per-device materialized positions, outboxes, and cache budgets),
-/// and it is recorded only from authenticated sources (a signed Store commit's
-/// author or our own upload). A device that bootstraps from a snapshot does not
-/// replay commits covered by that snapshot, so the owner-signed image must carry
-/// the authoritative uploader index used to dispatch blob reads.
-const SNAPSHOT_PRESERVED_NON_SYNCED_TABLE: &str = "blob_uploaders";
+/// Non-synced authenticated indexes whose source Store commits are covered by the
+/// snapshot and therefore will not replay after bootstrap.
+const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] =
+    &["blob_uploaders", "store_device_registration_activations"];
 
 /// On the snapshot-copy connection, scope it down to exactly what is eligible to
 /// cross devices, then VACUUM to reclaim the freed pages:
 ///
 /// 1. Table-level: DELETE every user table not in `synced` (except the
-///    [`SNAPSHOT_PRESERVED_NON_SYNCED_TABLE`]) — local-only tables keep their
+///    [`SNAPSHOT_PRESERVED_NON_SYNCED_TABLES`]) — local-only tables keep their
 ///    schema, lose their rows.
 /// 2. Row-level: within the synced tables, DELETE the rows the gate excludes
 ///    (gated-false roots and their FK-descendants), so a private subtree does
@@ -569,7 +623,7 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
         if synced.iter().any(|t| t.name() == table) {
             continue;
         }
-        if table == SNAPSHOT_PRESERVED_NON_SYNCED_TABLE {
+        if SNAPSHOT_PRESERVED_NON_SYNCED_TABLES.contains(&table.as_str()) {
             continue;
         }
         conn.execute_batch(&format!(

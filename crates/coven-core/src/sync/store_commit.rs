@@ -298,7 +298,12 @@ pub struct CirclePackageInput<'a> {
     pub circle_id: CircleId,
     pub control: CircleControlCoord,
     pub key_fingerprint: KeyFingerprint,
-    pub package_bytes: &'a [u8],
+    pub package: StorePackageInput<'a>,
+}
+
+pub struct StorePackageInput<'a> {
+    pub schema_version: u32,
+    pub bytes: &'a [u8],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,8 +417,10 @@ impl StoreBatchCommit {
             None,
             Vec::new(),
             Vec::new(),
-            schema_version,
-            Some(package_bytes),
+            Some(StorePackageInput {
+                schema_version,
+                bytes: package_bytes,
+            }),
             &[],
             signer,
         )
@@ -441,8 +448,10 @@ impl StoreBatchCommit {
             control,
             Vec::new(),
             Vec::new(),
-            schema_version,
-            store_package,
+            store_package.map(|bytes| StorePackageInput {
+                schema_version,
+                bytes,
+            }),
             &[],
             signer,
         )
@@ -467,7 +476,6 @@ impl StoreBatchCommit {
             None,
             device_registrations,
             Vec::new(),
-            0,
             None,
             &[],
             signer,
@@ -484,8 +492,7 @@ impl StoreBatchCommit {
         control: Option<StoreControl>,
         device_registrations: Vec<StoreDeviceRegistrationRef>,
         circle_controls: Vec<CircleControlRef>,
-        schema_version: u32,
-        store_package_bytes: Option<&[u8]>,
+        store_package_input: Option<StorePackageInput<'_>>,
         circle_package_inputs: &[CirclePackageInput<'_>],
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
@@ -518,8 +525,8 @@ impl StoreBatchCommit {
             control.as_ref(),
         )?;
         let stream_id = order.stream_id(&device_id);
-        let store_package = store_package_bytes
-            .map(|bytes| package_ref(stream_id, seq, schema_version, bytes))
+        let store_package = store_package_input
+            .map(|input| package_ref(stream_id, seq, input.schema_version, input.bytes))
             .transpose()?;
         validate_device_registration_refs(&device_registrations)?;
         let mut seen_circles = BTreeSet::new();
@@ -530,7 +537,12 @@ impl StoreBatchCommit {
                     return Err(StoreProtocolError::DuplicateCirclePackage(input.circle_id));
                 }
                 validate_circle_control_coord(order.policy(), &input.control)?;
-                let package = package_ref(stream_id, seq, schema_version, input.package_bytes)?;
+                let package = package_ref(
+                    stream_id,
+                    seq,
+                    input.package.schema_version,
+                    input.package.bytes,
+                )?;
                 Ok(CirclePackageRef {
                     circle_id: input.circle_id,
                     control: input.control.clone(),

@@ -3,7 +3,7 @@
 use crate::database::Database;
 use crate::keys::UserKeypair;
 
-use super::membership::MembershipChain;
+use super::membership::{is_exact_self_registration, MembershipChain};
 use super::storage::{CoordinationStorage, SyncStorage};
 use super::store_commit::{
     commit_semantic_prefix, head_semantic_prefix, registration_semantic_prefix, ObjectHash,
@@ -246,17 +246,21 @@ async fn prepare_registration_activation(
                 .map_err(database_error)?;
             let mut dependencies = db.materialized_frontier().await.map_err(database_error)?;
             dependencies.remove(&registration.device_id);
+            let author_pubkey = crate::keys::public_key_hex(signer);
             let membership_grant = match membership {
-                Some(chain) => chain
-                    .write_grant_coord(&crate::keys::public_key_hex(signer))
-                    .ok_or_else(|| {
-                        StoreRegistrationError::Invalid(
-                            "local identity has no active Store write grant".to_string(),
-                        )
-                    })
-                    .map(Some)?,
+                Some(chain) => match chain.write_grant_coord(&author_pubkey) {
+                    Some(grant) => Some(grant),
+                    None if chain.contains_member_now(&author_pubkey) => None,
+                    None => {
+                        return Err(StoreRegistrationError::Invalid(
+                            "local identity is not a current Store member".to_string(),
+                        ))
+                    }
+                },
                 None => None,
             };
+            let requires_self_registration_exception =
+                membership_grant.is_none() && membership.is_some();
             let commit = StoreBatchCommit::signed_with_registrations(
                 registration.store_root_hash,
                 db.new_write_id(),
@@ -271,6 +275,14 @@ async fn prepare_registration_activation(
                 signer,
             )
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+            if requires_self_registration_exception
+                && !is_exact_self_registration(&commit, std::slice::from_ref(registration))
+            {
+                return Err(StoreRegistrationError::Invalid(
+                    "Follower registration commit is not an exact control-only self-registration"
+                        .to_string(),
+                ));
+            }
             let head = StoreDeviceHead::signed(
                 registration.store_root_hash,
                 registration.device_id.clone(),
@@ -506,12 +518,14 @@ mod tests {
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::SequentialCopyIdGenerator;
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+    use crate::sync::membership::MemberRole;
     use crate::sync::store_commit::{registration_semantic_prefix, StoreDeviceRegistration};
     use crate::sync::store_objects::{
-        append_and_verify, list_latest_registration_chains, StoreObjectError,
+        append_and_verify, list_latest_registration_chains, load_store_protocol_root_at_hash,
+        StoreObjectError,
     };
     use crate::sync::test_helpers::{
-        open_test_db, publish_test_store_protocol_root, temp_store_dir,
+        bootstrap_chain, open_test_db, pubkey_hex, publish_test_store_protocol_root, temp_store_dir,
     };
 
     async fn initialized(
@@ -603,6 +617,67 @@ mod tests {
         assert_eq!(activated.len(), 1);
         assert_eq!(activated[0].device_id, "dev-reader");
         assert_eq!(activated[0].state, StoreDeviceRegistrationState::Active);
+    }
+
+    #[tokio::test]
+    async fn merge_follower_activates_and_peer_materializes_exact_self_registration() {
+        let (_home, storage, source, owner, store_root_hash) =
+            initialized("merge-follower-registration").await;
+        let root = load_store_protocol_root_at_hash(&storage, store_root_hash)
+            .await
+            .expect("load Store protocol root")
+            .expect("Store protocol root exists")
+            .value;
+        let mut membership = bootstrap_chain(root.founder);
+        let follower = UserKeypair::generate();
+        let grant = membership
+            .signed_set_member(
+                &owner,
+                pubkey_hex(&follower),
+                None,
+                MemberRole::Follower,
+                "2026-07-15T00:00:00Z".to_string(),
+            )
+            .expect("owner grants Follower membership");
+        membership.add_entry(grant).expect("apply Follower grant");
+
+        ensure_active_registration_with_coordination(
+            &source,
+            &storage,
+            None,
+            &follower,
+            Some(&membership),
+            "2026-07-15T00:00:01Z",
+        )
+        .await
+        .expect("Follower activates its own registration");
+
+        let peer = open_test_db();
+        let peer_root = publish_test_store_protocol_root(
+            &peer,
+            &storage,
+            "registration-store-test",
+            "dev-peer",
+            &owner,
+        )
+        .await;
+        assert_eq!(peer_root, store_root_hash);
+        let (_temp, store_dir) = temp_store_dir();
+        super::super::store_pull::pull_store_commits(
+            &peer,
+            peer.synced_tables(),
+            &storage,
+            store_root_hash,
+            "dev-peer",
+            &store_dir,
+            Some(&membership),
+        )
+        .await
+        .expect("pull Follower registration activation");
+
+        let activated = peer.activated_store_device_registrations().await.unwrap();
+        assert_eq!(activated.len(), 1);
+        assert_eq!(activated[0].author_pubkey, pubkey_hex(&follower));
     }
 
     #[tokio::test]
