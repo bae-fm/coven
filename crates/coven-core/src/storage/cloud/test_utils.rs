@@ -267,21 +267,12 @@ impl InMemoryCloudHome {
     }
 
     fn appended_bytes(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-        if let Some(bytes) = self
-            .appended
+        self.appended
             .lock()
             .unwrap()
             .iter()
             .find(|candidate| candidate.locator == *object)
             .map(|candidate| candidate.bytes.clone())
-        {
-            return Ok(bytes);
-        }
-        self.writes
-            .lock()
-            .unwrap()
-            .get(object.logical_key())
-            .cloned()
             .ok_or_else(|| CloudHomeError::NotFound(object.opaque_provider_id().to_string()))
     }
 
@@ -485,6 +476,10 @@ impl PartSink for InMemoryPartSink {
         Ok(())
     }
 
+    async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        Ok(())
+    }
+
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
         self.writes.lock().unwrap().insert(self.key, self.buf);
         Ok(())
@@ -587,15 +582,6 @@ impl InMemoryCloudHome {
             .filter(|candidate| candidate.locator.logical_key().starts_with(prefix))
             .map(|candidate| candidate.locator.clone())
             .collect();
-        let written_objects = self
-            .writes
-            .lock()
-            .unwrap()
-            .keys()
-            .filter(|key| key.starts_with(prefix))
-            .map(|key| AppendedObject::from_provider(key.clone(), key.clone()))
-            .collect::<Result<Vec<_>, _>>()?;
-        objects.extend(written_objects);
         if self.sort_listings.load(Ordering::SeqCst) {
             objects.sort_by(|left, right| {
                 left.logical_key()
@@ -981,5 +967,46 @@ mod tests {
         );
         h.remove_appended_candidate(&locator);
         assert_eq!(h.get_appended(locator.logical_key()), None);
+    }
+
+    #[tokio::test]
+    async fn appended_read_rejects_an_unknown_physical_id_for_a_mutable_object() {
+        let h = InMemoryCloudHome::new();
+        h.write(
+            "store-v1/test/copies/one.json",
+            BlobBody::from_bytes(b"mutable".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+        let unknown = AppendedObject::from_provider(
+            "store-v1/test/copies/one.json".to_string(),
+            "unknown-physical-id".to_string(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            h.read_appended(&unknown).await,
+            Err(CloudHomeError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn immutable_listing_excludes_mutable_objects_under_the_same_prefix() {
+        let h = InMemoryCloudHome::new();
+        h.write(
+            "store-v1/test/copies/mutable.json",
+            BlobBody::from_bytes(b"mutable".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+
+        assert!(h
+            .list_appended("store-v1/test/copies/")
+            .await
+            .unwrap()
+            .objects
+            .is_empty());
     }
 }
