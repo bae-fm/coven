@@ -522,6 +522,13 @@ pub fn pubkey_hex(kp: &UserKeypair) -> String {
     hex::encode(kp.public_key())
 }
 
+/// Ed25519 identity derived from exact test-owned seed bytes.
+pub fn user_keypair_from_seed(seed: [u8; 32]) -> UserKeypair {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    UserKeypair::from_signing_key_bytes(&signing_key.to_keypair_bytes())
+        .expect("seed-derived signing key is valid")
+}
+
 /// A membership chain rooted at the exact founder entry carried by Store protocol root.
 pub fn bootstrap_chain(founder: MembershipEntry) -> MembershipChain {
     let mut chain = MembershipChain::new();

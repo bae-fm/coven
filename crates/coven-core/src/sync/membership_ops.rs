@@ -2563,7 +2563,7 @@ mod tests {
     use crate::sync::hlc::Hlc;
     use crate::sync::membership::founder_entry;
     use crate::sync::test_helpers::{
-        append_membership_entry, pubkey_hex, MockSyncStorage, TestCustody,
+        append_membership_entry, pubkey_hex, user_keypair_from_seed, MockSyncStorage, TestCustody,
     };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -3139,10 +3139,10 @@ mod tests {
     async fn resolution_replay_orders_store_checkpoints_by_signed_head_references() {
         use crate::sync::membership::{entry_hash, AuthorStreamId};
 
-        let first = UserKeypair::generate();
-        let second = UserKeypair::generate();
-        let third = UserKeypair::generate();
-        let fourth = UserKeypair::generate();
+        let first = user_keypair_from_seed([1; 32]);
+        let second = user_keypair_from_seed([2; 32]);
+        let third = user_keypair_from_seed([3; 32]);
+        let fourth = user_keypair_from_seed([4; 32]);
         let pubkeys = [&first, &second, &third, &fourth]
             .into_iter()
             .map(pubkey_hex)
@@ -3228,85 +3228,80 @@ mod tests {
             .apply_resolutions(store_root_hash, std::slice::from_ref(&first_resolution))
             .expect("apply first resolution");
 
-        let (mut second_conflict, second_resolution, second_heads, second_entries) = (1..=100)
-            .find_map(|attempt| {
-                let remove_fourth = resumed
-                    .signed_remove_member_in_stream(
-                        &third,
-                        AuthorStreamId::from_bytes([attempt; 16]),
-                        pubkeys[3].clone(),
-                        "remove fourth".to_string(),
-                    )
-                    .ok()?;
-                let remove_third = resumed
-                    .signed_remove_member_in_stream(
-                        &fourth,
-                        AuthorStreamId::from_bytes([attempt.wrapping_add(100); 16]),
-                        pubkeys[2].clone(),
-                        "remove third".to_string(),
-                    )
-                    .ok()?;
-                let prior_refs = vec![first_resolution.resolution_ref()];
-                let new_heads = vec![
-                    AuthorHead::signed_with_resolutions(
-                        remove_fourth.store_id.clone(),
-                        remove_fourth.author_owner_grant.clone(),
-                        remove_fourth.stream_id,
-                        remove_fourth.seq,
-                        entry_hash(&remove_fourth),
-                        prior_refs.clone(),
-                        &third,
-                    ),
-                    AuthorHead::signed_with_resolutions(
-                        remove_third.store_id.clone(),
-                        remove_third.author_owner_grant.clone(),
-                        remove_third.stream_id,
-                        remove_third.seq,
-                        entry_hash(&remove_third),
-                        prior_refs,
-                        &fourth,
-                    ),
-                ];
-                let mut all_entries = resumed.entries().to_vec();
-                all_entries.extend([remove_fourth.clone(), remove_third.clone()]);
-                let mut all_heads = first_heads.clone();
-                all_heads.extend(new_heads.clone());
-                let conflict = resumed
-                    .replay_resolved_history_to_heads(
-                        all_entries
-                            .into_iter()
-                            .map(|entry| (entry.coord(), entry))
-                            .collect(),
-                        all_heads,
-                    )
-                    .ok()?;
-                let branch = match conflict.conflict()? {
-                    MembershipConflict::RevocationCycle {
-                        maximal_valid_branches,
-                        ..
-                    } => maximal_valid_branches
-                        .iter()
-                        .find(|branch| {
-                            branch.active_grants.values().any(|record| {
-                                record.member_pubkey == pubkeys[2]
-                                    && record.role == MemberRole::Owner
-                            })
-                        })?
-                        .heads
-                        .clone(),
-                    _ => return None,
-                };
-                let resolution = conflict
-                    .signed_cycle_resolution(store_root_hash, branch, &third)
-                    .ok()?;
-                (resolution.conflict_hash < first_resolution.conflict_hash).then_some((
-                    conflict,
-                    resolution,
-                    new_heads,
-                    vec![remove_fourth, remove_third],
-                ))
-            })
-            .expect("find causally later conflict whose hash sorts first");
+        let remove_fourth = resumed
+            .signed_remove_member_in_stream(
+                &third,
+                AuthorStreamId::from_bytes([1; 16]),
+                pubkeys[3].clone(),
+                "remove fourth".to_string(),
+            )
+            .expect("third Owner removes fourth");
+        let remove_third = resumed
+            .signed_remove_member_in_stream(
+                &fourth,
+                AuthorStreamId::from_bytes([101; 16]),
+                pubkeys[2].clone(),
+                "remove third".to_string(),
+            )
+            .expect("fourth Owner removes third");
+        let prior_refs = vec![first_resolution.resolution_ref()];
+        let second_heads = vec![
+            AuthorHead::signed_with_resolutions(
+                remove_fourth.store_id.clone(),
+                remove_fourth.author_owner_grant.clone(),
+                remove_fourth.stream_id,
+                remove_fourth.seq,
+                entry_hash(&remove_fourth),
+                prior_refs.clone(),
+                &third,
+            ),
+            AuthorHead::signed_with_resolutions(
+                remove_third.store_id.clone(),
+                remove_third.author_owner_grant.clone(),
+                remove_third.stream_id,
+                remove_third.seq,
+                entry_hash(&remove_third),
+                prior_refs,
+                &fourth,
+            ),
+        ];
+        let mut all_entries = resumed.entries().to_vec();
+        all_entries.extend([remove_fourth.clone(), remove_third.clone()]);
+        let mut all_heads = first_heads.clone();
+        all_heads.extend(second_heads.clone());
+        let mut second_conflict = resumed
+            .replay_resolved_history_to_heads(
+                all_entries
+                    .into_iter()
+                    .map(|entry| (entry.coord(), entry))
+                    .collect(),
+                all_heads,
+            )
+            .expect("second conflict");
+        let second_branch = match second_conflict.conflict().expect("second conflict") {
+            MembershipConflict::RevocationCycle {
+                maximal_valid_branches,
+                ..
+            } => maximal_valid_branches
+                .iter()
+                .find(|branch| {
+                    branch.active_grants.values().any(|record| {
+                        record.member_pubkey == pubkeys[2] && record.role == MemberRole::Owner
+                    })
+                })
+                .expect("third Owner branch")
+                .heads
+                .clone(),
+            _ => panic!("expected second revocation cycle"),
+        };
+        let second_resolution = second_conflict
+            .signed_cycle_resolution(store_root_hash, second_branch, &third)
+            .expect("second resolution");
+        assert!(
+            second_resolution.conflict_hash < first_resolution.conflict_hash,
+            "fixture must put the causally later resolution first by canonical key"
+        );
+        let second_entries = vec![remove_fourth, remove_third];
         second_conflict
             .apply_resolutions(store_root_hash, std::slice::from_ref(&second_resolution))
             .expect("apply second resolution");
@@ -3314,7 +3309,7 @@ mod tests {
             .signed_set_member_in_stream(
                 &third,
                 AuthorStreamId::from_bytes([250; 16]),
-                pubkey_hex(&UserKeypair::generate()),
+                pubkey_hex(&user_keypair_from_seed([5; 32])),
                 None,
                 MemberRole::Member,
                 "post-resolution suffix".to_string(),

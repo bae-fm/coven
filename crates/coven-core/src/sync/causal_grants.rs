@@ -1404,6 +1404,20 @@ mod tests {
     }
 
     #[test]
+    fn canonical_checkpoint_order_skips_a_lower_key_until_its_dependency_is_applied() {
+        let dependencies = BTreeMap::from([(1u8, BTreeSet::from([2u8])), (2u8, BTreeSet::new())]);
+        let mut applied = BTreeSet::new();
+
+        let first = canonical_ready_checkpoint(dependencies.iter(), &applied)
+            .expect("dependency checkpoint is ready");
+        assert_eq!(first, 2);
+        applied.insert(first);
+        let second = canonical_ready_checkpoint(dependencies.iter(), &applied)
+            .expect("dependent checkpoint becomes ready");
+        assert_eq!(second, 1);
+    }
+
+    #[test]
     fn cyclic_resolution_checkpoints_have_no_ready_cut() {
         let first = ObjectHash::digest(b"first cyclic checkpoint");
         let second = ObjectHash::digest(b"second cyclic checkpoint");

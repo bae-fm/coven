@@ -1806,7 +1806,7 @@ mod authority_tests {
         CircleRosterEntry, CircleRosterHead, CircleRosterHeadRef, CircleRosterStatus,
     };
     use super::super::membership::MembershipGrantId;
-    use super::super::test_helpers::MockSyncStorage;
+    use super::super::test_helpers::{user_keypair_from_seed, MockSyncStorage};
     use super::*;
 
     #[tokio::test]
@@ -2370,10 +2370,10 @@ mod authority_tests {
 
     #[tokio::test]
     async fn resolution_replay_orders_circle_checkpoints_by_signed_head_references() {
-        let first = UserKeypair::generate();
-        let second = UserKeypair::generate();
-        let third = UserKeypair::generate();
-        let fourth = UserKeypair::generate();
+        let first = user_keypair_from_seed([11; 32]);
+        let second = user_keypair_from_seed([12; 32]);
+        let third = user_keypair_from_seed([13; 32]);
+        let fourth = user_keypair_from_seed([14; 32]);
         let pubkeys = [&first, &second, &third, &fourth]
             .into_iter()
             .map(keys::public_key_hex)
@@ -2448,61 +2448,58 @@ mod authority_tests {
             .apply_resolutions(std::slice::from_ref(&first_resolution))
             .expect("apply first resolution");
 
-        let (mut second_conflict, second_resolution, second_heads, second_entries) = (1..=100)
-            .find_map(|attempt| {
-                let remove_fourth = resumed
-                    .signed_remove_member(
-                        "third-device",
-                        AuthorStreamId::from_bytes([attempt; 16]),
-                        pubkeys[3].clone(),
-                        &third,
-                    )
-                    .ok()?;
-                let remove_third = resumed
-                    .signed_remove_member(
-                        "fourth-device",
-                        AuthorStreamId::from_bytes([attempt.wrapping_add(100); 16]),
-                        pubkeys[2].clone(),
-                        &fourth,
-                    )
-                    .ok()?;
-                let refs = vec![first_resolution.resolution_ref()];
-                let new_heads = vec![
-                    CircleRosterHead::signed_with_resolutions(&remove_fourth, refs.clone(), &third),
-                    CircleRosterHead::signed_with_resolutions(&remove_third, refs, &fourth),
-                ];
-                let mut entries = resumed.entries().to_vec();
-                entries.extend([remove_fourth.clone(), remove_third.clone()]);
-                let mut heads = first_heads.clone();
-                heads.extend(new_heads.clone());
-                let conflict = resumed
-                    .replay_resolved_history_to_heads(entries, heads)
-                    .ok()?;
-                let branch = match conflict.status() {
-                    CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
-                        maximal_valid_branches,
-                        ..
-                    }) => maximal_valid_branches
-                        .iter()
-                        .find(|branch| {
-                            branch.active_grants.values().any(|record| {
-                                record.member_pubkey == pubkeys[2]
-                                    && record.role == CircleRole::Owner
-                            })
-                        })?
-                        .heads
-                        .clone(),
-                    _ => return None,
-                };
-                let resolution = conflict.signed_cycle_resolution(branch, &third).ok()?;
-                (resolution.conflict_hash < first_resolution.conflict_hash).then_some((
-                    conflict,
-                    resolution,
-                    new_heads,
-                    vec![remove_fourth, remove_third],
-                ))
-            })
-            .expect("find causally later Circle conflict whose hash sorts first");
+        let remove_fourth = resumed
+            .signed_remove_member(
+                "third-device",
+                AuthorStreamId::from_bytes([2; 16]),
+                pubkeys[3].clone(),
+                &third,
+            )
+            .expect("third Owner removes fourth");
+        let remove_third = resumed
+            .signed_remove_member(
+                "fourth-device",
+                AuthorStreamId::from_bytes([102; 16]),
+                pubkeys[2].clone(),
+                &fourth,
+            )
+            .expect("fourth Owner removes third");
+        let refs = vec![first_resolution.resolution_ref()];
+        let second_heads = vec![
+            CircleRosterHead::signed_with_resolutions(&remove_fourth, refs.clone(), &third),
+            CircleRosterHead::signed_with_resolutions(&remove_third, refs, &fourth),
+        ];
+        let mut entries = resumed.entries().to_vec();
+        entries.extend([remove_fourth.clone(), remove_third.clone()]);
+        let mut heads = first_heads.clone();
+        heads.extend(second_heads.clone());
+        let mut second_conflict = resumed
+            .replay_resolved_history_to_heads(entries, heads)
+            .expect("second conflict");
+        let second_branch = match second_conflict.status() {
+            CircleRosterStatus::Conflict(CircleRosterConflict::RevocationCycle {
+                maximal_valid_branches,
+                ..
+            }) => maximal_valid_branches
+                .iter()
+                .find(|branch| {
+                    branch.active_grants.values().any(|record| {
+                        record.member_pubkey == pubkeys[2] && record.role == CircleRole::Owner
+                    })
+                })
+                .expect("third Owner branch")
+                .heads
+                .clone(),
+            _ => panic!("expected second revocation cycle"),
+        };
+        let second_resolution = second_conflict
+            .signed_cycle_resolution(second_branch, &third)
+            .expect("second resolution");
+        assert!(
+            second_resolution.conflict_hash < first_resolution.conflict_hash,
+            "fixture must put the causally later Circle resolution first by canonical key"
+        );
+        let second_entries = vec![remove_fourth, remove_third];
         second_conflict
             .apply_resolutions(std::slice::from_ref(&second_resolution))
             .expect("apply second resolution");
@@ -2510,7 +2507,7 @@ mod authority_tests {
             .signed_set_member(
                 "third-device",
                 AuthorStreamId::from_bytes([250; 16]),
-                keys::public_key_hex(&UserKeypair::generate()),
+                keys::public_key_hex(&user_keypair_from_seed([15; 32])),
                 CircleRole::Member,
                 &third,
             )
