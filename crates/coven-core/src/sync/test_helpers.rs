@@ -21,7 +21,7 @@ use crate::sync::membership::{
 };
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::{
-    ProtocolObjectListing, ProtocolObjectLocator, StorageError, SyncStorage,
+    ImmutableObjectListing, ImmutableObjectLocator, StorageError, SyncStorage,
 };
 
 /// In-memory [`MasterKeyCustody`] for tests, with a switch to force `persist`
@@ -636,7 +636,9 @@ struct MembershipHeadReadPause {
 pub struct MockSyncStorage {
     objects: Mutex<HashMap<String, Vec<u8>>>,
     protocol_objects: Mutex<Vec<(crate::storage::cloud::AppendedObject, Vec<u8>)>>,
+    blob_copies: Mutex<Vec<(crate::storage::cloud::AppendedObject, Vec<u8>)>>,
     next_protocol_object: std::sync::atomic::AtomicU64,
+    next_blob_copy: std::sync::atomic::AtomicU64,
     store_commits: Mutex<HashMap<(String, u64), crate::sync::store_commit::StoreBatchCommit>>,
     store_protocol_root: crate::sync::store_commit::StoreProtocolRoot,
     /// One membership-head read to pause after snapshotting its bytes. The two
@@ -766,7 +768,9 @@ impl MockSyncStorage {
                 store_protocol_root_object,
                 store_protocol_root.to_bytes(),
             )]),
+            blob_copies: Mutex::new(Vec::new()),
             next_protocol_object: std::sync::atomic::AtomicU64::new(1),
+            next_blob_copy: std::sync::atomic::AtomicU64::new(0),
             store_commits: Mutex::new(HashMap::new()),
             store_protocol_root,
             membership_head_read_pause: Mutex::new(None),
@@ -810,6 +814,54 @@ impl MockSyncStorage {
 
     pub fn protocol_founder_keypair(&self) -> UserKeypair {
         self.keypair.clone()
+    }
+
+    pub fn blob_copy_append_count(&self) -> usize {
+        self.next_blob_copy
+            .load(std::sync::atomic::Ordering::SeqCst) as usize
+    }
+
+    pub fn insert_blob_copy_candidate(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        copy_id: crate::storage::cloud::CopyId,
+        bytes: Vec<u8>,
+    ) -> Result<ImmutableObjectLocator, StorageError> {
+        Self::validate_blob_locator_mode(locator)?;
+        let logical_key = crate::sync::storage::blob_copy_key(locator, copy_id)?;
+        let physical = crate::storage::cloud::AppendedObject::from_provider(
+            logical_key.clone(),
+            format!("mock-inserted-blob-copy-{copy_id}"),
+        );
+        self.blob_copies
+            .lock()
+            .unwrap()
+            .push((physical.clone(), bytes));
+        Ok(ImmutableObjectLocator::new(logical_key, physical))
+    }
+
+    fn validate_blob_locator_mode(
+        locator: &crate::blob::locator::BlobLocator,
+    ) -> Result<(), StorageError> {
+        if !matches!(locator, crate::blob::locator::BlobLocator::Opaque { .. }) {
+            return Err(StorageError::InvalidContent(
+                "blob locator protection does not match the mock's hashed storage mode".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_blob_append_authority(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+    ) -> Result<(), StorageError> {
+        if locator.uploader() != self.protocol_founder_pubkey() {
+            return Err(StorageError::InvalidContent(format!(
+                "blob locator uploader {:?} is not this mock device",
+                locator.uploader()
+            )));
+        }
+        Ok(())
     }
 
     pub fn protocol_founder_coord(&self) -> crate::sync::membership::MembershipCoord {
@@ -887,7 +939,7 @@ impl MockSyncStorage {
         semantic_prefix: &str,
         extension: &str,
         bytes: Vec<u8>,
-    ) -> ProtocolObjectLocator {
+    ) -> ImmutableObjectLocator {
         let id = self
             .next_protocol_object
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -903,7 +955,7 @@ impl MockSyncStorage {
             .lock()
             .unwrap()
             .push((physical.clone(), bytes));
-        ProtocolObjectLocator::new(logical_key, physical)
+        ImmutableObjectLocator::new(logical_key, physical)
     }
 
     /// Arm `read_blob_to_file` to gather `n` calls on a barrier before each serves,
@@ -1400,7 +1452,7 @@ impl SyncStorage for MockSyncStorage {
         semantic_prefix: &str,
         extension: &str,
         data: Vec<u8>,
-    ) -> Result<ProtocolObjectLocator, StorageError> {
+    ) -> Result<ImmutableObjectLocator, StorageError> {
         context.validate_path(semantic_prefix)?;
         context.validate_extension(extension)?;
         if semantic_prefix.starts_with("store-v1/membership/entries/")
@@ -1463,7 +1515,7 @@ impl SyncStorage for MockSyncStorage {
     async fn list_protocol_objects(
         &self,
         prefix: &str,
-    ) -> Result<ProtocolObjectListing, StorageError> {
+    ) -> Result<ImmutableObjectListing, StorageError> {
         if prefix == "store-v1/membership/entries/" {
             let armed_call_hit =
                 armed_put_failure_hits(&self.membership_list_count, &self.fail_membership_list_on);
@@ -1501,10 +1553,10 @@ impl SyncStorage for MockSyncStorage {
                     })
             })
             .map(|(physical, _)| {
-                ProtocolObjectLocator::new(physical.logical_key().to_string(), physical.clone())
+                ImmutableObjectLocator::new(physical.logical_key().to_string(), physical.clone())
             })
             .collect();
-        Ok(ProtocolObjectListing {
+        Ok(ImmutableObjectListing {
             objects,
             coverage: crate::storage::cloud::ListingCoverage::CompleteAtScan,
         })
@@ -1513,7 +1565,7 @@ impl SyncStorage for MockSyncStorage {
     async fn read_protocol_object(
         &self,
         context: &crate::sync::storage::ProtocolObjectContext,
-        object: &ProtocolObjectLocator,
+        object: &ImmutableObjectLocator,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError> {
         context.validate_locator(object, semantic_prefix)?;
@@ -1554,13 +1606,117 @@ impl SyncStorage for MockSyncStorage {
 
     async fn delete_protocol_object(
         &self,
-        object: &ProtocolObjectLocator,
+        object: &ImmutableObjectLocator,
     ) -> Result<(), StorageError> {
         let mut objects = self.protocol_objects.lock().unwrap();
         let before = objects.len();
         objects.retain(|(physical, _)| physical != object.physical());
         if objects.len() == before {
             return Err(StorageError::NotFound(object.logical_key().to_string()));
+        }
+        Ok(())
+    }
+
+    async fn append_blob_copy_from_file(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        stored_file: &std::path::Path,
+    ) -> Result<ImmutableObjectLocator, StorageError> {
+        Self::validate_blob_locator_mode(locator)?;
+        self.validate_blob_append_authority(locator)?;
+        let id = self
+            .next_blob_copy
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let copy_id = format!("{id:064x}")
+            .parse::<crate::storage::cloud::CopyId>()
+            .map_err(|error| StorageError::Configuration(error.to_string()))?;
+        let logical_key = crate::sync::storage::blob_copy_key(locator, copy_id)?;
+        let physical = crate::storage::cloud::AppendedObject::from_provider(
+            logical_key.clone(),
+            format!("mock-blob-copy-{id}"),
+        );
+        let bytes = crate::local_blob::read(stored_file)
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        self.blob_copies
+            .lock()
+            .unwrap()
+            .push((physical.clone(), bytes));
+        Ok(ImmutableObjectLocator::new(logical_key, physical))
+    }
+
+    async fn list_blob_copies(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+    ) -> Result<ImmutableObjectListing, StorageError> {
+        Self::validate_blob_locator_mode(locator)?;
+        let prefix = crate::sync::storage::blob_copy_prefix(locator)?;
+        let objects = self
+            .blob_copies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(physical, _)| physical.logical_key().starts_with(&prefix))
+            .map(|(physical, _)| {
+                ImmutableObjectLocator::new(physical.logical_key().to_string(), physical.clone())
+            })
+            .collect::<Vec<_>>();
+        for copy in &objects {
+            crate::sync::storage::validate_blob_copy_locator(locator, copy)?;
+        }
+        Ok(ImmutableObjectListing {
+            objects,
+            coverage: crate::storage::cloud::ListingCoverage::CompleteAtScan,
+        })
+    }
+
+    async fn read_blob_copy_to_file(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        copy: &ImmutableObjectLocator,
+        dest: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        Self::validate_blob_locator_mode(locator)?;
+        crate::sync::storage::validate_blob_copy_locator(locator, copy)?;
+        if copy.physical().logical_key() != copy.logical_key() {
+            return Err(StorageError::Parse(format!(
+                "blob locator key {:?} does not match physical key {:?}",
+                copy.logical_key(),
+                copy.physical().logical_key()
+            )));
+        }
+        let bytes = self
+            .blob_copies
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(physical, _)| physical == copy.physical())
+            .map(|(_, bytes)| bytes.clone())
+            .ok_or_else(|| StorageError::NotFound(copy.logical_key().to_string()))?;
+        crate::local_blob::write_atomic(dest, &bytes)
+            .await
+            .map_err(StorageError::LocalFilesystem)
+    }
+
+    async fn delete_blob_copy(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        copy: &ImmutableObjectLocator,
+    ) -> Result<(), StorageError> {
+        Self::validate_blob_locator_mode(locator)?;
+        crate::sync::storage::validate_blob_copy_locator(locator, copy)?;
+        if copy.physical().logical_key() != copy.logical_key() {
+            return Err(StorageError::Parse(format!(
+                "blob locator key {:?} does not match physical key {:?}",
+                copy.logical_key(),
+                copy.physical().logical_key()
+            )));
+        }
+        let mut copies = self.blob_copies.lock().unwrap();
+        let before = copies.len();
+        copies.retain(|(physical, _)| physical != copy.physical());
+        if copies.len() == before {
+            return Err(StorageError::NotFound(copy.logical_key().to_string()));
         }
         Ok(())
     }

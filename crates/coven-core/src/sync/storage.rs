@@ -354,7 +354,7 @@ impl ProtocolObjectContext {
 
     pub fn validate_locator(
         &self,
-        object: &ProtocolObjectLocator,
+        object: &ImmutableObjectLocator,
         semantic_prefix: &str,
     ) -> Result<(), StorageError> {
         self.validate_path(semantic_prefix)?;
@@ -540,17 +540,18 @@ pub async fn probe_serial_coordination(
     exercise.map_err(|reason| CoordinationProbeError::Failed { key, reason })
 }
 
-/// Runtime locator for one physical copy of a Store protocol object.
+/// Runtime locator for one physical copy of an immutable object.
 ///
 /// The raw provider locator is deliberately private and never serialized into a
-/// signed object or database row.
+/// signed object or database row. Protocol and blob validation remain separate
+/// because their logical paths carry different meaning.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProtocolObjectLocator {
+pub struct ImmutableObjectLocator {
     logical_key: String,
     physical: AppendedObject,
 }
 
-impl ProtocolObjectLocator {
+impl ImmutableObjectLocator {
     pub(crate) fn new(logical_key: String, physical: AppendedObject) -> Self {
         Self {
             logical_key,
@@ -568,9 +569,60 @@ impl ProtocolObjectLocator {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProtocolObjectListing {
-    pub objects: Vec<ProtocolObjectLocator>,
+pub struct ImmutableObjectListing {
+    pub objects: Vec<ImmutableObjectLocator>,
     pub coverage: ListingCoverage,
+}
+
+pub(crate) fn blob_copy_prefix(
+    locator: &crate::blob::locator::BlobLocator,
+) -> Result<String, StorageError> {
+    locator
+        .validate()
+        .map_err(|error| StorageError::Parse(error.to_string()))?;
+    Ok(format!("{}/copies/", locator.semantic_key()))
+}
+
+pub(crate) fn blob_copy_key(
+    locator: &crate::blob::locator::BlobLocator,
+    copy_id: CopyId,
+) -> Result<String, StorageError> {
+    Ok(format!(
+        "{}{copy_id}{}",
+        blob_copy_prefix(locator)?,
+        locator.storage_suffix()
+    ))
+}
+
+pub(crate) fn validate_blob_copy_locator(
+    locator: &crate::blob::locator::BlobLocator,
+    copy: &ImmutableObjectLocator,
+) -> Result<(), StorageError> {
+    let logical_key = copy.logical_key();
+    let prefix = blob_copy_prefix(locator)?;
+    let suffix = locator.storage_suffix();
+    let copy_id_with_suffix = logical_key.strip_prefix(&prefix).ok_or_else(|| {
+        StorageError::Parse(format!(
+            "blob copy {logical_key:?} is outside locator slot {:?}",
+            locator.semantic_key()
+        ))
+    })?;
+    let copy_id = copy_id_with_suffix.strip_suffix(suffix).ok_or_else(|| {
+        StorageError::Parse(format!(
+            "blob copy {logical_key:?} lacks expected storage suffix {suffix:?}"
+        ))
+    })?;
+    copy_id.parse::<CopyId>().map_err(|error| {
+        StorageError::Parse(format!(
+            "blob copy {logical_key:?} has a non-canonical copy id: {error}"
+        ))
+    })?;
+    if format!("{prefix}{copy_id}{suffix}") != logical_key {
+        return Err(StorageError::Parse(format!(
+            "blob copy path is not canonical: {logical_key:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Error type for storage operations.
@@ -641,28 +693,62 @@ pub trait SyncStorage: Send + Sync {
         semantic_prefix: &str,
         extension: &str,
         data: Vec<u8>,
-    ) -> Result<ProtocolObjectLocator, StorageError>;
+    ) -> Result<ImmutableObjectLocator, StorageError>;
 
     /// List all physical Store protocol copies under `prefix`, preserving
     /// duplicate provider ids.
     async fn list_protocol_objects(
         &self,
         prefix: &str,
-    ) -> Result<ProtocolObjectListing, StorageError>;
+    ) -> Result<ImmutableObjectListing, StorageError>;
 
     /// Read and open one exact physical Store protocol copy using the signed
     /// semantic prefix as encryption AAD.
     async fn read_protocol_object(
         &self,
         context: &ProtocolObjectContext,
-        object: &ProtocolObjectLocator,
+        object: &ImmutableObjectLocator,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError>;
 
     /// Delete one exact physical Store protocol copy.
     async fn delete_protocol_object(
         &self,
-        object: &ProtocolObjectLocator,
+        object: &ImmutableObjectLocator,
+    ) -> Result<(), StorageError>;
+
+    /// Append one already-final stored blob file as a fresh immutable physical
+    /// copy beneath the locator's semantic slot. The storage layer never seals,
+    /// opens, or rewrites these bytes.
+    async fn append_blob_copy_from_file(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        stored_file: &Path,
+    ) -> Result<ImmutableObjectLocator, StorageError>;
+
+    /// List every physical copy beneath one immutable blob locator. Incomplete
+    /// provider coverage is returned in [`ImmutableObjectListing::coverage`] as a
+    /// successful listing state; a provider failure remains an error.
+    async fn list_blob_copies(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+    ) -> Result<ImmutableObjectListing, StorageError>;
+
+    /// Read one exact physical blob copy into an atomically committed local file,
+    /// preserving the stored bytes unchanged.
+    async fn read_blob_copy_to_file(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        copy: &ImmutableObjectLocator,
+        dest: &Path,
+    ) -> Result<(), StorageError>;
+
+    /// Delete one exact physical blob copy. The locator is required so a copy
+    /// returned for one semantic slot cannot be deleted through another.
+    async fn delete_blob_copy(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        copy: &ImmutableObjectLocator,
     ) -> Result<(), StorageError>;
 
     /// Upload a blob. Under the hashed (default) scheme it is keyed

@@ -647,6 +647,10 @@ pub use coven_core::CloudCipher;
 
 // Cloud provider trait surface a provider implementor needs and its
 // thread-safety floor.
+pub use coven_core::storage::cloud::{
+    write_cloud_object_stream, AppendedListing, AppendedObject, CloudFileReadError,
+    CloudObjectStream, ListingCoverage,
+};
 pub use coven_core::{
     BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
     CloudHomeJoinInfo, PartSink, UploadProgress,

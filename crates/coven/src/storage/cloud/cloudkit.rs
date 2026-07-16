@@ -11,6 +11,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures_util::StreamExt;
 use tracing::warn;
 
 use crate::id_provider::{IdRef, UuidProvider};
@@ -235,6 +237,14 @@ struct ChunkManifest {
     part_count: usize,
     total_len: usize,
     upload_id: String,
+}
+
+enum CloudKitObjectLayout {
+    Single(Vec<u8>),
+    Chunked {
+        manifest: ChunkManifest,
+        chunks: Vec<(usize, String)>,
+    },
 }
 
 impl ChunkManifest {
@@ -684,6 +694,71 @@ impl CloudHome for CloudKitCloudHome {
             )))
         })
         .await
+    }
+
+    async fn read_appended_to_file(
+        &self,
+        object: &super::AppendedObject,
+        destination: &std::path::Path,
+    ) -> Result<(), super::CloudFileReadError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let key = object.logical_key().to_string();
+        let layout_key = key.clone();
+        let layout = blocking(move || {
+            match ops.read_record(&scope, &layout_key) {
+                Ok(data) => return Ok(CloudKitObjectLayout::Single(data)),
+                Err(CloudHomeError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+
+            match ops.read_record(&scope, &chunk_manifest_key(&layout_key)) {
+                Ok(data) => {
+                    let manifest = decode_chunk_manifest(&data)?;
+                    let chunks = list_numbered_chunks(&*ops, &scope, &layout_key, &manifest)?;
+                    verify_chunk_manifest(&layout_key, &manifest, &chunks)?;
+                    return Ok(CloudKitObjectLayout::Chunked { manifest, chunks });
+                }
+                Err(CloudHomeError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+
+            let chunks = ops.list_records(&scope, &format!("{layout_key}.part"))?;
+            if chunks.is_empty() {
+                return Err(CloudHomeError::NotFound(layout_key));
+            }
+            Err(CloudHomeError::Transport(format!(
+                "CloudKit object {layout_key} has chunk records but no manifest"
+            )))
+        })
+        .await?;
+
+        let stream: super::CloudObjectStream = match layout {
+            CloudKitObjectLayout::Single(data) => Box::pin(futures_util::stream::once(
+                async move { Ok(Bytes::from(data)) },
+            )),
+            CloudKitObjectLayout::Chunked { manifest, chunks } => {
+                let ops = self.ops.clone();
+                let scope = self.scope.clone();
+                Box::pin(
+                    futures_util::stream::iter(chunks).then(move |(index, chunk_key)| {
+                        let ops = ops.clone();
+                        let scope = scope.clone();
+                        let key = key.clone();
+                        let manifest = manifest.clone();
+                        async move {
+                            blocking(move || {
+                                read_chunk(&*ops, &scope, &key, &manifest, index, &chunk_key)
+                                    .map(Bytes::from)
+                            })
+                            .await
+                        }
+                    }),
+                )
+            }
+        };
+        super::write_cloud_object_stream(destination, stream).await?;
+        Ok(())
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {

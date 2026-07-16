@@ -198,6 +198,13 @@ impl BlobLocator {
         }
     }
 
+    pub(crate) fn storage_suffix(&self) -> &'static str {
+        match self {
+            Self::Opaque { .. } => ".enc",
+            Self::Browsable { .. } => "",
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), BlobLocatorError> {
         let expected = match self {
             Self::Opaque {

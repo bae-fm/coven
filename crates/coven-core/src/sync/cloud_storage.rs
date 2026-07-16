@@ -8,18 +8,20 @@
 //! choice (`.enc` for an encrypted home, no suffix for a plaintext one).
 
 use async_trait::async_trait;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio::sync::OnceCell;
 use tracing::warn;
 
 use super::storage::{
-    CoordinationError, CoordinationStorage, CreateHeadError, ProtocolObjectContext,
-    ProtocolObjectListing, ProtocolObjectLocator, ProtocolObjectProtection, ReplaceHeadError,
-    StorageError, SyncStorage, VersionToken, VersionedObject,
+    blob_copy_key, blob_copy_prefix, validate_blob_copy_locator, CoordinationError,
+    CoordinationStorage, CreateHeadError, ImmutableObjectListing, ImmutableObjectLocator,
+    ProtocolObjectContext, ProtocolObjectProtection, ReplaceHeadError, StorageError, SyncStorage,
+    VersionToken, VersionedObject,
 };
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
-use crate::storage::cloud::{BlobBody, CloudHeadStorage, CloudHome, CopyIdRef};
+use crate::storage::cloud::{BlobBody, CloudFileReadError, CloudHeadStorage, CloudHome, CopyIdRef};
 
 /// Every encrypted object carries this cleartext prefix naming the key it was
 /// sealed under, by 8-byte fingerprint: magic, then the fingerprint. A read
@@ -588,6 +590,44 @@ impl CloudSyncStorage {
 
     pub(crate) fn store_id(&self) -> &str {
         &self.store_id
+    }
+
+    fn validate_blob_locator_home(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+    ) -> Result<(), StorageError> {
+        let valid = matches!(
+            (locator, self.blob_paths, self.cipher.is_plaintext()),
+            (
+                crate::blob::locator::BlobLocator::Opaque { .. },
+                BlobPathScheme::Hashed,
+                false
+            ) | (
+                crate::blob::locator::BlobLocator::Browsable { .. },
+                BlobPathScheme::Plain,
+                true
+            )
+        );
+        if !valid {
+            return Err(StorageError::InvalidContent(
+                "blob locator protection does not match the cloud home's fixed storage mode"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_blob_append_authority(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+    ) -> Result<(), StorageError> {
+        if locator.uploader() != self.self_uploader() {
+            return Err(StorageError::InvalidContent(format!(
+                "blob locator uploader {:?} is not this device",
+                locator.uploader()
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn user_keypair(&self) -> &UserKeypair {
@@ -1307,7 +1347,7 @@ impl SyncStorage for CloudSyncStorage {
         semantic_prefix: &str,
         extension: &str,
         data: Vec<u8>,
-    ) -> Result<ProtocolObjectLocator, StorageError> {
+    ) -> Result<ImmutableObjectLocator, StorageError> {
         context.validate_path(semantic_prefix)?;
         context.validate_extension(extension)?;
         let copy_id = self
@@ -1331,13 +1371,13 @@ impl SyncStorage for CloudSyncStorage {
                 &crate::storage::cloud::no_progress(),
             )
             .await?;
-        Ok(ProtocolObjectLocator::new(logical_key, physical))
+        Ok(ImmutableObjectLocator::new(logical_key, physical))
     }
 
     async fn list_protocol_objects(
         &self,
         prefix: &str,
-    ) -> Result<ProtocolObjectListing, StorageError> {
+    ) -> Result<ImmutableObjectListing, StorageError> {
         if !super::storage::is_protocol_listing_prefix(prefix) {
             return Err(StorageError::Parse(format!(
                 "invalid protocol listing prefix {prefix:?}"
@@ -1357,9 +1397,9 @@ impl SyncStorage for CloudSyncStorage {
                     ))
                 })?
                 .to_string();
-            objects.push(ProtocolObjectLocator::new(logical_key, physical));
+            objects.push(ImmutableObjectLocator::new(logical_key, physical));
         }
-        Ok(ProtocolObjectListing {
+        Ok(ImmutableObjectListing {
             objects,
             coverage: listing.coverage,
         })
@@ -1368,7 +1408,7 @@ impl SyncStorage for CloudSyncStorage {
     async fn read_protocol_object(
         &self,
         context: &ProtocolObjectContext,
-        object: &ProtocolObjectLocator,
+        object: &ImmutableObjectLocator,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError> {
         context.validate_locator(object, semantic_prefix)?;
@@ -1394,9 +1434,109 @@ impl SyncStorage for CloudSyncStorage {
 
     async fn delete_protocol_object(
         &self,
-        object: &ProtocolObjectLocator,
+        object: &ImmutableObjectLocator,
     ) -> Result<(), StorageError> {
         self.home.delete_appended(object.physical()).await?;
+        Ok(())
+    }
+
+    async fn append_blob_copy_from_file(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        stored_file: &Path,
+    ) -> Result<ImmutableObjectLocator, StorageError> {
+        self.validate_blob_locator_home(locator)?;
+        self.validate_blob_append_authority(locator)?;
+        let copy_id = self
+            .copy_ids
+            .as_ref()
+            .ok_or_else(|| {
+                StorageError::Storage("blob append has no injected CopyIdGenerator".to_string())
+            })?
+            .next_copy_id();
+        let logical_key = blob_copy_key(locator, copy_id)?;
+        let stored_len = crate::local_blob::file_len(stored_file)
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        let reader = crate::local_blob::open_reader(stored_file)
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        let physical = self
+            .home
+            .append_object(
+                &logical_key,
+                BlobBody::from_file_with_prefix(stored_len, reader, None, Vec::new()),
+                &crate::storage::cloud::no_progress(),
+            )
+            .await?;
+        if physical.logical_key() != logical_key {
+            return Err(StorageError::Parse(format!(
+                "blob append returned physical key {:?} for logical key {logical_key:?}",
+                physical.logical_key()
+            )));
+        }
+        Ok(ImmutableObjectLocator::new(logical_key, physical))
+    }
+
+    async fn list_blob_copies(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+    ) -> Result<ImmutableObjectListing, StorageError> {
+        self.validate_blob_locator_home(locator)?;
+        let prefix = blob_copy_prefix(locator)?;
+        let listing = self.home.list_appended(&prefix).await?;
+        let mut objects = Vec::with_capacity(listing.objects.len());
+        for physical in listing.objects {
+            let logical_key = physical.logical_key().to_string();
+            let copy = ImmutableObjectLocator::new(logical_key, physical);
+            validate_blob_copy_locator(locator, &copy)?;
+            objects.push(copy);
+        }
+        Ok(ImmutableObjectListing {
+            objects,
+            coverage: listing.coverage,
+        })
+    }
+
+    async fn read_blob_copy_to_file(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        copy: &ImmutableObjectLocator,
+        dest: &Path,
+    ) -> Result<(), StorageError> {
+        self.validate_blob_locator_home(locator)?;
+        validate_blob_copy_locator(locator, copy)?;
+        if copy.physical().logical_key() != copy.logical_key() {
+            return Err(StorageError::Parse(format!(
+                "blob locator key {:?} does not match physical key {:?}",
+                copy.logical_key(),
+                copy.physical().logical_key()
+            )));
+        }
+        self.home
+            .read_appended_to_file(copy.physical(), dest)
+            .await
+            .map_err(|error| match error {
+                CloudFileReadError::Source(error) => StorageError::from(error),
+                CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
+            })
+    }
+
+    async fn delete_blob_copy(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        copy: &ImmutableObjectLocator,
+    ) -> Result<(), StorageError> {
+        self.validate_blob_locator_home(locator)?;
+        validate_blob_copy_locator(locator, copy)?;
+        if copy.physical().logical_key() != copy.logical_key() {
+            return Err(StorageError::Parse(format!(
+                "blob locator key {:?} does not match physical key {:?}",
+                copy.logical_key(),
+                copy.physical().logical_key()
+            )));
+        }
+        self.home.delete_appended(copy.physical()).await?;
         Ok(())
     }
 
@@ -1625,15 +1765,604 @@ impl SyncStorage for CloudSyncStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blob::locator::{BlobLocator, RemoteAudience};
     use crate::blob::BlobScope;
     use crate::config::HomeStorage;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
-        BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHomeError,
+        BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHomeError, CopyId, CopyIdGenerator,
         SequentialCopyIdGenerator,
     };
     use crate::sync::test_helpers::{open_test_db, TestCustody};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn opaque_locator(uploader: String) -> BlobLocator {
+        BlobLocator::opaque(
+            "covers",
+            "a1b2-blob",
+            uploader,
+            RemoteAudience::Store,
+            BlobScope::Master,
+            crate::KeyFingerprint::from_bytes([4; 8]),
+            19,
+            crate::sync::store_commit::ObjectHash::digest(b"plaintext blob"),
+        )
+        .expect("opaque locator")
+    }
+
+    struct CountingCopyIdGenerator {
+        calls: AtomicUsize,
+    }
+
+    impl CountingCopyIdGenerator {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl CopyIdGenerator for CountingCopyIdGenerator {
+        fn next_copy_id(&self) -> CopyId {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            "00".repeat(32).parse().expect("fixed canonical copy id")
+        }
+    }
+
+    async fn assert_locator_mode_rejected_before_io(
+        storage: &CloudSyncStorage,
+        home: &InMemoryCloudHome,
+        copy_ids: &CountingCopyIdGenerator,
+        locator: &BlobLocator,
+    ) {
+        let copy_id: CopyId = "11".repeat(32).parse().expect("canonical test copy id");
+        let logical_key = blob_copy_key(locator, copy_id).expect("blob copy key");
+        let copy = ImmutableObjectLocator::new(
+            logical_key.clone(),
+            crate::storage::cloud::AppendedObject::from_provider(logical_key, "unused".to_string()),
+        );
+        let temp = tempfile::tempdir().expect("mode mismatch temp dir");
+
+        assert!(matches!(
+            storage
+                .append_blob_copy_from_file(locator, &temp.path().join("absent-source"))
+                .await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        assert!(matches!(
+            storage.list_blob_copies(locator).await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        assert!(matches!(
+            storage
+                .read_blob_copy_to_file(locator, &copy, &temp.path().join("destination"))
+                .await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        assert!(matches!(
+            storage.delete_blob_copy(locator, &copy).await,
+            Err(StorageError::InvalidContent(_))
+        ));
+
+        assert_eq!(copy_ids.calls(), 0, "copy id source must not be consumed");
+        assert_eq!(home.append_count(), 0, "append provider must not be called");
+        assert_eq!(
+            home.appended_list_count(),
+            0,
+            "listing provider must not be called"
+        );
+        assert_eq!(
+            home.appended_full_read_count(),
+            0,
+            "full-read provider must not be called"
+        );
+        assert_eq!(
+            home.appended_stream_read_count(),
+            0,
+            "stream provider must not be called"
+        );
+        assert_eq!(
+            home.appended_delete_count(),
+            0,
+            "delete provider must not be called"
+        );
+    }
+
+    async fn exercise_blob_copy_storage(storage: &dyn SyncStorage, locator: &BlobLocator) {
+        let temp = tempfile::tempdir().expect("blob-copy temp dir");
+        let stored_file = temp.path().join("stored.bin");
+        let readback = temp.path().join("readback.bin");
+        let stored_bytes = b"exact already-sealed bytes";
+        crate::local_blob::write_atomic(&stored_file, stored_bytes)
+            .await
+            .expect("write stored source");
+
+        let first = storage
+            .append_blob_copy_from_file(locator, &stored_file)
+            .await
+            .expect("append first blob copy");
+        let second = storage
+            .append_blob_copy_from_file(locator, &stored_file)
+            .await
+            .expect("append retry blob copy");
+        assert_ne!(first.logical_key(), second.logical_key());
+
+        let listing = storage
+            .list_blob_copies(locator)
+            .await
+            .expect("list blob copies");
+        assert_eq!(listing.objects.len(), 2);
+        assert!(listing.objects.contains(&first));
+        assert!(listing.objects.contains(&second));
+
+        storage
+            .read_blob_copy_to_file(locator, &first, &readback)
+            .await
+            .expect("read exact first copy");
+        assert_eq!(
+            crate::local_blob::read(&readback)
+                .await
+                .expect("read local copy"),
+            stored_bytes,
+        );
+
+        storage
+            .delete_blob_copy(locator, &first)
+            .await
+            .expect("delete exact first copy");
+        let listing = storage
+            .list_blob_copies(locator)
+            .await
+            .expect("list surviving blob copy");
+        assert_eq!(listing.objects, vec![second]);
+    }
+
+    #[tokio::test]
+    async fn cloud_storage_appends_lists_reads_and_deletes_exact_blob_copies() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
+            BlobPathScheme::Hashed,
+            "blob-copy-store",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("blob-copy")));
+        let locator = opaque_locator(storage.self_uploader());
+
+        exercise_blob_copy_storage(&storage, &locator).await;
+
+        let keys = home.appended_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].starts_with(&format!("{}/copies/", locator.semantic_key())));
+        assert!(keys[0].ends_with(".enc"));
+        assert_eq!(home.appended_full_read_count(), 0);
+        assert_eq!(home.appended_stream_read_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn opaque_home_rejects_browsable_locator_before_any_io() {
+        let home = InMemoryCloudHome::new();
+        let copy_ids = Arc::new(CountingCopyIdGenerator::new());
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
+            BlobPathScheme::Hashed,
+            "opaque-mode-gate",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(copy_ids.clone());
+        let locator = BlobLocator::browsable(
+            "audio",
+            "abcd-track",
+            storage.self_uploader(),
+            "Artist/Album/track.flac",
+            5,
+            crate::sync::store_commit::ObjectHash::digest(b"track"),
+        )
+        .expect("browsable locator");
+
+        assert_locator_mode_rejected_before_io(&storage, &home, &copy_ids, &locator).await;
+    }
+
+    #[tokio::test]
+    async fn browsable_home_rejects_opaque_locator_before_any_io() {
+        let home = InMemoryCloudHome::new();
+        let copy_ids = Arc::new(CountingCopyIdGenerator::new());
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "browsable-mode-gate",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(copy_ids.clone());
+        let locator = opaque_locator(storage.self_uploader());
+
+        assert_locator_mode_rejected_before_io(&storage, &home, &copy_ids, &locator).await;
+    }
+
+    #[tokio::test]
+    async fn blob_append_rejects_foreign_uploader_before_id_file_or_provider_io() {
+        let home = InMemoryCloudHome::new();
+        let copy_ids = Arc::new(CountingCopyIdGenerator::new());
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
+            BlobPathScheme::Hashed,
+            "blob-uploader-authority",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(copy_ids.clone());
+        let locator = opaque_locator("11".repeat(32));
+        let temp = tempfile::tempdir().expect("foreign uploader temp dir");
+
+        assert!(matches!(
+            storage
+                .append_blob_copy_from_file(&locator, &temp.path().join("absent-source"))
+                .await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        assert_eq!(copy_ids.calls(), 0);
+        assert_eq!(home.append_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn blob_list_read_and_delete_accept_a_foreign_uploader() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
+            BlobPathScheme::Hashed,
+            "foreign-blob-reader",
+            UserKeypair::generate(),
+        );
+        let locator = opaque_locator("11".repeat(32));
+        let copy_id: CopyId = "22".repeat(32).parse().expect("canonical copy id");
+        let logical_key = blob_copy_key(&locator, copy_id).expect("blob copy key");
+        home.insert_appended_candidate(&logical_key, b"remote stored bytes".to_vec());
+
+        let listing = storage
+            .list_blob_copies(&locator)
+            .await
+            .expect("list foreign uploader copy");
+        assert_eq!(listing.objects.len(), 1);
+        let temp = tempfile::tempdir().expect("foreign uploader temp dir");
+        let destination = temp.path().join("stored.bin");
+        storage
+            .read_blob_copy_to_file(&locator, &listing.objects[0], &destination)
+            .await
+            .expect("read foreign uploader copy");
+        assert_eq!(
+            crate::local_blob::read(&destination)
+                .await
+                .expect("read destination"),
+            b"remote stored bytes"
+        );
+        storage
+            .delete_blob_copy(&locator, &listing.objects[0])
+            .await
+            .expect("delete foreign uploader copy");
+        assert!(storage
+            .list_blob_copies(&locator)
+            .await
+            .expect("list after delete")
+            .objects
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn blob_copy_listing_preserves_provider_duplicates_and_exact_identity() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
+            BlobPathScheme::Hashed,
+            "blob-copy-provider-duplicates",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
+            "blob-copy-provider-duplicates",
+        )));
+        let locator = opaque_locator(storage.self_uploader());
+        let temp = tempfile::tempdir().expect("blob-copy duplicate temp dir");
+        let stored_file = temp.path().join("stored.bin");
+        crate::local_blob::write_atomic(&stored_file, b"first physical bytes")
+            .await
+            .expect("write first physical source");
+        let first = storage
+            .append_blob_copy_from_file(&locator, &stored_file)
+            .await
+            .expect("append first physical copy");
+        home.insert_appended_candidate(first.logical_key(), b"second physical bytes".to_vec());
+
+        let listing = storage
+            .list_blob_copies(&locator)
+            .await
+            .expect("list provider duplicates");
+        assert_eq!(listing.objects.len(), 2);
+        assert_eq!(
+            listing.objects[0].logical_key(),
+            listing.objects[1].logical_key()
+        );
+        assert_ne!(listing.objects[0], listing.objects[1]);
+
+        let first_readback = temp.path().join("first-readback.bin");
+        let second_readback = temp.path().join("second-readback.bin");
+        storage
+            .read_blob_copy_to_file(&locator, &listing.objects[0], &first_readback)
+            .await
+            .expect("read first physical identity");
+        storage
+            .read_blob_copy_to_file(&locator, &listing.objects[1], &second_readback)
+            .await
+            .expect("read second physical identity");
+        assert_eq!(
+            crate::local_blob::read(&first_readback).await.unwrap(),
+            b"first physical bytes"
+        );
+        assert_eq!(
+            crate::local_blob::read(&second_readback).await.unwrap(),
+            b"second physical bytes"
+        );
+
+        storage
+            .delete_blob_copy(&locator, &listing.objects[0])
+            .await
+            .expect("delete first physical identity");
+        assert_eq!(
+            storage.list_blob_copies(&locator).await.unwrap().objects,
+            vec![listing.objects[1].clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn blob_copy_operations_reject_a_locator_from_another_semantic_slot() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
+            BlobPathScheme::Hashed,
+            "blob-copy-slot-binding",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
+            "blob-copy-slot-binding",
+        )));
+        let first_locator = opaque_locator(storage.self_uploader());
+        let other_locator = BlobLocator::opaque(
+            first_locator.namespace(),
+            "different-blob",
+            first_locator.uploader(),
+            RemoteAudience::Store,
+            BlobScope::Master,
+            crate::KeyFingerprint::from_bytes([4; 8]),
+            19,
+            crate::sync::store_commit::ObjectHash::digest(b"plaintext blob"),
+        )
+        .expect("other locator");
+        let temp = tempfile::tempdir().expect("blob-copy slot temp dir");
+        let stored_file = temp.path().join("stored.bin");
+        crate::local_blob::write_atomic(&stored_file, b"stored")
+            .await
+            .expect("write stored source");
+        let copy = storage
+            .append_blob_copy_from_file(&first_locator, &stored_file)
+            .await
+            .expect("append first slot copy");
+
+        assert!(matches!(
+            storage
+                .read_blob_copy_to_file(&other_locator, &copy, &temp.path().join("readback.bin"))
+                .await,
+            Err(StorageError::Parse(_))
+        ));
+        assert!(matches!(
+            storage.delete_blob_copy(&other_locator, &copy).await,
+            Err(StorageError::Parse(_))
+        ));
+        assert_eq!(
+            storage
+                .list_blob_copies(&first_locator)
+                .await
+                .unwrap()
+                .objects,
+            vec![copy]
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_storage_implements_the_exact_blob_copy_contract() {
+        let storage = crate::sync::test_helpers::MockSyncStorage::new();
+        let locator = opaque_locator(storage.protocol_founder_pubkey());
+
+        exercise_blob_copy_storage(&storage, &locator).await;
+    }
+
+    #[tokio::test]
+    async fn mock_blob_append_rejects_wrong_mode_and_foreign_uploader_before_counter_or_file() {
+        let storage = crate::sync::test_helpers::MockSyncStorage::new();
+        let temp = tempfile::tempdir().expect("mock parity temp dir");
+        let absent = temp.path().join("absent-source");
+        let browsable = BlobLocator::browsable(
+            "audio",
+            "abcd-track",
+            storage.protocol_founder_pubkey(),
+            "Artist/Album/track.flac",
+            5,
+            crate::sync::store_commit::ObjectHash::digest(b"track"),
+        )
+        .expect("browsable locator");
+        let foreign = opaque_locator("11".repeat(32));
+
+        assert!(matches!(
+            storage
+                .append_blob_copy_from_file(&browsable, &absent)
+                .await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        assert!(matches!(
+            storage.append_blob_copy_from_file(&foreign, &absent).await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        let copy_id: CopyId = "44".repeat(32).parse().expect("canonical copy id");
+        let logical_key = blob_copy_key(&browsable, copy_id).expect("browsable copy key");
+        let copy = ImmutableObjectLocator::new(
+            logical_key.clone(),
+            crate::storage::cloud::AppendedObject::from_provider(logical_key, "unused".to_string()),
+        );
+        assert!(matches!(
+            storage.list_blob_copies(&browsable).await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        assert!(matches!(
+            storage
+                .read_blob_copy_to_file(&browsable, &copy, &temp.path().join("destination"))
+                .await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        assert!(matches!(
+            storage.delete_blob_copy(&browsable, &copy).await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        assert_eq!(storage.blob_copy_append_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn mock_blob_list_read_and_delete_accept_a_foreign_opaque_uploader() {
+        let storage = crate::sync::test_helpers::MockSyncStorage::new();
+        let locator = opaque_locator("11".repeat(32));
+        let copy_id: CopyId = "33".repeat(32).parse().expect("canonical copy id");
+        let inserted = storage
+            .insert_blob_copy_candidate(&locator, copy_id, b"remote stored bytes".to_vec())
+            .expect("insert remote copy");
+
+        let listing = storage
+            .list_blob_copies(&locator)
+            .await
+            .expect("list remote mock copy");
+        assert_eq!(listing.objects, vec![inserted.clone()]);
+        let temp = tempfile::tempdir().expect("remote mock temp dir");
+        let destination = temp.path().join("stored.bin");
+        storage
+            .read_blob_copy_to_file(&locator, &inserted, &destination)
+            .await
+            .expect("read remote mock copy");
+        assert_eq!(
+            crate::local_blob::read(&destination)
+                .await
+                .expect("read destination"),
+            b"remote stored bytes"
+        );
+        storage
+            .delete_blob_copy(&locator, &inserted)
+            .await
+            .expect("delete remote mock copy");
+        assert!(storage
+            .list_blob_copies(&locator)
+            .await
+            .expect("list after delete")
+            .objects
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn blob_copy_listing_preserves_incomplete_coverage_as_success() {
+        let home = InMemoryCloudHome::new();
+        home.set_listing_coverage(crate::storage::cloud::ListingCoverage::BestEffort);
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
+            BlobPathScheme::Hashed,
+            "blob-copy-coverage",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
+            "blob-copy-coverage",
+        )));
+        let locator = opaque_locator(storage.self_uploader());
+
+        let listing = storage
+            .list_blob_copies(&locator)
+            .await
+            .expect("best-effort listing remains a successful listing");
+
+        assert_eq!(
+            listing.coverage,
+            crate::storage::cloud::ListingCoverage::BestEffort
+        );
+        assert!(listing.objects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn blob_copy_listing_rejects_noncanonical_copy_paths() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
+            BlobPathScheme::Hashed,
+            "blob-copy-malformed",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
+            "blob-copy-malformed",
+        )));
+        let locator = opaque_locator(storage.self_uploader());
+        home.insert_appended_candidate(
+            &format!("{}/copies/not-a-copy-id.enc", locator.semantic_key()),
+            b"stored".to_vec(),
+        );
+
+        assert!(matches!(
+            storage.list_blob_copies(&locator).await,
+            Err(StorageError::Parse(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn browsable_blob_copies_have_no_encryption_suffix() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "browsable-copy-store",
+            UserKeypair::generate(),
+        )
+        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("browsable-copy")));
+        let locator = BlobLocator::browsable(
+            "audio",
+            "abcd-track",
+            storage.self_uploader(),
+            "Artist/Album/track.flac",
+            5,
+            crate::sync::store_commit::ObjectHash::digest(b"track"),
+        )
+        .expect("browsable locator");
+        let temp = tempfile::tempdir().unwrap();
+        let stored_file = temp.path().join("stored.bin");
+        crate::local_blob::write_atomic(&stored_file, b"track")
+            .await
+            .unwrap();
+
+        let copy = storage
+            .append_blob_copy_from_file(&locator, &stored_file)
+            .await
+            .expect("append browsable blob copy");
+
+        assert!(copy
+            .logical_key()
+            .starts_with(&format!("{}/copies/", locator.semantic_key())));
+        assert!(!copy.logical_key().ends_with(".enc"));
+        assert_eq!(
+            home.get_appended(copy.logical_key()),
+            Some(b"track".to_vec())
+        );
+    }
 
     /// A committed rotation this device has not adopted survives a restart. A
     /// prior run marks it and persists to `protocol_state`; a fresh run restores it
@@ -2682,8 +3411,10 @@ mod tests {
         let malformed_logical = format!("{semantic}/copies/not-a-copy-id.json");
         let malformed_physical =
             home.insert_appended_candidate(&format!("{malformed_logical}.enc"), stored);
-        let malformed =
-            crate::sync::storage::ProtocolObjectLocator::new(malformed_logical, malformed_physical);
+        let malformed = crate::sync::storage::ImmutableObjectLocator::new(
+            malformed_logical,
+            malformed_physical,
+        );
 
         assert!(matches!(
             storage

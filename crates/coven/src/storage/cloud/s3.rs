@@ -44,13 +44,43 @@ fn s3_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+struct AbortOnDropTask<T> {
+    handle: Option<tokio::task::JoinHandle<T>>,
+}
+
+impl<T> AbortOnDropTask<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    async fn wait(mut self) -> Result<T, tokio::task::JoinError> {
+        let result = self
+            .handle
+            .as_mut()
+            .expect("S3 task handle is present")
+            .await;
+        self.handle.take();
+        result
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Run an S3 interaction on the big-stack runtime, flattening the join-handle
 /// result into the future's own `Result<T, CloudHomeError>`.
 /// The future must be `Send + 'static` (owned args, a cloned `Client`).
 async fn on_s3_rt<T: Send + 'static>(
     fut: impl std::future::Future<Output = Result<T, CloudHomeError>> + Send + 'static,
 ) -> Result<T, CloudHomeError> {
-    match s3_runtime().spawn(fut).await {
+    match AbortOnDropTask::new(s3_runtime().spawn(fut)).wait().await {
         Ok(r) => r,
         Err(e) => Err(CloudHomeError::Transport(format!("S3 task aborted: {e}"))),
     }
@@ -618,6 +648,45 @@ impl CloudHome for S3CloudHome {
         .await
     }
 
+    async fn read_appended_to_file(
+        &self,
+        object: &super::AppendedObject,
+        destination: &std::path::Path,
+    ) -> Result<(), super::CloudFileReadError> {
+        let full = self.full_key(object.logical_key());
+        let key = object.logical_key().to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let destination = destination.to_path_buf();
+        match AbortOnDropTask::new(s3_runtime().spawn(async move {
+            let response = client
+                .get_object()
+                .bucket(&bucket)
+                .key(&full)
+                .send()
+                .await
+                .map_err(|error| get_object_error(&key, error))?;
+            let stream =
+                futures_util::stream::unfold((response.body, key), |(mut body, key)| async move {
+                    body.next().await.map(|result| {
+                        let result = result
+                            .map_err(|error| body_read_error("read appended body", &key, error));
+                        (result, (body, key))
+                    })
+                });
+            super::write_cloud_object_stream(&destination, Box::pin(stream)).await?;
+            Ok::<(), super::CloudFileReadError>(())
+        }))
+        .wait()
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(super::CloudFileReadError::Source(
+                CloudHomeError::Transport(format!("S3 task aborted: {error}")),
+            )),
+        }
+    }
+
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
         let full = self.full_key(key);
         let range = range_header(start, end);
@@ -810,6 +879,7 @@ mod tests {
     use axum::http::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
     use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
     use axum::Router;
+    use bytes::Bytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -941,6 +1011,80 @@ mod tests {
                 .with_state(Arc::new(object)),
         )
         .await
+    }
+
+    #[derive(Clone)]
+    struct FakePausedBodyObject {
+        bucket: String,
+        key: String,
+        first: Vec<u8>,
+        second: Vec<u8>,
+        first_sent: Arc<tokio::sync::Notify>,
+        release_second: Arc<tokio::sync::Notify>,
+    }
+
+    async fn fake_s3_paused_body_endpoint(
+        State(object): State<FakePausedBodyObject>,
+        method: Method,
+        uri: Uri,
+    ) -> Response<Body> {
+        let expected_path = format!("/{}/{}", object.bucket, object.key);
+        if method != Method::GET || uri.path() != expected_path {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from("unexpected paused-body request"))
+                .expect("build bad-request response");
+        }
+
+        let total_len = object.first.len() + object.second.len();
+        let stream = futures_util::stream::unfold((0u8, object), |(stage, object)| async move {
+            match stage {
+                0 => {
+                    object.first_sent.notify_one();
+                    let first = object.first.clone();
+                    Some((Ok::<Bytes, std::io::Error>(Bytes::from(first)), (1, object)))
+                }
+                1 => {
+                    object.release_second.notified().await;
+                    let second = object.second.clone();
+                    Some((Ok(Bytes::from(second)), (2, object)))
+                }
+                _ => None,
+            }
+        });
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_LENGTH, total_len.to_string())
+            .body(Body::from_stream(stream))
+            .expect("build paused-body response")
+    }
+
+    async fn spawn_fake_s3_paused_body_endpoint(
+        object: FakePausedBodyObject,
+    ) -> (String, tokio::sync::oneshot::Sender<()>) {
+        spawn_fake_s3(
+            Router::new()
+                .fallback(fake_s3_paused_body_endpoint)
+                .with_state(object),
+        )
+        .await
+    }
+
+    async fn atomic_temp_paths(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut entries = tokio::fs::read_dir(directory)
+            .await
+            .expect("read destination directory");
+        let mut temps = Vec::new();
+        while let Some(entry) = entries.next_entry().await.expect("read destination entry") {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(coven_core::local_blob::TEMP_BLOB_PREFIX)
+            {
+                temps.push(entry.path());
+            }
+        }
+        temps
     }
 
     #[derive(Clone)]
@@ -1078,6 +1222,129 @@ mod tests {
             .await
             .expect_err("a 200 full-object response to a range request must error");
         assert!(matches!(err, CloudHomeError::Transport(_)), "got {err:?}");
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn appended_read_streams_exact_object_to_file() {
+        let full_body = b"0123456789abcdefghijklmnopqrstuvwxyz".to_vec();
+        let key = "storage/audio-object".to_string();
+        let bucket = "coven-s3-appended-read".to_string();
+        let (endpoint, shutdown) = spawn_fake_s3_full_body_endpoint(FakeFullBodyObject {
+            bucket: bucket.clone(),
+            key: key.clone(),
+            full_body: full_body.clone(),
+        })
+        .await;
+
+        if !loopback_connects(&endpoint).await {
+            return;
+        }
+
+        let home = S3CloudHome::new(
+            bucket,
+            "us-east-1".to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+        )
+        .await
+        .expect("construct S3CloudHome");
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let destination = tmp.path().join("object.bin");
+        let object = coven_core::storage::cloud::AppendedObject::from_provider(key.clone(), key);
+
+        home.read_appended_to_file(&object, &destination)
+            .await
+            .expect("stream appended object");
+
+        assert_eq!(
+            tokio::fs::read(&destination)
+                .await
+                .expect("read destination"),
+            full_body
+        );
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn canceling_appended_read_cannot_rename_over_destination_later() {
+        let key = "storage/cancel-object".to_string();
+        let bucket = "coven-s3-cancel-read".to_string();
+        let first = b"partial".to_vec();
+        let first_sent = Arc::new(tokio::sync::Notify::new());
+        let release_second = Arc::new(tokio::sync::Notify::new());
+        let (endpoint, shutdown) = spawn_fake_s3_paused_body_endpoint(FakePausedBodyObject {
+            bucket: bucket.clone(),
+            key: key.clone(),
+            first: first.clone(),
+            second: b" remainder".to_vec(),
+            first_sent: first_sent.clone(),
+            release_second: release_second.clone(),
+        })
+        .await;
+
+        if !loopback_connects(&endpoint).await {
+            return;
+        }
+
+        let home = S3CloudHome::new(
+            bucket,
+            "us-east-1".to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+        )
+        .await
+        .expect("construct S3CloudHome");
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let destination = tmp.path().join("object.bin");
+        tokio::fs::write(&destination, b"committed")
+            .await
+            .expect("seed destination");
+        let object = coven_core::storage::cloud::AppendedObject::from_provider(key.clone(), key);
+        let read_destination = destination.clone();
+        let read =
+            tokio::spawn(
+                async move { home.read_appended_to_file(&object, &read_destination).await },
+            );
+        first_sent.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if atomic_temp_paths(tmp.path()).await.iter().any(|path| {
+                    std::fs::metadata(path)
+                        .is_ok_and(|metadata| metadata.len() == first.len() as u64)
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first response chunk was written to the temp file");
+
+        read.abort();
+        assert!(read.await.expect_err("read task canceled").is_cancelled());
+        release_second.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if atomic_temp_paths(tmp.path()).await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("canceled S3 task removed its temp file");
+
+        assert_eq!(
+            tokio::fs::read(&destination)
+                .await
+                .expect("read destination"),
+            b"committed"
+        );
         let _ = shutdown.send(());
     }
 

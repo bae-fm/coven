@@ -8,10 +8,12 @@
 //! over it, and each backend's `CloudHome` impl forwards to these.
 
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
+use std::path::Path;
 
 use super::http::{body_text, ensure_ok, ok_bytes, NotFound};
 use super::s3_common::is_range_success;
-use super::CloudHomeError;
+use super::{CloudFileReadError, CloudHomeError};
 
 /// One page of a listing: the keys it yielded (already decoded and prefix-filtered)
 /// and the cursor to fetch the next page, present only when more pages remain.
@@ -63,6 +65,29 @@ pub(super) async fn rest_read<T: OAuthRestHome + ?Sized>(
     let resp = home.send_read(key, None).await?;
     let resp = ensure_ok(resp, &format!("read {key}"), home.not_found()).await?;
     ok_bytes(resp, &format!("read body for {key}")).await
+}
+
+pub(super) async fn rest_read_to_file<T: OAuthRestHome + ?Sized>(
+    home: &T,
+    key: &str,
+    destination: &Path,
+) -> Result<(), CloudFileReadError> {
+    let response = home.send_read(key, None).await?;
+    let response = ensure_ok(response, &format!("read {key}"), home.not_found()).await?;
+    response_to_file(response, destination, &format!("read body for {key}")).await
+}
+
+pub(super) async fn response_to_file(
+    response: reqwest::Response,
+    destination: &Path,
+    context: &str,
+) -> Result<(), CloudFileReadError> {
+    let context = context.to_string();
+    let stream = response.bytes_stream().map_err(move |error| {
+        CloudHomeError::Transport(format!("{context}: stream response: {error}"))
+    });
+    super::write_cloud_object_stream(destination, Box::pin(stream)).await?;
+    Ok(())
 }
 
 /// Read the `[start, end)` byte range of `key`.

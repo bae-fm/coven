@@ -1839,7 +1839,7 @@ impl SyncStorage for HostWriteInjector {
         semantic_prefix: &str,
         extension: &str,
         data: Vec<u8>,
-    ) -> Result<crate::sync::storage::ProtocolObjectLocator, StorageError> {
+    ) -> Result<crate::sync::storage::ImmutableObjectLocator, StorageError> {
         self.inner
             .append_protocol_object(context, semantic_prefix, extension, data)
             .await
@@ -1848,14 +1848,14 @@ impl SyncStorage for HostWriteInjector {
     async fn list_protocol_objects(
         &self,
         prefix: &str,
-    ) -> Result<crate::sync::storage::ProtocolObjectListing, StorageError> {
+    ) -> Result<crate::sync::storage::ImmutableObjectListing, StorageError> {
         self.inner.list_protocol_objects(prefix).await
     }
 
     async fn read_protocol_object(
         &self,
         context: &crate::sync::storage::ProtocolObjectContext,
-        object: &crate::sync::storage::ProtocolObjectLocator,
+        object: &crate::sync::storage::ImmutableObjectLocator,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError> {
         if semantic_prefix.starts_with("store-v1/packages/")
@@ -1870,9 +1870,43 @@ impl SyncStorage for HostWriteInjector {
 
     async fn delete_protocol_object(
         &self,
-        object: &crate::sync::storage::ProtocolObjectLocator,
+        object: &crate::sync::storage::ImmutableObjectLocator,
     ) -> Result<(), StorageError> {
         self.inner.delete_protocol_object(object).await
+    }
+
+    async fn append_blob_copy_from_file(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        stored_file: &std::path::Path,
+    ) -> Result<crate::sync::storage::ImmutableObjectLocator, StorageError> {
+        self.inner
+            .append_blob_copy_from_file(locator, stored_file)
+            .await
+    }
+
+    async fn list_blob_copies(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+    ) -> Result<crate::sync::storage::ImmutableObjectListing, StorageError> {
+        self.inner.list_blob_copies(locator).await
+    }
+
+    async fn read_blob_copy_to_file(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        copy: &crate::sync::storage::ImmutableObjectLocator,
+        dest: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        self.inner.read_blob_copy_to_file(locator, copy, dest).await
+    }
+
+    async fn delete_blob_copy(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        copy: &crate::sync::storage::ImmutableObjectLocator,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_blob_copy(locator, copy).await
     }
 
     async fn put_blob(

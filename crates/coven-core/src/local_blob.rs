@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use tokio::io::AsyncReadExt;
 
 /// The filename prefix an atomic blob write gives its in-progress temp sibling
@@ -44,9 +47,105 @@ pub enum StreamWriteError {
     Local(String),
 }
 
+#[derive(Debug)]
+pub enum ByteStreamWriteError<E> {
+    Source(E),
+    Local(String),
+}
+
 #[async_trait]
 pub trait PlaintextChunkReader: Send {
     async fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, PlaintextChunkError>;
+}
+
+#[async_trait]
+trait AtomicChunkSource {
+    type Error: Send;
+
+    async fn next_atomic_chunk(&mut self) -> Result<Option<Bytes>, Self::Error>;
+}
+
+struct PlaintextAtomicChunkSource<'a>(&'a mut dyn PlaintextChunkReader);
+
+#[async_trait]
+impl AtomicChunkSource for PlaintextAtomicChunkSource<'_> {
+    type Error = PlaintextChunkError;
+
+    async fn next_atomic_chunk(&mut self) -> Result<Option<Bytes>, Self::Error> {
+        let chunk = self.0.next_chunk(1 << 20).await?;
+        Ok((!chunk.is_empty()).then(|| Bytes::from(chunk)))
+    }
+}
+
+struct ByteStreamAtomicChunkSource<E> {
+    stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
+}
+
+#[async_trait]
+impl<E: Send> AtomicChunkSource for ByteStreamAtomicChunkSource<E> {
+    type Error = E;
+
+    async fn next_atomic_chunk(&mut self) -> Result<Option<Bytes>, Self::Error> {
+        self.stream.next().await.transpose()
+    }
+}
+
+enum AtomicChunkWriteError<E> {
+    Source(E),
+    Local(String),
+}
+
+struct AtomicTempFile {
+    path: PathBuf,
+    file: Option<tokio::fs::File>,
+    armed: bool,
+}
+
+impl AtomicTempFile {
+    fn create(path: PathBuf) -> Result<Self, String> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| format!("create temp blob {}: {error}", path.display()))?;
+        Ok(Self {
+            path,
+            file: Some(tokio::fs::File::from_std(file)),
+            armed: true,
+        })
+    }
+
+    fn file_mut(&mut self) -> &mut tokio::fs::File {
+        self.file.as_mut().expect("atomic temp file is open")
+    }
+
+    fn close(&mut self) {
+        self.file.take();
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AtomicTempFile {
+    fn drop(&mut self) {
+        self.file.take();
+        if !self.armed {
+            return;
+        }
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    %error,
+                    "could not remove canceled atomic-write temp blob"
+                );
+            }
+        }
+    }
 }
 
 struct FilePlaintextReader {
@@ -148,52 +247,65 @@ pub async fn write_stream_atomic(
     path: &Path,
     source: &mut dyn PlaintextChunkReader,
 ) -> Result<u64, StreamWriteError> {
+    let mut source = PlaintextAtomicChunkSource(source);
+    write_atomic_chunks(path, &mut source)
+        .await
+        .map_err(|error| match error {
+            AtomicChunkWriteError::Source(error) => StreamWriteError::Source(error),
+            AtomicChunkWriteError::Local(error) => StreamWriteError::Local(error),
+        })
+}
+
+pub async fn write_byte_stream_atomic<E: Send>(
+    path: &Path,
+    stream: Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>,
+) -> Result<u64, ByteStreamWriteError<E>> {
+    let mut source = ByteStreamAtomicChunkSource { stream };
+    write_atomic_chunks(path, &mut source)
+        .await
+        .map_err(|error| match error {
+            AtomicChunkWriteError::Source(error) => ByteStreamWriteError::Source(error),
+            AtomicChunkWriteError::Local(error) => ByteStreamWriteError::Local(error),
+        })
+}
+
+async fn write_atomic_chunks<S: AtomicChunkSource>(
+    path: &Path,
+    source: &mut S,
+) -> Result<u64, AtomicChunkWriteError<S::Error>> {
     use tokio::io::AsyncWriteExt;
 
     let parent = path.parent().ok_or_else(|| {
-        StreamWriteError::Local(format!("blob path has no parent dir: {}", path.display()))
+        AtomicChunkWriteError::Local(format!("blob path has no parent dir: {}", path.display()))
     })?;
     tokio::fs::create_dir_all(parent).await.map_err(|e| {
-        StreamWriteError::Local(format!("create parent dir for {}: {e}", path.display()))
+        AtomicChunkWriteError::Local(format!("create parent dir for {}: {e}", path.display()))
     })?;
-    let tmp = temp_sibling(parent);
-
-    let write = async {
-        let mut file = tokio::fs::File::create(&tmp).await.map_err(|e| {
-            StreamWriteError::Local(format!("create temp blob {}: {e}", tmp.display()))
+    let mut temp =
+        AtomicTempFile::create(temp_sibling(parent)).map_err(AtomicChunkWriteError::Local)?;
+    let mut written = 0u64;
+    while let Some(chunk) = source
+        .next_atomic_chunk()
+        .await
+        .map_err(AtomicChunkWriteError::Source)?
+    {
+        temp.file_mut().write_all(&chunk).await.map_err(|e| {
+            AtomicChunkWriteError::Local(format!("write temp blob {}: {e}", temp.path.display()))
         })?;
-        let mut written = 0u64;
-        loop {
-            let chunk = source.next_chunk(1 << 20).await?;
-            if chunk.is_empty() {
-                break;
-            }
-            file.write_all(&chunk).await.map_err(|e| {
-                StreamWriteError::Local(format!("write temp blob {}: {e}", tmp.display()))
-            })?;
-            written += chunk.len() as u64;
-        }
-        file.sync_all().await.map_err(|e| {
-            StreamWriteError::Local(format!("fsync temp blob {}: {e}", tmp.display()))
-        })?;
-        Ok::<u64, StreamWriteError>(written)
+        written += chunk.len() as u64;
     }
-    .await;
-    let written = match write {
-        Ok(written) => written,
-        Err(error) => {
-            remove_failed_temp(&tmp, "streamed write").await;
-            return Err(error);
-        }
-    };
-    if let Err(error) = tokio::fs::rename(&tmp, path).await {
-        remove_failed_temp(&tmp, "streamed rename").await;
-        return Err(StreamWriteError::Local(format!(
+    temp.file_mut().sync_all().await.map_err(|e| {
+        AtomicChunkWriteError::Local(format!("fsync temp blob {}: {e}", temp.path.display()))
+    })?;
+    temp.close();
+    std::fs::rename(&temp.path, path).map_err(|error| {
+        AtomicChunkWriteError::Local(format!(
             "rename temp blob {} -> {}: {error}",
-            tmp.display(),
+            temp.path.display(),
             path.display()
-        )));
-    }
+        ))
+    })?;
+    temp.disarm();
     Ok(written)
 }
 
@@ -540,6 +652,70 @@ mod tests {
                 "source failed".to_string(),
             ))
         );
+        assert_eq!(read(&path).await.expect("read destination"), b"committed");
+        assert!(temp_entries(tmp.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn byte_stream_failure_preserves_destination_and_removes_temp() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("streamed.bin");
+        write_atomic(&path, b"committed")
+            .await
+            .expect("seed destination");
+        let stream =
+            futures_util::stream::iter([Ok(Bytes::from_static(b"partial")), Err("source failed")]);
+
+        let error = write_byte_stream_atomic(&path, Box::pin(stream))
+            .await
+            .expect_err("source failure");
+
+        assert!(matches!(
+            error,
+            ByteStreamWriteError::Source("source failed")
+        ));
+        assert_eq!(read(&path).await.expect("read destination"), b"committed");
+        assert!(temp_entries(tmp.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn canceled_byte_stream_preserves_destination_and_removes_temp() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("streamed.bin");
+        write_atomic(&path, b"committed")
+            .await
+            .expect("seed destination");
+        let first_yielded = Arc::new(tokio::sync::Notify::new());
+        let first_yielded_for_stream = first_yielded.clone();
+        let stream = futures_util::stream::once(async move {
+            first_yielded_for_stream.notify_one();
+            Ok::<Bytes, &'static str>(Bytes::from_static(b"partial"))
+        })
+        .chain(futures_util::stream::pending());
+        let write_path = path.clone();
+        let write =
+            tokio::spawn(
+                async move { write_byte_stream_atomic(&write_path, Box::pin(stream)).await },
+            );
+        first_yielded.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let temps = temp_entries(tmp.path()).await;
+                if temps.iter().any(|temp| {
+                    std::fs::metadata(temp)
+                        .is_ok_and(|metadata| metadata.len() == b"partial".len() as u64)
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("partial temp file was written");
+
+        write.abort();
+        assert!(write.await.expect_err("write task canceled").is_cancelled());
+
         assert_eq!(read(&path).await.expect("read destination"), b"committed");
         assert!(temp_entries(tmp.path()).await.is_empty());
     }

@@ -12,7 +12,7 @@ use bytes::Bytes;
 use super::http::{self, ensure_ok, ok_bytes, ok_json, NotFound};
 use super::key_encoding::{decode_listed_key, encode_key};
 use super::oauth_rest::{
-    rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
+    response_to_file, rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
 };
 use super::oauth_session::OAuthSession;
 use super::resumable::RangePutSink;
@@ -1099,6 +1099,35 @@ impl CloudHome for GoogleDriveCloudHome {
         .await?;
         ok_bytes(
             response,
+            &format!("read appended body for {}", object.logical_key()),
+        )
+        .await
+    }
+
+    async fn read_appended_to_file(
+        &self,
+        object: &AppendedObject,
+        destination: &std::path::Path,
+    ) -> Result<(), super::CloudFileReadError> {
+        let file_id = object.opaque_provider_id().to_string();
+        let response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .get(format!("{DRIVE_API}/files/{file_id}"))
+                    .bearer_auth(token)
+                    .query(&[("alt", "media")])
+            })
+            .await?;
+        let response = ensure_ok(
+            response,
+            &format!("read appended {}", object.logical_key()),
+            NotFound::Status,
+        )
+        .await?;
+        response_to_file(
+            response,
+            destination,
             &format!("read appended body for {}", object.logical_key()),
         )
         .await

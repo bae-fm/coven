@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 
 use super::http::{self, ensure_ok, exists_from_response, NotFound};
 use super::oauth_rest::{
-    rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
+    rest_delete, rest_list, rest_read, rest_read_range, rest_read_to_file, ListPage, OAuthRestHome,
 };
 use super::oauth_session::OAuthSession;
 use super::{
@@ -663,6 +663,14 @@ impl CloudHome for DropboxCloudHome {
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         rest_read(self, key).await
+    }
+
+    async fn read_appended_to_file(
+        &self,
+        object: &super::AppendedObject,
+        destination: &std::path::Path,
+    ) -> Result<(), super::CloudFileReadError> {
+        rest_read_to_file(self, object.logical_key(), destination).await
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {

@@ -13,7 +13,7 @@ use super::membership::{
     StoreMembershipConflictResolutionRef,
 };
 use super::storage::{
-    ProtocolObjectContext, ProtocolObjectDomain, ProtocolObjectLocator, StorageError, SyncStorage,
+    ImmutableObjectLocator, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use super::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, commit_slot_prefix, head_slot_prefix,
@@ -34,7 +34,7 @@ pub struct VerifiedCopies<T> {
     pub value: T,
     pub bytes: Vec<u8>,
     pub semantic_hash: ObjectHash,
-    pub copies: Vec<ProtocolObjectLocator>,
+    pub copies: Vec<ImmutableObjectLocator>,
     pub coverage: ListingCoverage,
 }
 
@@ -159,10 +159,10 @@ fn parse_membership_resolution_copy_key(
     })
 }
 
-type ResolutionCopyObjectGroups<R> = BTreeMap<R, Vec<ProtocolObjectLocator>>;
+type ResolutionCopyObjectGroups<R> = BTreeMap<R, Vec<ImmutableObjectLocator>>;
 
 fn group_resolution_copy_objects<R: Ord>(
-    objects: Vec<ProtocolObjectLocator>,
+    objects: Vec<ImmutableObjectLocator>,
     prefix: &str,
     parse: impl Fn(&str) -> Result<R, StoreProtocolError>,
 ) -> Result<ResolutionCopyObjectGroups<R>, StoreObjectError> {
@@ -251,7 +251,7 @@ pub async fn append_and_verify(
     semantic_prefix: &str,
     extension: &str,
     bytes: &[u8],
-) -> Result<ProtocolObjectLocator, StoreObjectError> {
+) -> Result<ImmutableObjectLocator, StoreObjectError> {
     let object = storage
         .append_protocol_object(context, semantic_prefix, extension, bytes.to_vec())
         .await?;
@@ -355,7 +355,7 @@ pub async fn discover_store_protocol_root(
     let listing = storage
         .list_protocol_objects(STORE_PROTOCOL_ROOT_PREFIX)
         .await?;
-    let mut groups: BTreeMap<ObjectHash, Vec<ProtocolObjectLocator>> = BTreeMap::new();
+    let mut groups: BTreeMap<ObjectHash, Vec<ImmutableObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
         let (hash, _) =
             parse_store_protocol_root_copy_key(object.logical_key()).map_err(|error| {
@@ -597,10 +597,10 @@ fn membership_head_slot_prefix(
 }
 
 type MembershipCopyGroups =
-    BTreeMap<(String, MembershipGrantId, AuthorStreamId, u64), Vec<ProtocolObjectLocator>>;
+    BTreeMap<(String, MembershipGrantId, AuthorStreamId, u64), Vec<ImmutableObjectLocator>>;
 
 fn group_membership_copy_slots(
-    objects: Vec<ProtocolObjectLocator>,
+    objects: Vec<ImmutableObjectLocator>,
     prefix: &str,
     parser: fn(&str) -> Result<MembershipCopySlot, StoreProtocolError>,
 ) -> Result<MembershipCopyGroups, StoreObjectError> {
@@ -1256,7 +1256,7 @@ pub async fn list_snapshot_metas(
     let listing = storage
         .list_protocol_objects(STORE_SNAPSHOT_META_PREFIX)
         .await?;
-    let mut groups: BTreeMap<(String, ObjectHash), Vec<ProtocolObjectLocator>> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, ObjectHash), Vec<ImmutableObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_snapshot_meta_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
@@ -1323,7 +1323,7 @@ pub async fn list_visible_heads(
     store_root_hash: ObjectHash,
 ) -> Result<VerifiedHeadListing, StoreObjectError> {
     let listing = storage.list_protocol_objects(STORE_HEAD_PREFIX).await?;
-    let mut slots: BTreeMap<(String, u64), Vec<ProtocolObjectLocator>> = BTreeMap::new();
+    let mut slots: BTreeMap<(String, u64), Vec<ImmutableObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_head_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
@@ -1393,7 +1393,7 @@ pub async fn list_latest_ack_chains(
     store_root_hash: ObjectHash,
 ) -> Result<VerifiedAckChains, StoreObjectError> {
     let listing = storage.list_protocol_objects(STORE_ACK_PREFIX).await?;
-    let mut slots: BTreeMap<(String, u64), Vec<ProtocolObjectLocator>> = BTreeMap::new();
+    let mut slots: BTreeMap<(String, u64), Vec<ImmutableObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_ack_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
@@ -1478,7 +1478,7 @@ pub async fn list_latest_registration_chains(
     let listing = storage
         .list_protocol_objects(STORE_DEVICE_REGISTRATION_PREFIX)
         .await?;
-    let mut slots: BTreeMap<(String, u64), Vec<ProtocolObjectLocator>> = BTreeMap::new();
+    let mut slots: BTreeMap<(String, u64), Vec<ImmutableObjectLocator>> = BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_registration_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
@@ -1683,7 +1683,7 @@ pub async fn list_reclaimable_store_packages(
         }
     }
     let listing = storage.list_protocol_objects(STORE_PACKAGE_PREFIX).await?;
-    let mut groups: BTreeMap<(String, u64, ObjectHash), Vec<ProtocolObjectLocator>> =
+    let mut groups: BTreeMap<(String, u64, ObjectHash), Vec<ImmutableObjectLocator>> =
         BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_package_copy_key(object.logical_key()).map_err(|error| {
@@ -1825,7 +1825,7 @@ async fn load_semantic_candidates<T>(
     context: &ProtocolObjectContext,
     semantic_prefix: &str,
     semantic_hash: ObjectHash,
-    objects: Vec<ProtocolObjectLocator>,
+    objects: Vec<ImmutableObjectLocator>,
     coverage: ListingCoverage,
     validate: impl Fn(&[u8]) -> Result<T, StoreProtocolError>,
 ) -> Result<Option<VerifiedCopies<T>>, StoreObjectError> {
@@ -1904,12 +1904,12 @@ async fn load_singleton_candidates<T>(
     storage: &dyn SyncStorage,
     context: &ProtocolObjectContext,
     slot_prefix: &str,
-    objects: Vec<ProtocolObjectLocator>,
+    objects: Vec<ImmutableObjectLocator>,
     coverage: ListingCoverage,
     parse_hash: impl Fn(&str) -> Result<ObjectHash, StoreProtocolError>,
     validate: impl Fn(ObjectHash, &[u8]) -> Result<T, StoreProtocolError>,
 ) -> Result<Option<VerifiedCopies<T>>, StoreObjectError> {
-    let mut groups: BTreeMap<ObjectHash, (T, Vec<u8>, Vec<ProtocolObjectLocator>)> =
+    let mut groups: BTreeMap<ObjectHash, (T, Vec<u8>, Vec<ImmutableObjectLocator>)> =
         BTreeMap::new();
     for object in objects {
         let semantic_hash =
@@ -2212,7 +2212,7 @@ mod tests {
         let prefix = STORE_MEMBERSHIP_RESOLUTION_PREFIX;
         let semantic_prefix = membership_resolution_semantic_prefix(&reference);
         let locator = |key: String, provider: &str| {
-            ProtocolObjectLocator::new(
+            ImmutableObjectLocator::new(
                 key.clone(),
                 AppendedObject::from_provider(key, provider.to_string()),
             )

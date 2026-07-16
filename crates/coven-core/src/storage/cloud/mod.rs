@@ -18,8 +18,12 @@ use serde::{Deserialize, Serialize};
 #[cfg(any(test, feature = "test-utils"))]
 use sha2::{Digest, Sha256};
 use std::fmt;
+use std::path::Path;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+
+use futures_util::Stream;
 
 use crate::encryption::{ChunkSealer, CHUNK_SIZE};
 use crate::local_blob::PlaintextReader;
@@ -240,6 +244,33 @@ impl AppendedObject {
 pub struct AppendedListing {
     pub objects: Vec<AppendedObject>,
     pub coverage: ListingCoverage,
+}
+
+pub type CloudObjectStream =
+    Pin<Box<dyn Stream<Item = Result<Bytes, CloudHomeError>> + Send + 'static>>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum CloudFileReadError {
+    #[error(transparent)]
+    Source(#[from] CloudHomeError),
+    #[error("local destination failed: {0}")]
+    Local(String),
+}
+
+pub async fn write_cloud_object_stream(
+    destination: &Path,
+    stream: CloudObjectStream,
+) -> Result<u64, CloudFileReadError> {
+    crate::local_blob::write_byte_stream_atomic(destination, stream)
+        .await
+        .map_err(|error| match error {
+            crate::local_blob::ByteStreamWriteError::Source(error) => {
+                CloudFileReadError::Source(error)
+            }
+            crate::local_blob::ByteStreamWriteError::Local(error) => {
+                CloudFileReadError::Local(error)
+            }
+        })
 }
 
 impl CloudHomeError {
@@ -790,6 +821,21 @@ pub trait CloudHome: Send + Sync {
     /// Read the exact physical copy named by `object`.
     async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
         self.read(object.logical_key()).await
+    }
+
+    /// Stream the exact physical copy named by `object` into an atomically
+    /// committed local file. Providers must override this rather than routing
+    /// blob-size objects through [`Self::read_appended`].
+    async fn read_appended_to_file(
+        &self,
+        object: &AppendedObject,
+        _destination: &Path,
+    ) -> Result<(), CloudFileReadError> {
+        Err(CloudHomeError::Configuration(format!(
+            "cloud provider cannot stream exact appended object {:?}",
+            object.logical_key()
+        ))
+        .into())
     }
 
     /// Delete the exact physical copy named by `object`.

@@ -65,6 +65,9 @@ pub struct InMemoryCloudHome {
     corrupt_append_readback: Arc<AtomicUsize>,
     append_pause: Arc<Mutex<Option<AppendPause>>>,
     appended_listing_pause: Arc<Mutex<Option<ListingPause>>>,
+    appended_list_count: Arc<AtomicUsize>,
+    appended_full_read_count: Arc<AtomicUsize>,
+    appended_stream_read_count: Arc<AtomicUsize>,
     listing_coverage: Arc<Mutex<ListingCoverage>>,
     appended_delete_count: Arc<AtomicUsize>,
     fail_appended_delete_on: Arc<AtomicUsize>,
@@ -91,6 +94,9 @@ impl InMemoryCloudHome {
             corrupt_append_readback: Arc::new(AtomicUsize::new(0)),
             append_pause: Arc::new(Mutex::new(None)),
             appended_listing_pause: Arc::new(Mutex::new(None)),
+            appended_list_count: Arc::new(AtomicUsize::new(0)),
+            appended_full_read_count: Arc::new(AtomicUsize::new(0)),
+            appended_stream_read_count: Arc::new(AtomicUsize::new(0)),
             listing_coverage: Arc::new(Mutex::new(ListingCoverage::CompleteAtScan)),
             appended_delete_count: Arc::new(AtomicUsize::new(0)),
             fail_appended_delete_on: Arc::new(AtomicUsize::new(0)),
@@ -185,6 +191,22 @@ impl InMemoryCloudHome {
         self.append_count.load(Ordering::SeqCst)
     }
 
+    pub fn appended_list_count(&self) -> usize {
+        self.appended_list_count.load(Ordering::SeqCst)
+    }
+
+    pub fn appended_full_read_count(&self) -> usize {
+        self.appended_full_read_count.load(Ordering::SeqCst)
+    }
+
+    pub fn appended_stream_read_count(&self) -> usize {
+        self.appended_stream_read_count.load(Ordering::SeqCst)
+    }
+
+    pub fn appended_delete_count(&self) -> usize {
+        self.appended_delete_count.load(Ordering::SeqCst)
+    }
+
     pub fn set_listing_coverage(&self, coverage: ListingCoverage) {
         *self.listing_coverage.lock().unwrap() = coverage;
     }
@@ -242,6 +264,25 @@ impl InMemoryCloudHome {
             .iter()
             .find(|candidate| candidate.locator.logical_key() == logical_key)
             .map(|candidate| candidate.bytes.clone())
+    }
+
+    fn appended_bytes(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        if let Some(bytes) = self
+            .appended
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate.locator == *object)
+            .map(|candidate| candidate.bytes.clone())
+        {
+            return Ok(bytes);
+        }
+        self.writes
+            .lock()
+            .unwrap()
+            .get(object.logical_key())
+            .cloned()
+            .ok_or_else(|| CloudHomeError::NotFound(object.opaque_provider_id().to_string()))
     }
 
     /// Snapshot of the bytes at `key`, or `None` if absent. Cloned so the
@@ -532,6 +573,7 @@ impl CloudHome for InMemoryCloudHome {
     }
 
     async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        self.appended_list_count.fetch_add(1, Ordering::SeqCst);
         let pause = self.appended_listing_pause.lock().unwrap().clone();
         if let Some(pause) = pause {
             pause.reached.notify_one();
@@ -568,22 +610,21 @@ impl CloudHome for InMemoryCloudHome {
     }
 
     async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-        if let Some(bytes) = self
-            .appended
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|candidate| candidate.locator == *object)
-            .map(|candidate| candidate.bytes.clone())
-        {
-            return Ok(bytes);
-        }
-        self.writes
-            .lock()
-            .unwrap()
-            .get(object.logical_key())
-            .cloned()
-            .ok_or_else(|| CloudHomeError::NotFound(object.opaque_provider_id().to_string()))
+        self.appended_full_read_count.fetch_add(1, Ordering::SeqCst);
+        self.appended_bytes(object)
+    }
+
+    async fn read_appended_to_file(
+        &self,
+        object: &AppendedObject,
+        destination: &std::path::Path,
+    ) -> Result<(), super::CloudFileReadError> {
+        self.appended_stream_read_count
+            .fetch_add(1, Ordering::SeqCst);
+        let bytes = self.appended_bytes(object)?;
+        let stream = futures_util::stream::once(async move { Ok(bytes::Bytes::from(bytes)) });
+        super::write_cloud_object_stream(destination, Box::pin(stream)).await?;
+        Ok(())
     }
 
     async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
