@@ -1,0 +1,622 @@
+use serde::{Deserialize, Serialize};
+
+use crate::blob::locator::{BlobLocator, BlobLocatorError, RemoteAudience};
+use crate::encryption::KeyFingerprint;
+use crate::store_dir::validate_path_token;
+use crate::sync::circle::CircleId;
+use crate::sync::circle_control::CircleControlCoord;
+use crate::sync::store_commit::{ObjectHash, STORE_PROTOCOL_VERSION};
+use crate::{WriteId, WritePolicy};
+
+/// The Store or Circle whose exact package bytes carry a changeset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum PackageAudience {
+    Store,
+    Circle {
+        circle_id: CircleId,
+        control: CircleControlCoord,
+        key_fingerprint: KeyFingerprint,
+    },
+}
+
+impl PackageAudience {
+    pub fn remote_audience(&self) -> RemoteAudience {
+        match self {
+            Self::Store => RemoteAudience::Store,
+            Self::Circle { circle_id, .. } => RemoteAudience::Circle(*circle_id),
+        }
+    }
+}
+
+/// One declared row blob and the exact immutable locator committed beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RowBlobLocatorBinding {
+    table: String,
+    row_id: String,
+    row_stamp: String,
+    column: String,
+    locator: BlobLocator,
+}
+
+impl RowBlobLocatorBinding {
+    pub fn new(
+        table: impl Into<String>,
+        row_id: impl Into<String>,
+        row_stamp: impl Into<String>,
+        column: impl Into<String>,
+        locator: BlobLocator,
+    ) -> Result<Self, AudiencePackageError> {
+        let binding = Self {
+            table: table.into(),
+            row_id: row_id.into(),
+            row_stamp: row_stamp.into(),
+            column: column.into(),
+            locator,
+        };
+        binding.validate()?;
+        Ok(binding)
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn row_id(&self) -> &str {
+        &self.row_id
+    }
+
+    pub fn row_stamp(&self) -> &str {
+        &self.row_stamp
+    }
+
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
+    pub fn locator(&self) -> &BlobLocator {
+        &self.locator
+    }
+
+    fn sort_key(&self) -> (&str, &str, &str, &str) {
+        (&self.table, &self.row_id, &self.column, &self.row_stamp)
+    }
+
+    fn identity(&self) -> (&str, &str, &str) {
+        (&self.table, &self.row_id, &self.column)
+    }
+
+    fn validate(&self) -> Result<(), AudiencePackageError> {
+        for (field, value) in [
+            ("table", self.table.as_str()),
+            ("row_id", self.row_id.as_str()),
+            ("row_stamp", self.row_stamp.as_str()),
+            ("column", self.column.as_str()),
+        ] {
+            if value.is_empty() {
+                return Err(AudiencePackageError::EmptyBindingField(field));
+            }
+        }
+        self.locator
+            .validate()
+            .map_err(AudiencePackageError::Locator)
+    }
+}
+
+/// Canonical bytes for one audience partition of a Store write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudiencePackage {
+    version: u32,
+    store_root_hash: ObjectHash,
+    write_id: WriteId,
+    stream_id: String,
+    seq: u64,
+    schema_version: u32,
+    audience: PackageAudience,
+    changeset: Vec<u8>,
+    blob_bindings: Vec<RowBlobLocatorBinding>,
+}
+
+impl AudiencePackage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn store(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        stream_id: impl Into<String>,
+        seq: u64,
+        schema_version: u32,
+        changeset: Vec<u8>,
+        blob_bindings: Vec<RowBlobLocatorBinding>,
+    ) -> Result<Self, AudiencePackageError> {
+        Self::new(
+            store_root_hash,
+            write_id,
+            stream_id.into(),
+            seq,
+            schema_version,
+            PackageAudience::Store,
+            changeset,
+            blob_bindings,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn circle(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        stream_id: impl Into<String>,
+        seq: u64,
+        schema_version: u32,
+        circle_id: CircleId,
+        control: CircleControlCoord,
+        key_fingerprint: KeyFingerprint,
+        changeset: Vec<u8>,
+        blob_bindings: Vec<RowBlobLocatorBinding>,
+    ) -> Result<Self, AudiencePackageError> {
+        Self::new(
+            store_root_hash,
+            write_id,
+            stream_id.into(),
+            seq,
+            schema_version,
+            PackageAudience::Circle {
+                circle_id,
+                control,
+                key_fingerprint,
+            },
+            changeset,
+            blob_bindings,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        stream_id: String,
+        seq: u64,
+        schema_version: u32,
+        audience: PackageAudience,
+        changeset: Vec<u8>,
+        mut blob_bindings: Vec<RowBlobLocatorBinding>,
+    ) -> Result<Self, AudiencePackageError> {
+        blob_bindings.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+        let package = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            write_id,
+            stream_id,
+            seq,
+            schema_version,
+            audience,
+            changeset,
+            blob_bindings,
+        };
+        package.validate()?;
+        Ok(package)
+    }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, AudiencePackageError> {
+        let package: Self = serde_json::from_slice(bytes)
+            .map_err(|error| AudiencePackageError::Malformed(error.to_string()))?;
+        package.validate()?;
+        if package.to_bytes() != bytes {
+            return Err(AudiencePackageError::NonCanonicalEncoding);
+        }
+        Ok(package)
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("AudiencePackage serialization cannot fail")
+    }
+
+    pub fn store_root_hash(&self) -> ObjectHash {
+        self.store_root_hash
+    }
+
+    pub fn write_id(&self) -> &WriteId {
+        &self.write_id
+    }
+
+    pub fn stream_id(&self) -> &str {
+        &self.stream_id
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    pub fn audience(&self) -> &PackageAudience {
+        &self.audience
+    }
+
+    pub fn changeset(&self) -> &[u8] {
+        &self.changeset
+    }
+
+    pub fn blob_bindings(&self) -> &[RowBlobLocatorBinding] {
+        &self.blob_bindings
+    }
+
+    pub fn policy(&self) -> Option<WritePolicy> {
+        match &self.audience {
+            PackageAudience::Store => None,
+            PackageAudience::Circle { control, .. } => Some(match control {
+                CircleControlCoord::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
+                CircleControlCoord::Serial { .. } => WritePolicy::Serial,
+            }),
+        }
+    }
+
+    fn validate(&self) -> Result<(), AudiencePackageError> {
+        if self.version != STORE_PROTOCOL_VERSION {
+            return Err(AudiencePackageError::UnsupportedVersion(self.version));
+        }
+        validate_path_token(&self.stream_id)
+            .map_err(|error| AudiencePackageError::UnsafeStreamId(error.to_string()))?;
+        if self.seq == 0 {
+            return Err(AudiencePackageError::InvalidSequence(0));
+        }
+        if let PackageAudience::Circle { control, .. } = &self.audience {
+            control
+                .validate()
+                .map_err(|error| AudiencePackageError::InvalidCircleControl(error.to_string()))?;
+        }
+        let expected_audience = self.audience.remote_audience();
+        let mut previous_sort_key = None;
+        let mut identities = std::collections::BTreeSet::new();
+        for binding in &self.blob_bindings {
+            binding.validate()?;
+            if binding.locator.audience() != expected_audience {
+                return Err(AudiencePackageError::LocatorAudienceMismatch {
+                    table: binding.table.clone(),
+                    row_id: binding.row_id.clone(),
+                    expected: expected_audience.clone(),
+                    actual: binding.locator.audience(),
+                });
+            }
+            if let PackageAudience::Circle {
+                key_fingerprint, ..
+            } = &self.audience
+            {
+                if let Some(actual) = binding
+                    .locator
+                    .key_fingerprint()
+                    .filter(|actual| *actual != *key_fingerprint)
+                {
+                    return Err(AudiencePackageError::LocatorKeyFingerprintMismatch {
+                        table: binding.table.clone(),
+                        row_id: binding.row_id.clone(),
+                        expected: *key_fingerprint,
+                        actual,
+                    });
+                }
+            }
+            if !identities.insert(binding.identity()) {
+                return Err(AudiencePackageError::DuplicateBinding {
+                    table: binding.table.clone(),
+                    row_id: binding.row_id.clone(),
+                    row_stamp: binding.row_stamp.clone(),
+                    column: binding.column.clone(),
+                });
+            }
+            let sort_key = binding.sort_key();
+            if let Some(previous) = previous_sort_key {
+                if previous > sort_key {
+                    return Err(AudiencePackageError::UnsortedBindings);
+                }
+            }
+            previous_sort_key = Some(sort_key);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AudiencePackageError {
+    #[error("unsupported audience package version {0}")]
+    UnsupportedVersion(u32),
+    #[error("unsafe audience package stream id: {0}")]
+    UnsafeStreamId(String),
+    #[error("invalid audience package sequence {0}")]
+    InvalidSequence(u64),
+    #[error("invalid Circle control coordinate: {0}")]
+    InvalidCircleControl(String),
+    #[error("row blob binding has empty {0}")]
+    EmptyBindingField(&'static str),
+    #[error("row blob binding locator: {0}")]
+    Locator(#[from] BlobLocatorError),
+    #[error(
+        "row blob locator audience mismatch for {table:?}/{row_id:?}: expected {expected:?}, found {actual:?}"
+    )]
+    LocatorAudienceMismatch {
+        table: String,
+        row_id: String,
+        expected: RemoteAudience,
+        actual: RemoteAudience,
+    },
+    #[error(
+        "row blob locator key fingerprint mismatch for {table:?}/{row_id:?}: expected {expected}, found {actual:?}"
+    )]
+    LocatorKeyFingerprintMismatch {
+        table: String,
+        row_id: String,
+        expected: KeyFingerprint,
+        actual: KeyFingerprint,
+    },
+    #[error(
+        "duplicate row blob locator binding for {table:?}/{row_id:?}/{column:?} at {row_stamp:?}"
+    )]
+    DuplicateBinding {
+        table: String,
+        row_id: String,
+        row_stamp: String,
+        column: String,
+    },
+    #[error("row blob locator bindings are not canonically sorted")]
+    UnsortedBindings,
+    #[error("malformed audience package: {0}")]
+    Malformed(String),
+    #[error("audience package bytes are not canonical")]
+    NonCanonicalEncoding,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blob::locator::{BlobLocator, RemoteAudience};
+    use crate::sync::circle::CircleId;
+    use crate::sync::circle_control::CircleControlCoord;
+    use crate::sync::store_commit::ObjectHash;
+    use crate::{BlobScope, KeyFingerprint, WriteId, WritePolicy};
+
+    fn locator(id: &str, audience: RemoteAudience) -> BlobLocator {
+        BlobLocator::opaque(
+            "covers",
+            id,
+            "11".repeat(32),
+            audience,
+            BlobScope::Master,
+            KeyFingerprint::from_bytes([4; 8]),
+            7,
+            ObjectHash::digest(id.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    fn binding(row: &str, locator: BlobLocator) -> RowBlobLocatorBinding {
+        RowBlobLocatorBinding::new(
+            "covers",
+            row,
+            "0000000001000-0000-device",
+            "blob_id",
+            locator,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn store_package_sorts_bindings_and_round_trips_canonical_bytes() {
+        let package = AudiencePackage::store(
+            ObjectHash::digest(b"root"),
+            WriteId::from_generated("write-a".to_string()),
+            "device-a",
+            3,
+            8,
+            b"changeset".to_vec(),
+            vec![
+                binding("row-b", locator("b2c3-blob", RemoteAudience::Store)),
+                binding("row-a", locator("a1b2-blob", RemoteAudience::Store)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(package.blob_bindings()[0].row_id(), "row-a");
+        let bytes = package.to_bytes();
+        assert_eq!(AudiencePackage::parse(&bytes).unwrap(), package);
+        assert_eq!(bytes, package.to_bytes());
+    }
+
+    #[test]
+    fn store_package_has_literal_canonical_bytes() {
+        let root = ObjectHash::digest(b"root");
+        let package = AudiencePackage::store(
+            root,
+            WriteId::from_generated("write-a".to_string()),
+            "device-a",
+            3,
+            8,
+            b"cs".to_vec(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(package.to_bytes()).unwrap(),
+            format!(
+                "{{\"version\":1,\"store_root_hash\":\"{root}\",\"write_id\":\"write-a\",\"stream_id\":\"device-a\",\"seq\":3,\"schema_version\":8,\"audience\":\"store\",\"changeset\":[99,115],\"blob_bindings\":[]}}"
+            )
+        );
+    }
+
+    #[test]
+    fn package_refuses_duplicate_row_binding() {
+        let one = binding("row-a", locator("a1b2-blob", RemoteAudience::Store));
+        let two = binding("row-a", locator("b2c3-blob", RemoteAudience::Store));
+        assert!(matches!(
+            AudiencePackage::store(
+                ObjectHash::digest(b"root"),
+                WriteId::from_generated("write-a".to_string()),
+                "device-a",
+                3,
+                8,
+                Vec::new(),
+                vec![one, two],
+            ),
+            Err(AudiencePackageError::DuplicateBinding { .. })
+        ));
+    }
+
+    #[test]
+    fn package_refuses_locator_from_another_audience() {
+        let circle = CircleId::from_bytes([8; 16]);
+        assert!(matches!(
+            AudiencePackage::store(
+                ObjectHash::digest(b"root"),
+                WriteId::from_generated("write-a".to_string()),
+                "device-a",
+                3,
+                8,
+                Vec::new(),
+                vec![binding(
+                    "row-a",
+                    locator("a1b2-blob", RemoteAudience::Circle(circle))
+                )],
+            ),
+            Err(AudiencePackageError::LocatorAudienceMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn circle_package_refuses_browsable_locator() {
+        let circle = CircleId::from_bytes([8; 16]);
+        let browsable = BlobLocator::browsable(
+            "audio",
+            "abcd-track",
+            "22".repeat(32),
+            "Artist/Album/track.flac",
+            7,
+            ObjectHash::digest(b"track"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            AudiencePackage::circle(
+                ObjectHash::digest(b"root"),
+                WriteId::from_generated("write-a".to_string()),
+                "serial",
+                4,
+                8,
+                circle,
+                CircleControlCoord::Serial {
+                    author_pubkey: "22".repeat(32),
+                    generation: 4,
+                    control_hash: ObjectHash::digest(b"control"),
+                },
+                KeyFingerprint::from_bytes([4; 8]),
+                Vec::new(),
+                vec![binding("row-a", browsable)],
+            ),
+            Err(AudiencePackageError::LocatorAudienceMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn circle_package_refuses_locator_from_another_key() {
+        let circle = CircleId::from_bytes([8; 16]);
+        let wrong_key_locator = BlobLocator::opaque(
+            "covers",
+            "a1b2-blob",
+            "11".repeat(32),
+            RemoteAudience::Circle(circle),
+            BlobScope::Master,
+            KeyFingerprint::from_bytes([5; 8]),
+            7,
+            ObjectHash::digest(b"cover"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            AudiencePackage::circle(
+                ObjectHash::digest(b"root"),
+                WriteId::from_generated("write-a".to_string()),
+                "serial",
+                4,
+                8,
+                circle,
+                CircleControlCoord::Serial {
+                    author_pubkey: "22".repeat(32),
+                    generation: 4,
+                    control_hash: ObjectHash::digest(b"control"),
+                },
+                KeyFingerprint::from_bytes([4; 8]),
+                Vec::new(),
+                vec![binding("row-a", wrong_key_locator)],
+            ),
+            Err(AudiencePackageError::LocatorKeyFingerprintMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn package_rejects_unknown_shape_and_noncanonical_bytes() {
+        let package = AudiencePackage::store(
+            ObjectHash::digest(b"root"),
+            WriteId::from_generated("write-a".to_string()),
+            "device-a",
+            3,
+            8,
+            b"changeset".to_vec(),
+            Vec::new(),
+        )
+        .unwrap();
+        let bytes = package.to_bytes();
+
+        let mut unknown_field: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        unknown_field["unknown"] = serde_json::json!(true);
+        assert!(matches!(
+            AudiencePackage::parse(&serde_json::to_vec(&unknown_field).unwrap()),
+            Err(AudiencePackageError::Malformed(_))
+        ));
+
+        let mut unknown_variant: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        unknown_variant["audience"] = serde_json::json!({ "unknown": {} });
+        assert!(matches!(
+            AudiencePackage::parse(&serde_json::to_vec(&unknown_variant).unwrap()),
+            Err(AudiencePackageError::Malformed(_))
+        ));
+
+        let mut noncanonical = bytes;
+        noncanonical.push(b'\n');
+        assert_eq!(
+            AudiencePackage::parse(&noncanonical),
+            Err(AudiencePackageError::NonCanonicalEncoding)
+        );
+    }
+
+    #[test]
+    fn circle_package_binds_control_fingerprint_and_locator_audience() {
+        let circle = CircleId::from_bytes([8; 16]);
+        let package = AudiencePackage::circle(
+            ObjectHash::digest(b"root"),
+            WriteId::from_generated("write-a".to_string()),
+            "serial",
+            4,
+            8,
+            circle,
+            CircleControlCoord::Serial {
+                author_pubkey: "22".repeat(32),
+                generation: 4,
+                control_hash: ObjectHash::digest(b"control"),
+            },
+            KeyFingerprint::from_bytes([4; 8]),
+            b"circle changeset".to_vec(),
+            vec![binding(
+                "row-a",
+                locator("a1b2-blob", RemoteAudience::Circle(circle)),
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(package.policy(), Some(WritePolicy::Serial));
+        assert_eq!(
+            AudiencePackage::parse(&package.to_bytes()).unwrap(),
+            package
+        );
+    }
+}

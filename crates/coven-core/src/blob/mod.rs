@@ -102,6 +102,7 @@ pub mod delete;
 #[doc(hidden)]
 pub mod local_cleanup;
 pub mod local_files;
+pub mod locator;
 pub mod transition;
 pub mod upload;
 

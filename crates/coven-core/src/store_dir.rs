@@ -1,5 +1,5 @@
 use std::ops::Deref;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 use crate::config::{Config, ConfigError};
@@ -101,28 +101,17 @@ pub fn validate_path_token(token: &str) -> Result<(), PathTokenError> {
 /// Reject an untrusted `cloud_path` (the consumer's readable object key under the
 /// plain scheme, e.g. `"Artist - Album/cover.jpg"`) that could escape its
 /// namespace prefix in the bucket. Unlike a path token, an interior `/` is
-/// legitimate — the readable path is nested — but a `..` component, a leading
-/// separator (an absolute key), a `\`, or a NUL still escape or truncate, so they
-/// are refused. The `cloud_path` never feeds a local file path, only the cloud
-/// object key, so this guards the keyspace, not the disk.
+/// legitimate — the readable path is nested — but every segment still has to be
+/// a canonical path token. Empty, `.`, `..`, colon/platform-prefix, backslash,
+/// and NUL forms are refused before an object key is built. The `cloud_path`
+/// never feeds a local file path, only the cloud object key, so this guards the
+/// keyspace, not the disk.
 pub fn validate_cloud_path(cloud_path: &str) -> Result<(), PathTokenError> {
-    if cloud_path.is_empty() {
-        return Err(PathTokenError::Empty);
-    }
-    if cloud_path.contains('\0') {
-        return Err(PathTokenError::NulByte);
-    }
-    if cloud_path.contains('\\') {
-        return Err(PathTokenError::Separator);
-    }
     if cloud_path.starts_with('/') {
         return Err(PathTokenError::Separator);
     }
-    if Path::new(cloud_path)
-        .components()
-        .any(|c| c == Component::ParentDir)
-    {
-        return Err(PathTokenError::ParentDir);
+    for segment in cloud_path.split('/') {
+        validate_path_token(segment)?;
     }
     Ok(())
 }
@@ -521,8 +510,7 @@ mod tests {
     }
 
     /// A `cloud_path` is a readable object key, so an interior `/` is legitimate
-    /// (nested path), but a `..` component, a leading slash, a `\`, or a NUL still
-    /// escape its namespace prefix and are refused.
+    /// (nested path), but every component must itself be a canonical path token.
     #[test]
     fn validate_cloud_path_allows_nesting_but_rejects_escapes() {
         assert_eq!(validate_cloud_path("Artist - Album/cover.jpg"), Ok(()));
@@ -537,5 +525,11 @@ mod tests {
         );
         assert_eq!(validate_cloud_path("/abs"), Err(PathTokenError::Separator));
         assert_eq!(validate_cloud_path("a\\b"), Err(PathTokenError::Separator),);
+        assert_eq!(validate_cloud_path("a/./b"), Err(PathTokenError::CurDir));
+        assert_eq!(validate_cloud_path("a//b"), Err(PathTokenError::Empty));
+        assert_eq!(validate_cloud_path("a/b/"), Err(PathTokenError::Empty));
+        assert_eq!(validate_cloud_path("C:/b"), Err(PathTokenError::Colon));
+        assert_eq!(validate_cloud_path("a/C:b"), Err(PathTokenError::Colon));
+        assert_eq!(validate_cloud_path("a/b\0c"), Err(PathTokenError::NulByte));
     }
 }
