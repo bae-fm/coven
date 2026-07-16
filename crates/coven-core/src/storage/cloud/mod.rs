@@ -734,6 +734,11 @@ pub trait PartSink: Send {
         is_last: bool,
     ) -> Result<(), CloudHomeError>;
 
+    /// Cancel the open upload and remove its unpublished provider state. The
+    /// sink remains armed until cancellation succeeds, so dropping it after an
+    /// error retries cleanup and terminates the process if cleanup still fails.
+    async fn abort(&mut self) -> Result<(), CloudHomeError>;
+
     /// Commit the upload (e.g. S3 `complete_multipart_upload`); a no-op where the
     /// last `send_part` already committed.
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError>;
@@ -764,7 +769,21 @@ async fn write_blob<C: CloudHome + ?Sized>(
     let part_size = sink.part_size();
     let total = body.len();
     let mut offset = 0u64;
-    while let Some(part) = body.next_part(part_size).await? {
+    loop {
+        let part = match body.next_part(part_size).await {
+            Ok(Some(part)) => part,
+            Ok(None) => break,
+            Err(operation) => {
+                let cleanup = sink.abort().await;
+                return Err(match cleanup {
+                    Ok(()) => operation,
+                    Err(cleanup) => CloudHomeError::CleanupFailed {
+                        operation: Box::new(operation),
+                        cleanup: Box::new(cleanup),
+                    },
+                });
+            }
+        };
         let n = part.len() as u64;
         let is_last = offset + n >= total;
         sink.send_part(part, offset, is_last).await?;
@@ -1132,6 +1151,9 @@ mod streaming_tests {
                 "parts arrive in order at the running offset"
             );
             self.buf.extend_from_slice(&part);
+            Ok(())
+        }
+        async fn abort(&mut self) -> Result<(), CloudHomeError> {
             Ok(())
         }
         async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {

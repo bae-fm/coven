@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 use crate::id_provider::{IdRef, UuidProvider};
 
@@ -324,6 +323,75 @@ where
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| CloudHomeError::Transport(format!("spawn_blocking failed: {e}")))?
+}
+
+struct BlockingState<T> {
+    result: std::sync::Mutex<Option<std::thread::Result<T>>>,
+    ready: std::sync::Condvar,
+    notify: tokio::sync::Notify,
+}
+
+struct BlockingCompletion<T> {
+    state: Arc<BlockingState<T>>,
+    consumed: bool,
+}
+
+impl<T> Drop for BlockingCompletion<T> {
+    fn drop(&mut self) {
+        if self.consumed {
+            return;
+        }
+        let mut result = self.state.result.lock().expect("lock blocking result");
+        while result.is_none() {
+            result = self
+                .state
+                .ready
+                .wait(result)
+                .expect("wait for blocking result");
+        }
+    }
+}
+
+async fn cancellation_safe_blocking<T, F>(f: F) -> Result<T, CloudHomeError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let state = Arc::new(BlockingState {
+        result: std::sync::Mutex::new(None),
+        ready: std::sync::Condvar::new(),
+        notify: tokio::sync::Notify::new(),
+    });
+    let worker_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        worker_state
+            .result
+            .lock()
+            .expect("lock blocking result")
+            .replace(result);
+        worker_state.ready.notify_all();
+        worker_state.notify.notify_one();
+    });
+    let mut completion = BlockingCompletion {
+        state,
+        consumed: false,
+    };
+    let result = loop {
+        let notified = completion.state.notify.notified();
+        if let Some(result) = completion
+            .state
+            .result
+            .lock()
+            .expect("lock blocking result")
+            .take()
+        {
+            break result;
+        }
+        notified.await;
+    };
+    completion.consumed = true;
+    result.map_err(|_| CloudHomeError::Transport("CloudKit blocking task panicked".to_string()))
 }
 
 /// If a key ends with CloudKit layout metadata, strip that suffix to get the
@@ -1083,50 +1151,80 @@ struct CloudKitPartSink {
     index: usize,
     total_len: usize,
     written_len: usize,
+    settled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CloudKitPartSink {
-    /// Best-effort deletion of the part records this upload wrote, called when a
-    /// part write or the manifest write fails — before any manifest is published.
-    /// Without it a failed upload leaves tokened part records with no manifest: an
-    /// orphan `list` would report (as a base key) but `read` cannot assemble. Only
-    /// this upload's own token is deleted, so a prior object at the same key (which
-    /// stays readable until its manifest is replaced) is untouched.
-    async fn abort(&self) {
+    async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        if self.settled.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
         let ops = self.ops.clone();
         let scope = self.scope.clone();
         let key = self.key.clone();
         let upload_id = self.upload_id.clone();
         let written_parts = self.index;
-        let result = blocking(move || {
+        cancellation_safe_blocking(move || {
             for i in 0..written_parts {
                 delete_single_record(&*ops, &scope, &chunk_part_key(&key, &upload_id, i))?;
             }
-            Ok(())
+            Ok::<(), CloudHomeError>(())
         })
-        .await;
-        if let Err(e) = result {
-            warn!(
-                "Failed to abort CloudKit multipart upload for {}: {e}",
-                self.key
-            );
-        }
+        .await??;
+        self.settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     /// Write one record of this upload, aborting the whole upload on failure —
     /// the shape both the part writes and the manifest write share.
     async fn write_record_or_abort(
-        &self,
+        &mut self,
         record_key: String,
         data: Vec<u8>,
     ) -> Result<(), CloudHomeError> {
         let ops = self.ops.clone();
         let scope = self.scope.clone();
-        if let Err(e) = blocking(move || ops.write_record(&scope, &record_key, data)).await {
-            self.abort().await;
-            return Err(e);
+        if let Err(operation) =
+            cancellation_safe_blocking(move || ops.write_record(&scope, &record_key, data)).await?
+        {
+            let cleanup = self.abort().await;
+            return Err(combine_cloudkit_cleanup_failure(operation, cleanup));
         }
         Ok(())
+    }
+}
+
+fn combine_cloudkit_cleanup_failure(
+    operation: CloudHomeError,
+    cleanup: Result<(), CloudHomeError>,
+) -> CloudHomeError {
+    match cleanup {
+        Ok(()) => operation,
+        Err(cleanup) => CloudHomeError::CleanupFailed {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup),
+        },
+    }
+}
+
+impl Drop for CloudKitPartSink {
+    fn drop(&mut self) {
+        if self.settled.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        for index in 0..self.index {
+            let part_key = chunk_part_key(&self.key, &self.upload_id, index);
+            if let Err(error) = delete_single_record(&*self.ops, &self.scope, &part_key) {
+                tracing::error!(
+                    %error,
+                    key = %self.key,
+                    upload_id = %self.upload_id,
+                    "CloudKit cancellation failed to discard multipart part"
+                );
+                std::process::abort();
+            }
+        }
     }
 }
 
@@ -1149,19 +1247,37 @@ impl super::PartSink for CloudKitPartSink {
         self.write_record_or_abort(chunk_key, part.to_vec()).await
     }
 
-    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
+    async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        CloudKitPartSink::abort(self).await
+    }
+
+    async fn finish(mut self: Box<Self>) -> Result<(), CloudHomeError> {
         let manifest = ChunkManifest::new(self.total_len, self.upload_id.clone());
         if self.index != manifest.part_count || self.written_len != manifest.total_len {
-            self.abort().await;
-            return Err(CloudHomeError::Transport(format!(
+            let operation = CloudHomeError::Transport(format!(
                 "CloudKit multipart {} wrote {} parts/{} bytes, expected {} parts/{} bytes",
                 self.key, self.index, self.written_len, manifest.part_count, manifest.total_len
-            )));
+            ));
+            let cleanup = self.abort().await;
+            return Err(combine_cloudkit_cleanup_failure(operation, cleanup));
         }
         let manifest_key = chunk_manifest_key(&self.key);
         let manifest_data = encode_chunk_manifest(manifest);
-        self.write_record_or_abort(manifest_key, manifest_data)
-            .await?;
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let settled = self.settled.clone();
+        if let Err(operation) = cancellation_safe_blocking(move || {
+            let result = ops.write_record(&scope, &manifest_key, manifest_data);
+            if result.is_ok() {
+                settled.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            result
+        })
+        .await?
+        {
+            let cleanup = self.abort().await;
+            return Err(combine_cloudkit_cleanup_failure(operation, cleanup));
+        }
 
         // The manifest is published, so the object is now readable. The remaining
         // steps only clean up records the previous object left; their failure fails
@@ -1215,6 +1331,7 @@ impl CloudHome for CloudKitCloudHome {
             index: 0,
             total_len,
             written_len: 0,
+            settled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }))
     }
 
@@ -1688,11 +1805,18 @@ mod tests {
         DeleteVersions(Vec<String>),
     }
 
+    struct PausedWrite {
+        key: String,
+        stored: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    }
+
     struct MockCloudKitOps {
         store: Mutex<HashMap<(CloudKitScope, String), Vec<u8>>>,
         versions: Mutex<HashMap<(CloudKitScope, String), u64>>,
         calls: Mutex<Vec<MockCall>>,
         fail_deletes: Mutex<HashSet<String>>,
+        fail_delete_once: Mutex<HashMap<String, usize>>,
         fail_writes: Mutex<HashSet<String>>,
         staged_batches: Mutex<HashMap<String, Vec<CloudKitRecordCreate>>>,
         next_batch: AtomicUsize,
@@ -1701,6 +1825,7 @@ mod tests {
         lose_commit_response: AtomicBool,
         return_wrong_commit_keys: AtomicBool,
         scripted_change_pages: Mutex<Option<VecDeque<CloudKitRecordChangesPage>>>,
+        pause_write_after_store: Mutex<Option<PausedWrite>>,
         record_exists_calls: AtomicUsize,
         grant_share_calls: AtomicUsize,
         revoke_share_calls: AtomicUsize,
@@ -1714,6 +1839,7 @@ mod tests {
                 versions: Mutex::new(HashMap::new()),
                 calls: Mutex::new(Vec::new()),
                 fail_deletes: Mutex::new(HashSet::new()),
+                fail_delete_once: Mutex::new(HashMap::new()),
                 fail_writes: Mutex::new(HashSet::new()),
                 staged_batches: Mutex::new(HashMap::new()),
                 next_batch: AtomicUsize::new(0),
@@ -1722,6 +1848,7 @@ mod tests {
                 lose_commit_response: AtomicBool::new(false),
                 return_wrong_commit_keys: AtomicBool::new(false),
                 scripted_change_pages: Mutex::new(None),
+                pause_write_after_store: Mutex::new(None),
                 record_exists_calls: AtomicUsize::new(0),
                 grant_share_calls: AtomicUsize::new(0),
                 revoke_share_calls: AtomicUsize::new(0),
@@ -1739,6 +1866,13 @@ mod tests {
 
         fn fail_delete(&self, key: &str) {
             self.fail_deletes.lock().unwrap().insert(key.to_string());
+        }
+
+        fn fail_next_delete(&self, key: &str) {
+            self.fail_delete_once
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), 1);
         }
 
         fn fail_write(&self, key: &str) {
@@ -1759,6 +1893,25 @@ mod tests {
 
         fn script_change_pages(&self, pages: Vec<CloudKitRecordChangesPage>) {
             *self.scripted_change_pages.lock().unwrap() = Some(pages.into());
+        }
+
+        fn pause_write_after_store(
+            &self,
+            key: &str,
+        ) -> (Arc<std::sync::Barrier>, Arc<std::sync::Barrier>) {
+            let stored = Arc::new(std::sync::Barrier::new(2));
+            let release = Arc::new(std::sync::Barrier::new(2));
+            let previous = self
+                .pause_write_after_store
+                .lock()
+                .unwrap()
+                .replace(PausedWrite {
+                    key: key.to_string(),
+                    stored: stored.clone(),
+                    release: release.clone(),
+                });
+            assert!(previous.is_none(), "a CloudKit write is already paused");
+            (stored, release)
         }
     }
 
@@ -1781,6 +1934,19 @@ mod tests {
             let mut versions = self.versions.lock().unwrap();
             let next = versions.get(&record).copied().unwrap_or(0) + 1;
             versions.insert(record, next);
+            drop(versions);
+            let pause = {
+                let mut pause = self.pause_write_after_store.lock().unwrap();
+                match pause.as_ref() {
+                    Some(paused) if paused.key == key => pause.take(),
+                    _ => None,
+                }
+            };
+            if let Some(paused) = pause {
+                assert_eq!(paused.key, key);
+                paused.stored.wait();
+                paused.release.wait();
+            }
             Ok(())
         }
 
@@ -1823,6 +1989,12 @@ mod tests {
                 .push(MockCall::Delete(key.to_string()));
             if self.fail_deletes.lock().unwrap().contains(key) {
                 return Err(CloudHomeError::Transport(format!("delete {key} failed")));
+            }
+            if let Some(remaining) = self.fail_delete_once.lock().unwrap().get_mut(key) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    return Err(CloudHomeError::Transport(format!("delete {key} failed")));
+                }
             }
             self.store
                 .lock()
@@ -2227,6 +2399,168 @@ mod tests {
             data,
         )
         .unwrap();
+    }
+
+    struct FailingBodyReader {
+        emitted: bool,
+    }
+
+    #[async_trait]
+    impl crate::local_blob::PlaintextChunkReader for FailingBodyReader {
+        async fn next_chunk(
+            &mut self,
+            _max: usize,
+        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+            if !self.emitted {
+                self.emitted = true;
+                return Ok(vec![7; CHUNK_SIZE]);
+            }
+            Err(crate::local_blob::PlaintextChunkError::Local(
+                "injected body failure".to_string(),
+            ))
+        }
+    }
+
+    struct PausedBodyReader {
+        emitted: bool,
+        waiting: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl crate::local_blob::PlaintextChunkReader for PausedBodyReader {
+        async fn next_chunk(
+            &mut self,
+            _max: usize,
+        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+            if !self.emitted {
+                self.emitted = true;
+                return Ok(vec![7; CHUNK_SIZE]);
+            }
+            self.waiting.notify_one();
+            self.release.notified().await;
+            Ok(vec![8])
+        }
+    }
+
+    #[tokio::test]
+    async fn mutable_body_failure_reports_cleanup_failure_and_drop_retries_cleanup() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let part_key = chunk_part_key("mutable/body-failure", "cloudkit-upload-0", 0);
+        ops.fail_next_delete(&part_key);
+        let reader = crate::local_blob::PlaintextReader::from_test_reader(FailingBodyReader {
+            emitted: false,
+        });
+        let body = BlobBody::from_test_reader((CHUNK_SIZE + 1) as u64, reader);
+
+        let error = home
+            .write("mutable/body-failure", body, &no_progress())
+            .await
+            .expect_err("body failure must report failed cleanup");
+
+        assert!(
+            matches!(error, CloudHomeError::CleanupFailed { .. }),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("injected body failure"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("delete"), "{error}");
+        assert!(!ops
+            .record_exists(&CloudKitScope::Private, &part_key)
+            .expect("inspect canceled part"));
+    }
+
+    #[tokio::test]
+    async fn canceling_mutable_write_removes_every_staged_part() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let waiting = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let reader = crate::local_blob::PlaintextReader::from_test_reader(PausedBodyReader {
+            emitted: false,
+            waiting: waiting.clone(),
+            release: release.clone(),
+        });
+        let body = BlobBody::from_test_reader((CHUNK_SIZE + 1) as u64, reader);
+        let write =
+            tokio::spawn(async move { home.write("mutable/cancel", body, &no_progress()).await });
+        waiting.notified().await;
+
+        write.abort();
+        assert!(write.await.expect_err("write task canceled").is_cancelled());
+        release.notify_waiters();
+
+        let part_key = chunk_part_key("mutable/cancel", "cloudkit-upload-0", 0);
+        assert!(!ops
+            .record_exists(&CloudKitScope::Private, &part_key)
+            .expect("inspect canceled part"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_after_mutable_manifest_publish_preserves_the_committed_layout() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let key = "mutable/published";
+        let data = vec![9; CHUNK_SIZE + 1];
+        let (stored, release) = ops.pause_write_after_store(&chunk_manifest_key(key));
+        let write_home = home.clone();
+        let write_data = data.clone();
+        let write = tokio::spawn(async move {
+            write_home
+                .write(key, BlobBody::from_bytes(write_data), &no_progress())
+                .await
+        });
+        tokio::task::spawn_blocking(move || stored.wait())
+            .await
+            .expect("wait for manifest publication");
+
+        write.abort();
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .expect("release manifest publication");
+        assert!(write.await.expect_err("write task canceled").is_cancelled());
+
+        assert_eq!(home.read(key).await.expect("read committed layout"), data);
+        assert!(ops
+            .record_exists(&CloudKitScope::Private, &chunk_manifest_key(key))
+            .expect("inspect committed manifest"));
+        assert_eq!(
+            ops.list_records(&CloudKitScope::Private, &format!("{key}.part"))
+                .expect("inspect committed parts")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn mutable_cancellation_cleanup_failure_terminates_the_process() {
+        const CHILD: &str = "COVEN_CLOUDKIT_MUTABLE_CANCEL_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let runtime = tokio::runtime::Runtime::new().expect("build child runtime");
+            runtime.block_on(async {
+                let (home, ops) = make_cloud_home_with_ops();
+                let mut sink = home
+                    .open_multipart("mutable/cancel", (CHUNK_SIZE + 1) as u64)
+                    .await
+                    .expect("open CloudKit multipart upload");
+                sink.send_part(Bytes::from(vec![7; CHUNK_SIZE]), 0, false)
+                    .await
+                    .expect("write first multipart part");
+                ops.fail_delete(&chunk_part_key("mutable/cancel", "cloudkit-upload-0", 0));
+                drop(sink);
+            });
+            std::process::exit(0);
+        }
+
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("locate CloudKit test executable"),
+        )
+        .arg("mutable_cancellation_cleanup_failure_terminates_the_process")
+        .arg("--nocapture")
+        .env(CHILD, "1")
+        .status()
+        .expect("run CloudKit mutable cancellation subprocess");
+        assert!(!status.success(), "cancellation subprocess survived");
     }
 
     #[tokio::test]

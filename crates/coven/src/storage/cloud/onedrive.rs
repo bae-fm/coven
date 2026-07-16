@@ -203,7 +203,7 @@ impl OneDriveCloudHome {
             Ok(response) => response,
             Err(operation) => {
                 return match self.resolve_item_by_path(key).await {
-                    Ok(Some(object)) => Ok(object),
+                    Ok(Some(_)) => Err(CloudHomeError::AlreadyExists(key.to_string())),
                     Ok(None) => Err(operation),
                     Err(cleanup) => Err(CloudHomeError::CleanupFailed {
                         operation: Box::new(operation),
@@ -227,7 +227,7 @@ impl OneDriveCloudHome {
                     "commit append {key}: read response: {operation}"
                 ));
                 return match self.resolve_item_by_path(key).await {
-                    Ok(Some(object)) => Ok(object),
+                    Ok(Some(_)) => Err(CloudHomeError::AlreadyExists(key.to_string())),
                     Ok(None) => Err(operation),
                     Err(cleanup) => Err(CloudHomeError::CleanupFailed {
                         operation: Box::new(operation),
@@ -237,6 +237,35 @@ impl OneDriveCloudHome {
             }
         };
         parse_onedrive_appended_object(key, &response_body)
+    }
+
+    async fn verify_appended_object(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        let item_id = object.opaque_provider_id();
+        let response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .get(self.item_id_url(item_id))
+                    .bearer_auth(token)
+                    .query(&[("$select", "id,name,parentReference,deleted,file")])
+            })
+            .await?;
+        let response = ensure_ok(response, "verify exact OneDrive item", NotFound::Status).await?;
+        let metadata: serde_json::Value =
+            http::ok_json(response, "parse exact OneDrive item metadata").await?;
+        let expected_name = encode_key(object.logical_key());
+        let matches = metadata["id"].as_str() == Some(item_id)
+            && metadata["name"].as_str() == Some(expected_name.as_str())
+            && metadata["parentReference"]["id"].as_str() == Some(self.folder_id.as_str())
+            && metadata["deleted"].is_null()
+            && metadata["file"].is_object();
+        if !matches {
+            return Err(CloudHomeError::Transport(format!(
+                "exact OneDrive locator for {} does not identify item {item_id} named {expected_name} in folder {}",
+                object.logical_key(), self.folder_id
+            )));
+        }
+        Ok(())
     }
 
     async fn list_appended_objects(
@@ -601,6 +630,7 @@ impl OneDriveCloudHome {
     }
 
     async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        self.verify_appended_object(object).await?;
         let response = self
             .session
             .api_call(|token| {
@@ -627,6 +657,7 @@ impl OneDriveCloudHome {
         object: &super::AppendedObject,
         destination: &std::path::Path,
     ) -> Result<(), super::CloudFileReadError> {
+        self.verify_appended_object(object).await?;
         let response = self
             .session
             .api_call(|token| {
@@ -644,6 +675,7 @@ impl OneDriveCloudHome {
     }
 
     async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        self.verify_appended_object(object).await?;
         let response = self
             .session
             .api_call(|token| {
@@ -973,7 +1005,9 @@ mod tests {
                 Router::new().fallback(append_endpoint).with_state(state),
             )
             .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
+                shutdown_rx
+                    .await
+                    .expect("receive OneDrive endpoint shutdown");
             })
             .await
             .expect("OneDrive endpoint failed");
@@ -1012,15 +1046,150 @@ mod tests {
         assert!(commit["@microsoft.graph.sourceUrl"]
             .as_str()
             .is_some_and(|url| url.ends_with("/upload/session")));
-        let _ = shutdown.send(());
+        drop(requests);
+        shutdown.send(()).expect("shut down OneDrive endpoint");
+    }
+
+    async fn exact_item_endpoint(request: Request<Body>) -> Response<Body> {
+        let method = request.method().as_str();
+        let path = request.uri().path();
+        if method == "GET" && path.ends_with("/items/item-1") {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"id":"item-1","name":"{}","parentReference":{{"id":"folder456"}},"file":{{}}}}"#,
+                    encode_key("protocol/copy")
+                )))
+                .expect("build exact metadata response");
+        }
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from(format!("unexpected request: {method} {path}")))
+            .expect("build unexpected response")
+    }
+
+    #[tokio::test]
+    async fn exact_operations_reject_a_onedrive_id_bound_to_another_logical_key() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind OneDrive endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().fallback(exact_item_endpoint))
+                .await
+                .expect("OneDrive endpoint failed");
+        });
+        let home = home().with_graph_api(endpoint);
+        let object =
+            AppendedObject::from_provider("protocol/other".to_string(), "item-1".to_string())
+                .expect("build mismatched OneDrive locator");
+
+        let read_error = home
+            .read_appended(&object)
+            .await
+            .expect_err("mismatched OneDrive read must fail");
+        assert!(
+            read_error.to_string().contains("does not identify"),
+            "{read_error}"
+        );
+        let delete_error = home
+            .delete_appended(&object)
+            .await
+            .expect_err("mismatched OneDrive delete must fail");
+        assert!(
+            delete_error.to_string().contains("does not identify"),
+            "{delete_error}"
+        );
+        server.abort();
+    }
+
+    async fn ambiguous_commit_endpoint(
+        State(endpoint): State<String>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        let method = request.method().as_str();
+        let path = request.uri().path();
+        if method == "POST" && path.ends_with("/createUploadSession") {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"uploadUrl":"{endpoint}/upload/session"}}"#
+                )))
+                .expect("build upload session response");
+        }
+        if method == "PUT" && path == "/upload/session" {
+            return Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .body(Body::from(r#"{"nextExpectedRanges":[]}"#))
+                .expect("build upload response");
+        }
+        if method == "PUT" && path.contains("/items/folder456:/") {
+            let stream = futures_util::stream::iter([
+                Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from_static(b"{")),
+                Err(std::io::Error::other("commit response interrupted")),
+            ]);
+            return Response::builder()
+                .status(StatusCode::CREATED)
+                .body(Body::from_stream(stream))
+                .expect("build interrupted commit response");
+        }
+        if method == "GET" && path.contains("/items/folder456:/") {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"id":"pre-existing-item"}"#))
+                .expect("build occupant response");
+        }
+        if method == "DELETE" && path == "/upload/session" {
+            return Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .expect("build cancellation response");
+        }
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from(format!("unexpected request: {method} {path}")))
+            .expect("build unexpected response")
+    }
+
+    #[tokio::test]
+    async fn ambiguous_commit_does_not_adopt_the_current_path_occupant() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind OneDrive endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let app = Router::new()
+            .fallback(ambiguous_commit_endpoint)
+            .with_state(endpoint.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("OneDrive endpoint failed");
+        });
+        let home = home().with_graph_api(endpoint);
+
+        let error = home
+            .append_object(
+                "protocol/copy",
+                BlobBody::from_bytes(b"copy-bytes".to_vec()),
+                &super::super::no_progress(),
+            )
+            .await
+            .expect_err("ambiguous commit must not adopt a path occupant");
+
+        assert!(matches!(error, CloudHomeError::AlreadyExists(key) if key == "protocol/copy"));
+        server.abort();
     }
 
     async fn repeated_delta_link_endpoint(request: Request<Body>) -> Response<Body> {
         let authority = request
             .headers()
             .get("host")
-            .and_then(|value| value.to_str().ok())
-            .expect("host header");
+            .expect("host header")
+            .to_str()
+            .expect("host header is UTF-8");
         Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")

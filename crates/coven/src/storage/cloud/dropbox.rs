@@ -182,17 +182,80 @@ impl DropboxCloudHome {
 
     async fn send_exact_read(
         &self,
-        provider_id: &str,
+        object: &AppendedObject,
     ) -> Result<reqwest::Response, CloudHomeError> {
+        let provider_id = object.opaque_provider_id();
         let api_arg = dropbox_api_arg(&serde_json::json!({"path": provider_id}));
-        self.session
+        let response = self
+            .session
             .api_call(|token| {
                 self.client()
                     .post(format!("{}/files/download", self.content_base))
                     .bearer_auth(token)
                     .header("Dropbox-API-Arg", &api_arg)
             })
-            .await
+            .await?;
+        let response = ensure_ok(response, "read exact Dropbox file", self.not_found()).await?;
+        let metadata = response
+            .headers()
+            .get("Dropbox-API-Result")
+            .ok_or_else(|| {
+                CloudHomeError::Transport(format!(
+                    "exact Dropbox read for {} omitted Dropbox-API-Result",
+                    object.logical_key()
+                ))
+            })?
+            .to_str()
+            .map_err(|error| {
+                CloudHomeError::Transport(format!(
+                    "exact Dropbox read for {} returned invalid metadata: {error}",
+                    object.logical_key()
+                ))
+            })?;
+        let metadata: serde_json::Value = serde_json::from_str(metadata).map_err(|error| {
+            CloudHomeError::Transport(format!(
+                "exact Dropbox read for {} returned malformed metadata: {error}",
+                object.logical_key()
+            ))
+        })?;
+        self.validate_appended_metadata(object, &metadata)?;
+        Ok(response)
+    }
+
+    fn validate_appended_metadata(
+        &self,
+        object: &AppendedObject,
+        metadata: &serde_json::Value,
+    ) -> Result<(), CloudHomeError> {
+        let expected_path = self.full_path(object.logical_key());
+        let matches = metadata[".tag"].as_str() == Some("file")
+            && metadata["id"].as_str() == Some(object.opaque_provider_id())
+            && metadata["path_display"].as_str() == Some(expected_path.as_str());
+        if !matches {
+            return Err(CloudHomeError::Transport(format!(
+                "exact Dropbox locator for {} does not identify {} at {expected_path}",
+                object.logical_key(),
+                object.opaque_provider_id()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn verify_appended_object(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        let body = serde_json::json!({"path": object.opaque_provider_id()});
+        let response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .post(format!("{}/files/get_metadata", self.api_base))
+                    .bearer_auth(token)
+                    .json(&body)
+            })
+            .await?;
+        let response = ensure_ok(response, "verify exact Dropbox file", self.not_found()).await?;
+        let metadata: serde_json::Value =
+            http::ok_json(response, "parse exact Dropbox metadata").await?;
+        self.validate_appended_metadata(object, &metadata)
     }
 
     /// Call `share_folder` and resolve the shared_folder_id, handling both
@@ -631,6 +694,10 @@ impl super::PartSink for DropboxSessionSink<'_> {
         Ok(())
     }
 
+    async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        Ok(())
+    }
+
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
         Ok(())
     }
@@ -997,8 +1064,7 @@ impl DropboxCloudHome {
     }
 
     async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-        let response = self.send_exact_read(object.opaque_provider_id()).await?;
-        let response = ensure_ok(response, "read exact Dropbox file", self.not_found()).await?;
+        let response = self.send_exact_read(object).await?;
         http::ok_bytes(response, "read exact Dropbox body").await
     }
 
@@ -1011,12 +1077,12 @@ impl DropboxCloudHome {
         object: &super::AppendedObject,
         destination: &std::path::Path,
     ) -> Result<(), super::CloudFileReadError> {
-        let response = self.send_exact_read(object.opaque_provider_id()).await?;
-        let response = ensure_ok(response, "read exact Dropbox file", self.not_found()).await?;
+        let response = self.send_exact_read(object).await?;
         super::oauth_rest::response_to_file(response, destination, "read exact Dropbox body").await
     }
 
     async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        self.verify_appended_object(object).await?;
         let body = serde_json::json!({"path": object.opaque_provider_id()});
         let response = self
             .session
@@ -1237,11 +1303,12 @@ mod tests {
         request: Request<Body>,
     ) -> Response<Body> {
         let path = request.uri().path().to_string();
-        let api_arg = request
-            .headers()
-            .get("Dropbox-API-Arg")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
+        let api_arg = request.headers().get("Dropbox-API-Arg").map(|value| {
+            value
+                .to_str()
+                .expect("Dropbox-API-Arg is UTF-8")
+                .to_string()
+        });
         let body = to_bytes(request.into_body(), usize::MAX)
             .await
             .expect("read request body")
@@ -1263,8 +1330,29 @@ mod tests {
                 .expect("build upload response"),
             "/files/download" => Response::builder()
                 .status(StatusCode::OK)
+                .header(
+                    "Dropbox-API-Result",
+                    serde_json::json!({
+                        ".tag": "file",
+                        "id": "id:copy",
+                        "path_display": "/Apps/your-app/my-store/protocol/copy",
+                    })
+                    .to_string(),
+                )
                 .body(Body::from("copy-bytes"))
                 .expect("build download response"),
+            "/files/get_metadata" => Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        ".tag": "file",
+                        "id": "id:copy",
+                        "path_display": "/Apps/your-app/my-store/protocol/copy",
+                    })
+                    .to_string(),
+                ))
+                .expect("build metadata response"),
             "/files/delete_v2" => Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/json")
@@ -1294,7 +1382,9 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
+                    shutdown_rx
+                        .await
+                        .expect("receive Dropbox endpoint shutdown");
                 })
                 .await
                 .expect("Dropbox endpoint failed");
@@ -1327,7 +1417,7 @@ mod tests {
             .expect("delete exact copy");
 
         let requests = requests.lock().expect("lock requests");
-        assert_eq!(requests.len(), 3, "{requests:?}");
+        assert_eq!(requests.len(), 4, "{requests:?}");
         let upload_arg: serde_json::Value = serde_json::from_str(
             requests[0]
                 .api_arg
@@ -1348,10 +1438,47 @@ mod tests {
         )
         .expect("parse read arg");
         assert_eq!(read_arg["path"], "id:copy");
+        let metadata_body: serde_json::Value =
+            serde_json::from_slice(&requests[2].body).expect("parse metadata body");
+        assert_eq!(requests[2].path, "/files/get_metadata");
+        assert_eq!(metadata_body["path"], "id:copy");
         let delete_body: serde_json::Value =
-            serde_json::from_slice(&requests[2].body).expect("parse delete body");
+            serde_json::from_slice(&requests[3].body).expect("parse delete body");
         assert_eq!(delete_body["path"], "id:copy");
-        let _ = shutdown.send(());
+        drop(requests);
+        shutdown.send(()).expect("shut down Dropbox endpoint");
+    }
+
+    #[tokio::test]
+    async fn exact_operations_reject_a_dropbox_id_bound_to_another_logical_key() {
+        let (home, requests, shutdown) = immutable_copy_test_home().await;
+        let object =
+            AppendedObject::from_provider("protocol/other".to_string(), "id:copy".to_string())
+                .expect("build mismatched Dropbox locator");
+
+        let read_error = home
+            .read_appended(&object)
+            .await
+            .expect_err("mismatched Dropbox read must fail");
+        assert!(
+            read_error.to_string().contains("does not identify"),
+            "{read_error}"
+        );
+        let delete_error = home
+            .delete_appended(&object)
+            .await
+            .expect_err("mismatched Dropbox delete must fail");
+        assert!(
+            delete_error.to_string().contains("does not identify"),
+            "{delete_error}"
+        );
+
+        let requests = requests.lock().expect("lock requests");
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(requests[0].path, "/files/download");
+        assert_eq!(requests[1].path, "/files/get_metadata");
+        drop(requests);
+        shutdown.send(()).expect("shut down Dropbox endpoint");
     }
 
     async fn repeated_cursor_endpoint() -> Response<Body> {

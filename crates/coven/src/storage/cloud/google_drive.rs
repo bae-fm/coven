@@ -209,6 +209,7 @@ impl GoogleDriveCloudHome {
     ) -> Result<Vec<DriveFileIdentity>, CloudHomeError> {
         let query = find_file_query(&self.folder_id, encoded_name);
         let mut page_token: Option<String> = None;
+        let mut page_tokens = PageTokenTracker::new("Google Drive file identity listing");
         let mut files = Vec::new();
 
         loop {
@@ -236,7 +237,7 @@ impl GoogleDriveCloudHome {
             files.extend(parse_drive_file_identities(&json));
 
             match json["nextPageToken"].as_str() {
-                Some(next) => page_token = Some(next.to_string()),
+                Some(next) => page_token = Some(page_tokens.record(next)?),
                 None => break,
             }
         }
@@ -500,6 +501,43 @@ impl GoogleDriveCloudHome {
         }
     }
 
+    async fn verify_appended_object(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        let file_id = object.opaque_provider_id();
+        let response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .get(format!("{}/files/{file_id}", self.drive_api))
+                    .bearer_auth(token)
+                    .query(&[("fields", "id,name,parents,trashed")])
+            })
+            .await?;
+        let response = ensure_ok(
+            response,
+            &format!("verify appended {}", object.logical_key()),
+            NotFound::Status,
+        )
+        .await?;
+        let metadata: serde_json::Value =
+            ok_json(response, "parse exact Drive file metadata").await?;
+        let expected_name = encode_key(object.logical_key());
+        let id_matches = metadata["id"].as_str() == Some(file_id);
+        let name_matches = metadata["name"].as_str() == Some(expected_name.as_str());
+        let parent_matches = metadata["parents"].as_array().is_some_and(|parents| {
+            parents
+                .iter()
+                .any(|parent| parent.as_str() == Some(&self.folder_id))
+        });
+        let is_live = metadata["trashed"].as_bool() == Some(false);
+        if !(id_matches && name_matches && parent_matches && is_live) {
+            return Err(CloudHomeError::Transport(format!(
+                "exact Drive locator for {} does not identify file {file_id} named {expected_name} in folder {}",
+                object.logical_key(), self.folder_id
+            )));
+        }
+        Ok(())
+    }
+
     /// Open a resumable upload session for an existing Drive file and return its
     /// session URL (the `Location` header Google returns).
     async fn open_resumable_update_session(
@@ -633,17 +671,22 @@ impl GoogleDriveCloudHome {
                 "append resumable create",
             ));
         }
-        response
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .filter(|url| !url.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| {
-                CloudHomeError::Transport(format!(
-                    "append resumable create {key}: no Location header returned"
-                ))
-            })
+        let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+            return Err(CloudHomeError::Transport(format!(
+                "append resumable create {key}: no Location header returned"
+            )));
+        };
+        let location = location.to_str().map_err(|error| {
+            CloudHomeError::Transport(format!(
+                "append resumable create {key}: invalid Location header: {error}"
+            ))
+        })?;
+        if location.is_empty() {
+            return Err(CloudHomeError::Transport(format!(
+                "append resumable create {key}: empty Location header returned"
+            )));
+        }
+        Ok(location.to_string())
     }
 
     async fn list_appended_objects(
@@ -668,6 +711,8 @@ impl GoogleDriveCloudHome {
                             ("q", query.as_str()),
                             ("fields", "incompleteSearch,nextPageToken,files(id,name)"),
                             ("pageSize", "1000"),
+                            ("includeItemsFromAllDrives", "true"),
+                            ("supportsAllDrives", "true"),
                         ]);
                     if let Some(ref page) = page {
                         request = request.query(&[("pageToken", page.as_str())]);
@@ -729,7 +774,7 @@ impl GoogleDriveCloudHome {
                 self.client()
                     .get(format!("{}/changes/startPageToken", self.drive_api))
                     .bearer_auth(token)
-                    .query(&[("fields", "startPageToken")])
+                    .query(&[("fields", "startPageToken"), ("supportsAllDrives", "true")])
             })
             .await?;
         let response = ensure_ok(response, "get Drive change token", NotFound::Status).await?;
@@ -765,7 +810,8 @@ impl GoogleDriveCloudHome {
                             ("pageToken", page_token.as_str()),
                             ("pageSize", "1000"),
                             ("includeRemoved", "true"),
-                            ("restrictToMyDrive", "true"),
+                            ("includeItemsFromAllDrives", "true"),
+                            ("supportsAllDrives", "true"),
                             ("spaces", "drive"),
                             (
                                 "fields",
@@ -987,44 +1033,16 @@ where
     finish_create_media_upload(key, upload_result, || delete_created_file(file_id)).await
 }
 
-/// Roll back a failed multipart upload that had to create its Drive file. When
-/// `created_file_id` is `Some`, the resumable session created a brand-new file
-/// that never received its content, so it is deleted — otherwise a failed upload
-/// would leave a zero-byte object that `exists`/`list` report and `read` returns
-/// empty for. When it is `None` the upload overwrote a pre-existing file, whose
-/// prior content stays intact (a resumable session commits only on the final
-/// part), so nothing is deleted and the original error is returned unchanged.
-async fn rollback_created_multipart<Delete, DeleteFut>(
-    key: &str,
-    created_file_id: Option<String>,
-    cause: CloudHomeError,
-    delete_created_file: Delete,
-) -> CloudHomeError
-where
-    Delete: FnOnce(String) -> DeleteFut,
-    DeleteFut: std::future::Future<Output = Result<(), CloudHomeError>>,
-{
-    let Some(file_id) = created_file_id else {
-        return cause;
-    };
-    match delete_created_file(file_id).await {
-        Ok(()) => cause,
-        Err(delete_error) => CloudHomeError::Transport(format!(
-            "multipart {key}: {cause}; rollback delete failed: {delete_error}"
-        )),
-    }
-}
-
-/// A [`PartSink`](super::PartSink) over a Drive resumable session that also owns
-/// the rollback for a file the upload created. Part uploads delegate to the shared
-/// [`RangePutSink`]; on the first part failure the created file is deleted so a
-/// failed upload leaves no zero-byte object behind. Overwrites of an existing file
-/// carry `created_file_id: None` and leave that file untouched on failure.
+/// A Drive resumable sink. New objects use a resumable-create session, which
+/// keeps the file absent until the final part commits; `finish` then resolves
+/// concurrent same-name creates by the create token. Existing objects use a
+/// resumable-update session and require no post-commit reconciliation.
 struct DriveMultipartSink<'a> {
     home: &'a GoogleDriveCloudHome,
     inner: RangePutSink,
     key: String,
-    created_file_id: Option<String>,
+    encoded: String,
+    created: Option<CreatedDriveFile>,
 }
 
 #[async_trait]
@@ -1039,24 +1057,21 @@ impl super::PartSink for DriveMultipartSink<'_> {
         offset: u64,
         is_last: bool,
     ) -> Result<(), CloudHomeError> {
-        let Err(cause) = self.inner.send_part(part, offset, is_last).await else {
-            return Ok(());
-        };
-        let created = self.created_file_id.take();
-        let home = self.home;
-        let key = self.key.as_str();
-        Err(
-            rollback_created_multipart(key, created, cause, |file_id| async move {
-                home.delete_created_file(key, &file_id).await
-            })
-            .await,
-        )
+        self.inner.send_part(part, offset, is_last).await
     }
 
-    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
-        // The final part commits the file; the resumable session has no separate
-        // completion step, so there is nothing left that can fail here.
-        Box::new(self.inner).finish().await
+    async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        self.inner.abort().await
+    }
+
+    async fn finish(mut self: Box<Self>) -> Result<(), CloudHomeError> {
+        Box::new(self.inner).finish().await?;
+        if let Some(created) = self.created.take() {
+            self.home
+                .reconcile_created_file(&self.key, &self.encoded, created)
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -1229,26 +1244,37 @@ impl GoogleDriveCloudHome {
         total_len: u64,
     ) -> Result<BoxPartSink<'a>, CloudHomeError> {
         let encoded = encode_key(key);
-        // `created_file_id` is `Some` only when this upload creates the file, so a
-        // failure after creation deletes exactly the file we made and leaves a
-        // pre-existing one alone.
-        let (file_id, created_file_id, op) = match self.find_file_id(&encoded).await? {
-            Some(file_id) => (file_id, None, "update"),
+        let (session_url, created, op) = match self.find_file_id(&encoded).await? {
+            Some(file_id) => (
+                self.open_resumable_update_session(key, &file_id).await?,
+                None,
+                "update",
+            ),
             None => {
-                let file_id = self.create_file_for_key(key, &encoded).await?;
-                (file_id.clone(), Some(file_id), "create")
-            }
-        };
-        let session_url = match self.open_resumable_update_session(key, &file_id).await {
-            Ok(url) => url,
-            Err(cause) => {
-                return Err(rollback_created_multipart(
-                    key,
-                    created_file_id,
-                    cause,
-                    |file_id| async move { self.delete_created_file(key, &file_id).await },
+                let attempt = self.new_append_attempt(key).await?;
+                let session_url = match self.open_resumable_create_session(key, &attempt).await {
+                    Ok(session_url) => session_url,
+                    Err(operation) => {
+                        return match self
+                            .resolve_failed_append(key, &attempt, operation, false)
+                            .await
+                        {
+                            Err(error) => Err(error),
+                            Ok(object) => Err(CloudHomeError::Transport(format!(
+                            "open mutable Drive upload {key}: uncommitted session resolved as {}",
+                            object.opaque_provider_id()
+                        ))),
+                        }
+                    }
+                };
+                (
+                    session_url,
+                    Some(CreatedDriveFile {
+                        id: attempt.file_id,
+                        create_token: attempt.create_token,
+                    }),
+                    "create",
                 )
-                .await);
             }
         };
         let key_owned = key.to_string();
@@ -1268,7 +1294,8 @@ impl GoogleDriveCloudHome {
             home: self,
             inner,
             key: key.to_string(),
-            created_file_id,
+            encoded,
+            created,
         }))
     }
 
@@ -1377,6 +1404,7 @@ impl GoogleDriveCloudHome {
     }
 
     async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        self.verify_appended_object(object).await?;
         let file_id = object.opaque_provider_id().to_string();
         let response = self
             .session
@@ -1405,6 +1433,7 @@ impl GoogleDriveCloudHome {
         object: &AppendedObject,
         destination: &std::path::Path,
     ) -> Result<(), super::CloudFileReadError> {
+        self.verify_appended_object(object).await?;
         let file_id = object.opaque_provider_id().to_string();
         let response = self
             .session
@@ -1430,6 +1459,7 @@ impl GoogleDriveCloudHome {
     }
 
     async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        self.verify_appended_object(object).await?;
         self.delete_created_file(object.logical_key(), object.opaque_provider_id())
             .await
     }
@@ -1728,6 +1758,21 @@ mod tests {
                 .body(Body::from(r#"{"id":"ignored-response-id"}"#))
                 .expect("build append response");
         }
+        if method == "GET"
+            && path == "/files/generated-id"
+            && query
+                .as_deref()
+                .is_some_and(|query| query.contains("fields="))
+        {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"id":"generated-id","name":"{}","parents":["folder123"],"trashed":false}}"#,
+                    encode_key("protocol/copy")
+                )))
+                .expect("build metadata response");
+        }
         if method == "GET" && path == "/files/generated-id" {
             return Response::builder()
                 .status(StatusCode::OK)
@@ -1765,7 +1810,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
+                    shutdown_rx.await.expect("receive Drive endpoint shutdown");
                 })
                 .await
                 .expect("Drive endpoint failed");
@@ -1802,7 +1847,7 @@ mod tests {
             .expect("delete Drive copy");
 
         let requests = requests.lock().expect("lock requests");
-        assert_eq!(requests.len(), 4, "{requests:?}");
+        assert_eq!(requests.len(), 6, "{requests:?}");
         assert_eq!(requests[0].path, "/files/generateIds");
         let upload = String::from_utf8(requests[1].body.clone()).expect("multipart body is UTF-8");
         assert_eq!(requests[1].method, "POST");
@@ -1819,9 +1864,307 @@ mod tests {
         assert!(upload.contains("copy-bytes"), "{upload}");
         assert_eq!(requests[2].method, "GET");
         assert_eq!(requests[2].path, "/files/generated-id");
-        assert_eq!(requests[3].method, "DELETE");
+        assert!(requests[2]
+            .query
+            .as_deref()
+            .is_some_and(|query| query.contains("fields=")));
+        assert_eq!(requests[3].method, "GET");
         assert_eq!(requests[3].path, "/files/generated-id");
-        let _ = shutdown.send(());
+        assert_eq!(requests[4].method, "GET");
+        assert_eq!(requests[4].path, "/files/generated-id");
+        assert_eq!(requests[5].method, "DELETE");
+        assert_eq!(requests[5].path, "/files/generated-id");
+        drop(requests);
+        shutdown.send(()).expect("shut down Drive endpoint");
+    }
+
+    #[tokio::test]
+    async fn exact_operations_reject_a_drive_id_bound_to_another_logical_key() {
+        let (home, requests, shutdown) = immutable_copy_test_home().await;
+        let object =
+            AppendedObject::from_provider("protocol/other".to_string(), "generated-id".to_string())
+                .expect("build mismatched Drive locator");
+
+        let read_error = home
+            .read_appended(&object)
+            .await
+            .expect_err("mismatched Drive read must fail");
+        assert!(
+            read_error.to_string().contains("does not identify"),
+            "{read_error}"
+        );
+        let delete_error = home
+            .delete_appended(&object)
+            .await
+            .expect_err("mismatched Drive delete must fail");
+        assert!(
+            delete_error.to_string().contains("does not identify"),
+            "{delete_error}"
+        );
+
+        let requests = requests.lock().expect("lock requests");
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(requests.iter().all(|request| request.method == "GET"));
+        drop(requests);
+        shutdown.send(()).expect("shut down Drive endpoint");
+    }
+
+    async fn malformed_location_endpoint() -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                reqwest::header::LOCATION,
+                reqwest::header::HeaderValue::from_bytes(&[0xff])
+                    .expect("build non-UTF-8 Location header"),
+            )
+            .body(Body::empty())
+            .expect("build malformed Location response")
+    }
+
+    #[tokio::test]
+    async fn resumable_create_rejects_a_non_utf8_location_header() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Drive endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(malformed_location_endpoint),
+            )
+            .await
+            .expect("Drive endpoint failed");
+        });
+        let home = home().with_endpoints(endpoint.clone(), endpoint);
+        let attempt = DriveAppendAttempt {
+            file_id: "generated-id".to_string(),
+            create_token: "create-token".to_string(),
+        };
+
+        let error = home
+            .open_resumable_create_session("protocol/copy", &attempt)
+            .await
+            .expect_err("non-UTF-8 Location must fail");
+
+        assert!(
+            error.to_string().contains("invalid Location header"),
+            "{error}"
+        );
+        server.abort();
+    }
+
+    struct FailingMultipartBodyReader {
+        emitted: bool,
+    }
+
+    #[async_trait]
+    impl crate::local_blob::PlaintextChunkReader for FailingMultipartBodyReader {
+        async fn next_chunk(
+            &mut self,
+            _max: usize,
+        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+            if !self.emitted {
+                self.emitted = true;
+                return Ok(vec![7; GDRIVE_CHUNK_SIZE]);
+            }
+            Err(crate::local_blob::PlaintextChunkError::Local(
+                "injected Drive body failure".to_string(),
+            ))
+        }
+    }
+
+    struct PausedMultipartBodyReader {
+        emitted: bool,
+        waiting: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl crate::local_blob::PlaintextChunkReader for PausedMultipartBodyReader {
+        async fn next_chunk(
+            &mut self,
+            _max: usize,
+        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+            if !self.emitted {
+                self.emitted = true;
+                return Ok(vec![7; GDRIVE_CHUNK_SIZE]);
+            }
+            self.waiting.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[derive(Clone)]
+    struct MutableCreateEndpointState {
+        endpoint: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        deletes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn mutable_create_endpoint(
+        State(state): State<MutableCreateEndpointState>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        let method = request.method().to_string();
+        let path = request.uri().path().to_string();
+        let query = request.uri().query().map(str::to_string);
+        let body = to_bytes(request.into_body(), usize::MAX)
+            .await
+            .expect("read request body")
+            .to_vec();
+        state
+            .requests
+            .lock()
+            .expect("lock requests")
+            .push(RecordedRequest {
+                method: method.clone(),
+                path: path.clone(),
+                query: query.clone(),
+                body,
+            });
+        if method == "GET" && path == "/files" {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"files":[]}"#))
+                .expect("build absent file response");
+        }
+        if method == "GET" && path == "/files/generateIds" {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"ids":["generated-id"]}"#))
+                .expect("build generated id response");
+        }
+        if method == "POST"
+            && path == "/files"
+            && query
+                .as_deref()
+                .is_some_and(|query| query.contains("uploadType=resumable"))
+        {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(
+                    reqwest::header::LOCATION,
+                    format!("{}/session", state.endpoint),
+                )
+                .body(Body::empty())
+                .expect("build resumable session response");
+        }
+        if method == "PUT" && path == "/session" {
+            return Response::builder()
+                .status(StatusCode::PERMANENT_REDIRECT)
+                .body(Body::empty())
+                .expect("build incomplete upload response");
+        }
+        if method == "DELETE" && path == "/session" {
+            state
+                .deletes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .expect("build session cancellation response");
+        }
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from(format!(
+                "unexpected request: {method} {path} {query:?}"
+            )))
+            .expect("build unexpected response")
+    }
+
+    async fn mutable_create_test_home() -> (
+        GoogleDriveCloudHome,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Drive endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let deletes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = MutableCreateEndpointState {
+            endpoint: endpoint.clone(),
+            requests: requests.clone(),
+            deletes: deletes.clone(),
+        };
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .fallback(mutable_create_endpoint)
+                    .with_state(state),
+            )
+            .await
+            .expect("Drive endpoint failed");
+        });
+        (
+            home()
+                .with_endpoints(endpoint.clone(), endpoint)
+                .with_ids(Arc::new(crate::id_provider::SequentialIdProvider::new(
+                    "drive-create",
+                ))),
+            requests,
+            deletes,
+            server,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn absent_mutable_multipart_body_failure_cancels_the_create_session() {
+        let (home, requests, deletes, server) = mutable_create_test_home().await;
+        let reader =
+            crate::local_blob::PlaintextReader::from_test_reader(FailingMultipartBodyReader {
+                emitted: false,
+            });
+        let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
+
+        let error = home
+            .write("mutable/copy", body, &super::super::no_progress())
+            .await
+            .expect_err("Drive body failure must cancel its create session");
+
+        assert!(
+            error.to_string().contains("injected Drive body failure"),
+            "{error}"
+        );
+        assert_eq!(deletes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let requests = requests.lock().expect("lock requests");
+        let file_posts: Vec<_> = requests
+            .iter()
+            .filter(|request| request.method == "POST" && request.path == "/files")
+            .collect();
+        assert_eq!(file_posts.len(), 1, "{requests:?}");
+        assert!(file_posts[0]
+            .query
+            .as_deref()
+            .is_some_and(|query| query.contains("uploadType=resumable")));
+        drop(requests);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canceling_absent_mutable_multipart_cancels_the_create_session() {
+        let (home, _requests, deletes, server) = mutable_create_test_home().await;
+        let waiting = Arc::new(tokio::sync::Notify::new());
+        let reader =
+            crate::local_blob::PlaintextReader::from_test_reader(PausedMultipartBodyReader {
+                emitted: false,
+                waiting: waiting.clone(),
+            });
+        let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
+        let write = tokio::spawn(async move {
+            home.write("mutable/copy", body, &super::super::no_progress())
+                .await
+        });
+        waiting.notified().await;
+
+        write.abort();
+        assert!(write.await.expect_err("write task canceled").is_cancelled());
+        assert_eq!(deletes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        server.abort();
     }
 
     async fn repeated_drive_page_endpoint(request: Request<Body>) -> Response<Body> {
@@ -1869,6 +2212,120 @@ mod tests {
         .expect_err("repeated page token must refuse authoritative coverage");
 
         assert!(result.to_string().contains("repeated"), "{result}");
+        server.abort();
+    }
+
+    async fn repeated_file_identity_page_endpoint(request: Request<Body>) -> Response<Body> {
+        let path = request.uri().path();
+        let body = if path == "/files" {
+            r#"{"files":[],"nextPageToken":"same"}"#
+        } else {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from(format!("unexpected path: {path}")))
+                .expect("build unexpected response");
+        };
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .expect("build repeated page response")
+    }
+
+    #[tokio::test]
+    async fn file_identity_listing_rejects_a_repeated_page_token() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Drive endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(repeated_file_identity_page_endpoint),
+            )
+            .await
+            .expect("Drive endpoint failed");
+        });
+        let home = home().with_endpoints(endpoint.clone(), endpoint);
+
+        let error = home
+            .list_file_identities(&encode_key("protocol/copy"))
+            .await
+            .expect_err("repeated identity page token must fail");
+
+        assert!(error.to_string().contains("repeated"), "{error}");
+        server.abort();
+    }
+
+    async fn shared_drive_listing_endpoint(
+        State(requests): State<Arc<Mutex<Vec<RecordedRequest>>>>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        let path = request.uri().path().to_string();
+        let query = request.uri().query().map(str::to_string);
+        requests
+            .lock()
+            .expect("lock requests")
+            .push(RecordedRequest {
+                method: request.method().to_string(),
+                path: path.clone(),
+                query,
+                body: Vec::new(),
+            });
+        let body = match path.as_str() {
+            "/changes/startPageToken" => r#"{"startPageToken":"start"}"#,
+            "/files" => r#"{"files":[]}"#,
+            "/changes" => r#"{"changes":[],"newStartPageToken":"end"}"#,
+            _ => {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Body::from(format!("unexpected path: {path}")))
+                    .expect("build unexpected response")
+            }
+        };
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .expect("build listing response")
+    }
+
+    #[tokio::test]
+    async fn authoritative_listing_includes_shared_drive_changes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Drive endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .fallback(shared_drive_listing_endpoint)
+            .with_state(requests.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("Drive endpoint failed");
+        });
+        let home = home().with_endpoints(endpoint.clone(), endpoint);
+
+        home.list_appended("protocol/")
+            .await
+            .expect("list shared Drive files");
+
+        let requests = requests.lock().expect("lock requests");
+        assert_eq!(requests.len(), 3, "{requests:?}");
+        for request in &*requests {
+            let query = request.query.as_deref().expect("listing query");
+            assert!(query.contains("supportsAllDrives=true"), "{query}");
+        }
+        for request in requests
+            .iter()
+            .filter(|request| request.path != "/changes/startPageToken")
+        {
+            let query = request.query.as_deref().expect("listing query");
+            assert!(query.contains("includeItemsFromAllDrives=true"), "{query}");
+            assert!(!query.contains("restrictToMyDrive"), "{query}");
+        }
+        drop(requests);
         server.abort();
     }
 
@@ -2491,70 +2948,6 @@ mod tests {
         assert!(
             msg.contains("media upload failed"),
             "missing upload failure: {msg}"
-        );
-        assert!(
-            msg.contains("delete failed"),
-            "missing delete failure: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn multipart_part_failure_deletes_the_created_file() {
-        let deleted_id = std::cell::RefCell::new(None);
-        let cause = CloudHomeError::Transport("multipart part 2 failed".to_string());
-        let err = rollback_created_multipart(
-            "blobs/aa/bb",
-            Some("created-file-id".to_string()),
-            cause,
-            |file_id| async {
-                deleted_id.replace(Some(file_id));
-                Ok(())
-            },
-        )
-        .await;
-
-        assert_eq!(deleted_id.into_inner().as_deref(), Some("created-file-id"));
-        assert!(
-            err.to_string().contains("multipart part 2 failed"),
-            "missing part failure: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn multipart_failure_leaves_pre_existing_file_intact() {
-        let delete_called = std::cell::Cell::new(false);
-        let cause = CloudHomeError::Transport("multipart part 2 failed".to_string());
-        let err = rollback_created_multipart("blobs/aa/bb", None, cause, |_| async {
-            delete_called.set(true);
-            Ok(())
-        })
-        .await;
-
-        assert!(
-            !delete_called.get(),
-            "overwrite of an existing file must not delete it on failure"
-        );
-        assert!(
-            err.to_string().contains("multipart part 2 failed"),
-            "missing part failure: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn multipart_rollback_reports_delete_failure_alongside_cause() {
-        let cause = CloudHomeError::Transport("multipart part 2 failed".to_string());
-        let err = rollback_created_multipart(
-            "blobs/aa/bb",
-            Some("created-file-id".to_string()),
-            cause,
-            |_| async { Err(CloudHomeError::Transport("delete failed".to_string())) },
-        )
-        .await;
-        let msg = err.to_string();
-
-        assert!(
-            msg.contains("multipart part 2 failed"),
-            "missing part failure: {msg}"
         );
         assert!(
             msg.contains("delete failed"),

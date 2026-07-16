@@ -487,7 +487,6 @@ struct S3PartSink {
 
 impl S3PartSink {
     async fn abort(&mut self) -> Result<(), CloudHomeError> {
-        self.settled = true;
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         let key = self.key.clone();
@@ -506,6 +505,7 @@ impl S3PartSink {
             Ok(())
         })
         .await?;
+        self.settled = true;
         Ok(())
     }
 }
@@ -562,6 +562,17 @@ fn combine_cleanup_failure(
     }
 }
 
+fn validate_appended_object(object: &AppendedObject) -> Result<(), CloudHomeError> {
+    if object.opaque_provider_id() != object.logical_key() {
+        return Err(CloudHomeError::Transport(format!(
+            "exact S3 locator for {} names a different object key {}",
+            object.logical_key(),
+            object.opaque_provider_id()
+        )));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl super::PartSink for S3PartSink {
     fn part_size(&self) -> usize {
@@ -610,6 +621,10 @@ impl super::PartSink for S3PartSink {
                 Err(combine_cleanup_failure(e, cleanup))
             }
         }
+    }
+
+    async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        S3PartSink::abort(self).await
     }
 
     async fn finish(mut self: Box<Self>) -> Result<(), CloudHomeError> {
@@ -840,6 +855,7 @@ impl S3CloudHome {
         object: &super::AppendedObject,
         destination: &std::path::Path,
     ) -> Result<(), super::CloudFileReadError> {
+        validate_appended_object(object)?;
         let full = self.full_key(object.logical_key());
         let key = object.logical_key().to_string();
         let client = self.client.clone();
@@ -1200,6 +1216,7 @@ impl ImmutableCopyStorage for S3CloudHome {
         S3CloudHome::list_appended(self, prefix).await
     }
     async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        validate_appended_object(object)?;
         S3CloudHome::read(self, object.logical_key()).await
     }
     async fn read_appended_to_file(
@@ -1210,6 +1227,7 @@ impl ImmutableCopyStorage for S3CloudHome {
         S3CloudHome::read_appended_to_file(self, object, destination).await
     }
     async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        validate_appended_object(object)?;
         S3CloudHome::delete(self, object.logical_key()).await
     }
 }
@@ -1313,7 +1331,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
+                    shutdown_rx.await.expect("receive fake S3 shutdown");
                 })
                 .await
                 .expect("fake S3 endpoint failed");
@@ -1600,7 +1618,7 @@ mod tests {
                 ("objects/copy-b", "objects/copy-b"),
             ]
         );
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down fake S3");
     }
 
     #[derive(Clone)]
@@ -1628,7 +1646,7 @@ mod tests {
             .push(
                 headers
                     .get(IF_NONE_MATCH)
-                    .and_then(|value| value.to_str().ok())
+                    .map(|value| value.to_str().expect("If-None-Match header is UTF-8"))
                     .map(str::to_string),
             );
         Response::builder()
@@ -1678,7 +1696,7 @@ mod tests {
             vec![None, Some("*".to_string())]
         );
         assert!(home.immutable_copies);
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down fake S3");
     }
 
     #[derive(Clone)]
@@ -1709,17 +1727,19 @@ mod tests {
                 .expect("build create response");
         }
         if method == Method::PUT && path_ok {
-            let query = uri.query().unwrap_or_default();
+            let query = uri.query().expect("multipart part query");
             let upload_id = query
                 .split('&')
                 .find_map(|part| part.strip_prefix("uploadId="))
-                .unwrap_or_default()
+                .expect("multipart part uploadId")
                 .to_string();
             let length = headers
                 .get(CONTENT_LENGTH)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse().ok())
-                .unwrap_or_default();
+                .expect("multipart part Content-Length")
+                .to_str()
+                .expect("multipart part Content-Length is UTF-8")
+                .parse()
+                .expect("multipart part Content-Length is an integer");
             state
                 .uploaded_parts
                 .lock()
@@ -1740,7 +1760,7 @@ mod tests {
             state.completion_headers.lock().expect("lock headers").push(
                 headers
                     .get(IF_NONE_MATCH)
-                    .and_then(|value| value.to_str().ok())
+                    .map(|value| value.to_str().expect("If-None-Match header is UTF-8"))
                     .map(str::to_string),
             );
             let collision = uri
@@ -1763,10 +1783,10 @@ mod tests {
         if method == Method::DELETE && path_ok {
             let upload_id = uri
                 .query()
-                .unwrap_or_default()
+                .expect("multipart abort query")
                 .split('&')
                 .find_map(|part| part.strip_prefix("uploadId="))
-                .unwrap_or_default()
+                .expect("multipart abort uploadId")
                 .to_string();
             state
                 .aborted_uploads
@@ -1859,11 +1879,11 @@ mod tests {
             *aborts.lock().expect("lock aborts"),
             vec!["upload-2".to_string()]
         );
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down fake S3");
     }
 
     async fn fake_s3_body_failure_endpoint(
-        State(bucket): State<String>,
+        State((bucket, remaining_abort_failures)): State<(String, Arc<AtomicUsize>)>,
         method: Method,
         uri: Uri,
     ) -> Response<Body> {
@@ -1885,9 +1905,20 @@ mod tests {
                 .expect("build part response");
         }
         if method == Method::DELETE && path_ok {
+            if remaining_abort_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::from("injected abort failure"))
+                    .expect("build abort failure response");
+            }
             return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("injected abort failure"))
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
                 .expect("build abort response");
         }
         Response::builder()
@@ -1955,16 +1986,17 @@ mod tests {
             .unwrap();
 
         assert!(abort_seen.load(Ordering::SeqCst));
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down fake S3");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn immutable_append_reports_body_and_multipart_abort_failures() {
         let bucket = "immutable-body-failure-test".to_string();
+        let abort_failures = Arc::new(AtomicUsize::new(1));
         let (endpoint, shutdown) = spawn_fake_s3(
             Router::new()
                 .fallback(fake_s3_body_failure_endpoint)
-                .with_state(bucket.clone()),
+                .with_state((bucket.clone(), abort_failures.clone())),
         )
         .await;
         let home = S3CloudHome::new(
@@ -1997,7 +2029,43 @@ mod tests {
             "{error}"
         );
         assert!(error.to_string().contains("abort multipart"), "{error}");
-        let _ = shutdown.send(());
+        assert_eq!(abort_failures.load(Ordering::SeqCst), 0);
+        shutdown.send(()).expect("shut down fake S3");
+    }
+
+    #[tokio::test]
+    async fn exact_operations_reject_a_mismatched_s3_object_key() {
+        let home = S3CloudHome::new(
+            "exact-locator-test".to_string(),
+            "us-east-1".to_string(),
+            Some("http://127.0.0.1:9".to_string()),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
+        )
+        .await
+        .expect("construct home");
+        let object = AppendedObject::from_provider(
+            "protocol/copy".to_string(),
+            "protocol/other".to_string(),
+        )
+        .expect("build mismatched S3 locator");
+
+        let read_error = <S3CloudHome as ImmutableCopyStorage>::read_appended(&home, &object)
+            .await
+            .expect_err("mismatched S3 read must fail");
+        assert!(read_error.to_string().contains("different object key"));
+        let destination = std::env::temp_dir().join("coven-mismatched-s3-locator");
+        let file_error = home
+            .read_appended_to_file(&object, &destination)
+            .await
+            .expect_err("mismatched S3 file read must fail");
+        assert!(file_error.to_string().contains("different object key"));
+        let delete_error = <S3CloudHome as ImmutableCopyStorage>::delete_appended(&home, &object)
+            .await
+            .expect_err("mismatched S3 delete must fail");
+        assert!(delete_error.to_string().contains("different object key"));
     }
 
     #[test]
@@ -2010,7 +2078,7 @@ mod tests {
                 let (endpoint, _shutdown) = spawn_fake_s3(
                     Router::new()
                         .fallback(fake_s3_body_failure_endpoint)
-                        .with_state(bucket.clone()),
+                        .with_state((bucket.clone(), Arc::new(AtomicUsize::new(1)))),
                 )
                 .await;
                 let home = S3CloudHome::new(
@@ -2031,9 +2099,8 @@ mod tests {
                     .await
                     .unwrap();
                 drop(sink);
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             });
-            panic!("failed cancellation abort did not terminate the process");
+            std::process::exit(0);
         }
 
         let status = std::process::Command::new(std::env::current_exe().unwrap())

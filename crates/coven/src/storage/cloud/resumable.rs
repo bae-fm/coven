@@ -14,6 +14,38 @@ use reqwest::StatusCode;
 use super::http::range_content_header;
 use super::CloudHomeError;
 
+fn cancellation_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("coven-resumable-cancel")
+            .enable_all()
+            .build()
+            .expect("build resumable cancellation runtime")
+    })
+}
+
+async fn cancel_upload_session(
+    client: reqwest::Client,
+    session_url: String,
+    key: String,
+) -> Result<(), CloudHomeError> {
+    let response = client.delete(&session_url).send().await.map_err(|error| {
+        CloudHomeError::Transport(format!(
+            "cancel upload session {key} at {session_url}: {error}"
+        ))
+    })?;
+    let status = response.status();
+    if status.is_success() || status == StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    let body = super::http::body_text(response).await;
+    Err(CloudHomeError::Transport(format!(
+        "cancel upload session {key} at {session_url} (HTTP {status}): {body}"
+    )))
+}
+
 /// Maps a non-success upload response `(status, body)` to a `CloudHomeError` —
 /// the per-provider quota/error classifier.
 pub(super) type ClassifyWrite = Box<dyn Fn(StatusCode, &str) -> CloudHomeError + Send + Sync>;
@@ -126,24 +158,14 @@ impl RangePutUploader {
         if self.completed {
             return Ok(());
         }
+        cancel_upload_session(
+            self.client.clone(),
+            self.session_url.clone(),
+            self.key.clone(),
+        )
+        .await?;
         self.completed = true;
-        let response = self
-            .client
-            .delete(&self.session_url)
-            .send()
-            .await
-            .map_err(|error| {
-                CloudHomeError::Transport(format!("upload chunk {}: {error}", self.key))
-            })?;
-        let status = response.status();
-        if status.is_success() || status == StatusCode::NOT_FOUND {
-            return Ok(());
-        }
-        let body = super::http::body_text(response).await;
-        Err(CloudHomeError::Transport(format!(
-            "cancel upload session {} (HTTP {status}): {body}",
-            self.key
-        )))
+        Ok(())
     }
 
     pub(super) fn mark_completed(&mut self) {
@@ -169,11 +191,28 @@ impl Drop for RangePutUploader {
         if self.completed {
             return;
         }
-        let request = self.client.delete(self.session_url.clone());
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let _ = request.send().await;
-            });
+        let client = self.client.clone();
+        let session_url = self.session_url.clone();
+        let key = self.key.clone();
+        let cancellation_key = key.clone();
+        let cancellation_url = session_url.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        cancellation_runtime().spawn(async move {
+            let result = cancel_upload_session(client, session_url, key).await;
+            if result_tx.send(result).is_err() {
+                std::process::abort();
+            }
+        });
+        match result_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, key = %cancellation_key, session_url = %cancellation_url, "resumable upload cancellation failed");
+                std::process::abort();
+            }
+            Err(error) => {
+                tracing::error!(%error, key = %cancellation_key, session_url = %cancellation_url, "resumable upload cancellation task disappeared");
+                std::process::abort();
+            }
         }
     }
 }
@@ -217,6 +256,10 @@ impl super::PartSink for RangePutSink {
         self.0.send_part(part, offset, is_last).await.map(drop)
     }
 
+    async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        self.0.abort().await
+    }
+
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
         Ok(())
     }
@@ -230,8 +273,47 @@ mod tests {
     use axum::extract::State;
     use axum::http::{Method, Response, StatusCode};
     use axum::Router;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    fn spawn_cancellation_endpoint(
+        status: &'static str,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind cancellation endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept cancellation request");
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).expect("read cancellation request");
+                assert_ne!(count, 0, "cancellation request ended before its headers");
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let request = String::from_utf8(request).expect("cancellation request is UTF-8");
+            assert!(request.starts_with("DELETE "), "{request}");
+            started_tx
+                .send(())
+                .expect("cancellation observer still exists");
+            release
+                .recv()
+                .expect("cancellation response release signal");
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write cancellation response");
+        });
+        (endpoint, started_rx, server)
+    }
 
     async fn incomplete_upload_endpoint(method: Method) -> Response<Body> {
         if method == Method::DELETE {
@@ -263,7 +345,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
+                    shutdown_rx.await.expect("receive upload endpoint shutdown");
                 })
                 .await
                 .expect("upload endpoint failed");
@@ -288,7 +370,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, Router::new().fallback(successful_upload_endpoint))
                 .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
+                    shutdown_rx.await.expect("receive upload endpoint shutdown");
                 })
                 .await
                 .expect("upload endpoint failed");
@@ -333,7 +415,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
+                    shutdown_rx.await.expect("receive upload endpoint shutdown");
                 })
                 .await
                 .expect("upload endpoint failed");
@@ -341,16 +423,30 @@ mod tests {
         (endpoint, delete_count, shutdown_tx)
     }
 
-    async fn failed_upload_and_cancel_endpoint(method: Method) -> Response<Body> {
-        let body = match method {
-            Method::PUT => "upload failed",
-            Method::DELETE => "cancellation failed",
-            _ => "unexpected method",
-        };
-        Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(body))
-            .expect("build failure response")
+    async fn failed_upload_and_cancel_endpoint(
+        State(delete_count): State<Arc<AtomicUsize>>,
+        method: Method,
+    ) -> Response<Body> {
+        match method {
+            Method::PUT => Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("upload failed"))
+                .expect("build upload failure response"),
+            Method::DELETE if delete_count.fetch_add(1, Ordering::SeqCst) == 0 => {
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from("cancellation failed"))
+                    .expect("build cancellation failure response")
+            }
+            Method::DELETE => Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .expect("build cancellation response"),
+            _ => Response::builder()
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .body(Body::from("unexpected method"))
+                .expect("build method response"),
+        }
     }
 
     async fn spawn_failed_upload_and_cancel_endpoint() -> (String, tokio::sync::oneshot::Sender<()>)
@@ -360,13 +456,16 @@ mod tests {
             .expect("bind upload endpoint");
         let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let delete_count = Arc::new(AtomicUsize::new(0));
         tokio::spawn(async move {
             axum::serve(
                 listener,
-                Router::new().fallback(failed_upload_and_cancel_endpoint),
+                Router::new()
+                    .fallback(failed_upload_and_cancel_endpoint)
+                    .with_state(delete_count),
             )
             .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
+                shutdown_rx.await.expect("receive upload endpoint shutdown");
             })
             .await
             .expect("upload endpoint failed");
@@ -395,7 +494,7 @@ mod tests {
             err.to_string(),
             "transport error: 308 Permanent Redirect: upload incomplete"
         );
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down upload endpoint");
     }
 
     #[tokio::test]
@@ -416,7 +515,7 @@ mod tests {
             .await
             .expect_err("premature completion must fail");
         assert!(error.to_string().contains("201 Created"), "{error}");
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down upload endpoint");
     }
 
     #[tokio::test]
@@ -441,7 +540,7 @@ mod tests {
             .await
             .expect("read final response body");
         assert_eq!(body.as_ref(), br#"{"id":"provider-file-id"}"#);
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down upload endpoint");
     }
 
     #[tokio::test]
@@ -462,10 +561,10 @@ mod tests {
             .await
             .expect_err("failed part must surface");
         assert_eq!(delete_count.load(Ordering::SeqCst), 1);
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down upload endpoint");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn part_failure_preserves_the_operation_and_cancellation_errors() {
         let (endpoint, shutdown) = spawn_failed_upload_and_cancel_endpoint().await;
         let mut uploader = RangePutUploader::new(
@@ -491,6 +590,84 @@ mod tests {
             "{cleanup}"
         );
         assert!(!error.is_retryable());
-        let _ = shutdown.send(());
+        drop(uploader);
+        shutdown.send(()).expect("shut down upload endpoint");
+    }
+
+    #[tokio::test]
+    async fn drop_without_a_runtime_waits_for_cancellation_to_finish() {
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let (endpoint, started_rx, server) =
+            spawn_cancellation_endpoint("204 No Content", release_rx);
+        let uploader = RangePutUploader::new(
+            reqwest::Client::new(),
+            endpoint,
+            StatusCode::PERMANENT_REDIRECT.as_u16(),
+            8,
+            4,
+            "objects/blob".to_string(),
+            Box::new(|status, body| CloudHomeError::Transport(format!("{status}: {body}"))),
+        );
+        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+        let dropper = std::thread::spawn(move || {
+            drop(uploader);
+            finished_tx.send(()).expect("drop observer still exists");
+        });
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("cancellation request started");
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        release_tx
+            .send(())
+            .expect("cancellation endpoint still exists");
+        finished_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("drop finished after cancellation response");
+        dropper.join().expect("drop thread succeeded");
+        server.join().expect("cancellation endpoint succeeded");
+    }
+
+    #[test]
+    fn cancellation_failure_terminates_the_process() {
+        const CHILD: &str = "COVEN_RANGE_PUT_CANCEL_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let (endpoint, started_rx, _server) =
+                spawn_cancellation_endpoint("500 Internal Server Error", release_rx);
+            let releaser = std::thread::spawn(move || {
+                started_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("cancellation request started");
+                release_tx
+                    .send(())
+                    .expect("cancellation endpoint still exists");
+            });
+            let uploader = RangePutUploader::new(
+                reqwest::Client::new(),
+                endpoint,
+                StatusCode::PERMANENT_REDIRECT.as_u16(),
+                8,
+                4,
+                "objects/blob".to_string(),
+                Box::new(|status, body| CloudHomeError::Transport(format!("{status}: {body}"))),
+            );
+            drop(uploader);
+            releaser.join().expect("cancellation releaser succeeded");
+            std::process::exit(0);
+        }
+
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("locate resumable test executable"),
+        )
+        .arg("cancellation_failure_terminates_the_process")
+        .arg("--nocapture")
+        .env(CHILD, "1")
+        .status()
+        .expect("run resumable cancellation subprocess");
+        assert!(!status.success(), "cancellation subprocess survived");
     }
 }

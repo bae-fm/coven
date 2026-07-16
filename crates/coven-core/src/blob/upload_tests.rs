@@ -337,6 +337,9 @@ impl crate::storage::cloud::PartSink for SlowPartSink {
         tokio::time::sleep(self.per_chunk_delay).await;
         Ok(())
     }
+    async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        Ok(())
+    }
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
         Ok(())
     }

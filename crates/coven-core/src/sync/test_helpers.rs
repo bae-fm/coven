@@ -1992,6 +1992,9 @@ impl PartSink for MockPartSink<'_> {
         self.buf.extend_from_slice(&part);
         Ok(())
     }
+    async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        Ok(())
+    }
     async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
         self.storage
             .objects
