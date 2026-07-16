@@ -121,11 +121,12 @@ fn membership_resolution_semantic_prefix(
     )
 }
 
-fn parse_membership_resolution_copy_key(
+fn parse_resolution_copy_key_parts(
     key: &str,
-) -> Result<StoreMembershipConflictResolutionRef, StoreProtocolError> {
+    prefix: &str,
+) -> Result<(ObjectHash, String, ObjectHash), StoreProtocolError> {
     let relative = key
-        .strip_prefix(STORE_MEMBERSHIP_RESOLUTION_PREFIX)
+        .strip_prefix(prefix)
         .ok_or_else(|| StoreProtocolError::MalformedPath(key.to_string()))?;
     let segments = relative.split('/').collect::<Vec<_>>();
     if segments.len() != 5
@@ -135,15 +136,50 @@ fn parse_membership_resolution_copy_key(
     {
         return Err(StoreProtocolError::MalformedPath(key.to_string()));
     }
+    Ok((
+        segments[0]
+            .parse()
+            .map_err(|_| StoreProtocolError::MalformedPath(key.to_string()))?,
+        segments[1].to_string(),
+        segments[2]
+            .parse()
+            .map_err(|_| StoreProtocolError::MalformedPath(key.to_string()))?,
+    ))
+}
+
+fn parse_membership_resolution_copy_key(
+    key: &str,
+) -> Result<StoreMembershipConflictResolutionRef, StoreProtocolError> {
+    let (conflict_hash, resolver_pubkey, resolution_hash) =
+        parse_resolution_copy_key_parts(key, STORE_MEMBERSHIP_RESOLUTION_PREFIX)?;
     Ok(StoreMembershipConflictResolutionRef {
-        conflict_hash: segments[0]
-            .parse()
-            .map_err(|_| StoreProtocolError::MalformedPath(key.to_string()))?,
-        resolver_pubkey: segments[1].to_string(),
-        resolution_hash: segments[2]
-            .parse()
-            .map_err(|_| StoreProtocolError::MalformedPath(key.to_string()))?,
+        conflict_hash,
+        resolver_pubkey,
+        resolution_hash,
     })
+}
+
+type ResolutionCopyObjectGroups<R> = BTreeMap<R, Vec<ProtocolObjectLocator>>;
+
+fn group_resolution_copy_objects<R: Ord>(
+    objects: Vec<ProtocolObjectLocator>,
+    prefix: &str,
+    parse: impl Fn(&str) -> Result<R, StoreProtocolError>,
+) -> Result<ResolutionCopyObjectGroups<R>, StoreObjectError> {
+    let mut groups = BTreeMap::new();
+    for object in objects {
+        let reference =
+            parse(object.logical_key()).map_err(|error| StoreObjectError::Collision {
+                semantic_prefix: prefix.trim_end_matches('/').to_string(),
+                key: object.logical_key().to_string(),
+                reason: error.to_string(),
+            })?;
+        groups
+            .entry(reference)
+            .or_insert_with(Vec::new)
+            .push(object);
+    }
+    Ok(groups)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1029,21 +1065,11 @@ pub async fn list_membership_resolution_objects(
     let listing = storage
         .list_protocol_objects(STORE_MEMBERSHIP_RESOLUTION_PREFIX)
         .await?;
-    let mut groups =
-        BTreeMap::<StoreMembershipConflictResolutionRef, Vec<ProtocolObjectLocator>>::new();
-    for object in listing.objects {
-        let reference =
-            parse_membership_resolution_copy_key(object.logical_key()).map_err(|error| {
-                StoreObjectError::Collision {
-                    semantic_prefix: STORE_MEMBERSHIP_RESOLUTION_PREFIX
-                        .trim_end_matches('/')
-                        .to_string(),
-                    key: object.logical_key().to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
-        groups.entry(reference).or_default().push(object);
-    }
+    let groups = group_resolution_copy_objects(
+        listing.objects,
+        STORE_MEMBERSHIP_RESOLUTION_PREFIX,
+        parse_membership_resolution_copy_key,
+    )?;
     let mut resolutions = Vec::with_capacity(groups.len());
     for (reference, objects) in groups {
         let semantic_prefix = membership_resolution_semantic_prefix(&reference);
@@ -1075,25 +1101,12 @@ fn parse_circle_roster_resolution_copy_key(
     circle_id: CircleId,
 ) -> Result<CircleRosterConflictResolutionRef, StoreProtocolError> {
     let prefix = format!("circles/{circle_id}/roster/resolutions/");
-    let relative = key
-        .strip_prefix(&prefix)
-        .ok_or_else(|| StoreProtocolError::MalformedPath(key.to_string()))?;
-    let segments = relative.split('/').collect::<Vec<_>>();
-    if segments.len() != 5
-        || segments[1].is_empty()
-        || segments[3] != "copies"
-        || !segments[4].ends_with(".json")
-    {
-        return Err(StoreProtocolError::MalformedPath(key.to_string()));
-    }
+    let (conflict_hash, resolver_pubkey, resolution_hash) =
+        parse_resolution_copy_key_parts(key, &prefix)?;
     Ok(CircleRosterConflictResolutionRef {
-        conflict_hash: segments[0]
-            .parse()
-            .map_err(|_| StoreProtocolError::MalformedPath(key.to_string()))?,
-        resolver_pubkey: segments[1].to_string(),
-        resolution_hash: segments[2]
-            .parse()
-            .map_err(|_| StoreProtocolError::MalformedPath(key.to_string()))?,
+        conflict_hash,
+        resolver_pubkey,
+        resolution_hash,
     })
 }
 
@@ -1200,17 +1213,9 @@ pub async fn list_circle_roster_resolution_objects(
 ) -> Result<VerifiedCircleRosterResolutionListing, StoreObjectError> {
     let listing_prefix = format!("circles/{circle_id}/roster/resolutions/");
     let listing = storage.list_protocol_objects(&listing_prefix).await?;
-    let mut groups =
-        BTreeMap::<CircleRosterConflictResolutionRef, Vec<ProtocolObjectLocator>>::new();
-    for object in listing.objects {
-        let reference = parse_circle_roster_resolution_copy_key(object.logical_key(), circle_id)
-            .map_err(|error| StoreObjectError::Collision {
-                semantic_prefix: listing_prefix.trim_end_matches('/').to_string(),
-                key: object.logical_key().to_string(),
-                reason: error.to_string(),
-            })?;
-        groups.entry(reference).or_default().push(object);
-    }
+    let groups = group_resolution_copy_objects(listing.objects, &listing_prefix, |key| {
+        parse_circle_roster_resolution_copy_key(key, circle_id)
+    })?;
     let context = ProtocolObjectContext::circle(
         store_root_hash,
         ProtocolObjectDomain::CircleRosterResolution,
@@ -1977,7 +1982,7 @@ mod tests {
     use super::*;
     use crate::keys::UserKeypair;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
-    use crate::storage::cloud::SequentialCopyIdGenerator;
+    use crate::storage::cloud::{AppendedObject, SequentialCopyIdGenerator};
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::store_commit::{
         commit_slot_prefix, parse_commit_copy_key, ObjectHash, StoreProtocolError,
@@ -2169,6 +2174,81 @@ mod tests {
             });
         }
         Ok(bytes.to_vec())
+    }
+
+    #[test]
+    fn shared_resolution_copy_parser_accepts_only_its_physical_path_shape() {
+        let prefix = "resolution-parser/";
+        let conflict_hash = ObjectHash::digest(b"parser conflict");
+        let resolution_hash = ObjectHash::digest(b"parser resolution");
+        let key =
+            format!("{prefix}{conflict_hash}/resolver/{resolution_hash}/copies/physical-copy.json");
+        assert_eq!(
+            parse_resolution_copy_key_parts(&key, prefix).unwrap(),
+            (conflict_hash, "resolver".to_string(), resolution_hash)
+        );
+        assert!(matches!(
+            parse_resolution_copy_key_parts(&key, "wrong-prefix/"),
+            Err(StoreProtocolError::MalformedPath(path)) if path == key
+        ));
+
+        let malformed =
+            format!("{prefix}{conflict_hash}/resolver/{resolution_hash}/objects/copy.json");
+        assert!(matches!(
+            parse_resolution_copy_key_parts(&malformed, prefix),
+            Err(StoreProtocolError::MalformedPath(path)) if path == malformed
+        ));
+    }
+
+    #[test]
+    fn shared_resolution_copy_grouping_coalesces_references_and_rejects_malformed_keys() {
+        let conflict_hash = ObjectHash::digest(b"grouping conflict");
+        let resolution_hash = ObjectHash::digest(b"grouping resolution");
+        let reference = StoreMembershipConflictResolutionRef {
+            conflict_hash,
+            resolver_pubkey: "resolver".to_string(),
+            resolution_hash,
+        };
+        let prefix = STORE_MEMBERSHIP_RESOLUTION_PREFIX;
+        let semantic_prefix = membership_resolution_semantic_prefix(&reference);
+        let locator = |key: String, provider: &str| {
+            ProtocolObjectLocator::new(
+                key.clone(),
+                AppendedObject::from_provider(key, provider.to_string()),
+            )
+        };
+        let first = locator(
+            format!("{semantic_prefix}/copies/first.json"),
+            "first-provider-copy",
+        );
+        let second = locator(
+            format!("{semantic_prefix}/copies/second.json"),
+            "second-provider-copy",
+        );
+        let groups = group_resolution_copy_objects(
+            vec![first, second],
+            prefix,
+            parse_membership_resolution_copy_key,
+        )
+        .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[&reference].len(), 2);
+
+        let malformed_key = format!("{prefix}malformed");
+        let error = group_resolution_copy_objects(
+            vec![locator(malformed_key.clone(), "malformed-provider-copy")],
+            prefix,
+            parse_membership_resolution_copy_key,
+        )
+        .expect_err("a malformed resolution copy key fails grouping");
+        assert!(matches!(
+            error,
+            StoreObjectError::Collision {
+                semantic_prefix,
+                key,
+                ..
+            } if semantic_prefix == prefix.trim_end_matches('/') && key == malformed_key
+        ));
     }
 
     #[tokio::test]

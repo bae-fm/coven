@@ -1541,7 +1541,7 @@ impl CircleRosterChain {
                         .iter()
                         .map(|reference| reference.coord.clone())
                         .collect(),
-                    common_circle_frontier(&selected),
+                    causal_grants::common_frontier(&selected),
                 )
             }
             _ => return Err(CircleRosterError::InvalidConflictResolution),
@@ -1956,35 +1956,6 @@ impl CircleRosterChain {
         )?;
         Ok(entry)
     }
-}
-
-fn common_circle_frontier(frontiers: &[&[CircleRosterCoord]]) -> Vec<CircleRosterCoord> {
-    let Some(first) = frontiers.first() else {
-        return Vec::new();
-    };
-    let others = frontiers[1..]
-        .iter()
-        .map(|frontier| {
-            frontier
-                .iter()
-                .map(|coord| (coord.stream_key(), coord))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .collect::<Vec<_>>();
-    first
-        .iter()
-        .filter_map(|coord| {
-            let stream = coord.stream_key();
-            let mut common = coord.clone();
-            for frontier in &others {
-                let candidate = frontier.get(&stream)?;
-                if candidate.seq < common.seq {
-                    common = (*candidate).clone();
-                }
-            }
-            Some(common)
-        })
-        .collect()
 }
 
 fn circle_history_closure(

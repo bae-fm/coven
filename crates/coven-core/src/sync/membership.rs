@@ -2248,7 +2248,7 @@ impl MembershipChain {
                         .iter()
                         .map(|reference| reference.coord.clone())
                         .collect(),
-                    common_membership_frontier(&selected),
+                    causal_grants::common_frontier(&selected),
                 )
             }
             _ => return Err(MembershipError::InvalidConflictResolution),
@@ -2436,35 +2436,6 @@ fn reduce_store_membership_from_checkpoint(
         &checkpoint.included,
     )
     .map_err(map_store_causal_error)
-}
-
-fn common_membership_frontier(frontiers: &[&[MembershipCoord]]) -> Vec<MembershipCoord> {
-    let Some(first) = frontiers.first() else {
-        return Vec::new();
-    };
-    let others = frontiers[1..]
-        .iter()
-        .map(|frontier| {
-            frontier
-                .iter()
-                .map(|coord| (coord.stream_key(), coord))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .collect::<Vec<_>>();
-    first
-        .iter()
-        .filter_map(|coord| {
-            let stream = coord.stream_key();
-            let mut common = coord.clone();
-            for frontier in &others {
-                let candidate = frontier.get(&stream)?;
-                if candidate.seq < common.seq {
-                    common = (*candidate).clone();
-                }
-            }
-            Some(common)
-        })
-        .collect()
 }
 
 fn membership_history_closure(
