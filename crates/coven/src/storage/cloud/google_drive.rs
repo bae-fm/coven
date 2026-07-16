@@ -33,6 +33,10 @@ const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
 const CREATE_TOKEN_PROPERTY: &str = "covenCreateToken";
 const DRIVE_FOLDER_MIME_TYPE: &str = "application/vnd.google-apps.folder";
 
+fn drive_upload_cancellation_succeeded(status: reqwest::StatusCode) -> bool {
+    status.is_success() || status == reqwest::StatusCode::NOT_FOUND || status.as_u16() == 499
+}
+
 fn escape_drive_query_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
 }
@@ -1289,6 +1293,7 @@ impl GoogleDriveCloudHome {
             GDRIVE_CHUNK_SIZE,
             key.to_string(),
             classify,
+            drive_upload_cancellation_succeeded,
         );
         Ok(Box::new(DriveMultipartSink {
             home: self,
@@ -1341,6 +1346,7 @@ impl GoogleDriveCloudHome {
             GDRIVE_CHUNK_SIZE,
             full_logical_key.to_string(),
             classify,
+            drive_upload_cancellation_succeeded,
         );
         let total = body.len();
         let mut offset = 0u64;
@@ -1973,6 +1979,24 @@ mod tests {
         }
     }
 
+    struct EarlyEofMultipartBodyReader {
+        emitted: bool,
+    }
+
+    #[async_trait]
+    impl crate::local_blob::PlaintextChunkReader for EarlyEofMultipartBodyReader {
+        async fn next_chunk(
+            &mut self,
+            _max: usize,
+        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+            if self.emitted {
+                return Ok(Vec::new());
+            }
+            self.emitted = true;
+            Ok(vec![7; GDRIVE_CHUNK_SIZE])
+        }
+    }
+
     struct PausedMultipartBodyReader {
         emitted: bool,
         waiting: Arc<tokio::sync::Notify>,
@@ -1998,6 +2022,7 @@ mod tests {
         endpoint: String,
         requests: Arc<Mutex<Vec<RecordedRequest>>>,
         deletes: Arc<std::sync::atomic::AtomicUsize>,
+        first_delete_status: StatusCode,
     }
 
     async fn mutable_create_endpoint(
@@ -2057,11 +2082,15 @@ mod tests {
                 .expect("build incomplete upload response");
         }
         if method == "DELETE" && path == "/session" {
-            state
+            let delete_index = state
                 .deletes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return Response::builder()
-                .status(StatusCode::NO_CONTENT)
+                .status(if delete_index == 0 {
+                    state.first_delete_status
+                } else {
+                    StatusCode::NO_CONTENT
+                })
                 .body(Body::empty())
                 .expect("build session cancellation response");
         }
@@ -2079,6 +2108,17 @@ mod tests {
         Arc<std::sync::atomic::AtomicUsize>,
         tokio::task::JoinHandle<()>,
     ) {
+        mutable_create_test_home_with_delete_status(StatusCode::NO_CONTENT).await
+    }
+
+    async fn mutable_create_test_home_with_delete_status(
+        first_delete_status: StatusCode,
+    ) -> (
+        GoogleDriveCloudHome,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind Drive endpoint");
@@ -2089,6 +2129,7 @@ mod tests {
             endpoint: endpoint.clone(),
             requests: requests.clone(),
             deletes: deletes.clone(),
+            first_delete_status,
         };
         let server = tokio::spawn(async move {
             axum::serve(
@@ -2142,6 +2183,51 @@ mod tests {
             .as_deref()
             .is_some_and(|query| query.contains("uploadType=resumable")));
         drop(requests);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn absent_mutable_multipart_early_eof_cancels_the_create_session() {
+        let (home, _requests, deletes, server) = mutable_create_test_home().await;
+        let reader =
+            crate::local_blob::PlaintextReader::from_test_reader(EarlyEofMultipartBodyReader {
+                emitted: false,
+            });
+        let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
+
+        let error = home
+            .write("mutable/short", body, &super::super::no_progress())
+            .await
+            .expect_err("Drive must reject an incomplete upload body");
+
+        assert!(error.to_string().contains("ended after"), "{error}");
+        assert_eq!(deletes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drive_treats_499_as_successful_session_cancellation() {
+        let (home, _requests, deletes, server) = mutable_create_test_home_with_delete_status(
+            StatusCode::from_u16(499).expect("valid Drive cancellation status"),
+        )
+        .await;
+        let reader =
+            crate::local_blob::PlaintextReader::from_test_reader(FailingMultipartBodyReader {
+                emitted: false,
+            });
+        let body = BlobBody::from_test_reader((GDRIVE_CHUNK_SIZE + 1) as u64, reader);
+
+        let error = home
+            .write("mutable/cancel-499", body, &super::super::no_progress())
+            .await
+            .expect_err("the body failure must surface");
+
+        assert!(
+            error.to_string().contains("injected Drive body failure"),
+            "{error}"
+        );
+        assert!(error.cleanup_causes().is_none(), "{error}");
+        assert_eq!(deletes.load(std::sync::atomic::Ordering::SeqCst), 1);
         server.abort();
     }
 

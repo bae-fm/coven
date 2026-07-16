@@ -747,6 +747,16 @@ pub trait PartSink: Send {
 /// A boxed [`PartSink`] borrowing its home for `'a`.
 pub type BoxPartSink<'a> = Box<dyn PartSink + 'a>;
 
+async fn abort_part_sink(sink: &mut dyn PartSink, operation: CloudHomeError) -> CloudHomeError {
+    match sink.abort().await {
+        Ok(()) => operation,
+        Err(cleanup) => CloudHomeError::CleanupFailed {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup),
+        },
+    }
+}
+
 /// The central upload driver: pick single-request vs multipart by size and pump
 /// the parts. A blob at or below the home's `multipart_threshold` goes up as one
 /// bounded `put_object`; a larger one opens a multipart/resumable session and
@@ -772,16 +782,15 @@ async fn write_blob<C: CloudHome + ?Sized>(
     loop {
         let part = match body.next_part(part_size).await {
             Ok(Some(part)) => part,
-            Ok(None) => break,
+            Ok(None) if offset == total => break,
+            Ok(None) => {
+                let operation = CloudHomeError::Transport(format!(
+                    "upload body for {key} ended after {offset} of {total} bytes"
+                ));
+                return Err(abort_part_sink(sink.as_mut(), operation).await);
+            }
             Err(operation) => {
-                let cleanup = sink.abort().await;
-                return Err(match cleanup {
-                    Ok(()) => operation,
-                    Err(cleanup) => CloudHomeError::CleanupFailed {
-                        operation: Box::new(operation),
-                        cleanup: Box::new(cleanup),
-                    },
-                });
+                return Err(abort_part_sink(sink.as_mut(), operation).await);
             }
         };
         let n = part.len() as u64;
@@ -1114,6 +1123,7 @@ mod streaming_tests {
         store: Mutex<HashMap<String, Vec<u8>>>,
         put_calls: AtomicUsize,
         multipart_calls: AtomicUsize,
+        abort_calls: AtomicUsize,
         threshold: u64,
     }
 
@@ -1123,6 +1133,7 @@ mod streaming_tests {
                 store: Mutex::new(HashMap::new()),
                 put_calls: AtomicUsize::new(0),
                 multipart_calls: AtomicUsize::new(0),
+                abort_calls: AtomicUsize::new(0),
                 threshold,
             }
         }
@@ -1154,6 +1165,7 @@ mod streaming_tests {
             Ok(())
         }
         async fn abort(&mut self) -> Result<(), CloudHomeError> {
+            self.home.abort_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
@@ -1243,6 +1255,28 @@ mod streaming_tests {
             data.len() as u64,
             "progress reaches the full length"
         );
+    }
+
+    #[tokio::test]
+    async fn write_blob_aborts_when_the_body_ends_before_its_declared_length() {
+        let home = RecordingHome::new(1);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.bin");
+        std::fs::write(&path, [7; 4]).unwrap();
+        let reader = crate::local_blob::open_reader(&path).await.unwrap();
+        let body = BlobBody::from_file_with_prefix(5, reader, None, Vec::new());
+
+        let error = home
+            .write("short", body, &no_progress())
+            .await
+            .expect_err("an incomplete body must not commit");
+
+        assert!(
+            error.to_string().contains("ended after 4 of 5 bytes"),
+            "{error}"
+        );
+        assert_eq!(home.abort_calls.load(Ordering::SeqCst), 1);
+        assert!(!home.store.lock().unwrap().contains_key("short"));
     }
 
     /// A blob at or below the threshold goes through `put_object` as one request.

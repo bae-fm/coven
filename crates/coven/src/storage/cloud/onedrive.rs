@@ -28,6 +28,10 @@ use crate::oauth::{OAuthConfig, OAuthTokens};
 
 const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
 
+fn onedrive_upload_cancellation_succeeded(status: reqwest::StatusCode) -> bool {
+    status.is_success() || status == reqwest::StatusCode::NOT_FOUND
+}
+
 /// OneDrive cloud home backend.
 pub(crate) struct OneDriveCloudHome {
     drive_id: String,
@@ -538,6 +542,7 @@ impl OneDriveCloudHome {
             ONEDRIVE_CHUNK_SIZE,
             key.to_string(),
             classify,
+            onedrive_upload_cancellation_succeeded,
         )))
     }
 
@@ -569,6 +574,7 @@ impl OneDriveCloudHome {
             ONEDRIVE_CHUNK_SIZE,
             full_logical_key.to_string(),
             classify,
+            onedrive_upload_cancellation_succeeded,
         );
         let total = body.len();
         let mut offset = 0;
@@ -904,6 +910,12 @@ mod tests {
     use axum::http::{Request, Response, StatusCode};
     use axum::Router;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn onedrive_does_not_accept_drive_cancellation_status() {
+        let drive_canceled = StatusCode::from_u16(499).expect("valid Drive cancellation status");
+        assert!(!onedrive_upload_cancellation_succeeded(drive_canceled));
+    }
 
     fn home() -> OneDriveCloudHome {
         crate::oauth::install_test_client_creds();

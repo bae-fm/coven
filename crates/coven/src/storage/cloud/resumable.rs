@@ -30,6 +30,7 @@ async fn cancel_upload_session(
     client: reqwest::Client,
     session_url: String,
     key: String,
+    cancellation_succeeded: CancellationSucceeded,
 ) -> Result<(), CloudHomeError> {
     let response = client.delete(&session_url).send().await.map_err(|error| {
         CloudHomeError::Transport(format!(
@@ -37,7 +38,7 @@ async fn cancel_upload_session(
         ))
     })?;
     let status = response.status();
-    if status.is_success() || status == StatusCode::NOT_FOUND {
+    if cancellation_succeeded(status) {
         return Ok(());
     }
     let body = super::http::body_text(response).await;
@@ -49,6 +50,8 @@ async fn cancel_upload_session(
 /// Maps a non-success upload response `(status, body)` to a `CloudHomeError` —
 /// the per-provider quota/error classifier.
 pub(super) type ClassifyWrite = Box<dyn Fn(StatusCode, &str) -> CloudHomeError + Send + Sync>;
+
+pub(super) type CancellationSucceeded = fn(StatusCode) -> bool;
 
 /// A [`PartSink`](super::PartSink) over a resumable upload session: each part is a
 /// `Content-Range` PUT to the pre-authenticated `session_url` (no bearer token),
@@ -63,6 +66,7 @@ pub(super) struct RangePutUploader {
     /// The blob key, for error messages.
     key: String,
     classify: ClassifyWrite,
+    cancellation_succeeded: CancellationSucceeded,
     completed: bool,
 }
 
@@ -75,6 +79,7 @@ impl RangePutUploader {
         part_size: usize,
         key: String,
         classify: ClassifyWrite,
+        cancellation_succeeded: CancellationSucceeded,
     ) -> Self {
         RangePutUploader {
             client,
@@ -84,6 +89,7 @@ impl RangePutUploader {
             part_size,
             key,
             classify,
+            cancellation_succeeded,
             completed: false,
         }
     }
@@ -162,6 +168,7 @@ impl RangePutUploader {
             self.client.clone(),
             self.session_url.clone(),
             self.key.clone(),
+            self.cancellation_succeeded,
         )
         .await?;
         self.completed = true;
@@ -196,9 +203,11 @@ impl Drop for RangePutUploader {
         let key = self.key.clone();
         let cancellation_key = key.clone();
         let cancellation_url = session_url.clone();
+        let cancellation_succeeded = self.cancellation_succeeded;
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         cancellation_runtime().spawn(async move {
-            let result = cancel_upload_session(client, session_url, key).await;
+            let result =
+                cancel_upload_session(client, session_url, key, cancellation_succeeded).await;
             if result_tx.send(result).is_err() {
                 std::process::abort();
             }
@@ -228,6 +237,7 @@ impl RangePutSink {
         part_size: usize,
         key: String,
         classify: ClassifyWrite,
+        cancellation_succeeded: CancellationSucceeded,
     ) -> Self {
         Self(RangePutUploader::new(
             client,
@@ -237,6 +247,7 @@ impl RangePutSink {
             part_size,
             key,
             classify,
+            cancellation_succeeded,
         ))
     }
 }
@@ -277,6 +288,10 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    fn cancellation_succeeded(status: StatusCode) -> bool {
+        status.is_success() || status == StatusCode::NOT_FOUND
+    }
 
     fn spawn_cancellation_endpoint(
         status: &'static str,
@@ -484,6 +499,7 @@ mod tests {
             4,
             "objects/blob".to_string(),
             Box::new(|status, body| CloudHomeError::Transport(format!("{status}: {body}"))),
+            cancellation_succeeded,
         );
 
         let err = sink
@@ -508,6 +524,7 @@ mod tests {
             4,
             "objects/blob".to_string(),
             Box::new(|status, body| CloudHomeError::Transport(format!("{status}: {body}"))),
+            cancellation_succeeded,
         );
 
         let error = uploader
@@ -529,6 +546,7 @@ mod tests {
             4,
             "objects/blob".to_string(),
             Box::new(|status, body| CloudHomeError::Transport(format!("{status}: {body}"))),
+            cancellation_succeeded,
         );
 
         let body = uploader
@@ -554,6 +572,7 @@ mod tests {
             4,
             "objects/blob".to_string(),
             Box::new(|status, body| CloudHomeError::Transport(format!("{status}: {body}"))),
+            cancellation_succeeded,
         );
 
         uploader
@@ -575,6 +594,7 @@ mod tests {
             4,
             "objects/blob".to_string(),
             Box::new(|status, body| CloudHomeError::AlreadyExists(format!("{status}: {body}"))),
+            cancellation_succeeded,
         );
 
         let error = uploader
@@ -607,6 +627,7 @@ mod tests {
             4,
             "objects/blob".to_string(),
             Box::new(|status, body| CloudHomeError::Transport(format!("{status}: {body}"))),
+            cancellation_succeeded,
         );
         let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
         let dropper = std::thread::spawn(move || {
@@ -654,6 +675,7 @@ mod tests {
                 4,
                 "objects/blob".to_string(),
                 Box::new(|status, body| CloudHomeError::Transport(format!("{status}: {body}"))),
+                cancellation_succeeded,
             );
             drop(uploader);
             releaser.join().expect("cancellation releaser succeeded");
