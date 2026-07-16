@@ -166,6 +166,19 @@ pub enum MembershipOpsError {
     Serial(#[from] super::store_outbound::StoreOutboundError),
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "membership operations preserve their existing typed error"
+)]
+fn require_resolved_membership(chain: &MembershipChain) -> Result<(), MembershipOpsError> {
+    match chain.conflict() {
+        Some(conflict) => Err(MembershipOpsError::SemanticConflict(Box::new(
+            conflict.clone(),
+        ))),
+        None => Ok(()),
+    }
+}
+
 async fn required_store_root_hash(db: &Database) -> Result<ObjectHash, MembershipOpsError> {
     db.required_store_root_hash_mapped(
         || MembershipOpsError::NoFounderChain,
@@ -280,11 +293,7 @@ pub async fn get_members(
         Some(db),
     )
     .await?;
-    if let Some(conflict) = chain.conflict() {
-        return Err(MembershipOpsError::SemanticConflict(Box::new(
-            conflict.clone(),
-        )));
-    }
+    require_resolved_membership(&chain)?;
     let user_pubkey_hex = user_pubkey.map(hex::encode);
 
     let current = chain.current_members();
@@ -404,11 +413,7 @@ pub async fn invite_member_with_coordination(
         Some(db),
     )
     .await?;
-    if let Some(conflict) = chain.conflict() {
-        return Err(MembershipOpsError::SemanticConflict(Box::new(
-            conflict.clone(),
-        )));
-    }
+    require_resolved_membership(&chain)?;
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
@@ -1091,11 +1096,7 @@ pub async fn remove_member_with_coordination(
         Some(db),
     )
     .await?;
-    if let Some(conflict) = chain.conflict() {
-        return Err(MembershipOpsError::SemanticConflict(Box::new(
-            conflict.clone(),
-        )));
-    }
+    require_resolved_membership(&chain)?;
 
     // Revoke the member and rotate the cloud key. On return the rotation is
     // committed for every remaining member.

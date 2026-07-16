@@ -21,11 +21,11 @@ use super::store_commit::{
     parse_membership_entry_copy_key, parse_membership_head_copy_key, parse_package_copy_key,
     parse_registration_copy_key, parse_snapshot_meta_copy_key, parse_store_protocol_root_copy_key,
     registration_slot_prefix, snapshot_image_semantic_prefix, CommitFrontier, CommitPosition,
-    SnapshotMeta, StoreAck, StoreBatchCommit, StoreDeviceHead, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreDeviceRegistrationState, StoreProtocolRoot, STORE_ACK_PREFIX,
-    STORE_DEVICE_REGISTRATION_PREFIX, STORE_HEAD_PREFIX, STORE_MEMBERSHIP_ENTRY_PREFIX,
-    STORE_MEMBERSHIP_HEAD_PREFIX, STORE_PACKAGE_PREFIX, STORE_PROTOCOL_ROOT_PREFIX,
-    STORE_SNAPSHOT_META_PREFIX,
+    MembershipCopySlot, SnapshotMeta, StoreAck, StoreBatchCommit, StoreDeviceHead,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceRegistrationState,
+    StoreProtocolRoot, STORE_ACK_PREFIX, STORE_DEVICE_REGISTRATION_PREFIX, STORE_HEAD_PREFIX,
+    STORE_MEMBERSHIP_ENTRY_PREFIX, STORE_MEMBERSHIP_HEAD_PREFIX, STORE_PACKAGE_PREFIX,
+    STORE_PROTOCOL_ROOT_PREFIX, STORE_SNAPSHOT_META_PREFIX,
 };
 use super::store_commit::{ObjectHash, StoreProtocolError};
 
@@ -560,6 +560,34 @@ fn membership_head_slot_prefix(
     format!("{STORE_MEMBERSHIP_HEAD_PREFIX}{author}/{grant}/{stream_id}/{seq}")
 }
 
+type MembershipCopyGroups =
+    BTreeMap<(String, MembershipGrantId, AuthorStreamId, u64), Vec<ProtocolObjectLocator>>;
+
+fn group_membership_copy_slots(
+    objects: Vec<ProtocolObjectLocator>,
+    prefix: &str,
+    parser: fn(&str) -> Result<MembershipCopySlot, StoreProtocolError>,
+) -> Result<MembershipCopyGroups, StoreObjectError> {
+    let mut slots: MembershipCopyGroups = BTreeMap::new();
+    for object in objects {
+        let parsed = parser(object.logical_key()).map_err(|error| StoreObjectError::Collision {
+            semantic_prefix: prefix.trim_end_matches('/').to_string(),
+            key: object.logical_key().to_string(),
+            reason: error.to_string(),
+        })?;
+        slots
+            .entry((
+                parsed.author,
+                parsed.author_owner_grant,
+                parsed.stream_id,
+                parsed.sequence,
+            ))
+            .or_default()
+            .push(object);
+    }
+    Ok(slots)
+}
+
 fn parse_membership_entry_at(
     semantic_hash: ObjectHash,
     author: &str,
@@ -751,30 +779,11 @@ pub async fn list_membership_entry_objects(
     let listing = storage
         .list_protocol_objects(STORE_MEMBERSHIP_ENTRY_PREFIX)
         .await?;
-    let mut slots: BTreeMap<
-        (String, MembershipGrantId, AuthorStreamId, u64),
-        Vec<ProtocolObjectLocator>,
-    > = BTreeMap::new();
-    for object in listing.objects {
-        let parsed = parse_membership_entry_copy_key(object.logical_key()).map_err(|error| {
-            StoreObjectError::Collision {
-                semantic_prefix: STORE_MEMBERSHIP_ENTRY_PREFIX
-                    .trim_end_matches('/')
-                    .to_string(),
-                key: object.logical_key().to_string(),
-                reason: error.to_string(),
-            }
-        })?;
-        slots
-            .entry((
-                parsed.author,
-                parsed.author_owner_grant,
-                parsed.stream_id,
-                parsed.sequence,
-            ))
-            .or_default()
-            .push(object);
-    }
+    let slots = group_membership_copy_slots(
+        listing.objects,
+        STORE_MEMBERSHIP_ENTRY_PREFIX,
+        parse_membership_entry_copy_key,
+    )?;
     let mut entries = Vec::with_capacity(slots.len());
     for ((author, grant, stream_id, seq), objects) in slots {
         let slot = membership_entry_slot_prefix(&author, &grant, stream_id, seq);
@@ -909,30 +918,11 @@ pub async fn list_membership_head_objects(
     let listing = storage
         .list_protocol_objects(STORE_MEMBERSHIP_HEAD_PREFIX)
         .await?;
-    let mut slots: BTreeMap<
-        (String, MembershipGrantId, AuthorStreamId, u64),
-        Vec<ProtocolObjectLocator>,
-    > = BTreeMap::new();
-    for object in listing.objects {
-        let parsed = parse_membership_head_copy_key(object.logical_key()).map_err(|error| {
-            StoreObjectError::Collision {
-                semantic_prefix: STORE_MEMBERSHIP_HEAD_PREFIX
-                    .trim_end_matches('/')
-                    .to_string(),
-                key: object.logical_key().to_string(),
-                reason: error.to_string(),
-            }
-        })?;
-        slots
-            .entry((
-                parsed.author,
-                parsed.author_owner_grant,
-                parsed.stream_id,
-                parsed.sequence,
-            ))
-            .or_default()
-            .push(object);
-    }
+    let slots = group_membership_copy_slots(
+        listing.objects,
+        STORE_MEMBERSHIP_HEAD_PREFIX,
+        parse_membership_head_copy_key,
+    )?;
     let mut heads = Vec::with_capacity(slots.len());
     for ((author, grant, stream_id, seq), objects) in slots {
         let slot = membership_head_slot_prefix(&author, &grant, stream_id, seq);
@@ -2204,6 +2194,91 @@ mod tests {
         .unwrap();
         assert_eq!(loaded.bytes, bytes);
         assert_eq!(loaded.copies.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn membership_entry_listing_groups_copies_and_rejects_a_malformed_key() {
+        let home = InMemoryCloudHome::new();
+        let storage = storage(&home);
+        let owner = UserKeypair::generate();
+        let entry =
+            crate::sync::membership::founder_entry("membership-entry-listing", &owner, "founder");
+        let coord = entry.coord();
+        let store_root_hash = ObjectHash::digest(b"membership entry listing Store root");
+        append_membership_entry_object(&storage, store_root_hash, &coord, &entry)
+            .await
+            .unwrap();
+        append_membership_entry_object(&storage, store_root_hash, &coord, &entry)
+            .await
+            .unwrap();
+
+        let listed = list_membership_entry_objects(&storage, store_root_hash)
+            .await
+            .unwrap();
+        assert_eq!(listed.entries.len(), 1);
+        assert_eq!(listed.entries[0].0, coord);
+        assert_eq!(listed.entries[0].1.copies.len(), 2);
+
+        let malformed = format!("{STORE_MEMBERSHIP_ENTRY_PREFIX}malformed");
+        home.insert_appended_candidate(&malformed, b"malformed membership entry".to_vec());
+        let error = list_membership_entry_objects(&storage, store_root_hash)
+            .await
+            .expect_err("a malformed membership entry copy key fails the listing");
+        assert!(matches!(
+            error,
+            StoreObjectError::Collision {
+                semantic_prefix,
+                key,
+                ..
+            } if semantic_prefix == STORE_MEMBERSHIP_ENTRY_PREFIX.trim_end_matches('/')
+                && key == malformed
+        ));
+    }
+
+    #[tokio::test]
+    async fn membership_head_listing_groups_copies_and_rejects_a_malformed_key() {
+        let home = InMemoryCloudHome::new();
+        let storage = storage(&home);
+        let owner = UserKeypair::generate();
+        let entry =
+            crate::sync::membership::founder_entry("membership-head-listing", &owner, "founder");
+        let head = AuthorHead::signed(
+            entry.store_id.clone(),
+            entry.author_owner_grant.clone(),
+            entry.stream_id,
+            entry.seq,
+            entry_hash(&entry),
+            &owner,
+        );
+        let store_root_hash = ObjectHash::digest(b"membership head listing Store root");
+        append_membership_head_object(&storage, store_root_hash, &head)
+            .await
+            .unwrap();
+        append_membership_head_object(&storage, store_root_hash, &head)
+            .await
+            .unwrap();
+
+        let listed = list_membership_head_objects(&storage, store_root_hash)
+            .await
+            .unwrap();
+        assert_eq!(listed.heads.len(), 1);
+        assert_eq!(listed.heads[0].value, head);
+        assert_eq!(listed.heads[0].copies.len(), 2);
+
+        let malformed = format!("{STORE_MEMBERSHIP_HEAD_PREFIX}malformed");
+        home.insert_appended_candidate(&malformed, b"malformed membership head".to_vec());
+        let error = list_membership_head_objects(&storage, store_root_hash)
+            .await
+            .expect_err("a malformed membership head copy key fails the listing");
+        assert!(matches!(
+            error,
+            StoreObjectError::Collision {
+                semantic_prefix,
+                key,
+                ..
+            } if semantic_prefix == STORE_MEMBERSHIP_HEAD_PREFIX.trim_end_matches('/')
+                && key == malformed
+        ));
     }
 
     #[tokio::test]

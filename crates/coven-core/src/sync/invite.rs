@@ -83,6 +83,24 @@ impl From<crate::database::DbError> for InviteError {
     }
 }
 
+async fn select_mutation_author_stream(
+    db: &Database,
+    chain: &MembershipChain,
+    signer: &UserKeypair,
+) -> Result<AuthorStreamId, InviteError> {
+    let author = keys::public_key_hex(signer);
+    let grant = chain
+        .active_owner_grant(&author)
+        .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
+    Ok(db
+        .select_membership_author_stream(
+            &author,
+            &grant,
+            chain.reusable_author_streams(&author, &grant),
+        )
+        .await?)
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(
     tag = "kind",
@@ -735,17 +753,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
             (plan, progress, intent_hash)
         }
         None => {
-            let author = hex::encode(owner_keypair.public_key());
-            let grant = chain
-                .active_owner_grant(&author)
-                .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
-            let stream_id = db
-                .select_membership_author_stream(
-                    &author,
-                    &grant,
-                    chain.reusable_author_streams(&author, &grant),
-                )
-                .await?;
+            let stream_id = select_mutation_author_stream(db, chain, owner_keypair).await?;
             let plan = build_invite_mutation(
                 chain,
                 owner_keypair,
@@ -1611,17 +1619,7 @@ pub(crate) async fn revoke_member_durable(
                 )
                 .await;
             }
-            let author = hex::encode(owner_keypair.public_key());
-            let grant = chain
-                .active_owner_grant(&author)
-                .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
-            let stream_id = db
-                .select_membership_author_stream(
-                    &author,
-                    &grant,
-                    chain.reusable_author_streams(&author, &grant),
-                )
-                .await?;
+            let stream_id = select_mutation_author_stream(db, chain, owner_keypair).await?;
             let plan = build_revoke_mutation(
                 cloud_home,
                 chain,
