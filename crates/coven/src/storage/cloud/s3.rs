@@ -2224,7 +2224,7 @@ mod tests {
                 .expect("read destination"),
             full_body
         );
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down fake S3");
     }
 
     #[tokio::test]
@@ -2302,7 +2302,7 @@ mod tests {
                 .expect("read destination"),
             b"committed"
         );
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down fake S3");
     }
 
     #[tokio::test]
