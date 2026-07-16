@@ -1268,31 +1268,59 @@ async fn membership_authorizes(
     let Some(chain) = membership else {
         return Ok(true);
     };
-    let Some(grant) = commit.membership_grant.as_ref() else {
+    let Some(authority) = commit.membership_authority.as_ref() else {
         return Ok(chain.contains_member_now(&commit.author_pubkey)
             && is_exact_self_registration(commit, registrations));
     };
-    if chain.authorizes_write_at(grant, &commit.author_pubkey) {
+    if chain.authorizes_write_authority(authority, &commit.author_pubkey) {
         return Ok(true);
     }
     let owner = db
         .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
         .await?;
-    let entries = super::membership_ops::list_membership_entries(storage, commit.store_root_hash)
-        .await
-        .map_err(|error| StorePullError::Membership(StorePullMembershipError::Object(error)))?;
-    let refreshed = super::membership_ops::load_anchored_chain_with_candidates(
-        storage,
-        commit.store_root_hash,
-        &entries,
-        std::slice::from_ref(grant),
-        owner.as_deref(),
-        Some(db),
-    )
-    .await
-    .map_err(|error| StorePullError::Membership(StorePullMembershipError::Chain(error)))?;
-    Ok(refreshed
-        .is_some_and(|refreshed| refreshed.authorizes_write_at(grant, &commit.author_pubkey)))
+    match authority {
+        super::membership::MembershipGrantCreationAuthority::Entry(grant) => {
+            let entries =
+                super::membership_ops::list_membership_entries(storage, commit.store_root_hash)
+                    .await
+                    .map_err(|error| {
+                        StorePullError::Membership(StorePullMembershipError::Object(error))
+                    })?;
+            let refreshed = super::membership_ops::load_anchored_chain_with_candidates(
+                storage,
+                commit.store_root_hash,
+                &entries,
+                std::slice::from_ref(grant),
+                owner.as_deref(),
+                Some(db),
+            )
+            .await
+            .map_err(|error| StorePullError::Membership(StorePullMembershipError::Chain(error)))?;
+            Ok(refreshed.is_some_and(|refreshed| {
+                refreshed.authorizes_write_authority(authority, &commit.author_pubkey)
+            }))
+        }
+        super::membership::MembershipGrantCreationAuthority::ConflictResolution(reference) => {
+            let owner = owner.ok_or_else(|| {
+                StorePullError::Membership(StorePullMembershipError::Chain(
+                    super::membership_ops::AnchoredChainError::LoadFailed(
+                        "Store founder is absent while validating membership resolution"
+                            .to_string(),
+                    ),
+                ))
+            })?;
+            let resolved = super::membership_ops::load_anchored_chain_at_exact_heads(
+                storage,
+                commit.store_root_hash,
+                &owner,
+                chain.head_refs(),
+                std::slice::from_ref(reference),
+            )
+            .await
+            .map_err(|error| StorePullError::Membership(StorePullMembershipError::Chain(error)))?;
+            Ok(resolved.authorizes_write_authority(authority, &commit.author_pubkey))
+        }
+    }
 }
 
 fn carries_circle_payload(commit: &StoreBatchCommit) -> bool {
@@ -2180,7 +2208,7 @@ mod tests {
                 previous_commit_hash: None,
                 dependencies: BTreeMap::new(),
             },
-            Some(founder.coord()),
+            Some(crate::sync::membership::MembershipGrantCreationAuthority::Entry(founder.coord())),
             None,
             Vec::new(),
             Vec::new(),
@@ -2890,6 +2918,7 @@ mod tests {
             &member,
         )
         .unwrap();
+        let after_member = after_add.authorize_and_apply(&member_commit).unwrap();
         append_serial_commit(&storage, &add_commit).await;
         append_serial_commit(&storage, &member_commit).await;
         let member_head = StoreSerialHead::signed(
@@ -2920,7 +2949,7 @@ mod tests {
             .unwrap()
             .can_write(&member_pubkey));
 
-        let removal = after_add
+        let removal = after_member
             .membership
             .signed_remove_member(
                 &owner,

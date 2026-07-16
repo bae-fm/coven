@@ -255,7 +255,6 @@ macro_rules! coven_tables {
             "
     operation_id TEXT PRIMARY KEY,
     circle_id TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL CHECK (json_valid(status)),
     payload BLOB NOT NULL
 "
         );
@@ -439,6 +438,22 @@ mod tests {
                 .unwrap_or_else(|e| panic!("PRAGMA table_list({name}): {e}"));
             assert_eq!(strict, 1, "{name} must be STRICT");
         }
+    }
+
+    #[test]
+    fn circle_operation_journal_has_one_progress_representation() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        apply_coven_schema(&conn).expect("apply coven schema");
+        let mut statement = conn
+            .prepare("PRAGMA table_info(circle_operations)")
+            .expect("prepare circle_operations table_info");
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query circle_operations columns")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("read circle_operations columns");
+
+        assert_eq!(columns, ["operation_id", "circle_id", "payload"]);
     }
 
     #[test]

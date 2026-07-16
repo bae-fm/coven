@@ -739,8 +739,9 @@ async fn removed_owner_key_is_not_adopted() {
     }
     {
         let entry = chain
-            .signed_remove_member(
+            .signed_remove_member_in_stream(
                 &second_owner,
+                crate::sync::membership::AuthorStreamId::from_bytes([44; 16]),
                 pubkey_hex(&founder),
                 "0000000004000-0000-B".to_string(),
             )

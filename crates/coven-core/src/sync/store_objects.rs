@@ -4,9 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::storage::cloud::ListingCoverage;
 
+use super::circle::{circle_semantic_prefix, CircleId, CircleSemanticSlot};
+use super::circle_roster::{CircleRosterConflictResolution, CircleRosterConflictResolutionRef};
+
 use super::membership::{
     entry_hash, verify_membership_entry, AuthorHead, AuthorStreamId, MembershipCoord,
-    MembershipEntry, MembershipGrantId,
+    MembershipEntry, MembershipGrantId, StoreMembershipConflictResolution,
+    StoreMembershipConflictResolutionRef,
 };
 use super::storage::{
     ProtocolObjectContext, ProtocolObjectDomain, ProtocolObjectLocator, StorageError, SyncStorage,
@@ -92,6 +96,54 @@ pub struct VerifiedMembershipEntryListing {
 pub struct VerifiedMembershipHeadListing {
     pub heads: Vec<VerifiedCopies<AuthorHead>>,
     pub coverage: ListingCoverage,
+}
+
+#[derive(Debug)]
+pub struct VerifiedMembershipResolutionListing {
+    pub resolutions: Vec<VerifiedCopies<StoreMembershipConflictResolution>>,
+    pub coverage: ListingCoverage,
+}
+
+#[derive(Debug)]
+pub struct VerifiedCircleRosterResolutionListing {
+    pub resolutions: Vec<VerifiedCopies<CircleRosterConflictResolution>>,
+    pub coverage: ListingCoverage,
+}
+
+const STORE_MEMBERSHIP_RESOLUTION_PREFIX: &str = "store-v1/membership/resolutions/";
+
+fn membership_resolution_semantic_prefix(
+    reference: &StoreMembershipConflictResolutionRef,
+) -> String {
+    format!(
+        "{STORE_MEMBERSHIP_RESOLUTION_PREFIX}{}/{}/{}",
+        reference.conflict_hash, reference.resolver_pubkey, reference.resolution_hash
+    )
+}
+
+fn parse_membership_resolution_copy_key(
+    key: &str,
+) -> Result<StoreMembershipConflictResolutionRef, StoreProtocolError> {
+    let relative = key
+        .strip_prefix(STORE_MEMBERSHIP_RESOLUTION_PREFIX)
+        .ok_or_else(|| StoreProtocolError::MalformedPath(key.to_string()))?;
+    let segments = relative.split('/').collect::<Vec<_>>();
+    if segments.len() != 5
+        || segments[1].is_empty()
+        || segments[3] != "copies"
+        || !segments[4].ends_with(".json")
+    {
+        return Err(StoreProtocolError::MalformedPath(key.to_string()));
+    }
+    Ok(StoreMembershipConflictResolutionRef {
+        conflict_hash: segments[0]
+            .parse()
+            .map_err(|_| StoreProtocolError::MalformedPath(key.to_string()))?,
+        resolver_pubkey: segments[1].to_string(),
+        resolution_hash: segments[2]
+            .parse()
+            .map_err(|_| StoreProtocolError::MalformedPath(key.to_string()))?,
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -907,6 +959,301 @@ pub async fn list_membership_head_objects(
     })
 }
 
+fn parse_membership_resolution_at(
+    store_root_hash: ObjectHash,
+    reference: &StoreMembershipConflictResolutionRef,
+    bytes: &[u8],
+) -> Result<StoreMembershipConflictResolution, StoreProtocolError> {
+    let resolution: StoreMembershipConflictResolution = serde_json::from_slice(bytes)
+        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+    if resolution.store_root_hash != store_root_hash
+        || resolution.resolution_ref() != *reference
+        || resolution.resolution_hash() != reference.resolution_hash
+        || !resolution.verify_signature()
+    {
+        return Err(StoreProtocolError::InvalidSignature);
+    }
+    Ok(resolution)
+}
+
+pub async fn append_membership_resolution_object(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    resolution: &StoreMembershipConflictResolution,
+) -> Result<VerifiedCopies<StoreMembershipConflictResolution>, StoreObjectError> {
+    let reference = resolution.resolution_ref();
+    let semantic_prefix = membership_resolution_semantic_prefix(&reference);
+    let bytes = serde_json::to_vec(resolution)
+        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
+        .map_err(|error| StoreObjectError::Collision {
+            semantic_prefix: semantic_prefix.clone(),
+            key: semantic_prefix.clone(),
+            reason: error.to_string(),
+        })?;
+    parse_membership_resolution_at(store_root_hash, &reference, &bytes).map_err(|error| {
+        StoreObjectError::Collision {
+            semantic_prefix: semantic_prefix.clone(),
+            key: semantic_prefix.clone(),
+            reason: error.to_string(),
+        }
+    })?;
+    append_and_verify(
+        storage,
+        &ProtocolObjectContext::store(
+            store_root_hash,
+            ProtocolObjectDomain::StoreMembershipResolution,
+        ),
+        &semantic_prefix,
+        ".json",
+        &bytes,
+    )
+    .await?;
+    load_membership_resolution_object(storage, store_root_hash, &reference)
+        .await?
+        .ok_or_else(|| StorageError::NotFound(semantic_prefix).into())
+}
+
+pub async fn load_membership_resolution_object(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    reference: &StoreMembershipConflictResolutionRef,
+) -> Result<Option<VerifiedCopies<StoreMembershipConflictResolution>>, StoreObjectError> {
+    let semantic_prefix = membership_resolution_semantic_prefix(reference);
+    load_semantic_copies(
+        storage,
+        &ProtocolObjectContext::store(
+            store_root_hash,
+            ProtocolObjectDomain::StoreMembershipResolution,
+        ),
+        &semantic_prefix,
+        reference.resolution_hash,
+        |bytes| parse_membership_resolution_at(store_root_hash, reference, bytes),
+    )
+    .await
+}
+
+pub async fn list_membership_resolution_objects(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+) -> Result<VerifiedMembershipResolutionListing, StoreObjectError> {
+    let listing = storage
+        .list_protocol_objects(STORE_MEMBERSHIP_RESOLUTION_PREFIX)
+        .await?;
+    let mut groups =
+        BTreeMap::<StoreMembershipConflictResolutionRef, Vec<ProtocolObjectLocator>>::new();
+    for object in listing.objects {
+        let reference =
+            parse_membership_resolution_copy_key(object.logical_key()).map_err(|error| {
+                StoreObjectError::Collision {
+                    semantic_prefix: STORE_MEMBERSHIP_RESOLUTION_PREFIX
+                        .trim_end_matches('/')
+                        .to_string(),
+                    key: object.logical_key().to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+        groups.entry(reference).or_default().push(object);
+    }
+    let mut resolutions = Vec::with_capacity(groups.len());
+    for (reference, objects) in groups {
+        let semantic_prefix = membership_resolution_semantic_prefix(&reference);
+        if let Some(resolution) = load_semantic_candidates(
+            storage,
+            &ProtocolObjectContext::store(
+                store_root_hash,
+                ProtocolObjectDomain::StoreMembershipResolution,
+            ),
+            &semantic_prefix,
+            reference.resolution_hash,
+            objects,
+            listing.coverage,
+            |bytes| parse_membership_resolution_at(store_root_hash, &reference, bytes),
+        )
+        .await?
+        {
+            resolutions.push(resolution);
+        }
+    }
+    Ok(VerifiedMembershipResolutionListing {
+        resolutions,
+        coverage: listing.coverage,
+    })
+}
+
+fn parse_circle_roster_resolution_copy_key(
+    key: &str,
+    circle_id: CircleId,
+) -> Result<CircleRosterConflictResolutionRef, StoreProtocolError> {
+    let prefix = format!("circles/{circle_id}/roster/resolutions/");
+    let relative = key
+        .strip_prefix(&prefix)
+        .ok_or_else(|| StoreProtocolError::MalformedPath(key.to_string()))?;
+    let segments = relative.split('/').collect::<Vec<_>>();
+    if segments.len() != 5
+        || segments[1].is_empty()
+        || segments[3] != "copies"
+        || !segments[4].ends_with(".json")
+    {
+        return Err(StoreProtocolError::MalformedPath(key.to_string()));
+    }
+    Ok(CircleRosterConflictResolutionRef {
+        conflict_hash: segments[0]
+            .parse()
+            .map_err(|_| StoreProtocolError::MalformedPath(key.to_string()))?,
+        resolver_pubkey: segments[1].to_string(),
+        resolution_hash: segments[2]
+            .parse()
+            .map_err(|_| StoreProtocolError::MalformedPath(key.to_string()))?,
+    })
+}
+
+fn parse_circle_roster_resolution_at(
+    store_root_hash: ObjectHash,
+    circle_id: CircleId,
+    reference: &CircleRosterConflictResolutionRef,
+    bytes: &[u8],
+) -> Result<CircleRosterConflictResolution, StoreProtocolError> {
+    let resolution: CircleRosterConflictResolution = serde_json::from_slice(bytes)
+        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+    if resolution.store_root_hash != store_root_hash
+        || resolution.circle_id != circle_id
+        || resolution.resolution_ref() != *reference
+        || resolution.resolution_hash() != reference.resolution_hash
+        || !resolution.verify_signature()
+    {
+        return Err(StoreProtocolError::InvalidSignature);
+    }
+    Ok(resolution)
+}
+
+pub async fn append_circle_roster_resolution_object(
+    storage: &dyn SyncStorage,
+    encryption: crate::encryption::EncryptionService,
+    resolution: &CircleRosterConflictResolution,
+) -> Result<VerifiedCopies<CircleRosterConflictResolution>, StoreObjectError> {
+    let reference = resolution.resolution_ref();
+    let semantic_prefix = circle_semantic_prefix(CircleSemanticSlot::RosterResolution {
+        circle_id: resolution.circle_id,
+        resolution: &reference,
+    });
+    let bytes = serde_json::to_vec(resolution)
+        .map_err(|error| StoreProtocolError::Malformed(error.to_string()))
+        .map_err(|error| StoreObjectError::Collision {
+            semantic_prefix: semantic_prefix.clone(),
+            key: semantic_prefix.clone(),
+            reason: error.to_string(),
+        })?;
+    parse_circle_roster_resolution_at(
+        resolution.store_root_hash,
+        resolution.circle_id,
+        &reference,
+        &bytes,
+    )
+    .map_err(|error| StoreObjectError::Collision {
+        semantic_prefix: semantic_prefix.clone(),
+        key: semantic_prefix.clone(),
+        reason: error.to_string(),
+    })?;
+    append_and_verify(
+        storage,
+        &ProtocolObjectContext::circle(
+            resolution.store_root_hash,
+            ProtocolObjectDomain::CircleRosterResolution,
+            encryption.clone(),
+        ),
+        &semantic_prefix,
+        ".json",
+        &bytes,
+    )
+    .await?;
+    load_circle_roster_resolution_object(
+        storage,
+        resolution.store_root_hash,
+        resolution.circle_id,
+        encryption,
+        &reference,
+    )
+    .await?
+    .ok_or_else(|| StorageError::NotFound(semantic_prefix).into())
+}
+
+pub async fn load_circle_roster_resolution_object(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    circle_id: CircleId,
+    encryption: crate::encryption::EncryptionService,
+    reference: &CircleRosterConflictResolutionRef,
+) -> Result<Option<VerifiedCopies<CircleRosterConflictResolution>>, StoreObjectError> {
+    let semantic_prefix = circle_semantic_prefix(CircleSemanticSlot::RosterResolution {
+        circle_id,
+        resolution: reference,
+    });
+    load_semantic_copies(
+        storage,
+        &ProtocolObjectContext::circle(
+            store_root_hash,
+            ProtocolObjectDomain::CircleRosterResolution,
+            encryption,
+        ),
+        &semantic_prefix,
+        reference.resolution_hash,
+        |bytes| parse_circle_roster_resolution_at(store_root_hash, circle_id, reference, bytes),
+    )
+    .await
+}
+
+pub async fn list_circle_roster_resolution_objects(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    circle_id: CircleId,
+    encryption: crate::encryption::EncryptionService,
+) -> Result<VerifiedCircleRosterResolutionListing, StoreObjectError> {
+    let listing_prefix = format!("circles/{circle_id}/roster/resolutions/");
+    let listing = storage.list_protocol_objects(&listing_prefix).await?;
+    let mut groups =
+        BTreeMap::<CircleRosterConflictResolutionRef, Vec<ProtocolObjectLocator>>::new();
+    for object in listing.objects {
+        let reference = parse_circle_roster_resolution_copy_key(object.logical_key(), circle_id)
+            .map_err(|error| StoreObjectError::Collision {
+                semantic_prefix: listing_prefix.trim_end_matches('/').to_string(),
+                key: object.logical_key().to_string(),
+                reason: error.to_string(),
+            })?;
+        groups.entry(reference).or_default().push(object);
+    }
+    let context = ProtocolObjectContext::circle(
+        store_root_hash,
+        ProtocolObjectDomain::CircleRosterResolution,
+        encryption,
+    );
+    let mut resolutions = Vec::with_capacity(groups.len());
+    for (reference, objects) in groups {
+        let semantic_prefix = circle_semantic_prefix(CircleSemanticSlot::RosterResolution {
+            circle_id,
+            resolution: &reference,
+        });
+        if let Some(resolution) = load_semantic_candidates(
+            storage,
+            &context,
+            &semantic_prefix,
+            reference.resolution_hash,
+            objects,
+            listing.coverage,
+            |bytes| {
+                parse_circle_roster_resolution_at(store_root_hash, circle_id, &reference, bytes)
+            },
+        )
+        .await?
+        {
+            resolutions.push(resolution);
+        }
+    }
+    Ok(VerifiedCircleRosterResolutionListing {
+        resolutions,
+        coverage: listing.coverage,
+    })
+}
+
 pub async fn list_snapshot_metas(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
@@ -1646,6 +1993,173 @@ mod tests {
         commit_slot_prefix, parse_commit_copy_key, ObjectHash, StoreProtocolError,
     };
 
+    fn store_resolution(store_root_hash: ObjectHash) -> StoreMembershipConflictResolution {
+        use crate::sync::membership::{
+            founder_entry, AuthorHead, AuthorStreamId, MemberRole, MembershipChain,
+            MembershipConflict,
+        };
+
+        let first_owner = UserKeypair::generate();
+        let second_owner = UserKeypair::generate();
+        let first_pubkey = crate::keys::public_key_hex(&first_owner);
+        let second_pubkey = crate::keys::public_key_hex(&second_owner);
+        let mut base = MembershipChain::from_entries(vec![founder_entry(
+            "resolution-object-store",
+            &first_owner,
+            "founder",
+        )])
+        .unwrap();
+        let add_second = base
+            .signed_set_member(
+                &first_owner,
+                second_pubkey.clone(),
+                None,
+                MemberRole::Owner,
+                "add second".to_string(),
+            )
+            .unwrap();
+        base.add_entry(add_second).unwrap();
+        let remove_second = base
+            .signed_remove_member(&first_owner, second_pubkey, "remove second".to_string())
+            .unwrap();
+        let remove_first = base
+            .signed_remove_member_in_stream(
+                &second_owner,
+                AuthorStreamId::from_bytes([61; 16]),
+                first_pubkey.clone(),
+                "remove first".to_string(),
+            )
+            .unwrap();
+        let mut entries = base.entries().to_vec();
+        entries.extend([remove_second.clone(), remove_first.clone()]);
+        let conflicted = MembershipChain::from_entries_with_coords_and_heads(
+            entries
+                .into_iter()
+                .map(|entry| (entry.coord(), entry))
+                .collect(),
+            vec![
+                AuthorHead::signed(
+                    remove_second.store_id.clone(),
+                    remove_second.author_owner_grant.clone(),
+                    remove_second.stream_id,
+                    remove_second.seq,
+                    crate::sync::membership::entry_hash(&remove_second),
+                    &first_owner,
+                ),
+                AuthorHead::signed(
+                    remove_first.store_id.clone(),
+                    remove_first.author_owner_grant.clone(),
+                    remove_first.stream_id,
+                    remove_first.seq,
+                    crate::sync::membership::entry_hash(&remove_first),
+                    &second_owner,
+                ),
+            ],
+        )
+        .unwrap();
+        let MembershipConflict::RevocationCycle {
+            maximal_valid_branches,
+            ..
+        } = conflicted.conflict().unwrap()
+        else {
+            panic!("expected revocation cycle");
+        };
+        let branch = maximal_valid_branches
+            .iter()
+            .find(|branch| {
+                branch.active_grants.values().any(|record| {
+                    record.member_pubkey == first_pubkey && record.role == MemberRole::Owner
+                })
+            })
+            .unwrap()
+            .heads
+            .clone();
+        conflicted
+            .signed_cycle_resolution(store_root_hash, branch, &first_owner)
+            .unwrap()
+    }
+
+    fn circle_resolution(store_root_hash: ObjectHash) -> CircleRosterConflictResolution {
+        use crate::sync::circle::{
+            CircleId, CircleRole, CircleRosterChain, CircleRosterEntry, CircleRosterHead,
+            CircleRosterStatus,
+        };
+        use crate::sync::membership::{AuthorStreamId, MembershipGrantId};
+
+        let first_owner = UserKeypair::generate();
+        let second_owner = UserKeypair::generate();
+        let first_pubkey = crate::keys::public_key_hex(&first_owner);
+        let second_pubkey = crate::keys::public_key_hex(&second_owner);
+        let first_grant = MembershipGrantId(ObjectHash::digest(b"Circle object founder grant"));
+        let circle_id = CircleId::founder(store_root_hash, &first_pubkey, &first_grant);
+        let first_stream = AuthorStreamId::from_bytes([62; 16]);
+        let second_stream = AuthorStreamId::from_bytes([63; 16]);
+        let founder = CircleRosterEntry::founder(
+            store_root_hash,
+            circle_id,
+            "first-device",
+            first_stream,
+            first_grant,
+            &first_owner,
+        );
+        let mut base = vec![founder];
+        let add_second = CircleRosterChain::from_entries(base.clone())
+            .unwrap()
+            .signed_set_member(
+                "first-device",
+                first_stream,
+                second_pubkey.clone(),
+                CircleRole::Owner,
+                &first_owner,
+            )
+            .unwrap();
+        base.push(add_second);
+        let remove_second = CircleRosterChain::from_entries(base.clone())
+            .unwrap()
+            .signed_remove_member("first-device", first_stream, second_pubkey, &first_owner)
+            .unwrap();
+        let remove_first = CircleRosterChain::from_entries(base.clone())
+            .unwrap()
+            .signed_remove_member(
+                "second-device",
+                second_stream,
+                first_pubkey.clone(),
+                &second_owner,
+            )
+            .unwrap();
+        base.extend([remove_second.clone(), remove_first.clone()]);
+        let conflicted = CircleRosterChain::from_entries_with_heads(
+            base,
+            vec![
+                CircleRosterHead::signed(&remove_second, &first_owner),
+                CircleRosterHead::signed(&remove_first, &second_owner),
+            ],
+        )
+        .unwrap();
+        let CircleRosterStatus::Conflict(
+            crate::sync::circle::CircleRosterConflict::RevocationCycle {
+                maximal_valid_branches,
+                ..
+            },
+        ) = conflicted.status()
+        else {
+            panic!("expected revocation cycle");
+        };
+        let branch = maximal_valid_branches
+            .iter()
+            .find(|branch| {
+                branch.active_grants.values().any(|record| {
+                    record.member_pubkey == first_pubkey && record.role == CircleRole::Owner
+                })
+            })
+            .unwrap()
+            .heads
+            .clone();
+        conflicted
+            .signed_cycle_resolution(branch, &first_owner)
+            .unwrap()
+    }
+
     fn storage(home: &InMemoryCloudHome) -> CloudSyncStorage {
         CloudSyncStorage::new(
             Arc::new(home.clone()),
@@ -1690,6 +2204,85 @@ mod tests {
         .unwrap();
         assert_eq!(loaded.bytes, bytes);
         assert_eq!(loaded.copies.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn membership_resolution_append_load_and_list_use_the_exact_reference_path() {
+        let home = InMemoryCloudHome::new();
+        let storage = storage(&home);
+        let store_root_hash = ObjectHash::digest(b"membership resolution Store root");
+        let resolution = store_resolution(store_root_hash);
+        let reference = resolution.resolution_ref();
+
+        let appended = append_membership_resolution_object(&storage, store_root_hash, &resolution)
+            .await
+            .unwrap();
+        assert_eq!(appended.value, resolution);
+        assert!(appended.copies.iter().all(|copy| {
+            copy.logical_key()
+                .starts_with(&membership_resolution_semantic_prefix(&reference))
+        }));
+        assert_eq!(
+            load_membership_resolution_object(&storage, store_root_hash, &reference)
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            resolution
+        );
+        let listed = list_membership_resolution_objects(&storage, store_root_hash)
+            .await
+            .unwrap();
+        assert_eq!(listed.resolutions.len(), 1);
+        assert_eq!(listed.resolutions[0].value, resolution);
+    }
+
+    #[tokio::test]
+    async fn circle_resolution_append_load_and_list_use_the_exact_reference_path() {
+        let home = InMemoryCloudHome::new();
+        let storage = storage(&home);
+        let store_root_hash = ObjectHash::digest(b"Circle resolution Store root");
+        let resolution = circle_resolution(store_root_hash);
+        let reference = resolution.resolution_ref();
+        let encryption = crate::encryption::EncryptionService::from_key([17; 32]);
+
+        let appended =
+            append_circle_roster_resolution_object(&storage, encryption.clone(), &resolution)
+                .await
+                .unwrap();
+        assert_eq!(appended.value, resolution);
+        let prefix = circle_semantic_prefix(CircleSemanticSlot::RosterResolution {
+            circle_id: resolution.circle_id,
+            resolution: &reference,
+        });
+        assert!(appended
+            .copies
+            .iter()
+            .all(|copy| copy.logical_key().starts_with(&prefix)));
+        assert_eq!(
+            load_circle_roster_resolution_object(
+                &storage,
+                store_root_hash,
+                resolution.circle_id,
+                encryption.clone(),
+                &reference,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+            resolution
+        );
+        let listed = list_circle_roster_resolution_objects(
+            &storage,
+            store_root_hash,
+            resolution.circle_id,
+            encryption,
+        )
+        .await
+        .unwrap();
+        assert_eq!(listed.resolutions.len(), 1);
+        assert_eq!(listed.resolutions[0].value, resolution);
     }
 
     #[tokio::test]

@@ -8,6 +8,60 @@ use serde::{Deserialize, Serialize};
 
 use super::store_commit::ObjectHash;
 
+const MAX_CYCLIC_REVOCATION_SOURCES: usize = 12;
+
+pub(crate) fn canonical_ready_checkpoint<'a, K: Clone + Ord + 'a>(
+    mut dependencies: impl Iterator<Item = (&'a K, &'a BTreeSet<K>)>,
+    applied: &BTreeSet<K>,
+) -> Option<K> {
+    dependencies
+        .find(|(_, required)| required.is_subset(applied))
+        .map(|(checkpoint, _)| checkpoint.clone())
+}
+
+pub(crate) fn merge_checkpoint_evidence<K, V, C>(
+    merged_grants: &mut BTreeMap<K, V>,
+    merged_removed: &mut BTreeSet<K>,
+    merged_included: &mut BTreeSet<C>,
+    grants: &BTreeMap<K, V>,
+    removed: &BTreeSet<K>,
+    included: &BTreeSet<C>,
+) -> bool
+where
+    K: Clone + Ord,
+    V: Clone + Eq,
+    C: Clone + Ord,
+{
+    for (grant, record) in grants {
+        if merged_grants
+            .insert(grant.clone(), record.clone())
+            .is_some_and(|existing| existing != *record)
+        {
+            return false;
+        }
+    }
+    merged_removed.extend(removed.iter().cloned());
+    merged_included.extend(included.iter().cloned());
+    true
+}
+
+pub(crate) fn merge_checkpoint_frontier<C: CausalCoordinate>(
+    merged: &mut BTreeMap<C::StreamKey, C>,
+    frontier: &[C],
+) -> bool {
+    for coord in frontier {
+        let stream = coord.stream_key();
+        match merged.get(&stream) {
+            Some(existing) if existing.seq() == coord.seq() && existing != coord => return false,
+            Some(existing) if existing.seq() >= coord.seq() => {}
+            _ => {
+                merged.insert(stream, coord.clone());
+            }
+        }
+    }
+    true
+}
+
 const AUTHOR_STREAM_ID_DOMAIN: &[u8] = b"coven.author-stream-id.v1\0";
 
 /// Generated identity of one causal author stream.
@@ -140,6 +194,7 @@ pub(crate) enum CausalChange<C: CausalCoordinate, A: CausalAssignment> {
         removes: BTreeSet<MembershipGrantId>,
         owner_barriers: BTreeMap<MembershipGrantId, OwnerGrantBarrier<C>>,
     },
+    ResolutionActivation,
 }
 
 type RemovedGrants<'a, C> = (
@@ -160,7 +215,7 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalChange<C, A> {
                 owner_barriers,
                 ..
             } => Some((removes, owner_barriers)),
-            Self::Founder { .. } => None,
+            Self::Founder { .. } | Self::ResolutionActivation => None,
         }
     }
 
@@ -182,14 +237,57 @@ pub(crate) struct CausalEntry<C: CausalCoordinate, A: CausalAssignment> {
 pub(crate) struct GrantRecord<C: CausalCoordinate, A: CausalAssignment> {
     pub member_pubkey: String,
     pub assignment: A,
-    pub created_at: C,
+    pub creation: CausalGrantCreation<C>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CausalGrantCreation<C: CausalCoordinate> {
+    Entry(C),
+    Checkpoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CausalSeedGrant<A: CausalAssignment> {
+    pub member_pubkey: String,
+    pub assignment: A,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReducedGrants<C: CausalCoordinate, A: CausalAssignment> {
     pub grants: BTreeMap<MembershipGrantId, GrantRecord<C, A>>,
     pub removed: BTreeSet<MembershipGrantId>,
     pub included: BTreeSet<C>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CausalGrantBranch<C: CausalCoordinate, A: CausalAssignment> {
+    pub raw_heads: Vec<C>,
+    pub effective_frontier: Vec<C>,
+    pub reduced: ReducedGrants<C, A>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CausalGrantConflict<C: CausalCoordinate, A: CausalAssignment> {
+    ConcurrentMemberAssignments {
+        raw_heads: Vec<C>,
+        effective_frontier: Vec<C>,
+        member_pubkey: String,
+        conflicting_grants: BTreeMap<MembershipGrantId, GrantRecord<C, A>>,
+        uncontested_grants: BTreeMap<MembershipGrantId, GrantRecord<C, A>>,
+        reduced: ReducedGrants<C, A>,
+    },
+    RevocationCycle {
+        raw_heads: Vec<C>,
+        cyclic_sources: Vec<C>,
+        involved_owner_grants: BTreeSet<MembershipGrantId>,
+        maximal_valid_branches: Vec<CausalGrantBranch<C, A>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CausalGrantStatus<C: CausalCoordinate, A: CausalAssignment> {
+    Resolved(ReducedGrants<C, A>),
+    Conflict(CausalGrantConflict<C, A>),
 }
 
 impl<C: CausalCoordinate, A: CausalAssignment> ReducedGrants<C, A> {
@@ -257,13 +355,12 @@ pub(crate) enum CausalGrantError<C: CausalCoordinate> {
         index: usize,
         grant: MembershipGrantId,
     },
-    #[error("concurrent Owner revocations leave no active Owner")]
-    ConcurrentOwnerRevocationConflict,
-    #[error("member {member_pubkey} has concurrent active grants {grants:?}")]
-    ConcurrentMemberGrantConflict {
-        member_pubkey: String,
-        grants: Vec<MembershipGrantId>,
-    },
+    #[error("causal assignment history leaves no active Owner")]
+    NoActiveOwner,
+    #[error(
+        "causal assignment revocation cycle has {sources} sources, exceeding the protocol limit of {maximum}"
+    )]
+    RevocationCycleTooWide { sources: usize, maximum: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +434,7 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
                 removes,
                 ..
             } => self.remove(index, member_pubkey, removes, true, validate_exact_grants)?,
+            CausalChange::ResolutionActivation => {}
         }
         Ok(())
     }
@@ -360,7 +458,7 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
             GrantRecord {
                 member_pubkey: member_pubkey.to_string(),
                 assignment,
-                created_at: coord.clone(),
+                creation: CausalGrantCreation::Entry(coord.clone()),
             },
         );
         Ok(())
@@ -410,10 +508,60 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
 
 pub(crate) fn reduce<C: CausalCoordinate, A: CausalAssignment>(
     entries: &[CausalEntry<C, A>],
-) -> Result<ReducedGrants<C, A>, CausalGrantError<C>> {
-    if entries.is_empty() {
+) -> Result<CausalGrantStatus<C, A>, CausalGrantError<C>> {
+    reduce_internal(
+        entries,
+        &[],
+        &[],
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        true,
+    )
+}
+
+pub(crate) fn reduce_from_checkpoint<C: CausalCoordinate, A: CausalAssignment>(
+    entries: &[CausalEntry<C, A>],
+    raw_checkpoint_heads: &[C],
+    effective_checkpoint_frontier: &[C],
+    seed_grants: &BTreeMap<MembershipGrantId, CausalSeedGrant<A>>,
+    seed_removed: &BTreeSet<MembershipGrantId>,
+    seed_included: &BTreeSet<C>,
+) -> Result<CausalGrantStatus<C, A>, CausalGrantError<C>> {
+    reduce_internal(
+        entries,
+        raw_checkpoint_heads,
+        effective_checkpoint_frontier,
+        seed_grants,
+        seed_removed,
+        seed_included,
+        false,
+    )
+}
+
+fn reduce_internal<C: CausalCoordinate, A: CausalAssignment>(
+    entries: &[CausalEntry<C, A>],
+    raw_checkpoint_heads: &[C],
+    effective_checkpoint_frontier: &[C],
+    seed_grants: &BTreeMap<MembershipGrantId, CausalSeedGrant<A>>,
+    seed_removed: &BTreeSet<MembershipGrantId>,
+    seed_included: &BTreeSet<C>,
+    require_founder: bool,
+) -> Result<CausalGrantStatus<C, A>, CausalGrantError<C>> {
+    if entries.is_empty() && raw_checkpoint_heads.is_empty() {
         return Err(CausalGrantError::Empty);
     }
+    let checkpoint_by_stream = raw_checkpoint_heads
+        .iter()
+        .map(|coord| (coord.stream_key(), coord.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if checkpoint_by_stream.len() != raw_checkpoint_heads.len() {
+        return Err(CausalGrantError::ConflictingSequence {
+            stream: raw_checkpoint_heads[0].stream_key(),
+            seq: raw_checkpoint_heads[0].seq(),
+        });
+    }
+    let checkpoint_set = seed_included.iter().cloned().collect::<BTreeSet<_>>();
     let mut index_by_coord = BTreeMap::new();
     let mut streams = BTreeMap::<C::StreamKey, BTreeMap<u64, usize>>::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -445,8 +593,16 @@ pub(crate) fn reduce<C: CausalCoordinate, A: CausalAssignment>(
 
     for (stream, positions) in &streams {
         let max_seq = *positions.keys().next_back().expect("stream is non-empty");
-        let mut previous_hash = None;
-        for seq in 1..=max_seq {
+        let checkpoint = checkpoint_by_stream.get(stream);
+        let first_seq = checkpoint.map_or(1, |coord| coord.seq() + 1);
+        if positions.keys().next().copied() != Some(first_seq) {
+            return Err(CausalGrantError::MissingSequence {
+                stream: stream.clone(),
+                seq: first_seq,
+            });
+        }
+        let mut previous_hash = checkpoint.map(|coord| coord.entry_hash());
+        for seq in first_seq..=max_seq {
             let Some(index) = positions.get(&seq).copied() else {
                 return Err(CausalGrantError::MissingSequence {
                     stream: stream.clone(),
@@ -464,7 +620,11 @@ pub(crate) fn reduce<C: CausalCoordinate, A: CausalAssignment>(
             let own_dependency_is_exact = if seq == 1 {
                 !entry.dependencies.contains_key(stream)
             } else {
-                let predecessor = &entries[positions[&(seq - 1)]].coord;
+                let predecessor = if seq == first_seq {
+                    checkpoint.expect("a suffix above sequence one has a checkpoint predecessor")
+                } else {
+                    &entries[positions[&(seq - 1)]].coord
+                };
                 entry.dependencies.get(stream) == Some(predecessor)
             };
             if !own_dependency_is_exact {
@@ -476,7 +636,7 @@ pub(crate) fn reduce<C: CausalCoordinate, A: CausalAssignment>(
 
     for (index, entry) in entries.iter().enumerate() {
         for dependency in entry.dependencies.values() {
-            if !index_by_coord.contains_key(dependency) {
+            if !index_by_coord.contains_key(dependency) && !checkpoint_set.contains(dependency) {
                 return Err(CausalGrantError::MissingDependency {
                     index,
                     dependency: dependency.clone(),
@@ -492,31 +652,52 @@ pub(crate) fn reduce<C: CausalCoordinate, A: CausalAssignment>(
             matches!(entry.change, CausalChange::Founder { .. }).then_some(index)
         })
         .collect::<Vec<_>>();
-    if founders.len() != 1 {
+    if (require_founder && founders.len() != 1) || (!require_founder && !founders.is_empty()) {
         return Err(CausalGrantError::InvalidFounder);
     }
-    let founder_index = founders[0];
-    let founder = &entries[founder_index];
-    let CausalChange::Founder {
-        member_pubkey,
-        grant_id,
-        assignment,
-    } = &founder.change
-    else {
-        unreachable!()
-    };
-    if founder.coord.seq() != 1
-        || founder.coord.author_pubkey() != member_pubkey
-        || founder.coord.author_owner_grant() != grant_id
-        || founder.previous_hash.is_some()
-        || !founder.dependencies.is_empty()
-        || !assignment.is_owner()
-    {
-        return Err(CausalGrantError::InvalidFounder);
+    let founder_index = founders.first().copied();
+    if let Some(founder_index) = founder_index {
+        let founder = &entries[founder_index];
+        let CausalChange::Founder {
+            member_pubkey,
+            grant_id,
+            assignment,
+        } = &founder.change
+        else {
+            unreachable!()
+        };
+        if founder.coord.seq() != 1
+            || founder.coord.author_pubkey() != member_pubkey
+            || founder.coord.author_owner_grant() != grant_id
+            || founder.previous_hash.is_some()
+            || !founder.dependencies.is_empty()
+            || !assignment.is_owner()
+        {
+            return Err(CausalGrantError::InvalidFounder);
+        }
     }
 
     let mut remaining = (0..entries.len()).collect::<BTreeSet<_>>();
     let mut states = BTreeMap::<C, CausalState<C, A>>::new();
+    let seed_state = CausalState {
+        grants: seed_grants
+            .iter()
+            .map(|(grant, record)| {
+                (
+                    grant.clone(),
+                    GrantRecord {
+                        member_pubkey: record.member_pubkey.clone(),
+                        assignment: record.assignment.clone(),
+                        creation: CausalGrantCreation::Checkpoint,
+                    },
+                )
+            })
+            .collect(),
+        removed: seed_removed.clone(),
+    };
+    for head in effective_checkpoint_frontier {
+        states.insert(head.clone(), seed_state.clone());
+    }
     let mut causal_order = Vec::with_capacity(entries.len());
     while !remaining.is_empty() {
         let ready = remaining
@@ -540,7 +721,7 @@ pub(crate) fn reduce<C: CausalCoordinate, A: CausalAssignment>(
             for dependency in entry.dependencies.values() {
                 state.merge(&states[dependency], index)?;
             }
-            if index != founder_index
+            if Some(index) != founder_index
                 && !state.active_owner(
                     entry.coord.author_owner_grant(),
                     entry.coord.author_pubkey(),
@@ -577,13 +758,33 @@ pub(crate) fn reduce<C: CausalCoordinate, A: CausalAssignment>(
     }
 
     let mut sources = all_sources.clone();
-    let mut seen_source_sets = BTreeSet::new();
+    let mut source_sets = Vec::new();
+    let mut source_set_positions = BTreeMap::new();
     let included = loop {
-        if !seen_source_sets.insert(sources.clone()) {
-            return Err(CausalGrantError::ConcurrentOwnerRevocationConflict);
+        if let Some(cycle_start) = source_set_positions.get(&sources).copied() {
+            let cyclic_source_indices = source_sets[cycle_start..]
+                .iter()
+                .flat_map(BTreeSet::iter)
+                .copied()
+                .chain(sources.iter().copied())
+                .collect::<BTreeSet<_>>();
+            return Ok(CausalGrantStatus::Conflict(revocation_cycle_conflict(
+                entries,
+                &index_by_coord,
+                &raw,
+                &all_sources,
+                &cyclic_source_indices,
+                &causal_order,
+                raw_checkpoint_heads,
+                effective_checkpoint_frontier,
+                seed_included,
+                &seed_state,
+            )?));
         }
+        source_set_positions.insert(sources.clone(), source_sets.len());
+        source_sets.push(sources.clone());
         let cap_sources = cap_sources(entries, &raw, &sources);
-        let included = included_entries(entries, &index_by_coord, &cap_sources);
+        let included = included_entries(entries, &index_by_coord, &cap_sources, &checkpoint_set);
         let next_sources = all_sources
             .intersection(&included)
             .copied()
@@ -594,14 +795,7 @@ pub(crate) fn reduce<C: CausalCoordinate, A: CausalAssignment>(
         sources = next_sources;
     };
 
-    let mut effective = CausalState::default();
-    for index in causal_order {
-        let entry = &entries[index];
-        if !included.contains(&index) {
-            continue;
-        }
-        effective.apply(&entry.coord, &entry.change, index, false)?;
-    }
+    let effective = effective_state(entries, &causal_order, &included, &seed_state)?;
 
     let mut active_by_member = BTreeMap::<String, Vec<MembershipGrantId>>::new();
     for (grant, record) in &effective.grants {
@@ -616,21 +810,391 @@ pub(crate) fn reduce<C: CausalCoordinate, A: CausalAssignment>(
         .into_iter()
         .find(|(_, grants)| grants.len() > 1)
     {
-        return Err(CausalGrantError::ConcurrentMemberGrantConflict {
-            member_pubkey,
-            grants,
-        });
+        let conflicting_grants = grants
+            .iter()
+            .map(|grant| (grant.clone(), effective.grants[grant].clone()))
+            .collect();
+        let uncontested_grants = effective
+            .grants
+            .iter()
+            .filter(|(grant, _)| !effective.removed.contains(*grant) && !grants.contains(grant))
+            .map(|(grant, record)| (grant.clone(), record.clone()))
+            .collect();
+        let seed_included = seed_included.iter().cloned().collect::<Vec<_>>();
+        let reduced = reduced_from_state(entries, effective, included, &seed_included);
+        return Ok(CausalGrantStatus::Conflict(
+            CausalGrantConflict::ConcurrentMemberAssignments {
+                raw_heads: frontier_with_checkpoint(
+                    entries,
+                    0..entries.len(),
+                    raw_checkpoint_heads,
+                ),
+                effective_frontier: frontier_with_checkpoint(
+                    entries,
+                    reduced
+                        .included
+                        .iter()
+                        .filter_map(|coord| index_by_coord.get(coord).copied()),
+                    effective_checkpoint_frontier,
+                ),
+                member_pubkey,
+                conflicting_grants,
+                uncontested_grants,
+                reduced,
+            },
+        ));
     }
     require_owner(&effective)?;
 
-    Ok(ReducedGrants {
-        grants: effective.grants,
-        removed: effective.removed,
-        included: included
-            .into_iter()
-            .map(|index| entries[index].coord.clone())
+    let seed_included = seed_included.iter().cloned().collect::<Vec<_>>();
+    Ok(CausalGrantStatus::Resolved(reduced_from_state(
+        entries,
+        effective,
+        included,
+        &seed_included,
+    )))
+}
+
+fn effective_state<C: CausalCoordinate, A: CausalAssignment>(
+    entries: &[CausalEntry<C, A>],
+    causal_order: &[usize],
+    included: &BTreeSet<usize>,
+    seed: &CausalState<C, A>,
+) -> Result<CausalState<C, A>, CausalGrantError<C>> {
+    let mut effective = seed.clone();
+    for index in causal_order {
+        if included.contains(index) {
+            effective.apply(
+                &entries[*index].coord,
+                &entries[*index].change,
+                *index,
+                false,
+            )?;
+        }
+    }
+    Ok(effective)
+}
+
+fn reduced_from_state<C: CausalCoordinate, A: CausalAssignment>(
+    entries: &[CausalEntry<C, A>],
+    state: CausalState<C, A>,
+    included: BTreeSet<usize>,
+    checkpoint_heads: &[C],
+) -> ReducedGrants<C, A> {
+    ReducedGrants {
+        grants: state.grants,
+        removed: state.removed,
+        included: checkpoint_heads
+            .iter()
+            .cloned()
+            .chain(
+                included
+                    .into_iter()
+                    .map(|index| entries[index].coord.clone()),
+            )
             .collect(),
+    }
+}
+
+fn frontier_with_checkpoint<C: CausalCoordinate, A: CausalAssignment>(
+    entries: &[CausalEntry<C, A>],
+    indices: impl IntoIterator<Item = usize>,
+    checkpoint_heads: &[C],
+) -> Vec<C> {
+    let mut heads = checkpoint_heads
+        .iter()
+        .map(|coord| (coord.stream_key(), coord.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for index in indices {
+        let coord = &entries[index].coord;
+        heads
+            .entry(coord.stream_key())
+            .and_modify(|head| {
+                if coord.seq() > head.seq() {
+                    *head = coord.clone();
+                }
+            })
+            .or_insert_with(|| coord.clone());
+    }
+    heads.into_values().collect()
+}
+
+fn revocation_cycle_conflict<C: CausalCoordinate, A: CausalAssignment>(
+    entries: &[CausalEntry<C, A>],
+    index_by_coord: &BTreeMap<C, usize>,
+    raw: &CausalState<C, A>,
+    all_sources: &BTreeSet<usize>,
+    cyclic_source_indices: &BTreeSet<usize>,
+    causal_order: &[usize],
+    raw_checkpoint_heads: &[C],
+    effective_checkpoint_frontier: &[C],
+    seed_included: &BTreeSet<C>,
+    seed: &CausalState<C, A>,
+) -> Result<CausalGrantConflict<C, A>, CausalGrantError<C>> {
+    if cyclic_source_indices.len() > MAX_CYCLIC_REVOCATION_SOURCES {
+        return Err(CausalGrantError::RevocationCycleTooWide {
+            sources: cyclic_source_indices.len(),
+            maximum: MAX_CYCLIC_REVOCATION_SOURCES,
+        });
+    }
+    let checkpoint_set = seed_included.clone();
+    let mandatory_sources = all_sources
+        .difference(cyclic_source_indices)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let attacks = all_sources
+        .iter()
+        .map(|source| {
+            let selected = BTreeSet::from([*source]);
+            let included = included_entries(
+                entries,
+                index_by_coord,
+                &cap_sources(entries, raw, &selected),
+                &checkpoint_set,
+            );
+            (
+                *source,
+                all_sources.difference(&included).copied().collect(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let (fixed_source_sets, _) =
+        fixed_sets_from_attack_graph(&attacks, &mandatory_sources, cyclic_source_indices.len())
+            .map_err(|sources| CausalGrantError::RevocationCycleTooWide {
+                sources,
+                maximum: MAX_CYCLIC_REVOCATION_SOURCES,
+            })?;
+    let mut branches = Vec::new();
+    let raw_heads = frontier_with_checkpoint(entries, 0..entries.len(), raw_checkpoint_heads);
+    for sources in fixed_source_sets {
+        let included = included_entries(
+            entries,
+            index_by_coord,
+            &cap_sources(entries, raw, &sources),
+            &checkpoint_set,
+        );
+        let next_sources = all_sources
+            .intersection(&included)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if next_sources != sources {
+            continue;
+        }
+        let effective = effective_state(entries, causal_order, &included, seed)?;
+        if !has_owner(&effective) || has_concurrent_assignments(&effective) {
+            continue;
+        }
+        let reduced = reduced_from_state(
+            entries,
+            effective,
+            included.clone(),
+            &seed_included.iter().cloned().collect::<Vec<_>>(),
+        );
+        branches.push(CausalGrantBranch {
+            raw_heads: raw_heads
+                .iter()
+                .filter(|coord| {
+                    seed_included.contains(*coord)
+                        || index_by_coord
+                            .get(*coord)
+                            .is_some_and(|index| included.contains(index))
+                })
+                .cloned()
+                .collect(),
+            effective_frontier: frontier_with_checkpoint(
+                entries,
+                included.iter().copied(),
+                effective_checkpoint_frontier,
+            ),
+            reduced,
+        });
+    }
+    let branch_inclusions = branches
+        .iter()
+        .map(|branch| branch.reduced.included.clone())
+        .collect::<Vec<_>>();
+    branches.retain(|branch| {
+        !branch_inclusions.iter().any(|other| {
+            branch.reduced.included != *other && branch.reduced.included.is_subset(other)
+        })
+    });
+    branches.sort_by(|left, right| left.effective_frontier.cmp(&right.effective_frontier));
+
+    let involved_owner_grants = cyclic_source_indices
+        .iter()
+        .flat_map(|index| {
+            entries[*index]
+                .change
+                .removed()
+                .into_iter()
+                .flat_map(|(removed, _)| removed.iter())
+        })
+        .filter(|grant| {
+            raw.grants
+                .get(*grant)
+                .is_some_and(|record| record.assignment.is_owner())
+        })
+        .cloned()
+        .collect();
+    let mut cyclic_sources = cyclic_source_indices
+        .iter()
+        .map(|index| entries[*index].coord.clone())
+        .collect::<Vec<_>>();
+    cyclic_sources.sort();
+    Ok(CausalGrantConflict::RevocationCycle {
+        raw_heads,
+        cyclic_sources,
+        involved_owner_grants,
+        maximal_valid_branches: branches,
     })
+}
+
+fn fixed_sets_from_attack_graph(
+    attacks: &BTreeMap<usize, BTreeSet<usize>>,
+    mandatory: &BTreeSet<usize>,
+    cyclic_source_count: usize,
+) -> Result<(Vec<BTreeSet<usize>>, usize), usize> {
+    if cyclic_source_count > MAX_CYCLIC_REVOCATION_SOURCES {
+        return Err(cyclic_source_count);
+    }
+    let components = attack_graph_components(attacks);
+    let mut memo = BTreeSet::new();
+    let mut fixed = BTreeSet::new();
+    let mut explored = 0;
+    search_fixed_sets(
+        attacks,
+        &components,
+        mandatory.clone(),
+        &mut memo,
+        &mut fixed,
+        &mut explored,
+    );
+    Ok((fixed.into_iter().collect(), explored))
+}
+
+fn search_fixed_sets(
+    attacks: &BTreeMap<usize, BTreeSet<usize>>,
+    components: &[Vec<usize>],
+    mut selected: BTreeSet<usize>,
+    memo: &mut BTreeSet<BTreeSet<usize>>,
+    fixed: &mut BTreeSet<BTreeSet<usize>>,
+    explored: &mut usize,
+) {
+    if !memo.insert(selected.clone()) {
+        return;
+    }
+    *explored += 1;
+    loop {
+        let attacked = selected
+            .iter()
+            .flat_map(|source| attacks[source].iter().copied())
+            .collect::<BTreeSet<_>>();
+        if !selected.is_disjoint(&attacked) {
+            return;
+        }
+        let undecided = attacks
+            .keys()
+            .copied()
+            .filter(|node| !selected.contains(node) && !attacked.contains(node))
+            .collect::<BTreeSet<_>>();
+        if undecided.is_empty() {
+            fixed.insert(selected);
+            return;
+        }
+        let forced = undecided.iter().copied().find(|node| {
+            !undecided
+                .iter()
+                .any(|source| attacks[source].contains(node))
+        });
+        let Some(forced) = forced else {
+            let pivot = components
+                .iter()
+                .flat_map(|component| component.iter())
+                .find(|node| undecided.contains(node))
+                .copied()
+                .expect("an undecided attack-graph node exists");
+            let alternatives = std::iter::once(pivot)
+                .chain(
+                    undecided
+                        .iter()
+                        .copied()
+                        .filter(|source| attacks[source].contains(&pivot)),
+                )
+                .collect::<BTreeSet<_>>();
+            for source in alternatives {
+                let mut branch = selected.clone();
+                branch.insert(source);
+                search_fixed_sets(attacks, components, branch, memo, fixed, explored);
+            }
+            return;
+        };
+        selected.insert(forced);
+    }
+}
+
+fn attack_graph_components(attacks: &BTreeMap<usize, BTreeSet<usize>>) -> Vec<Vec<usize>> {
+    fn visit(
+        node: usize,
+        edges: &BTreeMap<usize, BTreeSet<usize>>,
+        seen: &mut BTreeSet<usize>,
+        order: &mut Vec<usize>,
+    ) {
+        if !seen.insert(node) {
+            return;
+        }
+        for target in &edges[&node] {
+            if edges.contains_key(target) {
+                visit(*target, edges, seen, order);
+            }
+        }
+        order.push(node);
+    }
+
+    let mut order = Vec::new();
+    let mut seen = BTreeSet::new();
+    for node in attacks.keys().copied() {
+        visit(node, attacks, &mut seen, &mut order);
+    }
+    let mut reverse = attacks
+        .keys()
+        .copied()
+        .map(|node| (node, BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    for (source, targets) in attacks {
+        for target in targets {
+            if let Some(incoming) = reverse.get_mut(target) {
+                incoming.insert(*source);
+            }
+        }
+    }
+    let mut components = Vec::new();
+    seen.clear();
+    for node in order.into_iter().rev() {
+        if seen.contains(&node) {
+            continue;
+        }
+        let mut component_order = Vec::new();
+        visit(node, &reverse, &mut seen, &mut component_order);
+        component_order.sort_unstable();
+        components.push(component_order);
+    }
+    components
+}
+
+fn has_concurrent_assignments<C: CausalCoordinate, A: CausalAssignment>(
+    state: &CausalState<C, A>,
+) -> bool {
+    let mut members = BTreeSet::new();
+    state.grants.iter().any(|(grant, record)| {
+        !state.removed.contains(grant) && !members.insert(record.member_pubkey.clone())
+    })
+}
+
+fn has_owner<C: CausalCoordinate, A: CausalAssignment>(state: &CausalState<C, A>) -> bool {
+    state
+        .grants
+        .iter()
+        .any(|(grant, record)| !state.removed.contains(grant) && record.assignment.is_owner())
 }
 
 fn cap_sources<C: CausalCoordinate, A: CausalAssignment>(
@@ -667,6 +1231,7 @@ fn included_entries<C: CausalCoordinate, A: CausalAssignment>(
     entries: &[CausalEntry<C, A>],
     index_by_coord: &BTreeMap<C, usize>,
     cap_sources: &BTreeMap<MembershipGrantId, Vec<(usize, OwnerGrantBarrier<C>)>>,
+    checkpoint: &BTreeSet<C>,
 ) -> BTreeSet<usize> {
     let mut included = (0..entries.len())
         .filter(|index| {
@@ -687,10 +1252,12 @@ fn included_entries<C: CausalCoordinate, A: CausalAssignment>(
             .iter()
             .copied()
             .filter(|index| {
-                entries[*index]
-                    .dependencies
-                    .values()
-                    .any(|dependency| !included.contains(&index_by_coord[dependency]))
+                entries[*index].dependencies.values().any(|dependency| {
+                    !checkpoint.contains(dependency)
+                        && !index_by_coord
+                            .get(dependency)
+                            .is_some_and(|index| included.contains(index))
+                })
             })
             .collect::<Vec<_>>();
         if descendants.is_empty() {
@@ -756,13 +1323,103 @@ fn validate_barriers<C: CausalCoordinate, A: CausalAssignment>(
 fn require_owner<C: CausalCoordinate, A: CausalAssignment>(
     state: &CausalState<C, A>,
 ) -> Result<(), CausalGrantError<C>> {
-    if state
-        .grants
-        .iter()
-        .any(|(grant, record)| !state.removed.contains(grant) && record.assignment.is_owner())
-    {
+    if has_owner(state) {
         Ok(())
     } else {
-        Err(CausalGrantError::ConcurrentOwnerRevocationConflict)
+        Err(CausalGrantError::NoActiveOwner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_set_search_propagates_an_unattacked_graph_without_subset_enumeration() {
+        let attacks = (0..64)
+            .map(|index| (index, BTreeSet::new()))
+            .collect::<BTreeMap<_, _>>();
+        let (sets, explored_states) =
+            fixed_sets_from_attack_graph(&attacks, &BTreeSet::new(), 0).unwrap();
+
+        assert_eq!(sets, vec![(0..64).collect()]);
+        assert!(
+            explored_states <= 2,
+            "constraint propagation explored {explored_states} states"
+        );
+    }
+
+    #[test]
+    fn fixed_set_search_rejects_disjoint_cycles_beyond_the_signed_protocol_bound() {
+        let attacks = (0..14)
+            .map(|index| (index, BTreeSet::from([index ^ 1])))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            fixed_sets_from_attack_graph(&attacks, &BTreeSet::new(), attacks.len()),
+            Err(14)
+        );
+    }
+
+    #[test]
+    fn independent_resolution_checkpoints_replay_in_canonical_order() {
+        let first = ObjectHash::digest(b"first independent checkpoint");
+        let second = ObjectHash::digest(b"second independent checkpoint");
+        let dependencies = BTreeMap::from([(first, BTreeSet::new()), (second, BTreeSet::new())]);
+        let expected = *dependencies.keys().next().expect("two checkpoints");
+
+        assert_eq!(
+            canonical_ready_checkpoint(dependencies.iter(), &BTreeSet::new()),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn cyclic_resolution_checkpoints_have_no_ready_cut() {
+        let first = ObjectHash::digest(b"first cyclic checkpoint");
+        let second = ObjectHash::digest(b"second cyclic checkpoint");
+        let dependencies = BTreeMap::from([
+            (first, BTreeSet::from([second])),
+            (second, BTreeSet::from([first])),
+        ]);
+
+        assert_eq!(
+            canonical_ready_checkpoint(dependencies.iter(), &BTreeSet::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn full_checkpoint_merge_preserves_a_removal_seen_by_only_one_branch() {
+        let grant = MembershipGrantId(ObjectHash::digest(b"removed checkpoint grant"));
+        let grants = BTreeMap::from([(grant.clone(), "member")]);
+        let removed = BTreeSet::from([grant.clone()]);
+        let mut merged_grants = BTreeMap::new();
+        let mut merged_removed = BTreeSet::new();
+        let mut merged_included = BTreeSet::new();
+
+        assert!(merge_checkpoint_evidence(
+            &mut merged_grants,
+            &mut merged_removed,
+            &mut merged_included,
+            &grants,
+            &removed,
+            &BTreeSet::from([1]),
+        ));
+        assert!(merge_checkpoint_evidence(
+            &mut merged_grants,
+            &mut merged_removed,
+            &mut merged_included,
+            &grants,
+            &BTreeSet::new(),
+            &BTreeSet::from([2]),
+        ));
+
+        assert_eq!(merged_grants, grants);
+        assert_eq!(merged_removed, removed);
+        assert_eq!(merged_included, BTreeSet::from([1, 2]));
+        assert!(!merged_grants
+            .keys()
+            .any(|candidate| !merged_removed.contains(candidate)));
     }
 }

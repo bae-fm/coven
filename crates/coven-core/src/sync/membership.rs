@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::causal_grants::{
-    self, CausalAssignment, CausalChange, CausalCoordinate, CausalEntry, CausalGrantError,
-    OwnerGrantBarrier,
+    self, CausalAssignment, CausalChange, CausalCoordinate, CausalEntry, CausalGrantConflict,
+    CausalGrantError, CausalGrantStatus, OwnerGrantBarrier,
 };
 pub use super::causal_grants::{AuthorStreamId, MembershipGrantId};
 use super::store_commit::{
@@ -29,16 +29,19 @@ pub enum MemberRole {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SerialMember {
+    pub member_pubkey: String,
     pub role: MemberRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_account_email: Option<String>,
+    pub created_at_generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SerialMembershipState {
     store_root_hash: ObjectHash,
-    members: BTreeMap<String, SerialMember>,
+    active_grants: BTreeMap<MembershipGrantId, SerialMember>,
+    current_generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,9 +59,12 @@ pub enum SerialMembershipChange {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_account_email: Option<String>,
         role: MemberRole,
+        grant_id: MembershipGrantId,
+        replaces: BTreeSet<MembershipGrantId>,
     },
     RemoveMember {
         user_pubkey: String,
+        removes: BTreeSet<MembershipGrantId>,
     },
 }
 
@@ -68,6 +74,7 @@ pub struct SerialMembershipEntry {
     pub version: u32,
     pub store_root_hash: ObjectHash,
     pub previous_state_hash: ObjectHash,
+    pub created_at_generation: u64,
     pub author_pubkey: String,
     pub created_at: String,
     pub change: SerialMembershipChange,
@@ -98,6 +105,8 @@ pub enum SerialMembershipError {
     NotAMember(String),
     #[error("Serial membership removal would leave no Owner")]
     LastOwner,
+    #[error("Serial membership generation is {actual}, expected {expected}")]
+    MembershipGeneration { expected: u64, actual: u64 },
     #[error("Serial commit carries a causal membership grant")]
     CausalGrant,
     #[error("Serial commit author {0} is not a current writer")]
@@ -131,7 +140,7 @@ impl SerialAuthorizationState {
         commit: &StoreBatchCommit,
         registrations: &[StoreDeviceRegistration],
     ) -> Result<Self, SerialMembershipError> {
-        if commit.membership_grant.is_some() {
+        if commit.membership_authority.is_some() {
             return Err(SerialMembershipError::CausalGrant);
         }
         let authorized = self.membership.can_write(&commit.author_pubkey)
@@ -142,10 +151,18 @@ impl SerialAuthorizationState {
                 commit.author_pubkey.clone(),
             ));
         }
-        let Some(control) = commit.control.as_ref() else {
-            return Ok(self.clone());
+        let membership = match commit.control.as_ref() {
+            Some(control) => self
+                .membership
+                .apply_at(control.serial_membership_entry(), commit.seq())?,
+            None => self.membership.advance_to(commit.seq())?,
         };
-        let membership = self.membership.apply(control.serial_membership_entry())?;
+        let Some(control) = commit.control.as_ref() else {
+            return Ok(Self {
+                membership,
+                key_generation: self.key_generation,
+            });
+        };
         let key_generation = match control {
             StoreControl::SerialMembership { .. } => self.key_generation,
             StoreControl::SerialMembershipAndKeyRotation { entry, generation } => {
@@ -220,13 +237,16 @@ impl SerialMembershipState {
         }
         Ok(Self {
             store_root_hash,
-            members: BTreeMap::from([(
-                owner_pubkey.clone(),
+            active_grants: BTreeMap::from([(
+                owner_grant_id.clone(),
                 SerialMember {
+                    member_pubkey: owner_pubkey.clone(),
                     role: MemberRole::Owner,
                     provider_account_email: None,
+                    created_at_generation: 0,
                 },
             )]),
+            current_generation: 0,
         })
     }
 
@@ -235,13 +255,13 @@ impl SerialMembershipState {
         struct StateFields<'a> {
             domain: &'static str,
             store_root_hash: ObjectHash,
-            members: &'a BTreeMap<String, SerialMember>,
+            active_grants: &'a BTreeMap<MembershipGrantId, SerialMember>,
         }
         ObjectHash::digest(
             &serde_json::to_vec(&StateFields {
                 domain: "coven.serial-membership-state.v1",
                 store_root_hash: self.store_root_hash,
-                members: &self.members,
+                active_grants: &self.active_grants,
             })
             .expect("Serial membership state serialization cannot fail"),
         )
@@ -252,32 +272,37 @@ impl SerialMembershipState {
     }
 
     pub fn current_members(&self) -> Vec<(String, MemberRole)> {
-        self.members
-            .iter()
-            .map(|(pubkey, member)| (pubkey.clone(), member.role.clone()))
+        self.active_grants
+            .values()
+            .map(|member| (member.member_pubkey.clone(), member.role.clone()))
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
             .collect()
     }
 
     pub fn current_member_provider_email(&self, pubkey: &str) -> Option<&str> {
-        self.members
-            .get(pubkey)
+        self.active_grants
+            .values()
+            .find(|member| member.member_pubkey == pubkey)
             .and_then(|member| member.provider_account_email.as_deref())
     }
 
     pub fn can_write(&self, pubkey: &str) -> bool {
-        self.members
-            .get(pubkey)
-            .is_some_and(|member| member.role.can_write())
+        self.active_grants
+            .values()
+            .any(|member| member.member_pubkey == pubkey && member.role.can_write())
     }
 
     fn contains(&self, pubkey: &str) -> bool {
-        self.members.contains_key(pubkey)
+        self.active_grants
+            .values()
+            .any(|member| member.member_pubkey == pubkey)
     }
 
     pub fn is_owner(&self, pubkey: &str) -> bool {
-        self.members
-            .get(pubkey)
-            .is_some_and(|member| member.role == MemberRole::Owner)
+        self.active_grants
+            .values()
+            .any(|member| member.member_pubkey == pubkey && member.role == MemberRole::Owner)
     }
 
     pub fn signed_set_member(
@@ -288,13 +313,20 @@ impl SerialMembershipState {
         role: MemberRole,
         created_at: String,
     ) -> Result<SerialMembershipEntry, SerialMembershipError> {
+        let created_at_generation = self.next_generation()?;
+        let grant_id =
+            serial_membership_grant_id(self.store_root_hash, created_at_generation, &user_pubkey);
+        let replaces = self.active_grants_for(&user_pubkey);
         self.signed_change(
             signer,
             SerialMembershipChange::SetMember {
                 user_pubkey,
                 provider_account_email,
                 role,
+                grant_id,
+                replaces,
             },
+            created_at_generation,
             created_at,
         )
     }
@@ -305,12 +337,18 @@ impl SerialMembershipState {
         user_pubkey: String,
         created_at: String,
     ) -> Result<SerialMembershipEntry, SerialMembershipError> {
-        if !self.members.contains_key(&user_pubkey) {
+        let removes = self.active_grants_for(&user_pubkey);
+        if removes.is_empty() {
             return Err(SerialMembershipError::NotAMember(user_pubkey));
         }
+        let created_at_generation = self.next_generation()?;
         self.signed_change(
             signer,
-            SerialMembershipChange::RemoveMember { user_pubkey },
+            SerialMembershipChange::RemoveMember {
+                user_pubkey,
+                removes,
+            },
+            created_at_generation,
             created_at,
         )
     }
@@ -319,6 +357,7 @@ impl SerialMembershipState {
         &self,
         signer: &UserKeypair,
         change: SerialMembershipChange,
+        created_at_generation: u64,
         created_at: String,
     ) -> Result<SerialMembershipEntry, SerialMembershipError> {
         let author_pubkey = keys::public_key_hex(signer);
@@ -329,6 +368,7 @@ impl SerialMembershipState {
             version: STORE_PROTOCOL_VERSION,
             store_root_hash: self.store_root_hash,
             previous_state_hash: self.state_hash(),
+            created_at_generation,
             author_pubkey,
             created_at,
             change,
@@ -340,6 +380,14 @@ impl SerialMembershipState {
     }
 
     pub fn apply(&self, entry: &SerialMembershipEntry) -> Result<Self, SerialMembershipError> {
+        self.apply_at(entry, entry.created_at_generation)
+    }
+
+    fn apply_at(
+        &self,
+        entry: &SerialMembershipEntry,
+        generation: u64,
+    ) -> Result<Self, SerialMembershipError> {
         if entry.version != STORE_PROTOCOL_VERSION {
             return Err(SerialMembershipError::UnsupportedVersion(entry.version));
         }
@@ -364,44 +412,115 @@ impl SerialMembershipState {
                 entry.author_pubkey.clone(),
             ));
         }
+        let expected_generation = self.next_generation()?;
+        if entry.created_at_generation != generation || generation != expected_generation {
+            return Err(SerialMembershipError::MembershipGeneration {
+                expected: expected_generation,
+                actual: entry.created_at_generation,
+            });
+        }
         let mut next = self.clone();
         match &entry.change {
             SerialMembershipChange::SetMember {
                 user_pubkey,
                 provider_account_email,
                 role,
+                grant_id,
+                replaces,
             } => {
-                next.members.insert(
-                    user_pubkey.clone(),
+                if *replaces != self.active_grants_for(user_pubkey)
+                    || next.active_grants.contains_key(grant_id)
+                {
+                    return Err(SerialMembershipError::StaleState {
+                        expected,
+                        actual: entry.previous_state_hash,
+                    });
+                }
+                for replaced in replaces {
+                    next.active_grants.remove(replaced);
+                }
+                next.active_grants.insert(
+                    grant_id.clone(),
                     SerialMember {
+                        member_pubkey: user_pubkey.clone(),
                         role: role.clone(),
                         provider_account_email: provider_account_email.clone(),
+                        created_at_generation: generation,
                     },
                 );
             }
-            SerialMembershipChange::RemoveMember { user_pubkey } => {
-                let removed = next
-                    .members
-                    .remove(user_pubkey)
-                    .ok_or_else(|| SerialMembershipError::NotAMember(user_pubkey.clone()))?;
-                if removed.role == MemberRole::Owner
-                    && !next
-                        .members
-                        .values()
-                        .any(|member| member.role == MemberRole::Owner)
+            SerialMembershipChange::RemoveMember {
+                user_pubkey,
+                removes,
+            } => {
+                if *removes != self.active_grants_for(user_pubkey) {
+                    return Err(SerialMembershipError::NotAMember(user_pubkey.clone()));
+                }
+                for removed in removes {
+                    next.active_grants.remove(removed);
+                }
+                if !next
+                    .active_grants
+                    .values()
+                    .any(|member| member.role == MemberRole::Owner)
                 {
                     return Err(SerialMembershipError::LastOwner);
                 }
             }
         }
+        next.current_generation = generation;
         Ok(next)
     }
+
+    fn active_grants_for(&self, pubkey: &str) -> BTreeSet<MembershipGrantId> {
+        self.active_grants
+            .iter()
+            .filter_map(|(grant, member)| (member.member_pubkey == pubkey).then_some(grant.clone()))
+            .collect()
+    }
+
+    fn next_generation(&self) -> Result<u64, SerialMembershipError> {
+        self.current_generation
+            .checked_add(1)
+            .ok_or(SerialMembershipError::MembershipGeneration {
+                expected: self.current_generation,
+                actual: self.current_generation,
+            })
+    }
+
+    fn advance_to(&self, generation: u64) -> Result<Self, SerialMembershipError> {
+        let expected = self.next_generation()?;
+        if generation != expected {
+            return Err(SerialMembershipError::MembershipGeneration {
+                expected,
+                actual: generation,
+            });
+        }
+        let mut next = self.clone();
+        next.current_generation = generation;
+        Ok(next)
+    }
+}
+
+fn serial_membership_grant_id(
+    store_root_hash: ObjectHash,
+    created_at_generation: u64,
+    member_pubkey: &str,
+) -> MembershipGrantId {
+    MembershipGrantId(ObjectHash::digest(
+        format!(
+            "coven.serial-membership-grant.v1\0{store_root_hash}\0{created_at_generation}\0{member_pubkey}"
+        )
+        .as_bytes(),
+    ))
 }
 
 impl SerialMembershipChange {
     pub fn user_pubkey(&self) -> &str {
         match self {
-            Self::SetMember { user_pubkey, .. } | Self::RemoveMember { user_pubkey } => user_pubkey,
+            Self::SetMember { user_pubkey, .. } | Self::RemoveMember { user_pubkey, .. } => {
+                user_pubkey
+            }
         }
     }
 
@@ -418,6 +537,7 @@ impl SerialMembershipEntry {
             version: u32,
             store_root_hash: ObjectHash,
             previous_state_hash: ObjectHash,
+            created_at_generation: u64,
             author_pubkey: &'a str,
             created_at: &'a str,
             change: &'a SerialMembershipChange,
@@ -427,6 +547,7 @@ impl SerialMembershipEntry {
             version: self.version,
             store_root_hash: self.store_root_hash,
             previous_state_hash: self.previous_state_hash,
+            created_at_generation: self.created_at_generation,
             author_pubkey: &self.author_pubkey,
             created_at: &self.created_at,
             change: &self.change,
@@ -477,6 +598,9 @@ pub enum MembershipChange {
         removes: BTreeSet<MembershipGrantId>,
         owner_barriers: BTreeMap<MembershipGrantId, OwnerStreamBarrier>,
     },
+    ResolutionActivation {
+        resolution: StoreMembershipConflictResolutionRef,
+    },
 }
 
 impl MembershipChange {
@@ -486,6 +610,7 @@ impl MembershipChange {
             Self::SetMember { user_pubkey, .. } | Self::RemoveMember { user_pubkey, .. } => {
                 user_pubkey
             }
+            Self::ResolutionActivation { resolution } => &resolution.resolver_pubkey,
         }
     }
 }
@@ -568,9 +693,9 @@ pub struct MembershipEntry {
     pub author_owner_grant: MembershipGrantId,
     pub stream_id: AuthorStreamId,
     pub seq: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_hash: Option<ObjectHash>,
     pub dependencies: Vec<MembershipCoord>,
+    pub resolution_dependencies: Vec<StoreMembershipConflictResolutionRef>,
     pub created_at: String,
     pub change: MembershipChange,
     pub signature: String,
@@ -593,7 +718,9 @@ impl MembershipEntry {
                 provider_account_email,
                 ..
             } => provider_account_email.as_deref(),
-            MembershipChange::Founder { .. } | MembershipChange::RemoveMember { .. } => None,
+            MembershipChange::Founder { .. }
+            | MembershipChange::RemoveMember { .. }
+            | MembershipChange::ResolutionActivation { .. } => None,
         }
     }
 }
@@ -608,7 +735,24 @@ pub struct AuthorHead {
     pub stream_id: AuthorStreamId,
     pub seq: u64,
     pub tip_hash: ObjectHash,
+    pub resolutions: Vec<StoreMembershipConflictResolutionRef>,
     pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipHeadRef {
+    pub coord: MembershipCoord,
+    pub head_hash: ObjectHash,
+}
+
+impl MembershipHeadRef {
+    pub fn from_head(head: &AuthorHead) -> Self {
+        Self {
+            coord: head.entry_coord(),
+            head_hash: head.head_hash(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -695,19 +839,305 @@ pub enum MembershipError {
         index: usize,
         grant: MembershipGrantId,
     },
-    #[error("concurrent Owner revocations leave no active Owner")]
-    ConcurrentOwnerRevocationConflict,
-    #[error("member {pubkey} has concurrent active grants {grants:?}")]
-    ConcurrentMemberGrantConflict {
-        pubkey: String,
-        grants: Vec<MembershipGrantId>,
-    },
+    #[error("membership history leaves no active Owner")]
+    NoActiveOwner,
+    #[error(
+        "membership revocation cycle has {sources} sources, exceeding the protocol limit of {maximum}"
+    )]
+    RevocationCycleTooWide { sources: usize, maximum: usize },
     #[error("signer {0} has no active Owner grant")]
     SignerIsNotOwner(String),
     #[error("member {0} has no active grants")]
     NotAMember(String),
     #[error("membership author stream contains a pruned suffix and cannot be extended")]
     PrunedAuthorStream,
+    #[error("membership author has no reusable stream; a fresh persisted stream is required")]
+    MissingAuthorStream,
+    #[error("membership resolution activation entry {0} is invalid")]
+    InvalidResolutionActivation(usize),
+    #[error("membership resolution activation requires a fresh persisted author stream")]
+    ResolutionActivationRequiresFreshStream,
+    #[error("membership has an unresolved semantic conflict")]
+    Conflict,
+    #[error("membership conflict is missing its exact signed raw heads")]
+    MissingConflictHeads,
+    #[error("membership conflict resolution does not name exact validated conflict evidence")]
+    InvalidConflictResolution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipGrantRecord {
+    pub member_pubkey: String,
+    pub role: MemberRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_account_email: Option<String>,
+    pub creation_authority: MembershipGrantCreationAuthority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MembershipGrantCreationAuthority {
+    Entry(MembershipCoord),
+    ConflictResolution(StoreMembershipConflictResolutionRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedStoreMembership {
+    pub active_grants: BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+    pub state_hash: ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreMembershipBranch {
+    pub heads: Vec<MembershipHeadRef>,
+    pub effective_frontier: Vec<MembershipCoord>,
+    pub active_grants: BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+    pub state_hash: ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MembershipConflict {
+    ConcurrentMemberAssignments {
+        conflict_hash: ObjectHash,
+        heads: Vec<MembershipHeadRef>,
+        effective_frontier: Vec<MembershipCoord>,
+        member_pubkey: String,
+        conflicting_grants: BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+        uncontested_grants: BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+    },
+    RevocationCycle {
+        conflict_hash: ObjectHash,
+        heads: Vec<MembershipHeadRef>,
+        cyclic_sources: Vec<MembershipCoord>,
+        involved_owner_grants: BTreeSet<MembershipGrantId>,
+        maximal_valid_branches: Vec<StoreMembershipBranch>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MembershipStatus {
+    Resolved(ResolvedStoreMembership),
+    Conflict(MembershipConflict),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreMembershipConflictResolutionRef {
+    pub conflict_hash: ObjectHash,
+    pub resolver_pubkey: String,
+    pub resolution_hash: ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreMembershipConflictResolution {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub conflict_hash: ObjectHash,
+    pub conflicting_heads: Vec<MembershipHeadRef>,
+    pub retired_owner_grants: BTreeSet<MembershipGrantId>,
+    pub resolver_pubkey: String,
+    pub resolver_branch_heads: Vec<MembershipHeadRef>,
+    pub replacement_grant: MembershipGrantId,
+    pub signature: String,
+}
+
+impl StoreMembershipConflictResolution {
+    fn canonical_bytes(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Signed<'a> {
+            domain: &'static str,
+            version: u32,
+            store_root_hash: ObjectHash,
+            conflict_hash: ObjectHash,
+            conflicting_heads: &'a [MembershipHeadRef],
+            retired_owner_grants: &'a BTreeSet<MembershipGrantId>,
+            resolver_pubkey: &'a str,
+            resolver_branch_heads: &'a [MembershipHeadRef],
+            replacement_grant: &'a MembershipGrantId,
+        }
+        serde_json::to_vec(&Signed {
+            domain: "coven.store-membership-conflict-resolution.v1",
+            version: self.version,
+            store_root_hash: self.store_root_hash,
+            conflict_hash: self.conflict_hash,
+            conflicting_heads: &self.conflicting_heads,
+            retired_owner_grants: &self.retired_owner_grants,
+            resolver_pubkey: &self.resolver_pubkey,
+            resolver_branch_heads: &self.resolver_branch_heads,
+            replacement_grant: &self.replacement_grant,
+        })
+        .expect("Store membership resolution serialization cannot fail")
+    }
+
+    pub fn resolution_hash(&self) -> ObjectHash {
+        ObjectHash::digest(
+            &serde_json::to_vec(self)
+                .expect("Store membership resolution serialization cannot fail"),
+        )
+    }
+
+    pub fn resolution_ref(&self) -> StoreMembershipConflictResolutionRef {
+        StoreMembershipConflictResolutionRef {
+            conflict_hash: self.conflict_hash,
+            resolver_pubkey: self.resolver_pubkey.clone(),
+            resolution_hash: self.resolution_hash(),
+        }
+    }
+
+    pub fn verify_signature(&self) -> bool {
+        self.version == STORE_PROTOCOL_VERSION
+            && self.replacement_grant
+                == derive_store_resolution_grant(&self.conflict_hash, &self.resolver_pubkey)
+            && keys::verify_signature_hex(
+                &self.resolver_pubkey,
+                &self.signature,
+                &self.canonical_bytes(),
+            )
+    }
+
+    pub fn verify_against(
+        &self,
+        store_root_hash: ObjectHash,
+        conflict: &MembershipConflict,
+    ) -> bool {
+        let MembershipConflict::RevocationCycle {
+            conflict_hash,
+            heads,
+            involved_owner_grants,
+            maximal_valid_branches,
+            ..
+        } = conflict
+        else {
+            return false;
+        };
+        let Some(branch) = maximal_valid_branches
+            .iter()
+            .find(|branch| branch.heads == self.resolver_branch_heads)
+        else {
+            return false;
+        };
+        let mut expected_retired = involved_owner_grants.clone();
+        expected_retired.extend(branch.active_grants.iter().filter_map(|(grant, record)| {
+            (record.member_pubkey == self.resolver_pubkey && record.role == MemberRole::Owner)
+                .then_some(grant.clone())
+        }));
+        self.version == STORE_PROTOCOL_VERSION
+            && self.store_root_hash == store_root_hash
+            && self.conflict_hash == *conflict_hash
+            && self.conflicting_heads == *heads
+            && self.retired_owner_grants == expected_retired
+            && self.replacement_grant
+                == derive_store_resolution_grant(conflict_hash, &self.resolver_pubkey)
+            && branch.active_grants.values().any(|record| {
+                record.member_pubkey == self.resolver_pubkey && record.role == MemberRole::Owner
+            })
+            && self.verify_signature()
+    }
+}
+
+pub fn derive_store_resolution_grant(
+    conflict_hash: &ObjectHash,
+    resolver_pubkey: &str,
+) -> MembershipGrantId {
+    MembershipGrantId(ObjectHash::digest(
+        format!("coven.store-membership-resolution-grant.v1\0{conflict_hash}\0{resolver_pubkey}")
+            .as_bytes(),
+    ))
+}
+
+pub fn resolve_store_membership_conflict(
+    store_root_hash: ObjectHash,
+    conflict: &MembershipConflict,
+    resolutions: &[StoreMembershipConflictResolution],
+) -> Result<ResolvedStoreMembership, MembershipError> {
+    let MembershipConflict::RevocationCycle {
+        maximal_valid_branches,
+        ..
+    } = conflict
+    else {
+        return Err(MembershipError::InvalidConflictResolution);
+    };
+    if resolutions.is_empty() {
+        return Err(MembershipError::InvalidConflictResolution);
+    }
+    let mut by_resolver = BTreeMap::new();
+    let mut selected_branches = Vec::new();
+    let mut retired_owner_grants = BTreeSet::new();
+    for resolution in resolutions {
+        if !resolution.verify_against(store_root_hash, conflict) {
+            return Err(MembershipError::InvalidConflictResolution);
+        }
+        if let Some(existing) = by_resolver.insert(
+            resolution.resolver_pubkey.clone(),
+            resolution.resolution_hash(),
+        ) {
+            if existing != resolution.resolution_hash() {
+                return Err(MembershipError::InvalidConflictResolution);
+            }
+            continue;
+        }
+        let branch = maximal_valid_branches
+            .iter()
+            .find(|branch| branch.heads == resolution.resolver_branch_heads)
+            .ok_or(MembershipError::InvalidConflictResolution)?;
+        if !selected_branches
+            .iter()
+            .any(|selected: &&StoreMembershipBranch| selected.heads == branch.heads)
+        {
+            selected_branches.push(branch);
+        }
+        retired_owner_grants.extend(resolution.retired_owner_grants.iter().cloned());
+    }
+    let (first_branch, other_branches) = selected_branches
+        .split_first()
+        .ok_or(MembershipError::InvalidConflictResolution)?;
+    let mut active_grants = first_branch
+        .active_grants
+        .iter()
+        .filter(|(grant, _)| !retired_owner_grants.contains(*grant))
+        .map(|(grant, record)| (grant.clone(), record.clone()))
+        .collect::<BTreeMap<_, _>>();
+    active_grants.retain(|grant, record| {
+        other_branches
+            .iter()
+            .all(|branch| branch.active_grants.get(grant) == Some(record))
+    });
+    for resolution in resolutions {
+        let record = MembershipGrantRecord {
+            member_pubkey: resolution.resolver_pubkey.clone(),
+            role: MemberRole::Owner,
+            provider_account_email: None,
+            creation_authority: MembershipGrantCreationAuthority::ConflictResolution(
+                resolution.resolution_ref(),
+            ),
+        };
+        if active_grants
+            .insert(resolution.replacement_grant.clone(), record.clone())
+            .is_some_and(|current| current != record)
+        {
+            return Err(MembershipError::InvalidConflictResolution);
+        }
+    }
+    let mut members = BTreeSet::new();
+    if !active_grants
+        .values()
+        .any(|record| record.role == MemberRole::Owner)
+        || active_grants
+            .values()
+            .any(|record| !members.insert(record.member_pubkey.clone()))
+    {
+        return Err(MembershipError::InvalidConflictResolution);
+    }
+    Ok(ResolvedStoreMembership {
+        state_hash: store_membership_state_hash(&active_grants),
+        active_grants,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -715,7 +1145,7 @@ struct GrantRecord {
     pubkey: String,
     role: MemberRole,
     provider_account_email: Option<String>,
-    created_at: MembershipCoord,
+    creation_authority: MembershipGrantCreationAuthority,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -730,6 +1160,19 @@ pub struct MembershipChain {
     coords: Vec<MembershipCoord>,
     state: CausalState,
     included: BTreeSet<MembershipCoord>,
+    status: Option<MembershipStatus>,
+    head_refs: Vec<MembershipHeadRef>,
+    resolution_checkpoint: Option<MembershipResolutionCheckpoint>,
+}
+
+#[derive(Debug, Clone)]
+struct MembershipResolutionCheckpoint {
+    raw_heads: Vec<MembershipCoord>,
+    effective_frontier: Vec<MembershipCoord>,
+    grants: BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+    removed: BTreeSet<MembershipGrantId>,
+    included: BTreeSet<MembershipCoord>,
+    resolutions: Vec<StoreMembershipConflictResolutionRef>,
 }
 
 impl MembershipChain {
@@ -749,6 +1192,37 @@ impl MembershipChain {
     pub fn from_entries_with_coords(
         entries: Vec<(MembershipCoord, MembershipEntry)>,
     ) -> Result<Self, MembershipError> {
+        Self::from_entries_with_coords_and_head_refs(entries, Vec::new())
+    }
+
+    pub fn from_entries_with_coords_and_heads(
+        entries: Vec<(MembershipCoord, MembershipEntry)>,
+        heads: Vec<AuthorHead>,
+    ) -> Result<Self, MembershipError> {
+        let expected_store = entries
+            .first()
+            .map(|(_, entry)| entry.store_id.as_str())
+            .ok_or(MembershipError::EmptyChain)?;
+        if heads.iter().any(|head| {
+            !head.verify()
+                || head.store_id != expected_store
+                || entries
+                    .iter()
+                    .find(|(coord, _)| *coord == head.entry_coord())
+                    .is_none_or(|(_, entry)| head.resolutions != entry.resolution_dependencies)
+        }) {
+            return Err(MembershipError::MissingConflictHeads);
+        }
+        Self::from_entries_with_coords_and_head_refs(
+            entries,
+            heads.iter().map(MembershipHeadRef::from_head).collect(),
+        )
+    }
+
+    fn from_entries_with_coords_and_head_refs(
+        entries: Vec<(MembershipCoord, MembershipEntry)>,
+        head_refs: Vec<MembershipHeadRef>,
+    ) -> Result<Self, MembershipError> {
         if entries.is_empty() {
             return Err(MembershipError::EmptyChain);
         }
@@ -758,6 +1232,9 @@ impl MembershipChain {
             coords,
             state: CausalState::default(),
             included: BTreeSet::new(),
+            status: None,
+            head_refs,
+            resolution_checkpoint: None,
         };
         chain.rebuild()?;
         Ok(chain)
@@ -765,6 +1242,225 @@ impl MembershipChain {
 
     pub fn entries(&self) -> &[MembershipEntry] {
         &self.entries
+    }
+
+    pub fn status(&self) -> &MembershipStatus {
+        self.status
+            .as_ref()
+            .expect("a loaded membership chain always has status")
+    }
+
+    pub fn head_refs(&self) -> &[MembershipHeadRef] {
+        &self.head_refs
+    }
+
+    pub fn resolution_refs(&self) -> &[StoreMembershipConflictResolutionRef] {
+        self.resolution_checkpoint
+            .as_ref()
+            .map_or(&[], |checkpoint| checkpoint.resolutions.as_slice())
+    }
+
+    pub(crate) fn resolution_checkpoint_covers(&self, coord: &MembershipCoord) -> bool {
+        self.resolution_checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| {
+                checkpoint.included.contains(coord) || checkpoint.raw_heads.contains(coord)
+            })
+    }
+
+    pub(crate) fn replay_resolved_history_to_heads(
+        &self,
+        entries: Vec<(MembershipCoord, MembershipEntry)>,
+        heads: Vec<AuthorHead>,
+    ) -> Result<Self, MembershipError> {
+        let resolution_checkpoint = self
+            .resolution_checkpoint
+            .clone()
+            .ok_or(MembershipError::InvalidConflictResolution)?;
+        let expected_store = entries
+            .first()
+            .map(|(_, entry)| entry.store_id.as_str())
+            .ok_or(MembershipError::EmptyChain)?;
+        if heads.iter().any(|head| {
+            !head.verify()
+                || head.store_id != expected_store
+                || entries
+                    .iter()
+                    .find(|(coord, _)| *coord == head.entry_coord())
+                    .is_none_or(|(_, entry)| head.resolutions != entry.resolution_dependencies)
+        }) {
+            return Err(MembershipError::MissingConflictHeads);
+        }
+        let (coords, entries): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        let mut chain = Self {
+            entries,
+            coords,
+            state: CausalState::default(),
+            included: BTreeSet::new(),
+            status: None,
+            head_refs: heads.iter().map(MembershipHeadRef::from_head).collect(),
+            resolution_checkpoint: Some(resolution_checkpoint),
+        };
+        chain.rebuild()?;
+        Ok(chain)
+    }
+
+    pub(crate) fn replay_merged_resolved_histories_to_heads(
+        chains: &[&MembershipChain],
+        entries: Vec<(MembershipCoord, MembershipEntry)>,
+        heads: Vec<AuthorHead>,
+    ) -> Result<Self, MembershipError> {
+        let mut raw_by_stream = BTreeMap::new();
+        let mut effective_by_stream = BTreeMap::new();
+        let mut grants = BTreeMap::new();
+        let mut removed = BTreeSet::new();
+        let mut included = BTreeSet::new();
+        let mut resolutions = BTreeSet::new();
+        for chain in chains {
+            let checkpoint = chain
+                .resolution_checkpoint
+                .as_ref()
+                .ok_or(MembershipError::InvalidConflictResolution)?;
+            if !causal_grants::merge_checkpoint_frontier(&mut raw_by_stream, &checkpoint.raw_heads)
+                || !causal_grants::merge_checkpoint_frontier(
+                    &mut effective_by_stream,
+                    &checkpoint.effective_frontier,
+                )
+                || !causal_grants::merge_checkpoint_evidence(
+                    &mut grants,
+                    &mut removed,
+                    &mut included,
+                    &checkpoint.grants,
+                    &checkpoint.removed,
+                    &checkpoint.included,
+                )
+            {
+                return Err(MembershipError::InvalidConflictResolution);
+            }
+            resolutions.extend(checkpoint.resolutions.iter().cloned());
+        }
+        let checkpoint = MembershipResolutionCheckpoint {
+            raw_heads: raw_by_stream.into_values().collect(),
+            effective_frontier: effective_by_stream.into_values().collect(),
+            grants,
+            removed,
+            included,
+            resolutions: resolutions.into_iter().collect(),
+        };
+        let base = chains
+            .first()
+            .ok_or(MembershipError::InvalidConflictResolution)?;
+        let mut merged = (*base).clone();
+        merged.resolution_checkpoint = Some(checkpoint);
+        merged.replay_resolved_history_to_heads(entries, heads)
+    }
+
+    pub(crate) fn checkpoint_current_resolved_state(&mut self) -> Result<(), MembershipError> {
+        self.ensure_resolved()?;
+        let resolutions = self
+            .resolution_checkpoint
+            .as_ref()
+            .map_or_else(Vec::new, |checkpoint| checkpoint.resolutions.clone());
+        let grants = self
+            .state
+            .grants
+            .iter()
+            .map(|(grant, record)| {
+                (
+                    grant.clone(),
+                    MembershipGrantRecord {
+                        member_pubkey: record.pubkey.clone(),
+                        role: record.role.clone(),
+                        provider_account_email: record.provider_account_email.clone(),
+                        creation_authority: record.creation_authority.clone(),
+                    },
+                )
+            })
+            .collect();
+        self.resolution_checkpoint = Some(MembershipResolutionCheckpoint {
+            raw_heads: self.author_heads(),
+            effective_frontier: self.effective_frontier(),
+            grants,
+            removed: self.state.removed.clone(),
+            included: self.included.clone(),
+            resolutions,
+        });
+        Ok(())
+    }
+
+    pub fn conflict(&self) -> Option<&MembershipConflict> {
+        match self.status() {
+            MembershipStatus::Resolved(_) => None,
+            MembershipStatus::Conflict(conflict) => Some(conflict),
+        }
+    }
+
+    pub fn ensure_resolved(&self) -> Result<(), MembershipError> {
+        match self.status() {
+            MembershipStatus::Resolved(_) => Ok(()),
+            MembershipStatus::Conflict(_) => Err(MembershipError::Conflict),
+        }
+    }
+
+    pub fn resolved_with(
+        &self,
+        store_root_hash: ObjectHash,
+        resolutions: &[StoreMembershipConflictResolution],
+    ) -> Result<ResolvedStoreMembership, MembershipError> {
+        match self.status() {
+            MembershipStatus::Resolved(resolved) if resolutions.is_empty() => Ok(resolved.clone()),
+            MembershipStatus::Conflict(conflict) => {
+                resolve_store_membership_conflict(store_root_hash, conflict, resolutions)
+            }
+            MembershipStatus::Resolved(_) => Err(MembershipError::InvalidConflictResolution),
+        }
+    }
+
+    pub fn signed_cycle_resolution(
+        &self,
+        store_root_hash: ObjectHash,
+        resolver_branch_heads: Vec<MembershipHeadRef>,
+        signer: &UserKeypair,
+    ) -> Result<StoreMembershipConflictResolution, MembershipError> {
+        let MembershipStatus::Conflict(MembershipConflict::RevocationCycle {
+            conflict_hash,
+            heads,
+            involved_owner_grants,
+            maximal_valid_branches,
+            ..
+        }) = self.status()
+        else {
+            return Err(MembershipError::Conflict);
+        };
+        let resolver_pubkey = keys::public_key_hex(signer);
+        let branch = maximal_valid_branches
+            .iter()
+            .find(|branch| branch.heads == resolver_branch_heads)
+            .ok_or(MembershipError::InvalidConflictResolution)?;
+        if !branch.active_grants.values().any(|record| {
+            record.member_pubkey == resolver_pubkey && record.role == MemberRole::Owner
+        }) {
+            return Err(MembershipError::SignerIsNotOwner(resolver_pubkey));
+        }
+        let replacement_grant = derive_store_resolution_grant(conflict_hash, &resolver_pubkey);
+        let mut retired_owner_grants = involved_owner_grants.clone();
+        retired_owner_grants.extend(branch.active_grants.iter().filter_map(|(grant, record)| {
+            (record.member_pubkey == resolver_pubkey && record.role == MemberRole::Owner)
+                .then_some(grant.clone())
+        }));
+        let mut resolution = StoreMembershipConflictResolution {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            conflict_hash: *conflict_hash,
+            conflicting_heads: heads.clone(),
+            retired_owner_grants,
+            resolver_pubkey,
+            resolver_branch_heads,
+            replacement_grant,
+            signature: String::new(),
+        };
+        resolution.signature = keys::sign_hex(signer, &resolution.canonical_bytes()).1;
+        Ok(resolution)
     }
 
     pub fn entries_with_coords(
@@ -786,7 +1482,9 @@ impl MembershipChain {
     pub fn founder_pubkey(&self) -> Option<&str> {
         self.entries.iter().find_map(|entry| match &entry.change {
             MembershipChange::Founder { owner_pubkey, .. } => Some(owner_pubkey.as_str()),
-            MembershipChange::SetMember { .. } | MembershipChange::RemoveMember { .. } => None,
+            MembershipChange::SetMember { .. }
+            | MembershipChange::RemoveMember { .. }
+            | MembershipChange::ResolutionActivation { .. } => None,
         })
     }
 
@@ -820,25 +1518,46 @@ impl MembershipChain {
     }
 
     pub fn can_write_now(&self, pubkey: &str) -> bool {
+        if self.conflict().is_some() {
+            return false;
+        }
         self.active_grants_for(pubkey)
             .iter()
             .any(|(_, record)| record.role.can_write())
     }
 
     pub(crate) fn contains_member_now(&self, pubkey: &str) -> bool {
+        if self.conflict().is_some() {
+            return false;
+        }
         !self.active_grants_for(pubkey).is_empty()
     }
 
     pub fn is_owner_now(&self, pubkey: &str) -> bool {
+        if self.conflict().is_some() {
+            return false;
+        }
         self.active_grants_for(pubkey)
             .iter()
             .any(|(_, record)| record.role == MemberRole::Owner)
     }
 
     pub fn authorizes_write_at(&self, coord: &MembershipCoord, pubkey: &str) -> bool {
+        self.active_grants_for(pubkey).iter().any(|(_, record)| {
+            record.role.can_write()
+                && record.creation_authority
+                    == MembershipGrantCreationAuthority::Entry(coord.clone())
+        })
+    }
+
+    pub fn authorizes_write_authority(
+        &self,
+        authority: &MembershipGrantCreationAuthority,
+        pubkey: &str,
+    ) -> bool {
         self.active_grants_for(pubkey)
             .iter()
-            .any(|(_, record)| record.role.can_write() && record.created_at == *coord)
+            .any(|(_, record)| record.role.can_write() && &record.creation_authority == authority)
     }
 
     pub fn contains_coord(&self, expected: &MembershipCoord) -> bool {
@@ -866,7 +1585,17 @@ impl MembershipChain {
         self.active_grants_for(pubkey)
             .into_iter()
             .find(|(_, record)| record.role.can_write())
-            .map(|(_, record)| record.created_at.clone())
+            .and_then(|(_, record)| match &record.creation_authority {
+                MembershipGrantCreationAuthority::Entry(coord) => Some(coord.clone()),
+                MembershipGrantCreationAuthority::ConflictResolution(_) => None,
+            })
+    }
+
+    pub fn write_grant_authority(&self, pubkey: &str) -> Option<MembershipGrantCreationAuthority> {
+        self.active_grants_for(pubkey)
+            .into_iter()
+            .find(|(_, record)| record.role.can_write())
+            .map(|(_, record)| record.creation_authority.clone())
     }
 
     pub fn active_grant_ids(&self, pubkey: &str) -> BTreeSet<MembershipGrantId> {
@@ -982,12 +1711,18 @@ impl MembershipChain {
             .into_iter()
             .filter(|coord| coord.author_pubkey == author && coord.author_owner_grant == grant)
             .max_by_key(|coord| coord.stream_id)?;
-        Some(AuthorHead::signed(
+        Some(AuthorHead::signed_with_resolutions(
             self.store_id()?.to_string(),
             grant,
             tip.stream_id,
             tip.seq,
             tip.entry_hash,
+            self.entries
+                .iter()
+                .find(|entry| entry.coord() == tip)
+                .expect("effective membership tip has an entry")
+                .resolution_dependencies
+                .clone(),
             signer,
         ))
     }
@@ -1000,12 +1735,18 @@ impl MembershipChain {
         let author = keys::public_key_hex(signer);
         let grant = self.active_owner_grant(&author)?;
         let tip = self.stream_tip(&author, &grant, stream_id)?;
-        Some(AuthorHead::signed(
+        Some(AuthorHead::signed_with_resolutions(
             self.store_id()?.to_string(),
             grant,
             stream_id,
             tip.seq,
             tip.entry_hash,
+            self.entries
+                .iter()
+                .find(|entry| entry.coord() == tip)
+                .expect("effective membership tip has an entry")
+                .resolution_dependencies
+                .clone(),
             signer,
         ))
     }
@@ -1025,11 +1766,7 @@ impl MembershipChain {
             .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
         let stream_id = self
             .preferred_author_stream(&author, &grant)
-            .unwrap_or_else(|| {
-                AuthorStreamId::from_digest(ObjectHash::digest(
-                    format!("coven.test-membership-author-stream.v1\0{author}\0{grant}").as_bytes(),
-                ))
-            });
+            .ok_or(MembershipError::MissingAuthorStream)?;
         self.signed_set_member_in_stream(
             signer,
             stream_id,
@@ -1076,6 +1813,7 @@ impl MembershipChain {
             seq,
             previous_hash,
             dependencies: self.frontier(),
+            resolution_dependencies: self.resolution_refs().to_vec(),
             created_at,
             change: MembershipChange::SetMember {
                 user_pubkey: user_pubkey.clone(),
@@ -1106,11 +1844,7 @@ impl MembershipChain {
             .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
         let stream_id = self
             .preferred_author_stream(&author, &grant)
-            .unwrap_or_else(|| {
-                AuthorStreamId::from_digest(ObjectHash::digest(
-                    format!("coven.test-membership-author-stream.v1\0{author}\0{grant}").as_bytes(),
-                ))
-            });
+            .ok_or(MembershipError::MissingAuthorStream)?;
         self.signed_remove_member_in_stream(signer, stream_id, user_pubkey, created_at)
     }
 
@@ -1143,6 +1877,7 @@ impl MembershipChain {
             seq,
             previous_hash,
             dependencies: self.frontier(),
+            resolution_dependencies: self.resolution_refs().to_vec(),
             created_at,
             change: MembershipChange::RemoveMember {
                 user_pubkey,
@@ -1154,6 +1889,66 @@ impl MembershipChain {
         sign_membership_entry(&mut entry, signer);
         let mut candidate = self.clone();
         candidate.add_entry(entry.clone())?;
+        Ok(entry)
+    }
+
+    pub fn signed_resolution_activation_in_stream(
+        &self,
+        store_root_hash: ObjectHash,
+        signer: &UserKeypair,
+        stream_id: AuthorStreamId,
+        resolution: &StoreMembershipConflictResolution,
+        created_at: String,
+    ) -> Result<MembershipEntry, MembershipError> {
+        self.ensure_resolved()?;
+        let MembershipStatus::Resolved(resolved_before) = self.status() else {
+            unreachable!("ensure_resolved accepted a conflict")
+        };
+        let reference = resolution.resolution_ref();
+        let author = keys::public_key_hex(signer);
+        if !resolution.verify_signature()
+            || resolution.store_root_hash != store_root_hash
+            || reference.resolver_pubkey != author
+            || !self.resolution_refs().contains(&reference)
+            || self.active_owner_grant(&author) != Some(resolution.replacement_grant.clone())
+        {
+            return Err(MembershipError::InvalidConflictResolution);
+        }
+        let author_grant = resolution.replacement_grant.clone();
+        if self
+            .raw_stream_tip(&author, &author_grant, stream_id)
+            .is_some()
+        {
+            return Err(MembershipError::ResolutionActivationRequiresFreshStream);
+        }
+        let mut entry = MembershipEntry {
+            version: STORE_PROTOCOL_VERSION,
+            store_id: self
+                .store_id()
+                .expect("validated chain has a store id")
+                .to_string(),
+            author_pubkey: author,
+            author_owner_grant: author_grant,
+            stream_id,
+            seq: 1,
+            previous_hash: None,
+            dependencies: self.effective_frontier(),
+            resolution_dependencies: self.resolution_refs().to_vec(),
+            created_at,
+            change: MembershipChange::ResolutionActivation {
+                resolution: reference,
+            },
+            signature: String::new(),
+        };
+        sign_membership_entry(&mut entry, signer);
+        let mut candidate = self.clone();
+        candidate.add_entry(entry.clone())?;
+        let MembershipStatus::Resolved(resolved_after) = candidate.status() else {
+            return Err(MembershipError::InvalidConflictResolution);
+        };
+        if resolved_after.state_hash != resolved_before.state_hash {
+            return Err(MembershipError::InvalidConflictResolution);
+        }
         Ok(entry)
     }
 
@@ -1248,6 +2043,39 @@ impl MembershipChain {
             let barriers = match &entry.change {
                 MembershipChange::SetMember { owner_barriers, .. }
                 | MembershipChange::RemoveMember { owner_barriers, .. } => owner_barriers,
+                MembershipChange::ResolutionActivation { resolution } => {
+                    if resolution.resolver_pubkey != entry.author_pubkey
+                        || entry.seq != 1
+                        || entry.previous_hash.is_some()
+                        || entry
+                            .dependencies
+                            .iter()
+                            .any(|dependency| dependency.stream_key() == entry.coord().stream_key())
+                        || entry.author_owner_grant
+                            != derive_store_resolution_grant(
+                                &resolution.conflict_hash,
+                                &resolution.resolver_pubkey,
+                            )
+                        || entry
+                            .resolution_dependencies
+                            .binary_search(resolution)
+                            .is_err()
+                        || self
+                            .resolution_checkpoint
+                            .as_ref()
+                            .is_none_or(|checkpoint| {
+                                let already_checkpointed =
+                                    checkpoint.included.contains(&entry.coord())
+                                        || checkpoint.raw_heads.contains(&entry.coord());
+                                !already_checkpointed
+                                    && (entry.dependencies != checkpoint.effective_frontier
+                                        || entry.resolution_dependencies != checkpoint.resolutions)
+                            })
+                    {
+                        return Err(MembershipError::InvalidResolutionActivation(index));
+                    }
+                    continue;
+                }
                 MembershipChange::Founder { .. } => continue,
             };
             if let Some((grant, _)) = barriers.iter().find(|(_, barrier)| {
@@ -1288,34 +2116,382 @@ impl MembershipChain {
             return Err(MembershipError::InvalidFounder);
         }
 
-        let reduced = reduce_store_membership(&self.entries)?;
+        let reduced = match &self.resolution_checkpoint {
+            Some(checkpoint) => reduce_store_membership_from_checkpoint(&self.entries, checkpoint)?,
+            None => reduce_store_membership(&self.entries)?,
+        };
+        let checkpoint_grants = self
+            .resolution_checkpoint
+            .as_ref()
+            .map(|checkpoint| &checkpoint.grants);
+        let (state_source, status) = match reduced {
+            CausalGrantStatus::Resolved(reduced) => {
+                let resolved = resolved_store_membership(&reduced, checkpoint_grants);
+                (Some(reduced), MembershipStatus::Resolved(resolved))
+            }
+            CausalGrantStatus::Conflict(CausalGrantConflict::ConcurrentMemberAssignments {
+                raw_heads,
+                effective_frontier,
+                member_pubkey,
+                conflicting_grants,
+                uncontested_grants,
+                reduced,
+            }) => {
+                let heads = self.exact_head_refs(&raw_heads)?;
+                let conflict = MembershipConflict::ConcurrentMemberAssignments {
+                    conflict_hash: membership_assignment_conflict_hash(
+                        &heads,
+                        &member_pubkey,
+                        &conflicting_grants,
+                    ),
+                    heads,
+                    effective_frontier,
+                    member_pubkey,
+                    conflicting_grants: map_store_grants(conflicting_grants, checkpoint_grants),
+                    uncontested_grants: map_store_grants(uncontested_grants, checkpoint_grants),
+                };
+                (Some(reduced), MembershipStatus::Conflict(conflict))
+            }
+            CausalGrantStatus::Conflict(CausalGrantConflict::RevocationCycle {
+                raw_heads,
+                cyclic_sources,
+                involved_owner_grants,
+                maximal_valid_branches,
+            }) => {
+                let heads = self.exact_head_refs(&raw_heads)?;
+                let branches = maximal_valid_branches
+                    .into_iter()
+                    .map(|branch| -> Result<StoreMembershipBranch, MembershipError> {
+                        let resolved =
+                            resolved_store_membership(&branch.reduced, checkpoint_grants);
+                        Ok(StoreMembershipBranch {
+                            heads: self.branch_head_refs(&branch.raw_heads)?,
+                            effective_frontier: branch.effective_frontier,
+                            active_grants: resolved.active_grants,
+                            state_hash: resolved.state_hash,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let conflict_hash = membership_revocation_conflict_hash(
+                    &heads,
+                    &cyclic_sources,
+                    &involved_owner_grants,
+                );
+                (
+                    None,
+                    MembershipStatus::Conflict(MembershipConflict::RevocationCycle {
+                        conflict_hash,
+                        heads,
+                        cyclic_sources,
+                        involved_owner_grants,
+                        maximal_valid_branches: branches,
+                    }),
+                )
+            }
+        };
+        if let Some(reduced) = state_source {
+            self.state = CausalState {
+                grants: reduced
+                    .grants
+                    .into_iter()
+                    .map(|(grant, record)| {
+                        let creation_authority = membership_creation_authority(
+                            &grant,
+                            record.creation,
+                            checkpoint_grants,
+                        );
+                        (
+                            grant,
+                            GrantRecord {
+                                pubkey: record.member_pubkey,
+                                role: record.assignment.role,
+                                provider_account_email: record.assignment.provider_account_email,
+                                creation_authority,
+                            },
+                        )
+                    })
+                    .collect(),
+                removed: reduced.removed,
+            };
+            self.included = reduced.included;
+        } else {
+            self.state = CausalState::default();
+            self.included.clear();
+        }
+        self.status = Some(status);
+        Ok(())
+    }
+
+    pub fn apply_resolutions(
+        &mut self,
+        store_root_hash: ObjectHash,
+        resolutions: &[StoreMembershipConflictResolution],
+    ) -> Result<(), MembershipError> {
+        let (raw_heads, effective_frontier) = match self.conflict() {
+            Some(MembershipConflict::RevocationCycle {
+                heads,
+                maximal_valid_branches,
+                ..
+            }) => {
+                let selected = resolutions
+                    .iter()
+                    .map(|resolution| {
+                        maximal_valid_branches
+                            .iter()
+                            .find(|branch| branch.heads == resolution.resolver_branch_heads)
+                            .map(|branch| branch.effective_frontier.as_slice())
+                            .ok_or(MembershipError::InvalidConflictResolution)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                (
+                    heads
+                        .iter()
+                        .map(|reference| reference.coord.clone())
+                        .collect(),
+                    common_membership_frontier(&selected),
+                )
+            }
+            _ => return Err(MembershipError::InvalidConflictResolution),
+        };
+        let resolved = self.resolved_with(store_root_hash, resolutions)?;
+        let mut grants = self
+            .resolution_checkpoint
+            .as_ref()
+            .map_or_else(BTreeMap::new, |checkpoint| checkpoint.grants.clone());
+        for entry in &self.entries {
+            let (grant, record) = match &entry.change {
+                MembershipChange::Founder {
+                    owner_pubkey,
+                    owner_grant_id,
+                } => (
+                    owner_grant_id.clone(),
+                    MembershipGrantRecord {
+                        member_pubkey: owner_pubkey.clone(),
+                        role: MemberRole::Owner,
+                        provider_account_email: None,
+                        creation_authority: MembershipGrantCreationAuthority::Entry(entry.coord()),
+                    },
+                ),
+                MembershipChange::SetMember {
+                    user_pubkey,
+                    provider_account_email,
+                    role,
+                    grant_id,
+                    ..
+                } => (
+                    grant_id.clone(),
+                    MembershipGrantRecord {
+                        member_pubkey: user_pubkey.clone(),
+                        role: role.clone(),
+                        provider_account_email: provider_account_email.clone(),
+                        creation_authority: MembershipGrantCreationAuthority::Entry(entry.coord()),
+                    },
+                ),
+                MembershipChange::RemoveMember { .. }
+                | MembershipChange::ResolutionActivation { .. } => continue,
+            };
+            grants.insert(grant, record);
+        }
+        grants.extend(resolved.active_grants.clone());
+        let removed: BTreeSet<_> = grants
+            .keys()
+            .filter(|grant| !resolved.active_grants.contains_key(*grant))
+            .cloned()
+            .collect();
+        let included = membership_history_closure(&self.entries, &effective_frontier);
+        let mut resolution_refs = self
+            .resolution_checkpoint
+            .as_ref()
+            .map_or_else(Vec::new, |checkpoint| checkpoint.resolutions.clone());
+        resolution_refs.extend(
+            resolutions
+                .iter()
+                .map(StoreMembershipConflictResolution::resolution_ref),
+        );
+        resolution_refs.sort();
+        resolution_refs.dedup();
+        self.resolution_checkpoint = Some(MembershipResolutionCheckpoint {
+            raw_heads,
+            effective_frontier: effective_frontier.clone(),
+            grants: grants.clone(),
+            removed: removed.clone(),
+            included: included.clone(),
+            resolutions: resolution_refs,
+        });
         self.state = CausalState {
-            grants: reduced
-                .grants
-                .into_iter()
+            grants: grants
+                .iter()
                 .map(|(grant, record)| {
                     (
-                        grant,
+                        grant.clone(),
                         GrantRecord {
-                            pubkey: record.member_pubkey,
-                            role: record.assignment.role,
-                            provider_account_email: record.assignment.provider_account_email,
-                            created_at: record.created_at,
+                            pubkey: record.member_pubkey.clone(),
+                            role: record.role.clone(),
+                            provider_account_email: record.provider_account_email.clone(),
+                            creation_authority: record.creation_authority.clone(),
                         },
                     )
                 })
                 .collect(),
-            removed: reduced.removed,
+            removed,
         };
-        self.included = reduced.included;
+        self.included = included;
+        self.status = Some(MembershipStatus::Resolved(resolved));
         Ok(())
+    }
+
+    fn exact_head_refs(
+        &self,
+        raw_heads: &[MembershipCoord],
+    ) -> Result<Vec<MembershipHeadRef>, MembershipError> {
+        let expected = raw_heads.iter().cloned().collect::<BTreeSet<_>>();
+        let mut references = self
+            .head_refs
+            .iter()
+            .filter(|reference| expected.contains(&reference.coord))
+            .cloned()
+            .collect::<Vec<_>>();
+        let actual = references
+            .iter()
+            .map(|reference| reference.coord.clone())
+            .collect::<BTreeSet<_>>();
+        if expected != actual || references.len() != expected.len() {
+            return Err(MembershipError::MissingConflictHeads);
+        }
+        references.sort();
+        Ok(references)
+    }
+
+    fn branch_head_refs(
+        &self,
+        branch_heads: &[MembershipCoord],
+    ) -> Result<Vec<MembershipHeadRef>, MembershipError> {
+        let by_coord = self
+            .head_refs
+            .iter()
+            .map(|reference| (reference.coord.clone(), reference.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut references = branch_heads
+            .iter()
+            .map(|coord| {
+                by_coord
+                    .get(coord)
+                    .cloned()
+                    .ok_or(MembershipError::MissingConflictHeads)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        references.sort();
+        Ok(references)
     }
 }
 
 fn reduce_store_membership(
     entries: &[MembershipEntry],
-) -> Result<causal_grants::ReducedGrants<MembershipCoord, StoreAssignment>, MembershipError> {
-    let normalized = entries
+) -> Result<CausalGrantStatus<MembershipCoord, StoreAssignment>, MembershipError> {
+    let normalized = normalize_store_membership(entries);
+    causal_grants::reduce(&normalized).map_err(map_store_causal_error)
+}
+
+fn reduce_store_membership_from_checkpoint(
+    entries: &[MembershipEntry],
+    checkpoint: &MembershipResolutionCheckpoint,
+) -> Result<CausalGrantStatus<MembershipCoord, StoreAssignment>, MembershipError> {
+    let checkpoint_by_stream = checkpoint
+        .raw_heads
+        .iter()
+        .map(|coord| (coord.stream_key(), coord))
+        .collect::<BTreeMap<_, _>>();
+    let suffix = entries
+        .iter()
+        .filter(|entry| {
+            checkpoint_by_stream
+                .get(&entry.coord().stream_key())
+                .is_none_or(|head| entry.seq > head.seq)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let normalized = normalize_store_membership(&suffix);
+    let seeds = checkpoint
+        .grants
+        .iter()
+        .map(|(grant, record)| {
+            (
+                grant.clone(),
+                causal_grants::CausalSeedGrant {
+                    member_pubkey: record.member_pubkey.clone(),
+                    assignment: StoreAssignment {
+                        role: record.role.clone(),
+                        provider_account_email: record.provider_account_email.clone(),
+                    },
+                },
+            )
+        })
+        .collect();
+    causal_grants::reduce_from_checkpoint(
+        &normalized,
+        &checkpoint.raw_heads,
+        &checkpoint.effective_frontier,
+        &seeds,
+        &checkpoint.removed,
+        &checkpoint.included,
+    )
+    .map_err(map_store_causal_error)
+}
+
+fn common_membership_frontier(frontiers: &[&[MembershipCoord]]) -> Vec<MembershipCoord> {
+    let Some(first) = frontiers.first() else {
+        return Vec::new();
+    };
+    let others = frontiers[1..]
+        .iter()
+        .map(|frontier| {
+            frontier
+                .iter()
+                .map(|coord| (coord.stream_key(), coord))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .collect::<Vec<_>>();
+    first
+        .iter()
+        .filter_map(|coord| {
+            let stream = coord.stream_key();
+            let mut common = coord.clone();
+            for frontier in &others {
+                let candidate = frontier.get(&stream)?;
+                if candidate.seq < common.seq {
+                    common = (*candidate).clone();
+                }
+            }
+            Some(common)
+        })
+        .collect()
+}
+
+fn membership_history_closure(
+    entries: &[MembershipEntry],
+    frontier: &[MembershipCoord],
+) -> BTreeSet<MembershipCoord> {
+    let by_coord = entries
+        .iter()
+        .map(|entry| (entry.coord(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut pending = frontier.iter().cloned().collect::<BTreeSet<_>>();
+    let mut included = BTreeSet::new();
+    while let Some(coord) = pending.pop_first() {
+        if !included.insert(coord.clone()) {
+            continue;
+        }
+        if let Some(entry) = by_coord.get(&coord) {
+            pending.extend(entry.dependencies.iter().cloned());
+        }
+    }
+    included
+}
+
+fn normalize_store_membership(
+    entries: &[MembershipEntry],
+) -> Vec<CausalEntry<MembershipCoord, StoreAssignment>> {
+    entries
         .iter()
         .map(|entry| {
             let dependencies = entry
@@ -1368,6 +2544,7 @@ fn reduce_store_membership(
                         .map(|(grant, barrier)| (grant.clone(), shared_store_barrier(barrier)))
                         .collect(),
                 },
+                MembershipChange::ResolutionActivation { .. } => CausalChange::ResolutionActivation,
             };
             CausalEntry {
                 coord: entry.coord(),
@@ -1376,8 +2553,146 @@ fn reduce_store_membership(
                 change,
             }
         })
-        .collect::<Vec<_>>();
-    causal_grants::reduce(&normalized).map_err(map_store_causal_error)
+        .collect()
+}
+
+fn map_store_grants(
+    grants: BTreeMap<
+        MembershipGrantId,
+        causal_grants::GrantRecord<MembershipCoord, StoreAssignment>,
+    >,
+    checkpoint: Option<&BTreeMap<MembershipGrantId, MembershipGrantRecord>>,
+) -> BTreeMap<MembershipGrantId, MembershipGrantRecord> {
+    grants
+        .into_iter()
+        .map(|(grant, record)| {
+            let creation_authority =
+                membership_creation_authority(&grant, record.creation, checkpoint);
+            (
+                grant,
+                MembershipGrantRecord {
+                    member_pubkey: record.member_pubkey,
+                    role: record.assignment.role,
+                    provider_account_email: record.assignment.provider_account_email,
+                    creation_authority,
+                },
+            )
+        })
+        .collect()
+}
+
+fn resolved_store_membership(
+    reduced: &causal_grants::ReducedGrants<MembershipCoord, StoreAssignment>,
+    checkpoint: Option<&BTreeMap<MembershipGrantId, MembershipGrantRecord>>,
+) -> ResolvedStoreMembership {
+    let active_grants = reduced
+        .grants
+        .iter()
+        .filter(|(grant, _)| !reduced.removed.contains(*grant))
+        .map(|(grant, record)| {
+            (
+                grant.clone(),
+                MembershipGrantRecord {
+                    member_pubkey: record.member_pubkey.clone(),
+                    role: record.assignment.role.clone(),
+                    provider_account_email: record.assignment.provider_account_email.clone(),
+                    creation_authority: membership_creation_authority(
+                        grant,
+                        record.creation.clone(),
+                        checkpoint,
+                    ),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let state_hash = store_membership_state_hash(&active_grants);
+    ResolvedStoreMembership {
+        active_grants,
+        state_hash,
+    }
+}
+
+fn membership_creation_authority(
+    grant: &MembershipGrantId,
+    creation: causal_grants::CausalGrantCreation<MembershipCoord>,
+    checkpoint: Option<&BTreeMap<MembershipGrantId, MembershipGrantRecord>>,
+) -> MembershipGrantCreationAuthority {
+    match creation {
+        causal_grants::CausalGrantCreation::Entry(coord) => {
+            MembershipGrantCreationAuthority::Entry(coord)
+        }
+        causal_grants::CausalGrantCreation::Checkpoint => checkpoint
+            .and_then(|grants| grants.get(grant))
+            .expect("checkpoint reducer seed has exact domain grant record")
+            .creation_authority
+            .clone(),
+    }
+}
+
+fn store_membership_state_hash(
+    active_grants: &BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+) -> ObjectHash {
+    #[derive(Serialize)]
+    struct State<'a> {
+        domain: &'static str,
+        active_grants: &'a BTreeMap<MembershipGrantId, MembershipGrantRecord>,
+    }
+    ObjectHash::digest(
+        &serde_json::to_vec(&State {
+            domain: "coven.store-membership-state.v1",
+            active_grants,
+        })
+        .expect("Store membership state serialization cannot fail"),
+    )
+}
+
+fn membership_assignment_conflict_hash(
+    heads: &[MembershipHeadRef],
+    member_pubkey: &str,
+    conflicting_grants: &BTreeMap<
+        MembershipGrantId,
+        causal_grants::GrantRecord<MembershipCoord, StoreAssignment>,
+    >,
+) -> ObjectHash {
+    #[derive(Serialize)]
+    struct Conflict<'a> {
+        domain: &'static str,
+        heads: &'a [MembershipHeadRef],
+        member_pubkey: &'a str,
+        conflicting_grant_ids: Vec<&'a MembershipGrantId>,
+    }
+    ObjectHash::digest(
+        &serde_json::to_vec(&Conflict {
+            domain: "coven.store-membership-assignment-conflict.v1",
+            heads,
+            member_pubkey,
+            conflicting_grant_ids: conflicting_grants.keys().collect(),
+        })
+        .expect("Store membership conflict serialization cannot fail"),
+    )
+}
+
+fn membership_revocation_conflict_hash(
+    heads: &[MembershipHeadRef],
+    cyclic_sources: &[MembershipCoord],
+    involved_owner_grants: &BTreeSet<MembershipGrantId>,
+) -> ObjectHash {
+    #[derive(Serialize)]
+    struct Conflict<'a> {
+        domain: &'static str,
+        heads: &'a [MembershipHeadRef],
+        cyclic_sources: &'a [MembershipCoord],
+        involved_owner_grants: &'a BTreeSet<MembershipGrantId>,
+    }
+    ObjectHash::digest(
+        &serde_json::to_vec(&Conflict {
+            domain: "coven.store-membership-revocation-conflict.v1",
+            heads,
+            cyclic_sources,
+            involved_owner_grants,
+        })
+        .expect("Store membership revocation conflict serialization cannot fail"),
+    )
 }
 
 fn shared_store_barrier(barrier: &OwnerStreamBarrier) -> OwnerGrantBarrier<MembershipCoord> {
@@ -1448,16 +2763,10 @@ fn map_store_causal_error(error: CausalGrantError<MembershipCoord>) -> Membershi
         CausalGrantError::InvalidOwnerRevocationBarrier { index, grant } => {
             MembershipError::InvalidOwnerRevocationBarrier { index, grant }
         }
-        CausalGrantError::ConcurrentOwnerRevocationConflict => {
-            MembershipError::ConcurrentOwnerRevocationConflict
+        CausalGrantError::NoActiveOwner => MembershipError::NoActiveOwner,
+        CausalGrantError::RevocationCycleTooWide { sources, maximum } => {
+            MembershipError::RevocationCycleTooWide { sources, maximum }
         }
-        CausalGrantError::ConcurrentMemberGrantConflict {
-            member_pubkey,
-            grants,
-        } => MembershipError::ConcurrentMemberGrantConflict {
-            pubkey: member_pubkey,
-            grants,
-        },
     }
 }
 
@@ -1502,6 +2811,7 @@ pub fn founder_entry(store_id: &str, owner: &UserKeypair, created_at: &str) -> M
         seq: 1,
         previous_hash: None,
         dependencies: Vec::new(),
+        resolution_dependencies: Vec::new(),
         created_at: created_at.to_string(),
         change: MembershipChange::Founder {
             owner_pubkey,
@@ -1525,6 +2835,7 @@ pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
         #[serde(skip_serializing_if = "Option::is_none")]
         previous_hash: Option<ObjectHash>,
         dependencies: &'a [MembershipCoord],
+        resolution_dependencies: &'a [StoreMembershipConflictResolutionRef],
         created_at: &'a str,
         change: &'a MembershipChange,
     }
@@ -1537,6 +2848,7 @@ pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
         seq: entry.seq,
         previous_hash: entry.previous_hash,
         dependencies: &entry.dependencies,
+        resolution_dependencies: &entry.resolution_dependencies,
         created_at: &entry.created_at,
         change: &entry.change,
     })
@@ -1556,11 +2868,27 @@ pub fn sign_membership_entry(entry: &mut MembershipEntry, keypair: &UserKeypair)
 }
 
 pub fn verify_membership_entry(entry: &MembershipEntry) -> bool {
-    keys::verify_signature_hex(
-        &entry.author_pubkey,
-        &entry.signature,
-        &canonical_bytes(entry),
-    )
+    let activation_position_is_valid = match &entry.change {
+        MembershipChange::ResolutionActivation { .. } => {
+            entry.seq == 1
+                && entry.previous_hash.is_none()
+                && entry
+                    .dependencies
+                    .iter()
+                    .all(|dependency| dependency.stream_key() != entry.coord().stream_key())
+        }
+        _ => true,
+    };
+    activation_position_is_valid
+        && entry
+            .resolution_dependencies
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        && keys::verify_signature_hex(
+            &entry.author_pubkey,
+            &entry.signature,
+            &canonical_bytes(entry),
+        )
 }
 
 impl AuthorHead {
@@ -1572,6 +2900,28 @@ impl AuthorHead {
         tip_hash: ObjectHash,
         signer: &UserKeypair,
     ) -> Self {
+        Self::signed_with_resolutions(
+            store_id,
+            author_owner_grant,
+            stream_id,
+            seq,
+            tip_hash,
+            Vec::new(),
+            signer,
+        )
+    }
+
+    pub fn signed_with_resolutions(
+        store_id: String,
+        author_owner_grant: MembershipGrantId,
+        stream_id: AuthorStreamId,
+        seq: u64,
+        tip_hash: ObjectHash,
+        mut resolutions: Vec<StoreMembershipConflictResolutionRef>,
+        signer: &UserKeypair,
+    ) -> Self {
+        resolutions.sort();
+        resolutions.dedup();
         let author_pubkey = keys::public_key_hex(signer);
         let mut head = Self {
             version: STORE_PROTOCOL_VERSION,
@@ -1581,6 +2931,7 @@ impl AuthorHead {
             stream_id,
             seq,
             tip_hash,
+            resolutions,
             signature: String::new(),
         };
         let (_, signature) = keys::sign_hex(signer, &head.canonical_bytes());
@@ -1590,11 +2941,28 @@ impl AuthorHead {
 
     pub fn verify(&self) -> bool {
         self.version == STORE_PROTOCOL_VERSION
+            && self.resolutions.windows(2).all(|pair| pair[0] < pair[1])
             && keys::verify_signature_hex(
                 &self.author_pubkey,
                 &self.signature,
                 &self.canonical_bytes(),
             )
+    }
+
+    pub fn entry_coord(&self) -> MembershipCoord {
+        MembershipCoord {
+            author_pubkey: self.author_pubkey.clone(),
+            author_owner_grant: self.author_owner_grant.clone(),
+            stream_id: self.stream_id,
+            seq: self.seq,
+            entry_hash: self.tip_hash,
+        }
+    }
+
+    pub fn head_hash(&self) -> ObjectHash {
+        ObjectHash::digest(
+            &serde_json::to_vec(self).expect("membership head serialization cannot fail"),
+        )
     }
 
     fn canonical_bytes(&self) -> Vec<u8> {
@@ -1607,6 +2975,7 @@ impl AuthorHead {
             stream_id: AuthorStreamId,
             seq: u64,
             tip_hash: ObjectHash,
+            resolutions: &'a [StoreMembershipConflictResolutionRef],
         }
         serde_json::to_vec(&Signed {
             version: self.version,
@@ -1616,6 +2985,7 @@ impl AuthorHead {
             stream_id: self.stream_id,
             seq: self.seq,
             tip_hash: self.tip_hash,
+            resolutions: &self.resolutions,
         })
         .expect("membership head signed fields serialize")
     }
@@ -1636,11 +3006,186 @@ mod tests {
         MembershipChain::from_entries(vec![founder_entry(store_id, owner, "founder")]).unwrap()
     }
 
+    fn three_owner_store_cycle() -> (UserKeypair, UserKeypair, UserKeypair, MembershipChain) {
+        let first = key();
+        let second = key();
+        let third = key();
+        let first_pubkey = keys::public_key_hex(&first);
+        let second_pubkey = keys::public_key_hex(&second);
+        let third_pubkey = keys::public_key_hex(&third);
+        let mut base = founded("three-owner-store", &first);
+        let add_second = base
+            .signed_set_member(
+                &first,
+                second_pubkey.clone(),
+                None,
+                MemberRole::Owner,
+                "add second Owner".to_string(),
+            )
+            .expect("add second Owner");
+        base.add_entry(add_second).expect("apply second Owner");
+        let add_third = base
+            .signed_set_member(
+                &first,
+                third_pubkey,
+                None,
+                MemberRole::Owner,
+                "add third Owner".to_string(),
+            )
+            .expect("add third Owner");
+        base.add_entry(add_third).expect("apply third Owner");
+        let remove_second = base
+            .signed_remove_member(&first, second_pubkey, "first branch".to_string())
+            .expect("first branch");
+        let remove_first = base
+            .signed_remove_member_in_stream(
+                &second,
+                AuthorStreamId::from_bytes([92; 16]),
+                first_pubkey,
+                "second branch".to_string(),
+            )
+            .expect("second branch");
+        let mut entries = base.entries().to_vec();
+        entries.extend([remove_second.clone(), remove_first.clone()]);
+        let heads = vec![
+            AuthorHead::signed(
+                remove_second.store_id.clone(),
+                remove_second.author_owner_grant.clone(),
+                remove_second.stream_id,
+                remove_second.seq,
+                entry_hash(&remove_second),
+                &first,
+            ),
+            AuthorHead::signed(
+                remove_first.store_id.clone(),
+                remove_first.author_owner_grant.clone(),
+                remove_first.stream_id,
+                remove_first.seq,
+                entry_hash(&remove_first),
+                &second,
+            ),
+        ];
+        let conflict = MembershipChain::from_entries_with_coords_and_heads(
+            entries
+                .into_iter()
+                .map(|entry| (entry.coord(), entry))
+                .collect(),
+            heads,
+        )
+        .expect("three-Owner Store conflict");
+        (first, second, third, conflict)
+    }
+
+    #[test]
+    fn unaffected_store_owner_resolution_retires_its_selected_branch_grant() {
+        let (_first, _second, third, conflicted) = three_owner_store_cycle();
+        let third_pubkey = keys::public_key_hex(&third);
+        let (branch, old_grant) = match conflicted.conflict().expect("conflict") {
+            MembershipConflict::RevocationCycle {
+                maximal_valid_branches,
+                ..
+            } => {
+                let branch = maximal_valid_branches
+                    .iter()
+                    .find(|branch| {
+                        branch.active_grants.values().any(|record| {
+                            record.member_pubkey == third_pubkey && record.role == MemberRole::Owner
+                        })
+                    })
+                    .expect("unaffected Owner branch");
+                let old_grant = branch
+                    .active_grants
+                    .iter()
+                    .find_map(|(grant, record)| {
+                        (record.member_pubkey == third_pubkey).then_some(grant.clone())
+                    })
+                    .expect("unaffected Owner grant");
+                (branch.heads.clone(), old_grant)
+            }
+            _ => panic!("expected revocation conflict"),
+        };
+        let store_root_hash = ObjectHash::digest(b"unaffected Store resolver root");
+        let resolution = conflicted
+            .signed_cycle_resolution(store_root_hash, branch, &third)
+            .expect("unaffected Owner resolution");
+        let resolved = conflicted
+            .resolved_with(store_root_hash, std::slice::from_ref(&resolution))
+            .expect("unaffected Owner resolution is valid");
+
+        assert!(resolution.retired_owner_grants.contains(&old_grant));
+        assert!(!resolved.active_grants.contains_key(&old_grant));
+        assert!(resolved
+            .active_grants
+            .contains_key(&resolution.replacement_grant));
+    }
+
+    #[test]
+    fn store_revocation_cycle_over_protocol_bound_is_typed() {
+        let owners = (0..13).map(|_| key()).collect::<Vec<_>>();
+        let pubkeys = owners.iter().map(keys::public_key_hex).collect::<Vec<_>>();
+        let mut base = founded("bounded-store-cycle", &owners[0]);
+        for pubkey in pubkeys.iter().skip(1) {
+            let add = base
+                .signed_set_member(
+                    &owners[0],
+                    pubkey.clone(),
+                    None,
+                    MemberRole::Owner,
+                    format!("add {pubkey}"),
+                )
+                .expect("add ring Owner");
+            base.add_entry(add).expect("apply ring Owner");
+        }
+        let removals = owners
+            .iter()
+            .enumerate()
+            .map(|(index, owner)| {
+                base.signed_remove_member_in_stream(
+                    owner,
+                    AuthorStreamId::from_bytes([index as u8 + 101; 16]),
+                    pubkeys[(index + 1) % pubkeys.len()].clone(),
+                    format!("remove ring successor {index}"),
+                )
+                .expect("sign ring removal")
+            })
+            .collect::<Vec<_>>();
+        let mut entries = base.entries().to_vec();
+        entries.extend(removals.iter().cloned());
+        let heads = removals
+            .iter()
+            .zip(&owners)
+            .map(|(entry, owner)| {
+                AuthorHead::signed(
+                    entry.store_id.clone(),
+                    entry.author_owner_grant.clone(),
+                    entry.stream_id,
+                    entry.seq,
+                    entry_hash(entry),
+                    owner,
+                )
+            })
+            .collect();
+
+        assert!(matches!(
+            MembershipChain::from_entries_with_coords_and_heads(
+                entries
+                    .into_iter()
+                    .map(|entry| (entry.coord(), entry))
+                    .collect(),
+                heads,
+            ),
+            Err(MembershipError::RevocationCycleTooWide {
+                sources: 13,
+                maximum: 12,
+            })
+        ));
+    }
+
     fn serial_authorization_with_follower(
         root: ObjectHash,
         owner: &UserKeypair,
         follower: &UserKeypair,
-    ) -> SerialAuthorizationState {
+    ) -> (SerialAuthorizationState, StoreBatchCommit) {
         let founder = founder_entry("serial-registration", owner, "founder");
         let authorization = SerialAuthorizationState::from_founder(root, &founder).unwrap();
         let add = authorization
@@ -1653,10 +3198,23 @@ mod tests {
                 "add follower".to_string(),
             )
             .unwrap();
-        SerialAuthorizationState {
-            membership: authorization.membership.apply(&add).unwrap(),
-            key_generation: authorization.key_generation,
-        }
+        let add_commit = StoreBatchCommit::signed_with_control(
+            root,
+            crate::WriteId::from_generated("add-serial-follower".to_string()),
+            "owner-device".to_string(),
+            StoreCommitOrder::Serial {
+                seq: 1,
+                previous_commit_hash: None,
+            },
+            None,
+            Some(StoreControl::SerialMembership { entry: add }),
+            1,
+            &[],
+            owner,
+        )
+        .unwrap();
+        let after_add = authorization.authorize_and_apply(&add_commit).unwrap();
+        (after_add, add_commit)
     }
 
     fn registration_commit(
@@ -1686,7 +3244,8 @@ mod tests {
         let root = ObjectHash::digest(b"follower registration root");
         let owner = key();
         let follower = key();
-        let authorization = serial_authorization_with_follower(root, &owner, &follower);
+        let (authorization, add_commit) =
+            serial_authorization_with_follower(root, &owner, &follower);
         let active = StoreDeviceRegistration::signed(
             root,
             "follower-device".to_string(),
@@ -1696,8 +3255,9 @@ mod tests {
             &follower,
         )
         .unwrap();
-        let active_commit = registration_commit(root, 1, None, &active, &follower);
-        authorization
+        let active_commit =
+            registration_commit(root, 2, Some(add_commit.commit_hash()), &active, &follower);
+        let after_active = authorization
             .authorize_and_apply_with_registrations(&active_commit, std::slice::from_ref(&active))
             .expect("active self-registration");
 
@@ -1712,12 +3272,12 @@ mod tests {
         .unwrap();
         let retirement_commit = registration_commit(
             root,
-            2,
+            3,
             Some(active_commit.commit_hash()),
             &retired,
             &follower,
         );
-        authorization
+        after_active
             .authorize_and_apply_with_registrations(
                 &retirement_commit,
                 std::slice::from_ref(&retired),
@@ -1731,7 +3291,8 @@ mod tests {
         let owner = key();
         let follower = key();
         let outsider = key();
-        let authorization = serial_authorization_with_follower(root, &owner, &follower);
+        let (authorization, add_commit) =
+            serial_authorization_with_follower(root, &owner, &follower);
         let another_identity = StoreDeviceRegistration::signed(
             root,
             "follower-device".to_string(),
@@ -1741,8 +3302,13 @@ mod tests {
             &outsider,
         )
         .unwrap();
-        let another_identity_commit =
-            registration_commit(root, 1, None, &another_identity, &follower);
+        let another_identity_commit = registration_commit(
+            root,
+            2,
+            Some(add_commit.commit_hash()),
+            &another_identity,
+            &follower,
+        );
         assert!(matches!(
             authorization.authorize_and_apply_with_registrations(
                 &another_identity_commit,
@@ -1765,8 +3331,8 @@ mod tests {
             crate::WriteId::from_generated("mixed-registration".to_string()),
             own.device_id.clone(),
             StoreCommitOrder::Serial {
-                seq: 1,
-                previous_commit_hash: None,
+                seq: 2,
+                previous_commit_hash: Some(add_commit.commit_hash()),
             },
             None,
             None,
@@ -1820,7 +3386,349 @@ mod tests {
                 keys::public_key_hex(&owner),
                 "remove last owner".to_string(),
             ),
-            Err(MembershipError::ConcurrentOwnerRevocationConflict)
+            Err(MembershipError::NoActiveOwner)
+        ));
+    }
+
+    #[test]
+    fn concurrent_member_assignments_are_validated_conflict_state() {
+        let owner = key();
+        let target = key();
+        let chain = founded("store", &owner);
+        let first = chain
+            .signed_set_member_in_stream(
+                &owner,
+                AuthorStreamId::from_bytes([21; 16]),
+                keys::public_key_hex(&target),
+                None,
+                MemberRole::Member,
+                "first".to_string(),
+            )
+            .unwrap();
+        let second = chain
+            .signed_set_member_in_stream(
+                &owner,
+                AuthorStreamId::from_bytes([22; 16]),
+                keys::public_key_hex(&target),
+                None,
+                MemberRole::Owner,
+                "second".to_string(),
+            )
+            .unwrap();
+        let mut entries = chain.entries().to_vec();
+        entries.extend([first.clone(), second.clone()]);
+        let heads = entries
+            .iter()
+            .filter(|entry| {
+                !entries.iter().any(|candidate| {
+                    candidate
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependency == &entry.coord())
+                        && candidate.stream_id == entry.stream_id
+                })
+            })
+            .map(|entry| {
+                AuthorHead::signed(
+                    entry.store_id.clone(),
+                    entry.author_owner_grant.clone(),
+                    entry.stream_id,
+                    entry.seq,
+                    entry_hash(entry),
+                    &owner,
+                )
+            })
+            .collect();
+
+        let conflicted = MembershipChain::from_entries_with_coords_and_heads(
+            entries
+                .into_iter()
+                .map(|entry| (entry.coord(), entry))
+                .collect(),
+            heads,
+        )
+        .expect("well-formed conflict");
+        assert!(matches!(
+            conflicted.status(),
+            MembershipStatus::Conflict(MembershipConflict::ConcurrentMemberAssignments {
+                member_pubkey,
+                conflicting_grants,
+                ..
+            }) if member_pubkey == &keys::public_key_hex(&target)
+                && conflicting_grants.len() == 2
+        ));
+    }
+
+    #[test]
+    fn concurrent_cross_revocation_is_a_validated_cycle_conflict() {
+        let first_owner = key();
+        let second_owner = key();
+        let first_pubkey = keys::public_key_hex(&first_owner);
+        let second_pubkey = keys::public_key_hex(&second_owner);
+        let mut base = founded("store", &first_owner);
+        let add_second = base
+            .signed_set_member(
+                &first_owner,
+                second_pubkey.clone(),
+                None,
+                MemberRole::Owner,
+                "add second".to_string(),
+            )
+            .unwrap();
+        base.add_entry(add_second).unwrap();
+        let remove_second = base
+            .signed_remove_member(
+                &first_owner,
+                second_pubkey.clone(),
+                "remove second".to_string(),
+            )
+            .unwrap();
+        let remove_first = base
+            .signed_remove_member_in_stream(
+                &second_owner,
+                AuthorStreamId::from_bytes([23; 16]),
+                first_pubkey.clone(),
+                "remove first".to_string(),
+            )
+            .unwrap();
+        let mut entries = base.entries().to_vec();
+        entries.extend([remove_second.clone(), remove_first.clone()]);
+        let heads = vec![
+            AuthorHead::signed(
+                remove_second.store_id.clone(),
+                remove_second.author_owner_grant.clone(),
+                remove_second.stream_id,
+                remove_second.seq,
+                entry_hash(&remove_second),
+                &first_owner,
+            ),
+            AuthorHead::signed(
+                remove_first.store_id.clone(),
+                remove_first.author_owner_grant.clone(),
+                remove_first.stream_id,
+                remove_first.seq,
+                entry_hash(&remove_first),
+                &second_owner,
+            ),
+        ];
+
+        let conflicted = MembershipChain::from_entries_with_coords_and_heads(
+            entries
+                .into_iter()
+                .map(|entry| (entry.coord(), entry))
+                .collect(),
+            heads,
+        )
+        .expect("well-formed conflict");
+        assert!(matches!(
+            conflicted.status(),
+            MembershipStatus::Conflict(MembershipConflict::RevocationCycle {
+                cyclic_sources,
+                involved_owner_grants,
+                maximal_valid_branches,
+                ..
+            }) if cyclic_sources.len() == 2
+                && involved_owner_grants.len() == 2
+                && maximal_valid_branches.len() == 2
+        ));
+
+        let MembershipConflict::RevocationCycle {
+            maximal_valid_branches,
+            ..
+        } = conflicted.conflict().expect("cycle conflict")
+        else {
+            unreachable!();
+        };
+        let resolver_branch_state = maximal_valid_branches
+            .iter()
+            .find(|branch| {
+                branch.active_grants.values().any(|record| {
+                    record.member_pubkey == first_pubkey && record.role == MemberRole::Owner
+                })
+            })
+            .expect("first Owner branch")
+            .clone();
+        let resolver_branch = resolver_branch_state.heads.clone();
+        let second_resolver_branch = maximal_valid_branches
+            .iter()
+            .find(|branch| {
+                branch.active_grants.values().any(|record| {
+                    record.member_pubkey == second_pubkey && record.role == MemberRole::Owner
+                })
+            })
+            .expect("second Owner branch")
+            .heads
+            .clone();
+        let store_root_hash = ObjectHash::digest(b"resolution Store root");
+        let resolution = conflicted
+            .signed_cycle_resolution(store_root_hash, resolver_branch.clone(), &first_owner)
+            .expect("branch Owner resolves the conflict");
+        let second_resolution = conflicted
+            .signed_cycle_resolution(store_root_hash, second_resolver_branch, &second_owner)
+            .expect("other branch Owner resolves the conflict");
+        let retried = conflicted
+            .signed_cycle_resolution(store_root_hash, resolver_branch, &first_owner)
+            .expect("same resolver retry");
+        assert_eq!(resolution, retried);
+        assert!(resolution.verify_against(
+            store_root_hash,
+            conflicted.conflict().expect("cycle conflict"),
+        ));
+        let resolved_once = conflicted
+            .resolved_with(store_root_hash, std::slice::from_ref(&resolution))
+            .expect("one resolution applies");
+        let resolved_duplicate = conflicted
+            .resolved_with(store_root_hash, &[resolution.clone(), resolution.clone()])
+            .expect("an exact retry is idempotent");
+        assert_eq!(resolved_once, resolved_duplicate);
+        assert!(resolved_once
+            .active_grants
+            .contains_key(&resolution.replacement_grant));
+        assert!(resolution
+            .retired_owner_grants
+            .iter()
+            .all(|grant| !resolved_once.active_grants.contains_key(grant)));
+
+        let resolved_union = conflicted
+            .resolved_with(
+                store_root_hash,
+                &[resolution.clone(), second_resolution.clone()],
+            )
+            .expect("distinct resolvers are unioned");
+        assert!(resolved_union
+            .active_grants
+            .contains_key(&resolution.replacement_grant));
+        assert!(resolved_union
+            .active_grants
+            .contains_key(&second_resolution.replacement_grant));
+
+        let mut branch_specific = conflicted.conflict().expect("cycle conflict").clone();
+        let MembershipConflict::RevocationCycle {
+            maximal_valid_branches,
+            ..
+        } = &mut branch_specific
+        else {
+            unreachable!()
+        };
+        let branch_only_grant = MembershipGrantId(ObjectHash::digest(b"branch-only grant"));
+        let branch_only_creation = maximal_valid_branches[0].effective_frontier[0].clone();
+        maximal_valid_branches[0].active_grants.insert(
+            branch_only_grant.clone(),
+            MembershipGrantRecord {
+                member_pubkey: keys::public_key_hex(&key()),
+                role: MemberRole::Member,
+                provider_account_email: None,
+                creation_authority: MembershipGrantCreationAuthority::Entry(branch_only_creation),
+            },
+        );
+        let composed = resolve_store_membership_conflict(
+            store_root_hash,
+            &branch_specific,
+            &[resolution.clone(), second_resolution.clone()],
+        )
+        .expect("compose only grants agreed by every valid branch");
+        assert!(!composed.active_grants.contains_key(&branch_only_grant));
+
+        let mut duplicate_member = branch_specific;
+        let MembershipConflict::RevocationCycle {
+            maximal_valid_branches,
+            ..
+        } = &mut duplicate_member
+        else {
+            unreachable!()
+        };
+        let duplicate_pubkey = keys::public_key_hex(&key());
+        let duplicate_creation = resolution.conflicting_heads[0].coord.clone();
+        for branch in maximal_valid_branches {
+            for suffix in [b'a', b'b'] {
+                branch.active_grants.insert(
+                    MembershipGrantId(ObjectHash::digest(&[suffix])),
+                    MembershipGrantRecord {
+                        member_pubkey: duplicate_pubkey.clone(),
+                        role: MemberRole::Member,
+                        provider_account_email: None,
+                        creation_authority: MembershipGrantCreationAuthority::Entry(
+                            duplicate_creation.clone(),
+                        ),
+                    },
+                );
+            }
+        }
+        assert!(matches!(
+            resolve_store_membership_conflict(
+                store_root_hash,
+                &duplicate_member,
+                &[resolution.clone(), second_resolution.clone()],
+            ),
+            Err(MembershipError::InvalidConflictResolution)
+        ));
+
+        let mut resumed = conflicted.clone();
+        let raw_heads = resumed.author_heads();
+        resumed
+            .apply_resolutions(store_root_hash, std::slice::from_ref(&resolution))
+            .expect("resolution activates replacement Owner grant");
+        assert_eq!(resumed.author_heads(), raw_heads);
+        assert_eq!(
+            resumed.effective_frontier(),
+            resolver_branch_state.effective_frontier
+        );
+        assert_eq!(resumed.resolution_refs(), &[resolution.resolution_ref()]);
+        let after_resolution = resumed
+            .signed_set_member_in_stream(
+                &first_owner,
+                AuthorStreamId::from_bytes([37; 16]),
+                keys::public_key_hex(&key()),
+                None,
+                MemberRole::Member,
+                "write after resolution".to_string(),
+            )
+            .expect("replacement Owner can author from a fresh stream");
+        assert_eq!(
+            after_resolution.author_owner_grant,
+            resolution.replacement_grant
+        );
+        resumed
+            .add_entry(after_resolution)
+            .expect("future authoring validates from the resolved checkpoint");
+        let activated_head = resumed
+            .signed_head_for_stream(&first_owner, AuthorStreamId::from_bytes([37; 16]))
+            .expect("sign post-resolution head");
+        assert_eq!(
+            activated_head.resolutions,
+            vec![resolution.resolution_ref()]
+        );
+        let authority =
+            MembershipGrantCreationAuthority::ConflictResolution(resolution.resolution_ref());
+        assert!(resumed.authorizes_write_authority(&authority, &first_pubkey));
+        let commit = StoreBatchCommit::signed(
+            store_root_hash,
+            crate::WriteId::from_generated("resolution-authorized-write".to_string()),
+            "first-device".to_string(),
+            super::super::store_commit::StoreCommitOrder::MergeConcurrent {
+                seq: 1,
+                previous_commit_hash: None,
+                dependencies: BTreeMap::new(),
+            },
+            Some(authority),
+            1,
+            b"resolution-authorized package",
+            &first_owner,
+        )
+        .expect("resolution-created Owner signs a Store commit");
+        assert_eq!(
+            commit.membership_authority,
+            Some(MembershipGrantCreationAuthority::ConflictResolution(
+                resolution.resolution_ref(),
+            ))
+        );
+        assert!(matches!(
+            conflicted.signed_cycle_resolution(
+                store_root_hash,
+                resolution.resolver_branch_heads.clone(),
+                &key(),
+            ),
+            Err(MembershipError::SignerIsNotOwner(_))
         ));
     }
 
@@ -1840,8 +3748,9 @@ mod tests {
             .unwrap();
         chain.add_entry(add_owner).unwrap();
         let second_stream = chain
-            .signed_set_member(
+            .signed_set_member_in_stream(
                 &second_owner,
+                AuthorStreamId::from_bytes([31; 16]),
                 keys::public_key_hex(&key()),
                 None,
                 MemberRole::Member,
@@ -1958,8 +3867,9 @@ mod tests {
             .unwrap();
         assert_ne!(old_grant, new_grant);
         let authored = chain
-            .signed_set_member(
+            .signed_set_member_in_stream(
                 &second,
+                AuthorStreamId::from_bytes([32; 16]),
                 keys::public_key_hex(&key()),
                 None,
                 MemberRole::Member,
@@ -1988,8 +3898,9 @@ mod tests {
         chain.add_entry(add_owner).unwrap();
 
         let self_removal = chain
-            .signed_remove_member(
+            .signed_remove_member_in_stream(
                 &departing_owner,
+                AuthorStreamId::from_bytes([33; 16]),
                 departing_pubkey.clone(),
                 "self removal".to_string(),
             )
@@ -2022,8 +3933,9 @@ mod tests {
         observed.add_entry(add_owner).unwrap();
 
         let stale_entry = observed
-            .signed_set_member(
+            .signed_set_member_in_stream(
                 &second_owner,
+                AuthorStreamId::from_bytes([34; 16]),
                 keys::public_key_hex(&target),
                 None,
                 MemberRole::Member,
@@ -2076,8 +3988,9 @@ mod tests {
             .unwrap();
         observed.add_entry(add_owner).unwrap();
         let first = observed
-            .signed_set_member(
+            .signed_set_member_in_stream(
                 &second_owner,
+                AuthorStreamId::from_bytes([35; 16]),
                 keys::public_key_hex(&first_target),
                 None,
                 MemberRole::Member,
@@ -2100,8 +4013,9 @@ mod tests {
         ));
 
         let second = observed
-            .signed_set_member(
+            .signed_set_member_in_stream(
                 &second_owner,
+                AuthorStreamId::from_bytes([35; 16]),
                 keys::public_key_hex(&second_target),
                 None,
                 MemberRole::Member,
@@ -2117,8 +4031,9 @@ mod tests {
         let mut stale = observed;
         stale.add_entry(second).unwrap();
         let third = stale
-            .signed_set_member(
+            .signed_set_member_in_stream(
                 &second_owner,
+                AuthorStreamId::from_bytes([35; 16]),
                 keys::public_key_hex(&third_target),
                 None,
                 MemberRole::Member,
@@ -2150,8 +4065,9 @@ mod tests {
             .unwrap();
         chain.add_entry(add_owner).unwrap();
         let authored = chain
-            .signed_set_member(
+            .signed_set_member_in_stream(
                 &second_owner,
+                AuthorStreamId::from_bytes([36; 16]),
                 keys::public_key_hex(&key()),
                 None,
                 MemberRole::Member,
@@ -2254,5 +4170,102 @@ mod tests {
             after_first.state_hash(),
             "removal names the exact globally preceding membership state"
         );
+    }
+
+    #[test]
+    fn serial_membership_hash_changes_when_an_assignment_is_recreated() {
+        let owner = key();
+        let member = key();
+        let root = ObjectHash::digest(b"Serial grant-bearing membership root");
+        let state = SerialMembershipState::from_founder(
+            root,
+            &founder_entry("serial-grant-store", &owner, "founder"),
+        )
+        .unwrap();
+        let first = state
+            .signed_set_member(
+                &owner,
+                keys::public_key_hex(&member),
+                None,
+                MemberRole::Member,
+                "first assignment".to_string(),
+            )
+            .unwrap();
+        let first_state = state.apply(&first).unwrap();
+        let replacement = first_state
+            .signed_set_member(
+                &owner,
+                keys::public_key_hex(&member),
+                None,
+                MemberRole::Member,
+                "replacement assignment".to_string(),
+            )
+            .unwrap();
+        let replacement_state = first_state.apply(&replacement).unwrap();
+
+        assert_ne!(first_state.state_hash(), replacement_state.state_hash());
+    }
+
+    #[test]
+    fn membership_head_resolution_cut_must_equal_its_tip_entry_cut() {
+        let owner = UserKeypair::generate();
+        let entry = founder_entry("head-tip-resolution-cut", &owner, "founder");
+        let fake = StoreMembershipConflictResolutionRef {
+            conflict_hash: ObjectHash::digest(b"head-tip conflict"),
+            resolver_pubkey: keys::public_key_hex(&owner),
+            resolution_hash: ObjectHash::digest(b"head-tip resolution"),
+        };
+        let head = AuthorHead::signed_with_resolutions(
+            entry.store_id.clone(),
+            entry.author_owner_grant.clone(),
+            entry.stream_id,
+            entry.seq,
+            entry_hash(&entry),
+            vec![fake],
+            &owner,
+        );
+
+        assert!(matches!(
+            MembershipChain::from_entries_with_coords_and_heads(
+                vec![(entry.coord(), entry)],
+                vec![head],
+            ),
+            Err(MembershipError::MissingConflictHeads)
+        ));
+    }
+
+    #[test]
+    fn membership_entry_rejects_unsorted_or_duplicate_resolution_dependencies() {
+        let owner = UserKeypair::generate();
+        let founder = founder_entry("entry-resolution-cut", &owner, "founder");
+        let chain = MembershipChain::from_entries(vec![founder]).unwrap();
+        let entry = chain
+            .signed_set_member(
+                &owner,
+                keys::public_key_hex(&UserKeypair::generate()),
+                None,
+                MemberRole::Member,
+                "member".to_string(),
+            )
+            .unwrap();
+        let mut refs = [b"first".as_slice(), b"second".as_slice()]
+            .into_iter()
+            .map(|label| StoreMembershipConflictResolutionRef {
+                conflict_hash: ObjectHash::digest(label),
+                resolver_pubkey: keys::public_key_hex(&owner),
+                resolution_hash: ObjectHash::digest(&[label, b" resolution"].concat()),
+            })
+            .collect::<Vec<_>>();
+        refs.sort();
+
+        let mut unsorted = entry.clone();
+        unsorted.resolution_dependencies = refs.iter().rev().cloned().collect();
+        sign_membership_entry(&mut unsorted, &owner);
+        assert!(!verify_membership_entry(&unsorted));
+
+        let mut duplicate = entry;
+        duplicate.resolution_dependencies = vec![refs[0].clone(), refs[0].clone()];
+        sign_membership_entry(&mut duplicate, &owner);
+        assert!(!verify_membership_entry(&duplicate));
     }
 }

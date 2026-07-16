@@ -19,8 +19,9 @@ use super::invite::InviteError;
 #[cfg(test)]
 use super::membership::founder_entry;
 use super::membership::{
-    AuthorHead, MemberInfo, MemberRole, MembershipChain, MembershipCoord, MembershipEntry,
-    MembershipGrantId, MembershipStreamKey,
+    AuthorHead, MemberInfo, MemberRole, MembershipChain, MembershipConflict, MembershipCoord,
+    MembershipEntry, MembershipGrantId, MembershipHeadRef, MembershipStreamKey,
+    StoreMembershipConflictResolution, StoreMembershipConflictResolutionRef,
 };
 use super::storage::{CoordinationStorage, StorageError, SyncStorage};
 use super::store_commit::{ObjectHash, StoreControl};
@@ -28,7 +29,8 @@ use super::store_commit::{ObjectHash, StoreControl};
 use super::store_objects::append_membership_entry_object;
 use super::store_objects::{
     append_membership_head_object, list_membership_entry_objects, list_membership_head_objects,
-    load_membership_entry_slot, load_membership_head_slot, StoreObjectError,
+    load_membership_entry_slot, load_membership_head_slot, load_membership_resolution_object,
+    StoreObjectError,
 };
 use crate::database::Database;
 use std::collections::BTreeMap;
@@ -156,6 +158,8 @@ pub enum MembershipOpsError {
     NoMembershipChain,
     #[error("membership chain has no founder")]
     ChainHasNoFounder,
+    #[error("membership has an unresolved semantic conflict: {0:?}")]
+    SemanticConflict(Box<MembershipConflict>),
     #[error("sharing requires an encrypted cloud home")]
     NotEncryptedHome,
     #[error(transparent)]
@@ -276,6 +280,11 @@ pub async fn get_members(
         Some(db),
     )
     .await?;
+    if let Some(conflict) = chain.conflict() {
+        return Err(MembershipOpsError::SemanticConflict(Box::new(
+            conflict.clone(),
+        )));
+    }
     let user_pubkey_hex = user_pubkey.map(hex::encode);
 
     let current = chain.current_members();
@@ -395,6 +404,11 @@ pub async fn invite_member_with_coordination(
         Some(db),
     )
     .await?;
+    if let Some(conflict) = chain.conflict() {
+        return Err(MembershipOpsError::SemanticConflict(Box::new(
+            conflict.clone(),
+        )));
+    }
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
@@ -1077,6 +1091,11 @@ pub async fn remove_member_with_coordination(
         Some(db),
     )
     .await?;
+    if let Some(conflict) = chain.conflict() {
+        return Err(MembershipOpsError::SemanticConflict(Box::new(
+            conflict.clone(),
+        )));
+    }
 
     // Revoke the member and rotate the cloud key. On return the rotation is
     // committed for every remaining member.
@@ -1516,12 +1535,82 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
     owner_pubkey: &str,
-    exact_heads: &[MembershipCoord],
+    exact_heads: &[MembershipHeadRef],
+    exact_resolutions: &[StoreMembershipConflictResolutionRef],
 ) -> Result<MembershipChain, AnchoredChainError> {
-    let by_grant =
-        membership_floor_by_grant(exact_heads).map_err(AnchoredChainError::LoadFailed)?;
-    let mut heads = Vec::with_capacity(by_grant.len());
-    for coord in by_grant.values() {
+    if exact_heads.is_empty()
+        || !exact_heads
+            .windows(2)
+            .all(|pair| pair[0].coord.stream_key() < pair[1].coord.stream_key())
+        || !exact_resolutions.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        return Err(AnchoredChainError::LoadFailed(
+            "membership state references are not canonical".to_string(),
+        ));
+    }
+    let heads = load_exact_membership_heads(storage, store_root_hash, exact_heads).await?;
+    let activated_resolutions = heads
+        .iter()
+        .flat_map(|head| head.resolutions.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if activated_resolutions != exact_resolutions {
+        return Err(AnchoredChainError::LoadFailed(
+            "membership state resolution refs differ from its signed heads".to_string(),
+        ));
+    }
+    let entries = download_committed_entries(storage, store_root_hash, &heads).await?;
+    let mut resolutions = Vec::with_capacity(exact_resolutions.len());
+    for reference in exact_resolutions {
+        let resolution = load_membership_resolution_object(storage, store_root_hash, reference)
+            .await
+            .map_err(map_membership_object_error)?
+            .ok_or_else(|| {
+                AnchoredChainError::LoadFailed(format!(
+                    "membership resolution {} is missing",
+                    reference.resolution_hash
+                ))
+            })?;
+        resolutions.push(resolution.value);
+    }
+    let chain = if resolutions.is_empty() {
+        MembershipChain::from_entries_with_coords_and_heads(entries.clone(), heads.clone())
+            .map_err(|error| {
+                AnchoredChainError::LoadFailed(format!("Invalid membership chain: {error}"))
+            })?
+    } else {
+        replay_membership_resolutions(storage, store_root_hash, &entries, &heads, &resolutions)
+            .await?
+    };
+    if !chain.is_founded_by(owner_pubkey) {
+        return Err(AnchoredChainError::LoadFailed(format!(
+            "membership chain is not founded by pinned owner {owner_pubkey}"
+        )));
+    }
+    let mut actual = chain.author_heads();
+    actual.sort();
+    let mut expected = exact_heads
+        .iter()
+        .map(|reference| reference.coord.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    if actual != expected {
+        return Err(AnchoredChainError::LoadFailed(
+            "membership chain does not resolve to the exact requested heads".to_string(),
+        ));
+    }
+    Ok(chain)
+}
+
+async fn load_exact_membership_heads(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    references: &[MembershipHeadRef],
+) -> Result<Vec<AuthorHead>, AnchoredChainError> {
+    let mut heads = Vec::with_capacity(references.len());
+    for reference in references {
+        let coord = &reference.coord;
         let loaded = load_membership_head_slot(
             storage,
             store_root_hash,
@@ -1544,6 +1633,7 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
             || head.stream_id != coord.stream_id
             || head.seq != coord.seq
             || head.tip_hash != coord.entry_hash
+            || head.head_hash() != reference.head_hash
             || !head.verify()
         {
             return Err(AnchoredChainError::LoadFailed(format!(
@@ -1553,22 +1643,249 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
         }
         heads.push(head);
     }
-    let chain = download_committed_chain(storage, store_root_hash, &heads).await?;
-    if !chain.is_founded_by(owner_pubkey) {
+    Ok(heads)
+}
+
+async fn replay_membership_resolutions(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    entries: &[(MembershipCoord, MembershipEntry)],
+    current_heads: &[AuthorHead],
+    resolutions: &[StoreMembershipConflictResolution],
+) -> Result<MembershipChain, AnchoredChainError> {
+    let known_resolution_refs = resolutions
+        .iter()
+        .map(|resolution| resolution.resolution_ref())
+        .collect::<std::collections::BTreeSet<_>>();
+    let activated_resolution_refs = current_heads
+        .iter()
+        .flat_map(|head| head.resolutions.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(reference) = activated_resolution_refs
+        .difference(&known_resolution_refs)
+        .next()
+    {
         return Err(AnchoredChainError::LoadFailed(format!(
-            "membership chain is not founded by pinned owner {owner_pubkey}"
+            "membership head references absent resolution {}",
+            reference.resolution_hash
         )));
     }
-    let mut actual = chain.author_heads();
-    actual.sort();
-    let mut expected = exact_heads.to_vec();
-    expected.sort();
-    if actual != expected {
+    if known_resolution_refs != activated_resolution_refs {
         return Err(AnchoredChainError::LoadFailed(
-            "membership chain does not resolve to the exact requested heads".to_string(),
+            "membership resolution objects differ from the exact signed head cut".to_string(),
         ));
     }
-    Ok(chain)
+    let mut prepared = BTreeMap::new();
+    for resolution in resolutions {
+        let reference = resolution.resolution_ref();
+        let conflict_heads = &resolution.conflicting_heads;
+        if conflict_heads.is_empty()
+            || !conflict_heads
+                .windows(2)
+                .all(|pair| pair[0].coord.stream_key() < pair[1].coord.stream_key())
+        {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership resolution conflict heads are not canonical".to_string(),
+            ));
+        }
+        let heads = load_exact_membership_heads(storage, store_root_hash, conflict_heads).await?;
+        let conflict_entries = download_committed_entries(storage, store_root_hash, &heads).await?;
+        let dependencies = heads
+            .iter()
+            .flat_map(|head| head.resolutions.iter())
+            .map(|reference| {
+                known_resolution_refs
+                    .contains(reference)
+                    .then_some(reference.clone())
+                    .ok_or_else(|| {
+                        AnchoredChainError::LoadFailed(format!(
+                            "membership conflict head references absent resolution {}",
+                            reference.resolution_hash
+                        ))
+                    })
+            })
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        if dependencies.contains(&reference) {
+            return Err(AnchoredChainError::LoadFailed(
+                "membership resolution depends on itself".to_string(),
+            ));
+        }
+        prepared.insert(
+            reference,
+            (resolution.clone(), heads, conflict_entries, dependencies),
+        );
+    }
+
+    let mut resolved_by_ref =
+        BTreeMap::<StoreMembershipConflictResolutionRef, MembershipChain>::new();
+    let mut applied = std::collections::BTreeSet::new();
+    while !prepared.is_empty() {
+        let next = super::causal_grants::canonical_ready_checkpoint(
+            prepared
+                .iter()
+                .map(|(reference, (_, _, _, dependencies))| (reference, dependencies)),
+            &applied,
+        )
+        .ok_or_else(|| {
+            AnchoredChainError::LoadFailed(
+                "membership resolution checkpoints contain a causal cycle".to_string(),
+            )
+        })?;
+        let (resolution, heads, conflict_entries, dependencies) =
+            prepared.remove(&next).ok_or_else(|| {
+                AnchoredChainError::LoadFailed(
+                    "ready membership resolution checkpoint is absent".to_string(),
+                )
+            })?;
+        let dependency_chains = dependencies
+            .iter()
+            .map(|dependency| {
+                resolved_by_ref.get(dependency).ok_or_else(|| {
+                    AnchoredChainError::LoadFailed(
+                        "ready membership resolution dependency is absent".to_string(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut prefix = BTreeMap::new();
+        for chain in &dependency_chains {
+            prefix.extend(
+                chain
+                    .entries()
+                    .iter()
+                    .cloned()
+                    .map(|entry| (entry.coord(), entry)),
+            );
+        }
+        prefix.extend(conflict_entries);
+        let mut conflict_chain = if dependency_chains.is_empty() {
+            MembershipChain::from_entries_with_coords_and_heads(prefix.into_iter().collect(), heads)
+                .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?
+        } else {
+            MembershipChain::replay_merged_resolved_histories_to_heads(
+                &dependency_chains,
+                prefix.into_iter().collect(),
+                heads,
+            )
+            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?
+        };
+        conflict_chain
+            .apply_resolutions(store_root_hash, std::slice::from_ref(&resolution))
+            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+        resolved_by_ref.insert(next.clone(), conflict_chain);
+        applied.insert(next);
+    }
+
+    let current_by_coord = entries.iter().cloned().collect::<BTreeMap<_, _>>();
+    let mut heads_by_cut = BTreeMap::<Vec<_>, Vec<_>>::new();
+    for head in current_heads {
+        heads_by_cut
+            .entry(head.resolutions.clone())
+            .or_default()
+            .push(head.clone());
+    }
+    let mut branch_chains = Vec::new();
+    for (cut, heads) in heads_by_cut {
+        let cut_set = cut
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let branch_heads = heads
+            .into_iter()
+            .filter(|head| {
+                let coord = head.entry_coord();
+                !resolved_by_ref.values().any(|checkpoint| {
+                    let checkpoint_cut = checkpoint
+                        .resolution_refs()
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    cut_set.is_subset(&checkpoint_cut)
+                        && cut_set != checkpoint_cut
+                        && checkpoint.resolution_checkpoint_covers(&coord)
+                })
+            })
+            .collect::<Vec<_>>();
+        if branch_heads.is_empty() {
+            continue;
+        }
+        let dependencies = cut
+            .iter()
+            .map(|reference| {
+                resolved_by_ref.get(reference).ok_or_else(|| {
+                    AnchoredChainError::LoadFailed(format!(
+                        "membership head references absent resolution {}",
+                        reference.resolution_hash
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut branch_history = BTreeMap::new();
+        for chain in &dependencies {
+            branch_history.extend(
+                chain
+                    .entries()
+                    .iter()
+                    .cloned()
+                    .map(|entry| (entry.coord(), entry)),
+            );
+        }
+        let mut pending = branch_heads
+            .iter()
+            .map(AuthorHead::entry_coord)
+            .collect::<std::collections::BTreeSet<_>>();
+        while let Some(coord) = pending.pop_first() {
+            if branch_history.contains_key(&coord) {
+                continue;
+            }
+            let entry = current_by_coord.get(&coord).ok_or_else(|| {
+                AnchoredChainError::LoadFailed(format!(
+                    "membership suffix entry {} is absent",
+                    coord.entry_hash
+                ))
+            })?;
+            pending.extend(entry.dependencies.iter().cloned());
+            branch_history.insert(coord, entry.clone());
+        }
+        let mut branch = if dependencies.is_empty() {
+            MembershipChain::from_entries_with_coords_and_heads(
+                branch_history.into_iter().collect(),
+                branch_heads,
+            )
+            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?
+        } else {
+            MembershipChain::replay_merged_resolved_histories_to_heads(
+                &dependencies,
+                branch_history.into_iter().collect(),
+                branch_heads,
+            )
+            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?
+        };
+        branch
+            .checkpoint_current_resolved_state()
+            .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))?;
+        branch_chains.push(branch);
+    }
+    let branch_refs = resolved_by_ref
+        .values()
+        .chain(branch_chains.iter())
+        .collect::<Vec<_>>();
+    let mut history = current_by_coord;
+    for chain in &branch_refs {
+        history.extend(
+            chain
+                .entries()
+                .iter()
+                .cloned()
+                .map(|entry| (entry.coord(), entry)),
+        );
+    }
+    MembershipChain::replay_merged_resolved_histories_to_heads(
+        &branch_refs,
+        history.into_iter().collect(),
+        current_heads.to_vec(),
+    )
+    .map_err(|error| AnchoredChainError::LoadFailed(error.to_string()))
 }
 
 pub(crate) fn membership_floor_by_grant(
@@ -1914,6 +2231,45 @@ async fn download_committed_chain(
     store_root_hash: ObjectHash,
     heads: &[AuthorHead],
 ) -> Result<MembershipChain, AnchoredChainError> {
+    let entries = download_committed_entries(storage, store_root_hash, heads).await?;
+    let resolution_refs = heads
+        .iter()
+        .flat_map(|head| head.resolutions.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut resolutions = Vec::with_capacity(resolution_refs.len());
+    for reference in resolution_refs {
+        let resolution = load_membership_resolution_object(storage, store_root_hash, &reference)
+            .await
+            .map_err(map_membership_object_error)?
+            .ok_or_else(|| {
+                AnchoredChainError::LoadFailed(format!(
+                    "membership resolution {} is missing",
+                    reference.resolution_hash
+                ))
+            })?;
+        resolutions.push(resolution.value);
+    }
+    if !resolutions.is_empty() {
+        return replay_membership_resolutions(
+            storage,
+            store_root_hash,
+            &entries,
+            heads,
+            &resolutions,
+        )
+        .await;
+    }
+
+    MembershipChain::from_entries_with_coords_and_heads(entries, heads.to_vec()).map_err(|error| {
+        AnchoredChainError::LoadFailed(format!("Invalid membership chain: {error}"))
+    })
+}
+
+async fn download_committed_entries(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    heads: &[AuthorHead],
+) -> Result<Vec<(MembershipCoord, MembershipEntry)>, AnchoredChainError> {
     let capacity = heads.iter().map(|head| head.seq as usize).sum();
     let mut entries = Vec::with_capacity(capacity);
     for head in heads {
@@ -1946,10 +2302,7 @@ async fn download_committed_chain(
             entries.push((coord, loaded.value));
         }
     }
-
-    MembershipChain::from_entries_with_coords(entries).map_err(|error| {
-        AnchoredChainError::LoadFailed(format!("Invalid membership chain: {error}"))
-    })
+    Ok(entries)
 }
 
 /// Validate the signed committed membership state against `owner_pubkey`, then
@@ -2244,6 +2597,773 @@ mod tests {
             watermark_db,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn exact_membership_loader_materializes_resolution_activation_without_assignment_suffix()
+    {
+        use crate::sync::membership::{entry_hash, AuthorStreamId};
+
+        let first_owner = UserKeypair::generate();
+        let second_owner = UserKeypair::generate();
+        let first_pubkey = pubkey_hex(&first_owner);
+        let second_pubkey = pubkey_hex(&second_owner);
+        let storage = MockSyncStorage::with_keypair(first_owner.clone());
+        let store_root_hash = storage.store_root_hash();
+        let mut base = MembershipChain::new();
+        base.add_entry(storage.store_protocol_root().founder.clone())
+            .expect("founder entry");
+        let add_second = base
+            .signed_set_member(
+                &first_owner,
+                second_pubkey,
+                None,
+                MemberRole::Owner,
+                "add second owner".to_string(),
+            )
+            .expect("add second owner");
+        base.add_entry(add_second).expect("apply second owner");
+        let remove_second = base
+            .signed_remove_member(
+                &first_owner,
+                pubkey_hex(&second_owner),
+                "remove second owner".to_string(),
+            )
+            .expect("first branch");
+        let remove_first = base
+            .signed_remove_member_in_stream(
+                &second_owner,
+                AuthorStreamId::from_bytes([61; 16]),
+                first_pubkey.clone(),
+                "remove first owner".to_string(),
+            )
+            .expect("second branch");
+        let mut entries = base.entries().to_vec();
+        entries.extend([remove_second.clone(), remove_first.clone()]);
+        let conflict_heads = vec![
+            AuthorHead::signed(
+                remove_second.store_id.clone(),
+                remove_second.author_owner_grant.clone(),
+                remove_second.stream_id,
+                remove_second.seq,
+                entry_hash(&remove_second),
+                &first_owner,
+            ),
+            AuthorHead::signed(
+                remove_first.store_id.clone(),
+                remove_first.author_owner_grant.clone(),
+                remove_first.stream_id,
+                remove_first.seq,
+                entry_hash(&remove_first),
+                &second_owner,
+            ),
+        ];
+        let conflicted = MembershipChain::from_entries_with_coords_and_heads(
+            entries
+                .iter()
+                .cloned()
+                .map(|entry| (entry.coord(), entry))
+                .collect(),
+            conflict_heads.clone(),
+        )
+        .expect("cross-revocation conflict");
+        let resolver_branch = match conflicted.conflict().expect("conflict") {
+            MembershipConflict::RevocationCycle {
+                maximal_valid_branches,
+                ..
+            } => maximal_valid_branches
+                .iter()
+                .find(|branch| {
+                    branch
+                        .active_grants
+                        .values()
+                        .any(|grant| grant.member_pubkey == first_pubkey)
+                })
+                .expect("first owner's branch")
+                .heads
+                .clone(),
+            _ => panic!("expected revocation cycle"),
+        };
+        let resolution = conflicted
+            .signed_cycle_resolution(store_root_hash, resolver_branch, &first_owner)
+            .expect("resolution");
+        let mut resumed = conflicted.clone();
+        resumed
+            .apply_resolutions(store_root_hash, std::slice::from_ref(&resolution))
+            .expect("apply resolution");
+        let resolution_only = resumed.clone();
+        let mut activated = resumed.clone();
+        let activation = activated
+            .signed_resolution_activation_in_stream(
+                store_root_hash,
+                &first_owner,
+                AuthorStreamId::from_bytes([63; 16]),
+                &resolution,
+                "activate resolution".to_string(),
+            )
+            .expect("resolution activation");
+        assert_eq!(
+            activation,
+            activated
+                .signed_resolution_activation_in_stream(
+                    store_root_hash,
+                    &first_owner,
+                    AuthorStreamId::from_bytes([63; 16]),
+                    &resolution,
+                    "activate resolution".to_string(),
+                )
+                .expect("resolution activation retry")
+        );
+        let frontier_before_activation = activated.effective_frontier();
+        assert_eq!(activation.dependencies, frontier_before_activation);
+        let mut missing_ref = activation.clone();
+        missing_ref.resolution_dependencies.clear();
+        super::super::membership::sign_membership_entry(&mut missing_ref, &first_owner);
+        let mut candidate = resumed.clone();
+        assert!(matches!(
+            candidate.add_entry(missing_ref),
+            Err(super::super::membership::MembershipError::InvalidResolutionActivation(_))
+        ));
+
+        let mut wrong_frontier = activation.clone();
+        wrong_frontier.dependencies.clear();
+        super::super::membership::sign_membership_entry(&mut wrong_frontier, &first_owner);
+        let mut candidate = resumed.clone();
+        assert!(matches!(
+            candidate.add_entry(wrong_frontier),
+            Err(super::super::membership::MembershipError::InvalidResolutionActivation(_))
+        ));
+
+        let mut wrong_cut = activation.clone();
+        let mut unapplied = resolution.resolution_ref();
+        unapplied.resolution_hash = ObjectHash::digest(b"unapplied Store resolution");
+        wrong_cut.resolution_dependencies.push(unapplied);
+        wrong_cut.resolution_dependencies.sort();
+        super::super::membership::sign_membership_entry(&mut wrong_cut, &first_owner);
+        let mut candidate = resumed.clone();
+        assert!(matches!(
+            candidate.add_entry(wrong_cut),
+            Err(super::super::membership::MembershipError::InvalidResolutionActivation(_))
+        ));
+
+        let mut old_grant = activation.clone();
+        old_grant.author_owner_grant = remove_second.author_owner_grant.clone();
+        super::super::membership::sign_membership_entry(&mut old_grant, &first_owner);
+        let mut candidate = resumed.clone();
+        assert!(matches!(
+            candidate.add_entry(old_grant),
+            Err(super::super::membership::MembershipError::InvalidResolutionActivation(_))
+        ));
+
+        let mut wrong_ref = activation.clone();
+        let super::super::membership::MembershipChange::ResolutionActivation {
+            resolution: wrong_resolution_ref,
+        } = &mut wrong_ref.change
+        else {
+            unreachable!()
+        };
+        wrong_resolution_ref.resolver_pubkey = pubkey_hex(&second_owner);
+        super::super::membership::sign_membership_entry(&mut wrong_ref, &first_owner);
+        let mut candidate = resumed.clone();
+        assert!(matches!(
+            candidate.add_entry(wrong_ref),
+            Err(super::super::membership::MembershipError::InvalidResolutionActivation(_))
+        ));
+        let state_before_activation = activated.status().clone();
+        activated
+            .add_entry(activation.clone())
+            .expect("apply resolution activation");
+        assert_eq!(activated.status(), &state_before_activation);
+        assert_ne!(activated.effective_frontier(), frontier_before_activation);
+        assert!(activated.effective_frontier().contains(&activation.coord()));
+        let activation_head = activated
+            .signed_head_for_stream(&first_owner, activation.stream_id)
+            .expect("chain-derived activation head");
+        assert_eq!(
+            activation_head.resolutions,
+            activation.resolution_dependencies
+        );
+        let suffix = resumed
+            .signed_set_member_in_stream(
+                &first_owner,
+                AuthorStreamId::from_bytes([62; 16]),
+                pubkey_hex(&UserKeypair::generate()),
+                None,
+                MemberRole::Member,
+                "post-resolution write".to_string(),
+            )
+            .expect("suffix entry");
+        resumed.add_entry(suffix.clone()).expect("apply suffix");
+        let current_heads = vec![resumed
+            .signed_head_for_stream(&first_owner, suffix.stream_id)
+            .expect("current head")];
+
+        for entry in &entries {
+            append_membership_entry_object(&storage, store_root_hash, &entry.coord(), entry)
+                .await
+                .expect("upload conflict closure");
+        }
+        for head in &conflict_heads {
+            append_membership_head_object(&storage, store_root_hash, head)
+                .await
+                .expect("upload conflict head");
+        }
+        append_membership_entry_object(&storage, store_root_hash, &activation.coord(), &activation)
+            .await
+            .expect("upload resolution activation");
+        append_membership_head_object(&storage, store_root_hash, &activation_head)
+            .await
+            .expect("upload resolution activation head");
+        super::super::store_objects::append_membership_resolution_object(
+            &storage,
+            store_root_hash,
+            &resolution,
+        )
+        .await
+        .expect("upload resolution");
+        let mut exact_heads = conflict_heads
+            .iter()
+            .map(MembershipHeadRef::from_head)
+            .collect::<Vec<_>>();
+        exact_heads.push(MembershipHeadRef::from_head(&activation_head));
+        exact_heads.sort();
+        let resolved_without_assignment_suffix = load_anchored_chain_at_exact_heads(
+            &storage,
+            store_root_hash,
+            &first_pubkey,
+            &exact_heads,
+            &[resolution.resolution_ref()],
+        )
+        .await
+        .expect("resolution activation is an exact signed membership cut");
+        assert_eq!(
+            resolved_without_assignment_suffix.current_members(),
+            activated.current_members()
+        );
+
+        let adversarial_stream = AuthorStreamId::from_bytes([64; 16]);
+        let mut adversarial_chain = resolution_only;
+        let first_in_stream = adversarial_chain
+            .signed_set_member_in_stream(
+                &first_owner,
+                adversarial_stream,
+                pubkey_hex(&UserKeypair::generate()),
+                None,
+                MemberRole::Member,
+                "first replacement-grant stream entry".to_string(),
+            )
+            .expect("valid sequence-one entry");
+        adversarial_chain
+            .add_entry(first_in_stream.clone())
+            .expect("apply sequence-one entry");
+        let mut forged_activation = adversarial_chain
+            .signed_set_member_in_stream(
+                &first_owner,
+                adversarial_stream,
+                pubkey_hex(&UserKeypair::generate()),
+                None,
+                MemberRole::Member,
+                "valid sequence-two entry".to_string(),
+            )
+            .expect("valid sequence-two entry");
+        forged_activation.change =
+            super::super::membership::MembershipChange::ResolutionActivation {
+                resolution: resolution.resolution_ref(),
+            };
+        super::super::membership::sign_membership_entry(&mut forged_activation, &first_owner);
+        assert_eq!(forged_activation.seq, 2);
+        assert!(forged_activation.previous_hash.is_some());
+        append_membership_entry_object(
+            &storage,
+            store_root_hash,
+            &first_in_stream.coord(),
+            &first_in_stream,
+        )
+        .await
+        .expect("upload sequence-one entry");
+        let forged_coord = forged_activation.coord();
+        let forged_prefix = super::super::store_commit::membership_entry_semantic_prefix(
+            &forged_coord.author_pubkey,
+            &forged_coord.author_owner_grant,
+            forged_coord.stream_id,
+            forged_coord.seq,
+            forged_coord.entry_hash,
+        );
+        storage
+            .append_protocol_object(
+                &super::super::storage::ProtocolObjectContext::store(
+                    store_root_hash,
+                    super::super::storage::ProtocolObjectDomain::StoreMembershipEntry,
+                ),
+                &forged_prefix,
+                ".json",
+                serde_json::to_vec(&forged_activation).expect("serialize forged activation"),
+            )
+            .await
+            .expect("inject forged sequence-two activation bytes");
+        let forged_head = AuthorHead::signed_with_resolutions(
+            forged_activation.store_id.clone(),
+            forged_activation.author_owner_grant.clone(),
+            forged_activation.stream_id,
+            forged_activation.seq,
+            entry_hash(&forged_activation),
+            forged_activation.resolution_dependencies.clone(),
+            &first_owner,
+        );
+        append_membership_head_object(&storage, store_root_hash, &forged_head)
+            .await
+            .expect("upload forged activation head");
+        let mut forged_heads = conflict_heads
+            .iter()
+            .map(MembershipHeadRef::from_head)
+            .collect::<Vec<_>>();
+        forged_heads.push(MembershipHeadRef::from_head(&forged_head));
+        forged_heads.sort();
+        load_anchored_chain_at_exact_heads(
+            &storage,
+            store_root_hash,
+            &first_pubkey,
+            &forged_heads,
+            &[resolution.resolution_ref()],
+        )
+        .await
+        .expect_err("a resolution activation cannot extend an existing stream");
+
+        let loaded = super::replay_membership_resolutions(
+            &storage,
+            store_root_hash,
+            &[(suffix.coord(), suffix)],
+            &current_heads,
+            &[resolution],
+        )
+        .await
+        .expect("fresh reader loads conflict history from the exact resolution heads");
+        assert_eq!(loaded.author_heads(), resumed.author_heads());
+        assert_eq!(loaded.current_members(), resumed.current_members());
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_conflict_resolutions_merge_before_replaying_their_suffixes() {
+        use crate::sync::membership::{entry_hash, AuthorStreamId};
+
+        let first = UserKeypair::generate();
+        let second = UserKeypair::generate();
+        let first_pubkey = pubkey_hex(&first);
+        let second_pubkey = pubkey_hex(&second);
+        let storage = MockSyncStorage::with_keypair(first.clone());
+        let root = storage.store_root_hash();
+        let mut base = MembershipChain::new();
+        base.add_entry(storage.store_protocol_root().founder.clone())
+            .unwrap();
+        let add_second = base
+            .signed_set_member(
+                &first,
+                second_pubkey.clone(),
+                None,
+                MemberRole::Owner,
+                "add second".to_string(),
+            )
+            .unwrap();
+        base.add_entry(add_second).unwrap();
+        let remove_second = base
+            .signed_remove_member(&first, second_pubkey.clone(), "remove second".to_string())
+            .unwrap();
+        let remove_first = base
+            .signed_remove_member_in_stream(
+                &second,
+                AuthorStreamId::from_bytes([201; 16]),
+                first_pubkey.clone(),
+                "remove first".to_string(),
+            )
+            .unwrap();
+        let mut conflict_entries = base.entries().to_vec();
+        conflict_entries.extend([remove_second.clone(), remove_first.clone()]);
+        let conflict_heads = vec![
+            AuthorHead::signed(
+                remove_second.store_id.clone(),
+                remove_second.author_owner_grant.clone(),
+                remove_second.stream_id,
+                remove_second.seq,
+                entry_hash(&remove_second),
+                &first,
+            ),
+            AuthorHead::signed(
+                remove_first.store_id.clone(),
+                remove_first.author_owner_grant.clone(),
+                remove_first.stream_id,
+                remove_first.seq,
+                entry_hash(&remove_first),
+                &second,
+            ),
+        ];
+        let conflicted = MembershipChain::from_entries_with_coords_and_heads(
+            conflict_entries
+                .iter()
+                .cloned()
+                .map(|entry| (entry.coord(), entry))
+                .collect(),
+            conflict_heads.clone(),
+        )
+        .unwrap();
+        let branches = match conflicted.conflict().unwrap() {
+            MembershipConflict::RevocationCycle {
+                maximal_valid_branches,
+                ..
+            } => maximal_valid_branches,
+            _ => panic!("expected revocation cycle"),
+        };
+        let first_branch = branches
+            .iter()
+            .find(|branch| {
+                branch.active_grants.values().any(|grant| {
+                    grant.member_pubkey == first_pubkey && grant.role == MemberRole::Owner
+                })
+            })
+            .unwrap()
+            .heads
+            .clone();
+        let second_branch = branches
+            .iter()
+            .find(|branch| {
+                branch.active_grants.values().any(|grant| {
+                    grant.member_pubkey == second_pubkey && grant.role == MemberRole::Owner
+                })
+            })
+            .unwrap()
+            .heads
+            .clone();
+        let resolution_a = conflicted
+            .signed_cycle_resolution(root, first_branch, &first)
+            .unwrap();
+        let resolution_b = conflicted
+            .signed_cycle_resolution(root, second_branch, &second)
+            .unwrap();
+
+        let mut after_a = conflicted.clone();
+        after_a
+            .apply_resolutions(root, std::slice::from_ref(&resolution_a))
+            .unwrap();
+        let suffix_a = after_a
+            .signed_set_member_in_stream(
+                &first,
+                AuthorStreamId::from_bytes([202; 16]),
+                second_pubkey.clone(),
+                None,
+                MemberRole::Owner,
+                "A reassigns B".to_string(),
+            )
+            .unwrap();
+        assert!(matches!(
+            &suffix_a.change,
+            crate::sync::membership::MembershipChange::SetMember { replaces, .. }
+                if replaces.is_empty()
+        ));
+        let mut after_b = conflicted.clone();
+        after_b
+            .apply_resolutions(root, std::slice::from_ref(&resolution_b))
+            .unwrap();
+        let suffix_b = after_b
+            .signed_set_member_in_stream(
+                &second,
+                AuthorStreamId::from_bytes([203; 16]),
+                pubkey_hex(&UserKeypair::generate()),
+                None,
+                MemberRole::Member,
+                "B suffix".to_string(),
+            )
+            .unwrap();
+        let mut current_heads = conflict_heads.clone();
+        current_heads.extend([
+            AuthorHead::signed_with_resolutions(
+                suffix_a.store_id.clone(),
+                suffix_a.author_owner_grant.clone(),
+                suffix_a.stream_id,
+                suffix_a.seq,
+                entry_hash(&suffix_a),
+                suffix_a.resolution_dependencies.clone(),
+                &first,
+            ),
+            AuthorHead::signed_with_resolutions(
+                suffix_b.store_id.clone(),
+                suffix_b.author_owner_grant.clone(),
+                suffix_b.stream_id,
+                suffix_b.seq,
+                entry_hash(&suffix_b),
+                suffix_b.resolution_dependencies.clone(),
+                &second,
+            ),
+        ]);
+        current_heads.sort_by_key(|head| head.entry_coord().stream_key());
+        for entry in &conflict_entries {
+            append_membership_entry_object(&storage, root, &entry.coord(), entry)
+                .await
+                .unwrap();
+        }
+        for head in &conflict_heads {
+            append_membership_head_object(&storage, root, head)
+                .await
+                .unwrap();
+        }
+
+        let unactivated = replay_membership_resolutions(
+            &storage,
+            root,
+            &[],
+            &conflict_heads,
+            &[resolution_b.clone(), resolution_a.clone()],
+        )
+        .await
+        .expect_err("raw resolution objects do not activate themselves");
+        assert!(unactivated
+            .to_string()
+            .contains("differ from the exact signed head cut"));
+
+        let loaded = replay_membership_resolutions(
+            &storage,
+            root,
+            &[(suffix_b.coord(), suffix_b), (suffix_a.coord(), suffix_a)],
+            &current_heads,
+            &[resolution_b, resolution_a],
+        )
+        .await
+        .expect("concurrent resolution branches replay as one causal cut");
+        assert!(matches!(
+            loaded.conflict(),
+            Some(MembershipConflict::ConcurrentMemberAssignments { member_pubkey, .. })
+                if member_pubkey == &second_pubkey
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolution_replay_orders_store_checkpoints_by_signed_head_references() {
+        use crate::sync::membership::{entry_hash, AuthorStreamId};
+
+        let first = UserKeypair::generate();
+        let second = UserKeypair::generate();
+        let third = UserKeypair::generate();
+        let fourth = UserKeypair::generate();
+        let pubkeys = [&first, &second, &third, &fourth]
+            .into_iter()
+            .map(pubkey_hex)
+            .collect::<Vec<_>>();
+        let storage = MockSyncStorage::with_keypair(first.clone());
+        let store_root_hash = storage.store_root_hash();
+        let mut base = MembershipChain::new();
+        base.add_entry(storage.store_protocol_root().founder.clone())
+            .expect("founder entry");
+        for pubkey in pubkeys.iter().skip(1) {
+            let add = base
+                .signed_set_member(
+                    &first,
+                    pubkey.clone(),
+                    None,
+                    MemberRole::Owner,
+                    format!("add {pubkey}"),
+                )
+                .expect("add Owner");
+            base.add_entry(add).expect("apply Owner");
+        }
+        let remove_second = base
+            .signed_remove_member(&first, pubkeys[1].clone(), "remove second".to_string())
+            .expect("first conflict branch");
+        let remove_first = base
+            .signed_remove_member_in_stream(
+                &second,
+                AuthorStreamId::from_bytes([141; 16]),
+                pubkeys[0].clone(),
+                "remove first".to_string(),
+            )
+            .expect("second conflict branch");
+        let mut history = base.entries().to_vec();
+        history.extend([remove_second.clone(), remove_first.clone()]);
+        let first_heads = vec![
+            AuthorHead::signed(
+                remove_second.store_id.clone(),
+                remove_second.author_owner_grant.clone(),
+                remove_second.stream_id,
+                remove_second.seq,
+                entry_hash(&remove_second),
+                &first,
+            ),
+            AuthorHead::signed(
+                remove_first.store_id.clone(),
+                remove_first.author_owner_grant.clone(),
+                remove_first.stream_id,
+                remove_first.seq,
+                entry_hash(&remove_first),
+                &second,
+            ),
+        ];
+        let first_conflict = MembershipChain::from_entries_with_coords_and_heads(
+            history
+                .iter()
+                .cloned()
+                .map(|entry| (entry.coord(), entry))
+                .collect(),
+            first_heads.clone(),
+        )
+        .expect("first conflict");
+        let first_branch = match first_conflict.conflict().expect("first conflict") {
+            MembershipConflict::RevocationCycle {
+                maximal_valid_branches,
+                ..
+            } => maximal_valid_branches
+                .iter()
+                .find(|branch| {
+                    branch.active_grants.values().any(|record| {
+                        record.member_pubkey == pubkeys[0] && record.role == MemberRole::Owner
+                    })
+                })
+                .expect("first Owner branch")
+                .heads
+                .clone(),
+            _ => panic!("expected first revocation cycle"),
+        };
+        let first_resolution = first_conflict
+            .signed_cycle_resolution(store_root_hash, first_branch, &first)
+            .expect("first resolution");
+        let mut resumed = first_conflict;
+        resumed
+            .apply_resolutions(store_root_hash, std::slice::from_ref(&first_resolution))
+            .expect("apply first resolution");
+
+        let (mut second_conflict, second_resolution, second_heads, second_entries) = (1..=100)
+            .find_map(|attempt| {
+                let remove_fourth = resumed
+                    .signed_remove_member_in_stream(
+                        &third,
+                        AuthorStreamId::from_bytes([attempt; 16]),
+                        pubkeys[3].clone(),
+                        "remove fourth".to_string(),
+                    )
+                    .ok()?;
+                let remove_third = resumed
+                    .signed_remove_member_in_stream(
+                        &fourth,
+                        AuthorStreamId::from_bytes([attempt.wrapping_add(100); 16]),
+                        pubkeys[2].clone(),
+                        "remove third".to_string(),
+                    )
+                    .ok()?;
+                let prior_refs = vec![first_resolution.resolution_ref()];
+                let new_heads = vec![
+                    AuthorHead::signed_with_resolutions(
+                        remove_fourth.store_id.clone(),
+                        remove_fourth.author_owner_grant.clone(),
+                        remove_fourth.stream_id,
+                        remove_fourth.seq,
+                        entry_hash(&remove_fourth),
+                        prior_refs.clone(),
+                        &third,
+                    ),
+                    AuthorHead::signed_with_resolutions(
+                        remove_third.store_id.clone(),
+                        remove_third.author_owner_grant.clone(),
+                        remove_third.stream_id,
+                        remove_third.seq,
+                        entry_hash(&remove_third),
+                        prior_refs,
+                        &fourth,
+                    ),
+                ];
+                let mut all_entries = resumed.entries().to_vec();
+                all_entries.extend([remove_fourth.clone(), remove_third.clone()]);
+                let mut all_heads = first_heads.clone();
+                all_heads.extend(new_heads.clone());
+                let conflict = resumed
+                    .replay_resolved_history_to_heads(
+                        all_entries
+                            .into_iter()
+                            .map(|entry| (entry.coord(), entry))
+                            .collect(),
+                        all_heads,
+                    )
+                    .ok()?;
+                let branch = match conflict.conflict()? {
+                    MembershipConflict::RevocationCycle {
+                        maximal_valid_branches,
+                        ..
+                    } => maximal_valid_branches
+                        .iter()
+                        .find(|branch| {
+                            branch.active_grants.values().any(|record| {
+                                record.member_pubkey == pubkeys[2]
+                                    && record.role == MemberRole::Owner
+                            })
+                        })?
+                        .heads
+                        .clone(),
+                    _ => return None,
+                };
+                let resolution = conflict
+                    .signed_cycle_resolution(store_root_hash, branch, &third)
+                    .ok()?;
+                (resolution.conflict_hash < first_resolution.conflict_hash).then_some((
+                    conflict,
+                    resolution,
+                    new_heads,
+                    vec![remove_fourth, remove_third],
+                ))
+            })
+            .expect("find causally later conflict whose hash sorts first");
+        second_conflict
+            .apply_resolutions(store_root_hash, std::slice::from_ref(&second_resolution))
+            .expect("apply second resolution");
+        let suffix = second_conflict
+            .signed_set_member_in_stream(
+                &third,
+                AuthorStreamId::from_bytes([250; 16]),
+                pubkey_hex(&UserKeypair::generate()),
+                None,
+                MemberRole::Member,
+                "post-resolution suffix".to_string(),
+            )
+            .expect("suffix");
+        second_conflict
+            .add_entry(suffix.clone())
+            .expect("apply suffix");
+        let mut current_heads = first_heads.clone();
+        current_heads.extend(second_heads.clone());
+        current_heads.push(
+            second_conflict
+                .signed_head_for_stream(&third, suffix.stream_id)
+                .expect("activated suffix head"),
+        );
+        current_heads.sort_by_key(|head| MembershipHeadRef::from_head(head).coord.stream_key());
+        history.extend(second_entries);
+
+        for entry in &history {
+            append_membership_entry_object(&storage, store_root_hash, &entry.coord(), entry)
+                .await
+                .expect("upload history");
+        }
+        for head in first_heads.iter().chain(&second_heads) {
+            append_membership_head_object(&storage, store_root_hash, head)
+                .await
+                .expect("upload historical head");
+        }
+        let absent = super::replay_membership_resolutions(
+            &storage,
+            store_root_hash,
+            &[(suffix.coord(), suffix.clone())],
+            &current_heads,
+            std::slice::from_ref(&second_resolution),
+        )
+        .await
+        .expect_err("historical head refs require their exact resolution object");
+        assert!(absent.to_string().contains("references absent resolution"));
+        let loaded = super::replay_membership_resolutions(
+            &storage,
+            store_root_hash,
+            &[(suffix.coord(), suffix)],
+            &current_heads,
+            &[first_resolution.clone(), second_resolution],
+        )
+        .await
+        .expect("signed head refs impose causal checkpoint order");
+
+        assert_eq!(loaded.current_members(), second_conflict.current_members());
+        assert_eq!(loaded.resolution_refs(), second_conflict.resolution_refs());
     }
 
     async fn load_and_persist_owner_anchor(
@@ -2667,8 +3787,9 @@ mod tests {
             .expect("active Owner signs membership grant");
         append_membership_entry(&storage, &mut chain, &founder_pubkey, 3, add_member).await;
         let remove_member = chain
-            .signed_remove_member(
+            .signed_remove_member_in_stream(
                 &second_owner,
+                super::super::membership::AuthorStreamId::from_bytes([41; 16]),
                 pubkey_hex(&member),
                 "0000000004000-0000-second".to_string(),
             )
@@ -3683,8 +4804,9 @@ mod tests {
             .expect("active Owner signs membership grant");
         append_membership_entry(&storage, &mut chain, &founder_pk, 4, add_invitee).await;
         let remove_member = chain
-            .signed_remove_member(
+            .signed_remove_member_in_stream(
                 &second_owner,
+                super::super::membership::AuthorStreamId::from_bytes([42; 16]),
                 pubkey_hex(&member),
                 "0000000005000-0000-f".to_string(),
             )

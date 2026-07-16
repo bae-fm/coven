@@ -63,9 +63,11 @@ pub(crate) enum ProtectedObjectDomain {
     StoreSnapshotImage,
     StoreMembershipEntry,
     StoreMembershipHead,
+    StoreMembershipResolution,
     StorePackage,
     CircleControl,
     CircleRoster,
+    CircleRosterResolution,
     CircleMetadata,
     CircleAccessLeaf,
     CircleAccessEnvelope,
@@ -136,6 +138,12 @@ impl ProtectedObjectDomain {
                 path_segment: None,
                 extension: ".json",
             },
+            Self::StoreMembershipResolution => ProtocolObjectMetadata {
+                aad_label: b"store-membership-resolution",
+                path_prefix: "store-v1/membership/resolutions/",
+                path_segment: None,
+                extension: ".json",
+            },
             Self::StorePackage => ProtocolObjectMetadata {
                 aad_label: b"store-package",
                 path_prefix: STORE_PACKAGE_PREFIX,
@@ -152,6 +160,12 @@ impl ProtectedObjectDomain {
                 aad_label: b"circle-roster",
                 path_prefix: crate::sync::circle::CIRCLE_ROSTER_PREFIX,
                 path_segment: Some("/roster/"),
+                extension: ".json",
+            },
+            Self::CircleRosterResolution => ProtocolObjectMetadata {
+                aad_label: b"circle-roster-resolution",
+                path_prefix: crate::sync::circle::CIRCLE_ROSTER_PREFIX,
+                path_segment: Some("/roster/resolutions/"),
                 extension: ".json",
             },
             Self::CircleMetadata => ProtocolObjectMetadata {
@@ -216,6 +230,8 @@ impl ProtocolObjectDomain {
         StoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipEntry);
     pub const StoreMembershipHead: StoreProtocolObjectDomain =
         StoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipHead);
+    pub const StoreMembershipResolution: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipResolution);
     pub const StorePackage: StoreProtocolObjectDomain =
         StoreProtocolObjectDomain(ProtectedObjectDomain::StorePackage);
     pub const CircleControl: StoreProtocolObjectDomain =
@@ -224,6 +240,8 @@ impl ProtocolObjectDomain {
         StoreProtocolObjectDomain(ProtectedObjectDomain::CircleAccessEnvelope);
     pub const CircleRoster: CircleProtocolObjectDomain =
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleRoster);
+    pub const CircleRosterResolution: CircleProtocolObjectDomain =
+        CircleProtocolObjectDomain(ProtectedObjectDomain::CircleRosterResolution);
     pub const CircleMetadata: CircleProtocolObjectDomain =
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleMetadata);
 }

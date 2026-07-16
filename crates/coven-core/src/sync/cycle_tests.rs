@@ -263,7 +263,11 @@ async fn append_active_store_device(
             previous_commit_hash: None,
             dependencies: BTreeMap::new(),
         },
-        Some(storage.protocol_founder_coord()),
+        Some(
+            crate::sync::membership::MembershipGrantCreationAuthority::Entry(
+                storage.protocol_founder_coord(),
+            ),
+        ),
         vec![StoreDeviceRegistrationRef::from_registration(&registration)],
         signer,
     )

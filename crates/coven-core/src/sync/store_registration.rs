@@ -251,9 +251,9 @@ async fn prepare_registration_activation(
             let mut dependencies = db.materialized_frontier().await.map_err(database_error)?;
             dependencies.remove(&registration.device_id);
             let author_pubkey = crate::keys::public_key_hex(signer);
-            let membership_grant = match membership {
-                Some(chain) => match chain.write_grant_coord(&author_pubkey) {
-                    Some(grant) => Some(grant),
+            let membership_authority = match membership {
+                Some(chain) => match chain.write_grant_authority(&author_pubkey) {
+                    Some(authority) => Some(authority),
                     None if chain.contains_member_now(&author_pubkey) => None,
                     None => {
                         return Err(StoreRegistrationError::Invalid(
@@ -264,7 +264,7 @@ async fn prepare_registration_activation(
                 None => None,
             };
             let requires_self_registration_exception =
-                membership_grant.is_none() && membership.is_some();
+                membership_authority.is_none() && membership.is_some();
             let commit = StoreBatchCommit::signed_with_registrations(
                 registration.store_root_hash,
                 db.new_write_id(),
@@ -274,7 +274,7 @@ async fn prepare_registration_activation(
                     previous_commit_hash: previous.map(|position| position.commit_hash),
                     dependencies,
                 },
-                membership_grant,
+                membership_authority,
                 vec![reference],
                 signer,
             )

@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use super::membership::{
     derive_founder_grant_id, verify_membership_entry, AuthorStreamId, MembershipChange,
-    MembershipCoord, MembershipEntry, MembershipGrantId,
+    MembershipCoord, MembershipEntry, MembershipGrantCreationAuthority, MembershipGrantId,
 };
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::CopyId;
@@ -384,7 +384,7 @@ pub struct StoreBatchCommit {
     pub author_pubkey: String,
     pub write_id: WriteId,
     pub order: StoreCommitOrder,
-    pub membership_grant: Option<MembershipCoord>,
+    pub membership_authority: Option<MembershipGrantCreationAuthority>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<StoreControl>,
     pub device_registrations: Vec<StoreDeviceRegistrationRef>,
@@ -403,7 +403,7 @@ struct CommitSignedFields<'a> {
     author_pubkey: &'a str,
     write_id: &'a WriteId,
     order: &'a StoreCommitOrder,
-    membership_grant: Option<&'a MembershipCoord>,
+    membership_authority: Option<&'a MembershipGrantCreationAuthority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     control: Option<&'a StoreControl>,
     device_registrations: &'a [StoreDeviceRegistrationRef],
@@ -444,7 +444,7 @@ impl StoreBatchCommit {
         write_id: WriteId,
         device_id: String,
         order: StoreCommitOrder,
-        membership_grant: Option<MembershipCoord>,
+        membership_authority: Option<MembershipGrantCreationAuthority>,
         schema_version: u32,
         package_bytes: &[u8],
         signer: &UserKeypair,
@@ -454,7 +454,7 @@ impl StoreBatchCommit {
             write_id,
             device_id,
             order,
-            membership_grant,
+            membership_authority,
             None,
             Vec::new(),
             Vec::new(),
@@ -473,7 +473,7 @@ impl StoreBatchCommit {
         write_id: WriteId,
         device_id: String,
         order: StoreCommitOrder,
-        membership_grant: Option<MembershipCoord>,
+        membership_authority: Option<MembershipGrantCreationAuthority>,
         control: Option<StoreControl>,
         schema_version: u32,
         package_bytes: &[u8],
@@ -485,7 +485,7 @@ impl StoreBatchCommit {
             write_id,
             device_id,
             order,
-            membership_grant,
+            membership_authority,
             control,
             Vec::new(),
             Vec::new(),
@@ -504,7 +504,7 @@ impl StoreBatchCommit {
         write_id: WriteId,
         device_id: String,
         order: StoreCommitOrder,
-        membership_grant: Option<MembershipCoord>,
+        membership_authority: Option<MembershipGrantCreationAuthority>,
         device_registrations: Vec<StoreDeviceRegistrationRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
@@ -513,7 +513,7 @@ impl StoreBatchCommit {
             write_id,
             device_id,
             order,
-            membership_grant,
+            membership_authority,
             None,
             device_registrations,
             Vec::new(),
@@ -529,7 +529,7 @@ impl StoreBatchCommit {
         write_id: WriteId,
         device_id: String,
         order: StoreCommitOrder,
-        membership_grant: Option<MembershipCoord>,
+        membership_authority: Option<MembershipGrantCreationAuthority>,
         control: Option<StoreControl>,
         device_registrations: Vec<StoreDeviceRegistrationRef>,
         circle_controls: Vec<CircleControlRef>,
@@ -555,8 +555,8 @@ impl StoreBatchCommit {
             }
             validate_frontier(dependencies)?;
         }
-        if let Some(grant) = membership_grant.as_ref() {
-            validate_membership_coord(grant)?;
+        if let Some(authority) = membership_authority.as_ref() {
+            validate_membership_authority(authority)?;
         }
         let author_pubkey = keys::public_key_hex(signer);
         validate_control(
@@ -616,7 +616,7 @@ impl StoreBatchCommit {
             author_pubkey,
             write_id,
             order,
-            membership_grant,
+            membership_authority,
             control,
             device_registrations,
             circle_controls,
@@ -637,7 +637,7 @@ impl StoreBatchCommit {
             author_pubkey: &self.author_pubkey,
             write_id: &self.write_id,
             order: &self.order,
-            membership_grant: self.membership_grant.as_ref(),
+            membership_authority: self.membership_authority.as_ref(),
             control: self.control.as_ref(),
             device_registrations: &self.device_registrations,
             circle_controls: &self.circle_controls,
@@ -763,8 +763,8 @@ impl StoreBatchCommit {
             }
             validate_frontier(dependencies)?;
         }
-        if let Some(grant) = self.membership_grant.as_ref() {
-            validate_membership_coord(grant)?;
+        if let Some(authority) = self.membership_authority.as_ref() {
+            validate_membership_authority(authority)?;
         }
         validate_parsed_control(self)?;
         if !keys::verify_signature_hex(
@@ -1770,6 +1770,8 @@ pub enum StoreProtocolError {
         seq: u64,
         entry_hash: String,
     },
+    #[error("invalid Store membership resolution authority for resolver {0:?}")]
+    InvalidMembershipResolutionAuthority(String),
     #[error("membership object coordinate {expected:?} differs from signed entry {declared:?}")]
     MembershipCoordinateMismatch {
         expected: Box<MembershipCoord>,
@@ -2241,6 +2243,27 @@ fn validate_membership_coord(coord: &MembershipCoord) -> Result<(), StoreProtoco
     Ok(())
 }
 
+fn validate_membership_authority(
+    authority: &MembershipGrantCreationAuthority,
+) -> Result<(), StoreProtocolError> {
+    match authority {
+        MembershipGrantCreationAuthority::Entry(coord) => validate_membership_coord(coord),
+        MembershipGrantCreationAuthority::ConflictResolution(reference) => {
+            let resolver = hex::decode(&reference.resolver_pubkey).map_err(|_| {
+                StoreProtocolError::InvalidMembershipResolutionAuthority(
+                    reference.resolver_pubkey.clone(),
+                )
+            })?;
+            if resolver.len() != crate::keys::SIGN_PUBLICKEYBYTES {
+                return Err(StoreProtocolError::InvalidMembershipResolutionAuthority(
+                    reference.resolver_pubkey.clone(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 fn validate_device_id(device_id: &str) -> Result<(), StoreProtocolError> {
     crate::store_dir::validate_path_token(device_id)
         .map_err(|error| StoreProtocolError::UnsafeDeviceId(error.to_string()))
@@ -2283,13 +2306,13 @@ mod tests {
                     },
                 )]),
             },
-            Some(MembershipCoord {
+            Some(MembershipGrantCreationAuthority::Entry(MembershipCoord {
                 author_pubkey: keys::public_key_hex(&signer),
                 author_owner_grant: store_protocol_root.founder.author_owner_grant.clone(),
                 stream_id: store_protocol_root.founder.stream_id,
                 seq: 1,
                 entry_hash: crate::sync::membership::entry_hash(&store_protocol_root.founder),
-            }),
+            })),
             3,
             &package,
             &signer,
@@ -2483,13 +2506,13 @@ mod tests {
                     previous_commit_hash: None,
                     dependencies: BTreeMap::new(),
                 },
-                Some(MembershipCoord {
+                Some(MembershipGrantCreationAuthority::Entry(MembershipCoord {
                     author_pubkey: keys::public_key_hex(&signer),
                     author_owner_grant: root.founder.author_owner_grant.clone(),
                     stream_id: root.founder.stream_id,
                     seq: 1,
                     entry_hash: crate::sync::membership::entry_hash(&root.founder),
-                }),
+                })),
                 None,
                 Vec::new(),
                 vec![control.clone(), control],
@@ -2523,13 +2546,13 @@ mod tests {
                 previous_commit_hash: None,
                 dependencies: BTreeMap::new(),
             },
-            Some(MembershipCoord {
+            Some(MembershipGrantCreationAuthority::Entry(MembershipCoord {
                 author_pubkey: keys::public_key_hex(&signer),
                 author_owner_grant: root.founder.author_owner_grant.clone(),
                 stream_id: root.founder.stream_id,
                 seq: 1,
                 entry_hash: crate::sync::membership::entry_hash(&root.founder),
-            }),
+            })),
             vec![reference.clone()],
             &signer,
         )

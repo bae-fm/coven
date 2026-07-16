@@ -30,7 +30,7 @@ use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
 use crate::sync::session::SyncedTable;
 
-use super::membership::{MembershipChain, MembershipCoord};
+use super::membership::{MembershipChain, MembershipGrantCreationAuthority};
 use super::storage::{StorageError, SyncStorage};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -64,7 +64,7 @@ pub(crate) struct PreparedStorePayload {
     pub blob_manifest: StoreBlobManifest,
     pub local_cleanup: StoreBatchLocalCleanup,
     pub completion: StoreBatchCompletion,
-    pub membership_grant: Option<MembershipCoord>,
+    pub membership_authority: Option<MembershipGrantCreationAuthority>,
 }
 
 /// Upload the blobs referenced by exact staged package bytes and persist every
@@ -147,7 +147,7 @@ pub(crate) async fn prepare_store_payload(
         completion: StoreBatchCompletion {
             consumed_make_remote_intents: consumed,
         },
-        membership_grant: resolve_write_grant(membership_chain, keypair),
+        membership_authority: resolve_write_authority(membership_chain, keypair),
     })
 }
 
@@ -233,12 +233,12 @@ pub(super) async fn upload_snapshot_host_blobs(
 /// judges the same membership state as the rest of the cycle rather than
 /// re-listing (the very disagreement that once had a puller skip the write it was
 /// meant to accept).
-fn resolve_write_grant(
+fn resolve_write_authority(
     membership_chain: Option<&MembershipChain>,
     keypair: &UserKeypair,
-) -> Option<MembershipCoord> {
+) -> Option<MembershipGrantCreationAuthority> {
     let our_pubkey = hex::encode(keypair.public_key());
-    membership_chain.and_then(|chain| chain.write_grant_coord(&our_pubkey))
+    membership_chain.and_then(|chain| chain.write_grant_authority(&our_pubkey))
 }
 
 #[derive(Clone)]

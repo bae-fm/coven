@@ -371,6 +371,34 @@ mod tests {
     use super::*;
     use crate::keys::{self, UserKeypair};
 
+    fn serial_membership(
+        owner: &UserKeypair,
+        peers: &[&UserKeypair],
+    ) -> super::super::membership::SerialMembershipState {
+        let root = ObjectHash::digest(b"Circle test Serial membership");
+        let founder = super::super::membership::founder_entry(
+            "circle-test-serial-membership",
+            owner,
+            "founder",
+        );
+        let mut state =
+            super::super::membership::SerialMembershipState::from_founder(root, &founder)
+                .expect("found Serial membership");
+        for (index, peer) in peers.iter().enumerate() {
+            let entry = state
+                .signed_set_member(
+                    owner,
+                    keys::public_key_hex(peer),
+                    None,
+                    super::super::membership::MemberRole::Member,
+                    format!("peer-{index}"),
+                )
+                .expect("sign Serial member");
+            state = state.apply(&entry).expect("apply Serial member");
+        }
+        state
+    }
+
     #[test]
     fn merkle_proofs_verify_for_every_leaf_in_even_and_odd_layers() {
         for leaf_count in 1..=9 {
@@ -405,27 +433,38 @@ mod tests {
             ),
         ];
 
+        let serial_membership = serial_membership(&owner, &[&peer]);
         for membership in [
             StoreMembershipStateRef::merge_concurrent(
-                vec![super::super::membership::MembershipCoord {
-                    author_pubkey: owner_pubkey.clone(),
-                    author_owner_grant: MembershipGrantId(ObjectHash::digest(b"store-owner-grant")),
-                    stream_id: super::super::membership::AuthorStreamId::from_bytes([1; 16]),
-                    seq: 1,
-                    entry_hash: ObjectHash::digest(b"store-founder"),
+                vec![super::super::membership::MembershipHeadRef {
+                    coord: super::super::membership::MembershipCoord {
+                        author_pubkey: owner_pubkey.clone(),
+                        author_owner_grant: MembershipGrantId(ObjectHash::digest(
+                            b"store-owner-grant",
+                        )),
+                        stream_id: super::super::membership::AuthorStreamId::from_bytes([1; 16]),
+                        seq: 1,
+                        entry_hash: ObjectHash::digest(b"store-founder"),
+                    },
+                    head_hash: ObjectHash::digest(b"store-founder-head"),
                 }],
-                &members,
+                Vec::new(),
+                ObjectHash::digest(b"grant-bearing Store membership"),
             ),
             StoreMembershipStateRef::serial(
                 Some(super::super::store_commit::CommitPosition {
                     seq: 1,
                     commit_hash: ObjectHash::digest(b"store-commit"),
                 }),
-                &members,
+                &serial_membership,
             ),
         ] {
-            let membership_grant = match &membership {
-                StoreMembershipStateRef::MergeConcurrent { heads, .. } => Some(heads[0].clone()),
+            let membership_authority = match &membership {
+                StoreMembershipStateRef::MergeConcurrent { heads, .. } => Some(
+                    super::super::membership::MembershipGrantCreationAuthority::Entry(
+                        heads[0].coord.clone(),
+                    ),
+                ),
                 StoreMembershipStateRef::Serial { .. } => None,
             };
             let ids = crate::id_provider::SequentialIdProvider::new("founder-circle");
@@ -435,7 +474,7 @@ mod tests {
                 "Household",
                 "0000000001000-0000-device-a",
                 membership,
-                membership_grant,
+                membership_authority,
                 members.clone(),
                 &ids,
                 &owner,
@@ -524,17 +563,21 @@ mod tests {
             ),
         ];
         let membership = StoreMembershipStateRef::merge_concurrent(
-            vec![super::super::membership::MembershipCoord {
-                author_pubkey: owner_pubkey.clone(),
-                author_owner_grant: MembershipGrantId(ObjectHash::digest(b"store-owner-grant")),
-                stream_id: super::super::membership::AuthorStreamId::from_bytes([1; 16]),
-                seq: 1,
-                entry_hash: ObjectHash::digest(b"store-founder"),
+            vec![super::super::membership::MembershipHeadRef {
+                coord: super::super::membership::MembershipCoord {
+                    author_pubkey: owner_pubkey.clone(),
+                    author_owner_grant: MembershipGrantId(ObjectHash::digest(b"store-owner-grant")),
+                    stream_id: super::super::membership::AuthorStreamId::from_bytes([1; 16]),
+                    seq: 1,
+                    entry_hash: ObjectHash::digest(b"store-founder"),
+                },
+                head_hash: ObjectHash::digest(b"store-founder-head"),
             }],
-            &members,
+            Vec::new(),
+            ObjectHash::digest(b"grant-bearing Store membership"),
         );
         let grant = match &membership {
-            StoreMembershipStateRef::MergeConcurrent { heads, .. } => heads[0].clone(),
+            StoreMembershipStateRef::MergeConcurrent { heads, .. } => heads[0].coord.clone(),
             StoreMembershipStateRef::Serial { .. } => unreachable!(),
         };
         let ids = crate::id_provider::SequentialIdProvider::new("access-verification");
@@ -544,7 +587,7 @@ mod tests {
             "Household",
             "0000000001000-0000-device-a",
             membership,
-            Some(grant),
+            Some(super::super::membership::MembershipGrantCreationAuthority::Entry(grant)),
             members.clone(),
             &ids,
             &owner,
@@ -594,7 +637,9 @@ mod tests {
             .verify_envelope(&creation.control, &substituted_leaf_id));
 
         let mut wrong_membership_leaf = creation.access[0].leaf.value.clone();
-        wrong_membership_leaf.store_membership = StoreMembershipStateRef::serial(None, &members);
+        let serial_membership = serial_membership(&owner, &[&peer]);
+        wrong_membership_leaf.store_membership =
+            StoreMembershipStateRef::serial(None, &serial_membership);
         wrong_membership_leaf.signature =
             keys::sign_hex(&owner, &wrong_membership_leaf.canonical_bytes()).1;
         let recipient_key =
@@ -611,8 +656,9 @@ mod tests {
         assert!(!wrong_membership_leaf.verify(&creation.control));
 
         let mut wrong_policy_control = creation.control.value.clone();
-        wrong_policy_control.store_membership = StoreMembershipStateRef::serial(None, &members);
-        wrong_policy_control.membership_grant = None;
+        wrong_policy_control.store_membership =
+            StoreMembershipStateRef::serial(None, &serial_membership);
+        wrong_policy_control.membership_authority = None;
         wrong_policy_control.signature =
             keys::sign_hex(&owner, &wrong_policy_control.canonical_bytes()).1;
         assert!(!wrong_policy_control.verify());
@@ -716,7 +762,14 @@ mod tests {
             seq: 1,
             entry_hash: ObjectHash::digest(b"store-founder"),
         };
-        let membership = StoreMembershipStateRef::merge_concurrent(vec![grant.clone()], &members);
+        let membership = StoreMembershipStateRef::merge_concurrent(
+            vec![super::super::membership::MembershipHeadRef {
+                coord: grant.clone(),
+                head_hash: ObjectHash::digest(b"multi-owner Store membership head"),
+            }],
+            Vec::new(),
+            ObjectHash::digest(b"multi-owner grant-bearing Store membership"),
+        );
         let ids = crate::id_provider::SequentialIdProvider::new("multi-owner-control");
         let creation = CircleCreation::founder(
             store_root_hash,
@@ -724,7 +777,7 @@ mod tests {
             "Household",
             "0000000001000-0000-device-a",
             membership,
-            Some(grant.clone()),
+            Some(super::super::membership::MembershipGrantCreationAuthority::Entry(grant.clone())),
             members,
             &ids,
             &author,
@@ -754,7 +807,7 @@ mod tests {
                 previous_commit_hash: None,
                 dependencies: BTreeMap::new(),
             },
-            Some(grant),
+            Some(super::super::membership::MembershipGrantCreationAuthority::Entry(grant)),
             None,
             Vec::new(),
             vec![reference.clone()],
@@ -822,7 +875,7 @@ mod tests {
                 previous_commit_hash: Some(commit.commit_hash()),
                 dependencies: BTreeMap::new(),
             },
-            control.value.membership_grant.clone(),
+            control.value.membership_authority.clone(),
             None,
             Vec::new(),
             vec![match &creation.policy_objects {

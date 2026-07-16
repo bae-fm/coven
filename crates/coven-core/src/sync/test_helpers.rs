@@ -1348,7 +1348,7 @@ impl MockSyncStorage {
                 previous_commit_hash: previous,
                 dependencies: std::collections::BTreeMap::new(),
             },
-            membership_grant,
+            membership_grant.map(crate::sync::membership::MembershipGrantCreationAuthority::Entry),
             schema_version,
             changeset_bytes,
             commit_signer,

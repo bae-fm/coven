@@ -4212,8 +4212,9 @@ async fn persisted_cycle_removal(pin_owner: bool) -> PersistedCycleRemoval {
         .expect("active Owner signs membership grant");
     append_membership_entry(&storage, &mut chain, &founder_pubkey, 3, add_member).await;
     let remove_member = chain
-        .signed_remove_member(
+        .signed_remove_member_in_stream(
             &second_owner,
+            crate::sync::membership::AuthorStreamId::from_bytes([43; 16]),
             pubkey_hex(&removed_member),
             "2026-03-01T00:03:00Z".to_string(),
         )
