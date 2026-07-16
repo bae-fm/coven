@@ -7701,6 +7701,76 @@ mod tests {
             .scoped_by("audience")
     }
 
+    fn assert_coven_schema_mutation_is_rejected(
+        name: &str,
+        tables: Vec<SyncedTable>,
+        write_policy: crate::WritePolicy,
+        migrations: Vec<Migration>,
+        mutate: impl FnOnce(&Connection),
+    ) {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join(format!("{name}.sqlite"));
+        let (database, _) = Database::open(
+            &path,
+            tables.clone(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            write_policy,
+            "schema-seed".to_string(),
+            &migrations,
+        )
+        .expect("seed database");
+        drop(database);
+
+        let conn = Connection::open(&path).expect("open database for schema mutation");
+        mutate(&conn);
+        drop(conn);
+
+        let writer_error = match Database::open(
+            &path,
+            tables.clone(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            write_policy,
+            "schema-writer".to_string(),
+            &migrations,
+        ) {
+            Ok(_) => panic!("writer must reject Coven schema mutation {name}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            writer_error.contains("Coven schema"),
+            "{name}: {writer_error}"
+        );
+
+        let reader_error = match Database::open_read_only(
+            &path,
+            tables,
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            write_policy,
+            "schema-reader".to_string(),
+            &migrations,
+        ) {
+            Ok(_) => panic!("read-only open must reject Coven schema mutation {name}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            reader_error.contains("Coven schema"),
+            "{name}: {reader_error}"
+        );
+
+        let conn = Connection::open(&path).expect("inspect rejected database");
+        let local_device_id: String = conn
+            .query_row(
+                "SELECT value FROM protocol_state WHERE key = ?1",
+                [LOCAL_DEVICE_ID_STATE_KEY],
+                |row| row.get(0),
+            )
+            .expect("local device id");
+        assert_eq!(local_device_id, "schema-seed", "{name} was rewritten");
+    }
+
     #[tokio::test]
     async fn required_store_root_hash_rejects_missing_and_malformed_state() {
         let (db, _) = Database::open(
@@ -7952,128 +8022,30 @@ mod tests {
         ];
 
         for (name, mutation) in cases {
-            let directory = tempfile::tempdir().expect("temp dir");
-            let path = directory.path().join(format!("{name}.sqlite"));
-            let (database, _) = Database::open(
-                &path,
+            assert_coven_schema_mutation_is_rejected(
+                name,
                 vec![scoped_things_table()],
-                BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
                 crate::WritePolicy::MergeConcurrent,
-                "schema-seed".to_string(),
-                &[scoped_things_migration()],
-            )
-            .expect("seed database");
-            drop(database);
-
-            let conn = Connection::open(&path).expect("open database for schema mutation");
-            conn.execute_batch(mutation).expect("mutate Coven schema");
-            drop(conn);
-
-            let writer_error = match Database::open(
-                &path,
-                vec![scoped_things_table()],
-                BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
-                crate::WritePolicy::MergeConcurrent,
-                "schema-writer".to_string(),
-                &[scoped_things_migration()],
-            ) {
-                Ok(_) => panic!("writer must reject Coven schema mutation {name}"),
-                Err(error) => error.to_string(),
-            };
-            assert!(
-                writer_error.contains("Coven schema"),
-                "{name}: {writer_error}"
+                vec![scoped_things_migration()],
+                |conn| {
+                    conn.execute_batch(mutation).expect("mutate Coven schema");
+                },
             );
-
-            let reader_error = match Database::open_read_only(
-                &path,
-                vec![scoped_things_table()],
-                BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
-                crate::WritePolicy::MergeConcurrent,
-                "schema-reader".to_string(),
-                &[scoped_things_migration()],
-            ) {
-                Ok(_) => panic!("read-only open must reject Coven schema mutation {name}"),
-                Err(error) => error.to_string(),
-            };
-            assert!(
-                reader_error.contains("Coven schema"),
-                "{name}: {reader_error}"
-            );
-
-            let conn = Connection::open(&path).expect("inspect rejected database");
-            let local_device_id: String = conn
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [LOCAL_DEVICE_ID_STATE_KEY],
-                    |row| row.get(0),
-                )
-                .expect("local device id");
-            assert_eq!(local_device_id, "schema-seed", "{name} was rewritten");
         }
     }
 
     #[test]
     fn writer_and_read_only_open_reject_unexpected_policy_specific_coven_tables() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let path = directory.path().join("unexpected-routing.sqlite");
-        let tables = vec![things_table(crate::sync::session::RowIdentity::SharedKey)];
-        let (database, _) = Database::open(
-            &path,
-            tables.clone(),
-            BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
+        assert_coven_schema_mutation_is_rejected(
+            "unexpected-routing",
+            vec![things_table(crate::sync::session::RowIdentity::SharedKey)],
             crate::WritePolicy::Serial,
-            "schema-seed".to_string(),
-            &[things_migration()],
-        )
-        .expect("seed Serial database");
-        drop(database);
-
-        let conn = Connection::open(&path).expect("open database for schema mutation");
-        crate::db::apply_coven_routing_schema(&conn).expect("add inapplicable routing tables");
-        drop(conn);
-
-        let writer_error = match Database::open(
-            &path,
-            tables.clone(),
-            BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::Serial,
-            "schema-writer".to_string(),
-            &[things_migration()],
-        ) {
-            Ok(_) => panic!("writer must reject unexpected Coven routing tables"),
-            Err(error) => error.to_string(),
-        };
-        assert!(writer_error.contains("Coven schema"), "{writer_error}");
-
-        let reader_error = match Database::open_read_only(
-            &path,
-            tables,
-            BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            crate::WritePolicy::Serial,
-            "schema-reader".to_string(),
-            &[things_migration()],
-        ) {
-            Ok(_) => panic!("read-only open must reject unexpected Coven routing tables"),
-            Err(error) => error.to_string(),
-        };
-        assert!(reader_error.contains("Coven schema"), "{reader_error}");
-
-        let conn = Connection::open(&path).expect("inspect rejected database");
-        let local_device_id: String = conn
-            .query_row(
-                "SELECT value FROM protocol_state WHERE key = ?1",
-                [LOCAL_DEVICE_ID_STATE_KEY],
-                |row| row.get(0),
-            )
-            .expect("local device id");
-        assert_eq!(local_device_id, "schema-seed");
+            vec![things_migration()],
+            |conn| {
+                crate::db::apply_coven_routing_schema(conn)
+                    .expect("add inapplicable routing tables");
+            },
+        );
     }
 
     #[test]
