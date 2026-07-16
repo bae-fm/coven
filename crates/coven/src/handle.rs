@@ -1079,13 +1079,18 @@ mod tests {
     use crate::config::{CloudProvider, Config, HomeStorage};
     use crate::encryption::EncryptionService;
     use crate::keys::{test_keyring, StoreKeys};
-    use crate::storage::cloud::cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare};
+    use crate::storage::cloud::cloudkit::{
+        CloudKitAtomicCreateBatch, CloudKitChangeToken, CloudKitOps, CloudKitRecordChange,
+        CloudKitRecordChangesContinuation, CloudKitRecordChangesPage, CloudKitRecordCreate,
+        CloudKitRecordVersion, CloudKitScope, CloudKitShare,
+    };
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::CloudHomeError;
     use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::sync_manager::{ConfigProvider, SyncError};
     use crate::sync::test_helpers::{plant_blob_row, read_test_db, temp_store_dir};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1095,6 +1100,8 @@ mod tests {
     struct TestCloudKitOps {
         store: Mutex<HashMap<TestCloudKitCoordinate, TestCloudKitObject>>,
         shares: Mutex<HashMap<String, CloudKitShare>>,
+        batches: Mutex<HashMap<String, Vec<CloudKitRecordCreate>>>,
+        next_batch: AtomicUsize,
     }
 
     /// A ready-to-use custody for tests that build a [`CovenHandle`] directly
@@ -1212,6 +1219,8 @@ mod tests {
             Self {
                 store: Mutex::new(HashMap::new()),
                 shares: Mutex::new(HashMap::new()),
+                batches: Mutex::new(HashMap::new()),
+                next_batch: AtomicUsize::new(0),
             }
         }
     }
@@ -1308,6 +1317,76 @@ mod tests {
             })
         }
 
+        fn begin_atomic_create(
+            &self,
+            _scope: &CloudKitScope,
+        ) -> Result<CloudKitAtomicCreateBatch, CloudHomeError> {
+            let batch = CloudKitAtomicCreateBatch::from_provider(format!(
+                "handle-batch-{}",
+                self.next_batch.fetch_add(1, Ordering::SeqCst)
+            ))?;
+            self.batches
+                .lock()
+                .unwrap()
+                .insert(batch.as_provider().to_string(), Vec::new());
+            Ok(batch)
+        }
+
+        fn stage_atomic_create_record(
+            &self,
+            _scope: &CloudKitScope,
+            batch: &CloudKitAtomicCreateBatch,
+            create: CloudKitRecordCreate,
+        ) -> Result<(), CloudHomeError> {
+            self.batches
+                .lock()
+                .unwrap()
+                .get_mut(batch.as_provider())
+                .ok_or_else(|| CloudHomeError::NotFound(batch.as_provider().to_string()))?
+                .push(create);
+            Ok(())
+        }
+
+        fn commit_atomic_create(
+            &self,
+            scope: &CloudKitScope,
+            batch: &CloudKitAtomicCreateBatch,
+        ) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
+            let mut batches = self.batches.lock().unwrap();
+            let creates = batches
+                .get(batch.as_provider())
+                .ok_or_else(|| CloudHomeError::NotFound(batch.as_provider().to_string()))?;
+            let mut store = self.store.lock().unwrap();
+            for create in creates {
+                if store.contains_key(&(scope.clone(), create.key.clone())) {
+                    return Err(CloudHomeError::AlreadyExists(create.key.clone()));
+                }
+            }
+            let creates = batches
+                .remove(batch.as_provider())
+                .expect("validated handle CloudKit batch disappeared");
+            let mut created = Vec::with_capacity(creates.len());
+            for create in creates {
+                store.insert((scope.clone(), create.key.clone()), (create.data, 1));
+                created.push(CloudKitRecordVersion {
+                    key: create.key,
+                    version: crate::storage::cloud::CloudHeadVersion::from_provider(
+                        "1".to_string(),
+                    )?,
+                });
+            }
+            Ok(created)
+        }
+
+        fn discard_atomic_create(
+            &self,
+            _scope: &CloudKitScope,
+            batch: &CloudKitAtomicCreateBatch,
+        ) -> Result<(), CloudHomeError> {
+            self.batches.lock().unwrap().remove(batch.as_provider());
+            Ok(())
+        }
+
         fn replace_record(
             &self,
             scope: &CloudKitScope,
@@ -1336,6 +1415,61 @@ mod tests {
                     version.to_string(),
                 )?,
             })
+        }
+
+        fn record_changes(
+            &self,
+            scope: &CloudKitScope,
+            after: Option<&CloudKitChangeToken>,
+        ) -> Result<CloudKitRecordChangesPage, CloudHomeError> {
+            if after.is_some() {
+                return Err(CloudHomeError::Transport(
+                    "handle CloudKit mock received an unexpected continuation token".to_string(),
+                ));
+            }
+            let store = self.store.lock().unwrap();
+            let changes = store
+                .iter()
+                .filter(|((record_scope, _), _)| record_scope == scope)
+                .map(|((_, key), (_, version))| {
+                    Ok(CloudKitRecordChange::Present(CloudKitRecordVersion {
+                        key: key.clone(),
+                        version: crate::storage::cloud::CloudHeadVersion::from_provider(
+                            version.to_string(),
+                        )?,
+                    }))
+                })
+                .collect::<Result<Vec<_>, CloudHomeError>>()?;
+            Ok(CloudKitRecordChangesPage {
+                changes,
+                continuation: CloudKitRecordChangesContinuation::Complete(
+                    CloudKitChangeToken::from_provider("handle-scan".to_string())?,
+                ),
+            })
+        }
+
+        fn delete_record_versions(
+            &self,
+            scope: &CloudKitScope,
+            exact_records: &[CloudKitRecordVersion],
+        ) -> Result<(), CloudHomeError> {
+            let mut store = self.store.lock().unwrap();
+            for record in exact_records {
+                let coordinate = (scope.clone(), record.key.clone());
+                let (_, version) = store
+                    .get(&coordinate)
+                    .ok_or_else(|| CloudHomeError::NotFound(record.key.clone()))?;
+                if version.to_string() != record.version.as_provider() {
+                    return Err(CloudHomeError::Transport(format!(
+                        "handle CloudKit record {:?} changed before exact deletion",
+                        record.key
+                    )));
+                }
+            }
+            for record in exact_records {
+                store.remove(&(scope.clone(), record.key.clone()));
+            }
+            Ok(())
         }
 
         fn grant_share(&self, member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError> {

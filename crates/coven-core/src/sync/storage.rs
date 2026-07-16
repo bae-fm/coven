@@ -630,12 +630,20 @@ pub(crate) fn validate_blob_copy_locator(
 pub enum StorageError {
     #[error("storage operation failed: {0}")]
     Storage(String),
+    #[error("{operation}; storage cleanup failed: {cleanup}")]
+    CleanupFailed {
+        #[source]
+        operation: Box<StorageError>,
+        cleanup: Box<StorageError>,
+    },
     #[error("storage configuration is invalid: {0}")]
     Configuration(String),
     #[error("storage object parse failed: {0}")]
     Parse(String),
     #[error("object not found: {0}")]
     NotFound(String),
+    #[error("storage object already exists: {0}")]
+    AlreadyExists(String),
     #[error("decryption failed: {0}")]
     Decryption(String),
     #[error("remote blob content is invalid: {0}")]
@@ -652,10 +660,19 @@ impl From<crate::storage::cloud::CloudHomeError> for StorageError {
     fn from(e: crate::storage::cloud::CloudHomeError) -> Self {
         match e {
             crate::storage::cloud::CloudHomeError::NotFound(key) => StorageError::NotFound(key),
+            crate::storage::cloud::CloudHomeError::AlreadyExists(key) => {
+                StorageError::AlreadyExists(key)
+            }
             crate::storage::cloud::CloudHomeError::Configuration(msg) => {
                 StorageError::Configuration(msg)
             }
             crate::storage::cloud::CloudHomeError::Transport(msg) => StorageError::Storage(msg),
+            crate::storage::cloud::CloudHomeError::CleanupFailed { operation, cleanup } => {
+                StorageError::CleanupFailed {
+                    operation: Box::new(StorageError::from(*operation)),
+                    cleanup: Box::new(StorageError::from(*cleanup)),
+                }
+            }
             crate::storage::cloud::CloudHomeError::Io(io_err) => {
                 StorageError::Storage(format!("I/O error: {io_err}"))
             }
@@ -665,11 +682,22 @@ impl From<crate::storage::cloud::CloudHomeError> for StorageError {
 
 impl StorageError {
     pub fn is_transport(&self) -> bool {
-        matches!(self, Self::Storage(_))
+        match self {
+            Self::Storage(_) => true,
+            Self::CleanupFailed { operation, .. } => operation.is_transport(),
+            _ => false,
+        }
     }
 
     pub(crate) fn definitely_uncommitted(&self) -> bool {
         !self.is_transport()
+    }
+
+    pub fn cleanup_causes(&self) -> Option<(&StorageError, &StorageError)> {
+        match self {
+            Self::CleanupFailed { operation, cleanup } => Some((operation, cleanup)),
+            _ => None,
+        }
     }
 }
 

@@ -8,17 +8,19 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use std::collections::HashMap;
 
 use super::http::{self, ensure_ok, exists_from_response, NotFound};
 use super::key_encoding::{decode_listed_key, encode_key};
 use super::oauth_rest::{
-    rest_delete, rest_list, rest_read, rest_read_range, rest_read_to_file, ListPage, OAuthRestHome,
+    rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome, PageTokenTracker,
 };
 use super::oauth_session::OAuthSession;
-use super::resumable::RangePutSink;
+use super::resumable::{RangePutSink, RangePutUploader};
 use super::{
-    sharing, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, RevokeOutcome,
+    sharing, AppendedListing, AppendedObject, BlobBody, BoxPartSink, CloudAccessOutcome,
+    CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo, ImmutableCopyStorage,
+    ListingCoverage, RevokeOutcome, UploadProgress,
 };
 use crate::clock::ClockRef;
 use crate::keys::StoreKeys;
@@ -30,7 +32,13 @@ const GRAPH_API: &str = "https://graph.microsoft.com/v1.0";
 pub(crate) struct OneDriveCloudHome {
     drive_id: String,
     folder_id: String,
+    graph_api: String,
     session: OAuthSession,
+}
+
+enum UploadSessionCompletion {
+    Automatic,
+    DeferredPersonal,
 }
 
 impl OneDriveCloudHome {
@@ -46,8 +54,15 @@ impl OneDriveCloudHome {
         Ok(Self {
             drive_id,
             folder_id,
+            graph_api: GRAPH_API.to_string(),
             session: OAuthSession::new(tokens, key_service, clock, config, "OneDrive"),
         })
+    }
+
+    #[cfg(test)]
+    fn with_graph_api(mut self, graph_api: String) -> Self {
+        self.graph_api = graph_api;
+        self
     }
 
     pub(crate) fn oauth_config() -> Result<OAuthConfig, crate::oauth::OAuthClientCredsError> {
@@ -77,7 +92,7 @@ impl OneDriveCloudHome {
     fn item_path_url(&self, key: &str) -> String {
         format!(
             "{}/drives/{}/items/{}:/{}:",
-            GRAPH_API,
+            self.graph_api,
             self.drive_id,
             self.folder_id,
             encode_key(key)
@@ -88,9 +103,232 @@ impl OneDriveCloudHome {
     fn children_url(&self) -> String {
         format!(
             "{}/drives/{}/items/{}/children",
-            GRAPH_API, self.drive_id, self.folder_id
+            self.graph_api, self.drive_id, self.folder_id
         )
     }
+
+    fn item_id_url(&self, item_id: &str) -> String {
+        format!(
+            "{}/drives/{}/items/{item_id}",
+            self.graph_api, self.drive_id
+        )
+    }
+
+    async fn create_upload_session(
+        &self,
+        key: &str,
+        conflict_behavior: &str,
+        completion: UploadSessionCompletion,
+    ) -> Result<String, CloudHomeError> {
+        let session_url = format!("{}/createUploadSession", self.item_path_url(key));
+        let body = serde_json::json!({
+            "item": { "@microsoft.graph.conflictBehavior": conflict_behavior },
+            "deferCommit": matches!(completion, UploadSessionCompletion::DeferredPersonal),
+        });
+        let response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .post(&session_url)
+                    .bearer_auth(token)
+                    .json(&body)
+            })
+            .await?;
+        let status = response.status();
+        let body = http::body_text(response).await;
+        if !status.is_success() {
+            return Err(classify_write_error(status, &body, key));
+        }
+        let json: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+            CloudHomeError::Transport(format!("parse upload session {key}: {error}"))
+        })?;
+        json["uploadUrl"]
+            .as_str()
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                CloudHomeError::Transport(format!("upload session {key}: no uploadUrl returned"))
+            })
+    }
+
+    async fn resolve_item_by_path(
+        &self,
+        key: &str,
+    ) -> Result<Option<AppendedObject>, CloudHomeError> {
+        let response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .get(self.item_path_url(key))
+                    .bearer_auth(token)
+                    .query(&[("$select", "id")])
+            })
+            .await?;
+        match ensure_ok(
+            response,
+            "resolve committed OneDrive item",
+            NotFound::Status,
+        )
+        .await
+        {
+            Ok(response) => {
+                let body = http::ok_bytes(response, "read committed OneDrive item").await?;
+                parse_onedrive_appended_object(key, &body).map(Some)
+            }
+            Err(CloudHomeError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn commit_deferred_append(
+        &self,
+        key: &str,
+        upload_url: &str,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        let body = serde_json::json!({
+            "name": encode_key(key),
+            "@microsoft.graph.conflictBehavior": "fail",
+            "@microsoft.graph.sourceUrl": upload_url,
+        });
+        let response = match self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .put(self.item_path_url(key))
+                    .bearer_auth(token)
+                    .json(&body)
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(operation) => {
+                return match self.resolve_item_by_path(key).await {
+                    Ok(Some(object)) => Ok(object),
+                    Ok(None) => Err(operation),
+                    Err(cleanup) => Err(CloudHomeError::CleanupFailed {
+                        operation: Box::new(operation),
+                        cleanup: Box::new(cleanup),
+                    }),
+                }
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_write_error(
+                status,
+                &http::body_text(response).await,
+                key,
+            ));
+        }
+        let response_body = match response.bytes().await {
+            Ok(body) => body,
+            Err(operation) => {
+                let operation = CloudHomeError::Transport(format!(
+                    "commit append {key}: read response: {operation}"
+                ));
+                return match self.resolve_item_by_path(key).await {
+                    Ok(Some(object)) => Ok(object),
+                    Ok(None) => Err(operation),
+                    Err(cleanup) => Err(CloudHomeError::CleanupFailed {
+                        operation: Box::new(operation),
+                        cleanup: Box::new(cleanup),
+                    }),
+                };
+            }
+        };
+        parse_onedrive_appended_object(key, &response_body)
+    }
+
+    async fn list_appended_objects(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<AppendedObject>, CloudHomeError> {
+        let mut next = Some(format!(
+            "{}/drives/{}/items/{}/delta?$select=id,name,parentReference,deleted,file",
+            self.graph_api, self.drive_id, self.folder_id
+        ));
+        let mut page_tokens = PageTokenTracker::new("OneDrive delta listing");
+        let mut objects = HashMap::new();
+        while let Some(url) = next.take() {
+            let response = self
+                .session
+                .api_call(|token| self.client().get(&url).bearer_auth(token))
+                .await?;
+            let response = ensure_ok(response, "list OneDrive delta", NotFound::Status).await?;
+            let page: serde_json::Value = http::ok_json(response, "parse OneDrive delta").await?;
+            apply_onedrive_delta_page(&page, &self.folder_id, prefix, &mut objects)?;
+            let next_link = page["@odata.nextLink"].as_str();
+            let delta_link = page["@odata.deltaLink"].as_str();
+            match (next_link, delta_link) {
+                (Some(next_link), None) if !next_link.is_empty() => {
+                    next = Some(page_tokens.record(next_link)?)
+                }
+                (None, Some(delta_link)) if !delta_link.is_empty() => break,
+                _ => return Err(CloudHomeError::Transport(
+                    "OneDrive delta page must contain exactly one non-empty nextLink or deltaLink"
+                        .to_string(),
+                )),
+            }
+        }
+        let mut objects: Vec<_> = objects.into_values().collect();
+        objects.sort_by(|left, right| {
+            left.logical_key()
+                .cmp(right.logical_key())
+                .then_with(|| left.opaque_provider_id().cmp(right.opaque_provider_id()))
+        });
+        Ok(objects)
+    }
+}
+
+fn apply_onedrive_delta_page(
+    page: &serde_json::Value,
+    folder_id: &str,
+    prefix: &str,
+    objects: &mut HashMap<String, AppendedObject>,
+) -> Result<(), CloudHomeError> {
+    let items = page["value"].as_array().ok_or_else(|| {
+        CloudHomeError::Transport("OneDrive delta page omitted value".to_string())
+    })?;
+    for item in items {
+        let id = item["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                CloudHomeError::Transport("OneDrive delta item omitted id".to_string())
+            })?;
+        if item.get("deleted").is_some() {
+            objects.remove(id);
+            continue;
+        }
+        if !item["file"].is_object() {
+            continue;
+        }
+        let name = item["name"].as_str().ok_or_else(|| {
+            CloudHomeError::Transport(format!("OneDrive delta file {id} omitted name"))
+        })?;
+        let parent_id = item["parentReference"]["id"].as_str().ok_or_else(|| {
+            CloudHomeError::Transport(format!(
+                "OneDrive delta file {id} omitted parentReference.id"
+            ))
+        })?;
+        if parent_id != folder_id {
+            objects.remove(id);
+            continue;
+        }
+        let Some(logical_key) = decode_listed_key("OneDrive", name) else {
+            objects.remove(id);
+            continue;
+        };
+        if logical_key.starts_with(prefix) {
+            objects.insert(
+                id.to_string(),
+                AppendedObject::from_provider(logical_key, id.to_string())?,
+            );
+        } else {
+            objects.remove(id);
+        }
+    }
+    Ok(())
 }
 
 /// `error.code` from a Microsoft Graph error body (e.g. `"quotaLimitReached"`),
@@ -105,13 +343,46 @@ fn parse_onedrive_error_code(body: &str) -> Option<String> {
 /// code gets a message naming the provider and the recovery step; everything else
 /// keeps the raw HTTP status + body for debugging.
 fn classify_write_error(status: reqwest::StatusCode, body: &str, key: &str) -> CloudHomeError {
-    if parse_onedrive_error_code(body).as_deref() == Some("quotaLimitReached") {
+    let code = parse_onedrive_error_code(body);
+    if code.as_deref() == Some("nameAlreadyExists") {
+        return CloudHomeError::AlreadyExists(key.to_string());
+    }
+    if code.as_deref() == Some("quotaLimitReached") {
         return CloudHomeError::Transport(
             "Your OneDrive storage is full. Free up space at onedrive.live.com to keep syncing."
                 .to_string(),
         );
     }
     CloudHomeError::Transport(format!("write {key} (HTTP {status}): {body}"))
+}
+
+fn combine_onedrive_cleanup_failure(
+    operation: CloudHomeError,
+    cleanup: Result<(), CloudHomeError>,
+) -> CloudHomeError {
+    match cleanup {
+        Ok(()) => operation,
+        Err(cleanup) => CloudHomeError::CleanupFailed {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup),
+        },
+    }
+}
+
+fn parse_onedrive_appended_object(
+    key: &str,
+    body: &[u8],
+) -> Result<AppendedObject, CloudHomeError> {
+    let json: serde_json::Value = serde_json::from_slice(body).map_err(|error| {
+        CloudHomeError::Transport(format!("append {key}: parse response: {error}"))
+    })?;
+    let id = json["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            CloudHomeError::Transport(format!("append {key}: response missing item id"))
+        })?;
+    AppendedObject::from_provider(key.to_string(), id.to_string())
 }
 
 /// Files at or below this size go up as a single PUT; larger files use a resumable
@@ -193,8 +464,7 @@ impl OAuthRestHome for OneDriveCloudHome {
     }
 }
 
-#[async_trait]
-impl CloudHome for OneDriveCloudHome {
+impl OneDriveCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let body = Bytes::from(data);
         let url = format!("{}/content", self.item_path_url(key));
@@ -224,32 +494,9 @@ impl CloudHome for OneDriveCloudHome {
         key: &str,
         total_len: u64,
     ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        let session_url = format!("{}/createUploadSession", self.item_path_url(key));
-        let body = serde_json::json!({
-            "item": { "@microsoft.graph.conflictBehavior": "replace" }
-        });
-        let resp = self
-            .session
-            .api_call(|token| {
-                self.client()
-                    .post(&session_url)
-                    .bearer_auth(token)
-                    .json(&body)
-            })
+        let upload_url = self
+            .create_upload_session(key, "replace", UploadSessionCompletion::Automatic)
             .await?;
-        let status = resp.status();
-        let resp_body = http::body_text(resp).await;
-        if !status.is_success() {
-            return Err(classify_write_error(status, &resp_body, key));
-        }
-        let json: serde_json::Value = serde_json::from_str(&resp_body)
-            .map_err(|e| CloudHomeError::Transport(format!("parse upload session {key}: {e}")))?;
-        let upload_url = json["uploadUrl"]
-            .as_str()
-            .ok_or_else(|| {
-                CloudHomeError::Transport(format!("upload session {key}: no uploadUrl returned"))
-            })?
-            .to_string();
         let key_owned = key.to_string();
         let classify =
             Box::new(move |status, body: &str| classify_write_error(status, body, &key_owned));
@@ -269,6 +516,108 @@ impl CloudHome for OneDriveCloudHome {
         ONEDRIVE_SIMPLE_PUT_MAX as u64
     }
 
+    async fn append_object(
+        &self,
+        full_logical_key: &str,
+        mut body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        let upload_url = self
+            .create_upload_session(
+                full_logical_key,
+                "fail",
+                UploadSessionCompletion::DeferredPersonal,
+            )
+            .await?;
+        let key = full_logical_key.to_string();
+        let classify =
+            Box::new(move |status, response: &str| classify_write_error(status, response, &key));
+        let mut uploader = RangePutUploader::new(
+            self.client().clone(),
+            upload_url.clone(),
+            202,
+            body.len(),
+            ONEDRIVE_CHUNK_SIZE,
+            full_logical_key.to_string(),
+            classify,
+        );
+        let total = body.len();
+        let mut offset = 0;
+        loop {
+            let part = match body.next_part(uploader.part_size()).await {
+                Ok(Some(part)) => part,
+                Ok(None) if offset == total => break,
+                Ok(None) => {
+                    let operation = CloudHomeError::Transport(format!(
+                        "append {full_logical_key}: upload body ended before the final part"
+                    ));
+                    let cleanup = uploader.abort().await;
+                    return Err(combine_onedrive_cleanup_failure(operation, cleanup));
+                }
+                Err(operation) => {
+                    let cleanup = uploader.abort().await;
+                    return Err(combine_onedrive_cleanup_failure(operation, cleanup));
+                }
+            };
+            let length = part.len() as u64;
+            let is_last = offset + length >= total;
+            let completion = uploader.send_deferred_part(part, offset, is_last).await?;
+            offset += length;
+            progress(offset);
+            if let Some(response) = completion {
+                let completion = response.bytes().await.map_err(|error| {
+                    CloudHomeError::Transport(format!(
+                        "append {full_logical_key}: read unexpected completion: {error}"
+                    ))
+                })?;
+                let object = parse_onedrive_appended_object(full_logical_key, &completion)?;
+                let operation = CloudHomeError::Transport(format!(
+                    "append {full_logical_key}: deferred upload published before explicit commit"
+                ));
+                let cleanup = self.delete_appended(&object).await;
+                return Err(combine_onedrive_cleanup_failure(operation, cleanup));
+            }
+        }
+        let result = self
+            .commit_deferred_append(full_logical_key, &upload_url)
+            .await;
+        match result {
+            Ok(object) => {
+                uploader.mark_completed();
+                Ok(object)
+            }
+            Err(operation) => {
+                let cleanup = uploader.abort().await;
+                Err(combine_onedrive_cleanup_failure(operation, cleanup))
+            }
+        }
+    }
+
+    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        Ok(AppendedListing {
+            objects: self.list_appended_objects(prefix).await?,
+            coverage: ListingCoverage::CompleteAtScan,
+        })
+    }
+
+    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        let response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .get(format!(
+                        "{}/content",
+                        self.item_id_url(object.opaque_provider_id())
+                    ))
+                    .bearer_auth(token)
+            })
+            .await?;
+        let response = ensure_ok(response, "read exact OneDrive item", NotFound::Status).await?;
+        Ok(http::ok_bytes(response, "read exact OneDrive body")
+            .await?
+            .to_vec())
+    }
+
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         rest_read(self, key).await
     }
@@ -278,7 +627,40 @@ impl CloudHome for OneDriveCloudHome {
         object: &super::AppendedObject,
         destination: &std::path::Path,
     ) -> Result<(), super::CloudFileReadError> {
-        rest_read_to_file(self, object.logical_key(), destination).await
+        let response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .get(format!(
+                        "{}/content",
+                        self.item_id_url(object.opaque_provider_id())
+                    ))
+                    .bearer_auth(token)
+            })
+            .await?;
+        let response = ensure_ok(response, "read exact OneDrive item", NotFound::Status).await?;
+        super::oauth_rest::response_to_file(response, destination, "read exact OneDrive item body")
+            .await
+    }
+
+    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        let response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .delete(self.item_id_url(object.opaque_provider_id()))
+                    .bearer_auth(token)
+            })
+            .await?;
+        let status = response.status();
+        if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+            Ok(())
+        } else {
+            Err(CloudHomeError::Transport(format!(
+                "delete exact OneDrive item (HTTP {status}): {}",
+                http::body_text(response).await
+            )))
+        }
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
@@ -309,7 +691,7 @@ impl CloudHome for OneDriveCloudHome {
         let email = desired.require_provider_email("OneDrive")?.to_string();
         let perms_url = format!(
             "{}/drives/{}/items/{}/permissions",
-            GRAPH_API, self.drive_id, self.folder_id
+            self.graph_api, self.drive_id, self.folder_id
         );
         let email_of = |permission: &serde_json::Value| {
             permission["grantedToV2"]["user"]["email"]
@@ -358,7 +740,7 @@ impl CloudHome for OneDriveCloudHome {
                 }
                 let url = format!(
                     "{}/drives/{}/items/{}/invite",
-                    GRAPH_API, self.drive_id, self.folder_id
+                    self.graph_api, self.drive_id, self.folder_id
                 );
                 let invite = serde_json::json!({
                     "recipients": [{"email": email}],
@@ -411,10 +793,85 @@ impl CloudHome for OneDriveCloudHome {
     }
 }
 
+#[async_trait]
+impl CloudHome for OneDriveCloudHome {
+    fn immutable_copy_storage(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn ImmutableCopyStorage>> {
+        Some(self)
+    }
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        OneDriveCloudHome::put_object(self, key, data).await
+    }
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        total_len: u64,
+    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+        OneDriveCloudHome::open_multipart(self, key, total_len).await
+    }
+    fn multipart_threshold(&self) -> u64 {
+        OneDriveCloudHome::multipart_threshold(self)
+    }
+    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        OneDriveCloudHome::read(self, key).await
+    }
+    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
+        OneDriveCloudHome::read_range(self, key, start, end).await
+    }
+    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+        OneDriveCloudHome::list(self, prefix).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+        OneDriveCloudHome::delete(self, key).await
+    }
+    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+        OneDriveCloudHome::exists(self, key).await
+    }
+    async fn set_access(
+        &self,
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
+        OneDriveCloudHome::set_access(self, desired).await
+    }
+}
+
+#[async_trait]
+impl ImmutableCopyStorage for OneDriveCloudHome {
+    async fn append_object(
+        &self,
+        key: &str,
+        body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        OneDriveCloudHome::append_object(self, key, body, progress).await
+    }
+    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        OneDriveCloudHome::list_appended(self, prefix).await
+    }
+    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        OneDriveCloudHome::read_appended(self, object).await
+    }
+    async fn read_appended_to_file(
+        &self,
+        object: &AppendedObject,
+        destination: &std::path::Path,
+    ) -> Result<(), super::CloudFileReadError> {
+        OneDriveCloudHome::read_appended_to_file(self, object, destination).await
+    }
+    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        OneDriveCloudHome::delete_appended(self, object).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use axum::body::{to_bytes, Body};
+    use axum::extract::State;
+    use axum::http::{Request, Response, StatusCode};
+    use axum::Router;
+    use std::sync::{Arc, Mutex};
 
     fn home() -> OneDriveCloudHome {
         crate::oauth::install_test_client_creds();
@@ -430,6 +887,175 @@ mod tests {
             Arc::new(crate::clock::SystemClock),
         )
         .expect("build test OneDrive home")
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordedRequest {
+        method: String,
+        path: String,
+        body: Vec<u8>,
+    }
+
+    #[derive(Clone)]
+    struct AppendEndpointState {
+        endpoint: String,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    }
+
+    async fn append_endpoint(
+        State(state): State<AppendEndpointState>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        let method = request.method().to_string();
+        let path = request.uri().path().to_string();
+        let body = to_bytes(request.into_body(), usize::MAX)
+            .await
+            .expect("read request body")
+            .to_vec();
+        state
+            .requests
+            .lock()
+            .expect("lock requests")
+            .push(RecordedRequest {
+                method: method.clone(),
+                path: path.clone(),
+                body,
+            });
+
+        if method == "POST" && path.ends_with("/createUploadSession") {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"uploadUrl":"{}/upload/session"}}"#,
+                    state.endpoint
+                )))
+                .expect("build session response");
+        }
+        if method == "PUT" && path == "/upload/session" {
+            return Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"nextExpectedRanges":[]}"#))
+                .expect("build deferred upload response");
+        }
+        if method == "PUT" && path.contains("/items/folder456:/") {
+            return Response::builder()
+                .status(StatusCode::CREATED)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"id":"item-1"}"#))
+                .expect("build commit response");
+        }
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from(format!("unexpected request: {method} {path}")))
+            .expect("build unexpected response")
+    }
+
+    async fn append_test_home() -> (
+        OneDriveCloudHome,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind OneDrive endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let state = AppendEndpointState {
+            endpoint: endpoint.clone(),
+            requests: requests.clone(),
+        };
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(append_endpoint).with_state(state),
+            )
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .expect("OneDrive endpoint failed");
+        });
+        (home().with_graph_api(endpoint), requests, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn append_defers_publication_then_commits_the_exact_destination() {
+        let (home, requests, shutdown) = append_test_home().await;
+        let object = home
+            .append_object(
+                "protocol/copy",
+                BlobBody::from_bytes(b"copy-bytes".to_vec()),
+                &super::super::no_progress(),
+            )
+            .await
+            .expect("append OneDrive copy");
+        assert_eq!(object.opaque_provider_id(), "item-1");
+
+        let requests = requests.lock().expect("lock requests");
+        assert_eq!(requests.len(), 3, "{requests:?}");
+        let session: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("parse session body");
+        assert_eq!(requests[0].method, "POST");
+        assert!(requests[0].path.ends_with("/createUploadSession"));
+        assert_eq!(session["item"]["@microsoft.graph.conflictBehavior"], "fail");
+        assert_eq!(session["deferCommit"], true);
+        assert_eq!(requests[1].path, "/upload/session");
+        assert_eq!(requests[1].body, b"copy-bytes");
+        let commit: serde_json::Value =
+            serde_json::from_slice(&requests[2].body).expect("parse commit body");
+        assert_eq!(requests[2].method, "PUT");
+        assert_eq!(commit["name"], encode_key("protocol/copy"));
+        assert_eq!(commit["@microsoft.graph.conflictBehavior"], "fail");
+        assert!(commit["@microsoft.graph.sourceUrl"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/upload/session")));
+        let _ = shutdown.send(());
+    }
+
+    async fn repeated_delta_link_endpoint(request: Request<Body>) -> Response<Body> {
+        let authority = request
+            .headers()
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+            .expect("host header");
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"value":[],"@odata.nextLink":"http://{authority}/same"}}"#
+            )))
+            .expect("build repeated delta link response")
+    }
+
+    #[tokio::test]
+    async fn authoritative_listing_rejects_a_repeated_next_link() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind OneDrive endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(repeated_delta_link_endpoint),
+            )
+            .await
+            .expect("OneDrive endpoint failed");
+        });
+        let home = home().with_graph_api(endpoint);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            home.list_appended("protocol/"),
+        )
+        .await
+        .expect("listing must terminate on a repeated next link")
+        .expect_err("repeated next link must refuse authoritative coverage");
+
+        assert!(result.to_string().contains("repeated"), "{result}");
+        server.abort();
     }
 
     #[test]
@@ -501,5 +1127,44 @@ mod tests {
         assert!(msg.contains("HTTP 404"), "{msg}");
         assert!(msg.contains("objects/dev1/1.enc"), "{msg}");
         assert!(!msg.contains("storage is full"), "{msg}");
+    }
+
+    #[test]
+    fn delta_pages_preserve_duplicate_names_by_exact_item_id_and_apply_deletes() {
+        let mut objects = HashMap::new();
+        let page = serde_json::json!({"value":[
+            {"id":"item-a", "name":encode_key("protocol/copy"), "parentReference":{"id":"folder456"}, "file":{}},
+            {"id":"item-b", "name":encode_key("protocol/copy"), "parentReference":{"id":"folder456"}, "file":{}}
+        ]});
+        apply_onedrive_delta_page(&page, "folder456", "protocol/", &mut objects)
+            .expect("apply baseline delta");
+        assert_eq!(objects.len(), 2);
+
+        let changes = serde_json::json!({"value":[
+            {"id":"item-a", "deleted":{}},
+            {"id":"item-b", "name":encode_key("elsewhere/copy"), "parentReference":{"id":"folder456"}, "file":{}}
+        ]});
+        apply_onedrive_delta_page(&changes, "folder456", "protocol/", &mut objects)
+            .expect("apply terminal delta");
+        assert!(objects.is_empty());
+    }
+
+    #[test]
+    fn delta_page_refuses_file_without_exact_item_id() {
+        let page = serde_json::json!({"value":[
+            {"name":encode_key("protocol/copy"), "parentReference":{"id":"folder456"}, "file":{}}
+        ]});
+        let error = apply_onedrive_delta_page(&page, "folder456", "protocol/", &mut HashMap::new())
+            .expect_err("missing id must refuse authoritative coverage");
+        assert!(error.to_string().contains("omitted id"), "{error}");
+    }
+
+    #[test]
+    fn appended_response_requires_and_preserves_item_id() {
+        let object = parse_onedrive_appended_object("protocol/copy", br#"{"id":"item-1"}"#)
+            .expect("parse append response");
+        assert_eq!(object.logical_key(), "protocol/copy");
+        assert_eq!(object.opaque_provider_id(), "item-1");
+        assert!(parse_onedrive_appended_object("protocol/copy", b"{}").is_err());
     }
 }

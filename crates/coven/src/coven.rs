@@ -1057,7 +1057,8 @@ mod tests {
     use crate::keys::test_keyring;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
-        BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+        AppendedListing, AppendedObject, BlobBody, BoxPartSink, CloudAccessOutcome,
+        CloudAccessState, CloudHome, CloudHomeError, ImmutableCopyStorage, UploadProgress,
     };
     use crate::store_dir::StoreDir;
     use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
@@ -3034,6 +3035,10 @@ mod tests {
 
     #[async_trait]
     impl CloudHome for GateCloudHome {
+        fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn ImmutableCopyStorage>> {
+            Some(self)
+        }
+
         async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
             self.gate().await;
             self.inner.put_object(key, data).await
@@ -3088,6 +3093,43 @@ mod tests {
         ) -> Result<CloudAccessOutcome, CloudHomeError> {
             self.gate().await;
             self.inner.set_access(desired).await
+        }
+    }
+
+    #[async_trait]
+    impl ImmutableCopyStorage for GateCloudHome {
+        async fn append_object(
+            &self,
+            key: &str,
+            body: BlobBody,
+            progress: &UploadProgress<'_>,
+        ) -> Result<AppendedObject, CloudHomeError> {
+            self.gate().await;
+            self.inner.append_object(key, body, progress).await
+        }
+
+        async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+            self.gate().await;
+            self.inner.list_appended(prefix).await
+        }
+
+        async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+            self.gate().await;
+            self.inner.read_appended(object).await
+        }
+
+        async fn read_appended_to_file(
+            &self,
+            object: &AppendedObject,
+            destination: &std::path::Path,
+        ) -> Result<(), crate::storage::cloud::CloudFileReadError> {
+            self.gate().await;
+            self.inner.read_appended_to_file(object, destination).await
+        }
+
+        async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+            self.gate().await;
+            self.inner.delete_appended(object).await
         }
     }
 

@@ -228,6 +228,7 @@ pub(crate) mod storage {
                         access_key,
                         secret_key,
                         config.cloud_home.s3_key_prefix.clone(),
+                        config.cloud_home.s3_immutable_copies,
                     )
                     .await?;
                     Ok(Box::new(s3))
@@ -337,7 +338,11 @@ pub(crate) mod storage {
             use crate::clock::FixedClock;
             use crate::config::{CloudProvider, Config, HomeStorage};
             use crate::keys::StoreKeys;
-            use crate::storage::cloud::cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare};
+            use crate::storage::cloud::cloudkit::{
+                CloudKitAtomicCreateBatch, CloudKitChangeToken, CloudKitOps,
+                CloudKitRecordChangesPage, CloudKitRecordCreate, CloudKitRecordVersion,
+                CloudKitScope, CloudKitShare,
+            };
             use crate::store_dir::StoreDir;
             use std::sync::Mutex;
 
@@ -424,6 +429,48 @@ pub(crate) mod storage {
                     crate::storage::cloud::CloudVersionedHead,
                     crate::storage::cloud::CloudHeadReplaceError,
                 > {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn begin_atomic_create(
+                    &self,
+                    _scope: &CloudKitScope,
+                ) -> Result<CloudKitAtomicCreateBatch, CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn stage_atomic_create_record(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _batch: &CloudKitAtomicCreateBatch,
+                    _record: CloudKitRecordCreate,
+                ) -> Result<(), CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn commit_atomic_create(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _batch: &CloudKitAtomicCreateBatch,
+                ) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn discard_atomic_create(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _batch: &CloudKitAtomicCreateBatch,
+                ) -> Result<(), CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn record_changes(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _after: Option<&CloudKitChangeToken>,
+                ) -> Result<CloudKitRecordChangesPage, CloudHomeError> {
+                    unimplemented!("not exercised by these tests")
+                }
+                fn delete_record_versions(
+                    &self,
+                    _scope: &CloudKitScope,
+                    _records: &[CloudKitRecordVersion],
+                ) -> Result<(), CloudHomeError> {
                     unimplemented!("not exercised by these tests")
                 }
                 fn grant_share(
@@ -587,7 +634,8 @@ pub use coven_core::{BlobDecl, Migration, MigrationStep, RowIdentity, SyncedTabl
 
 // Config.
 pub use coven_core::{
-    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3Serial, HomeStorage, WritePolicy,
+    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ImmutableCopies, CustomS3Serial,
+    HomeStorage, WritePolicy,
 };
 
 // Blob descriptors, cache error, the host-implemented transition observer.
@@ -649,11 +697,12 @@ pub use coven_core::CloudCipher;
 // thread-safety floor.
 pub use coven_core::storage::cloud::{
     write_cloud_object_stream, AppendedListing, AppendedObject, CloudFileReadError,
-    CloudObjectStream, ListingCoverage,
+    CloudObjectStream, ImmutableCopyStorage, ListingCoverage,
 };
 pub use coven_core::{
-    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, PartSink, UploadProgress,
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHeadCreateError,
+    CloudHeadReplaceError, CloudHeadVersion, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    CloudVersionedHead, PartSink, UploadProgress,
 };
 
 // Sync-status surface a host renders from `CovenHandle::subscribe_sync_status`:
@@ -690,7 +739,11 @@ pub use keys::entry_for_test;
 pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthClientCredsConflict, OAuthTokens};
 pub use storage::cloud::setup::generate_restore_code;
 pub use storage::cloud::{
-    cloudkit::{CloudKitOps, CloudKitScope, CloudKitShare},
+    cloudkit::{
+        CloudKitAtomicCreateBatch, CloudKitChangeToken, CloudKitOps, CloudKitRecordChange,
+        CloudKitRecordChangesContinuation, CloudKitRecordChangesPage, CloudKitRecordCreate,
+        CloudKitRecordVersion, CloudKitScope, CloudKitShare,
+    },
     create_cloud_home,
     s3::S3CloudHome,
 };

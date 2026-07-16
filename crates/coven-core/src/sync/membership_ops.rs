@@ -2554,10 +2554,10 @@ mod tests {
     use super::*;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
-        BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHeadCreateError,
-        CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome, CloudHomeError,
-        CloudHomeJoinInfo, CloudVersionedHead, RevokeOutcome, SequentialCopyIdGenerator,
-        UploadProgress,
+        BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError,
+        CloudHeadCreateError, CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome,
+        CloudHomeError, CloudHomeJoinInfo, CloudVersionedHead, ImmutableCopyStorage, RevokeOutcome,
+        SequentialCopyIdGenerator, UploadProgress,
     };
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::hlc::Hlc;
@@ -3452,6 +3452,10 @@ mod tests {
 
     #[async_trait]
     impl CloudHome for SerialMutationHome {
+        fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn ImmutableCopyStorage>> {
+            Some(self)
+        }
+
         async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
             if key.starts_with("keys/")
                 && self.fail_next_wrapped_write.swap(false, Ordering::SeqCst)
@@ -3473,36 +3477,6 @@ mod tests {
 
         fn multipart_threshold(&self) -> u64 {
             self.inner.multipart_threshold()
-        }
-
-        async fn append_object(
-            &self,
-            key: &str,
-            body: BlobBody,
-            progress: &UploadProgress<'_>,
-        ) -> Result<crate::storage::cloud::AppendedObject, CloudHomeError> {
-            self.inner.append_object(key, body, progress).await
-        }
-
-        async fn list_appended(
-            &self,
-            prefix: &str,
-        ) -> Result<crate::storage::cloud::AppendedListing, CloudHomeError> {
-            self.inner.list_appended(prefix).await
-        }
-
-        async fn read_appended(
-            &self,
-            object: &crate::storage::cloud::AppendedObject,
-        ) -> Result<Vec<u8>, CloudHomeError> {
-            self.inner.read_appended(object).await
-        }
-
-        async fn delete_appended(
-            &self,
-            object: &crate::storage::cloud::AppendedObject,
-        ) -> Result<(), CloudHomeError> {
-            self.inner.delete_appended(object).await
         }
 
         async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
@@ -3551,6 +3525,47 @@ mod tests {
                     Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
                 }
             }
+        }
+    }
+
+    #[async_trait]
+    impl ImmutableCopyStorage for SerialMutationHome {
+        async fn append_object(
+            &self,
+            key: &str,
+            body: BlobBody,
+            progress: &UploadProgress<'_>,
+        ) -> Result<crate::storage::cloud::AppendedObject, CloudHomeError> {
+            self.inner.append_object(key, body, progress).await
+        }
+
+        async fn list_appended(
+            &self,
+            prefix: &str,
+        ) -> Result<crate::storage::cloud::AppendedListing, CloudHomeError> {
+            self.inner.list_appended(prefix).await
+        }
+
+        async fn read_appended(
+            &self,
+            object: &crate::storage::cloud::AppendedObject,
+        ) -> Result<Vec<u8>, CloudHomeError> {
+            self.inner.read_appended(object).await
+        }
+
+        async fn read_appended_to_file(
+            &self,
+            object: &crate::storage::cloud::AppendedObject,
+            destination: &std::path::Path,
+        ) -> Result<(), CloudFileReadError> {
+            self.inner.read_appended_to_file(object, destination).await
+        }
+
+        async fn delete_appended(
+            &self,
+            object: &crate::storage::cloud::AppendedObject,
+        ) -> Result<(), CloudHomeError> {
+            self.inner.delete_appended(object).await
         }
     }
 
@@ -3635,8 +3650,9 @@ mod tests {
             BlobPathScheme::Hashed,
             name,
             owner.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(name)),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(name)))
+        .expect("test cloud storage supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()));
         let db = crate::sync::test_helpers::open_serial_test_db();
         crate::sync::test_helpers::publish_test_serial_store_protocol_root(

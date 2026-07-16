@@ -76,6 +76,10 @@ pub enum BootstrapError {
     },
     #[error("{provider:?} cannot coordinate a Serial Store with this configuration")]
     SerialCoordinationUnavailable { provider: crate::CloudProvider },
+    #[error(
+        "{provider:?} cannot store immutable protocol and blob copies with this configuration"
+    )]
+    ImmutableCopiesUnavailable { provider: crate::CloudProvider },
     #[error("database: {0}")]
     Database(String),
     #[error("invalid signing key: {0}")]
@@ -328,6 +332,7 @@ async fn build_cloud_home_for_join(
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
+    custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
 ) -> Result<JoinCloudHome, BootstrapError> {
     use crate::storage::cloud::*;
 
@@ -351,6 +356,7 @@ async fn build_cloud_home_for_join(
                 access_key.clone(),
                 secret_key.clone(),
                 key_prefix.clone(),
+                custom_s3_immutable_copies,
             )
             .await?;
             let s3 = Arc::new(s3);
@@ -483,6 +489,7 @@ pub async fn join_from_invite_code(
     migrations: &[Migration],
     expected_write_policy: crate::WritePolicy,
     custom_s3_serial: Option<crate::CustomS3Serial>,
+    custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
     key_custody: crate::custody::KeyCustody,
     identity_custody: IdentityCustody,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
@@ -507,6 +514,11 @@ pub async fn join_from_invite_code(
         actual_write_policy,
     )
     .map_err(|provider| BootstrapError::SerialCoordinationUnavailable { provider })?;
+    crate::storage::cloud::setup::require_immutable_copy_capabilities_join_info(
+        &code.join_info,
+        custom_s3_immutable_copies,
+    )
+    .map_err(|provider| BootstrapError::ImmutableCopiesUnavailable { provider })?;
     let joiner_public_key = crate::join_code::decode_join_request(join_request_code)
         .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?
         .public_key;
@@ -545,6 +557,7 @@ pub async fn join_from_invite_code(
             oauth_tokens,
             cloudkit_ops,
             clock.clone(),
+            custom_s3_immutable_copies,
         )
         .await?;
 
@@ -559,6 +572,7 @@ pub async fn join_from_invite_code(
             cloud.home,
             cloud.coordination,
             custom_s3_serial,
+            custom_s3_immutable_copies,
             clock,
             ids.as_ref(),
             &on_status,
@@ -615,6 +629,7 @@ pub(crate) async fn join_store(
         Arc::from(cloud_home),
         None,
         None,
+        None,
         Arc::new(crate::clock::SystemClock),
         ids,
         on_status,
@@ -635,11 +650,23 @@ pub(crate) async fn join_store_with_coordination(
     cloud_home: Arc<dyn CloudHome>,
     coordination: Option<CoordinationClients>,
     custom_s3_serial: Option<crate::CustomS3Serial>,
+    custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
     clock: crate::clock::ClockRef,
     ids: &dyn crate::id_provider::IdProvider,
     on_status: impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
+    let provider = code.join_info.cloud_provider();
+    crate::storage::cloud::setup::require_immutable_copy_capabilities_home(
+        cloud_home.clone(),
+        Some(provider),
+    )
+    .map_err(|error| match error {
+        crate::storage::cloud::setup::StorageSetupError::ImmutableCopiesUnavailable {
+            provider,
+        } => BootstrapError::ImmutableCopiesUnavailable { provider },
+        other => BootstrapError::Provider(other.to_string()),
+    })?;
     // Guard the destructive `stores/<id>` create/delete against any direct
     // caller, independent of the decode-time check on untrusted input.
     crate::store_dir::validate_path_token(&code.store_id)
@@ -736,10 +763,8 @@ pub(crate) async fn join_store_with_coordination(
             blob_paths,
             code.store_id.clone(),
             user_keypair.clone(),
-        )
-        .with_copy_ids(std::sync::Arc::new(
-            crate::storage::cloud::RandomCopyIdGenerator,
-        ));
+            std::sync::Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
+        )?;
         let storage = match coordination {
             Some((primary, peer)) => storage.with_serial_coordination_clients(primary, peer),
             None => storage,
@@ -769,6 +794,7 @@ pub(crate) async fn join_store_with_coordination(
             &code.join_info,
             &code.store_name,
             custom_s3_serial,
+            custom_s3_immutable_copies,
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
@@ -824,6 +850,7 @@ pub(crate) async fn bootstrap_and_save_store(
     join_info: &CloudHomeJoinInfo,
     store_name: &str,
     custom_s3_serial: Option<crate::CustomS3Serial>,
+    custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
     identity_custody: &dyn DeviceIdentityCustody,
@@ -921,7 +948,7 @@ pub(crate) async fn bootstrap_and_save_store(
 
         // Create and save config — the last durable write and the
         // store's completion marker.
-        let config = build_config(
+        let mut config = build_config(
             store_id,
             device_id,
             store_dir,
@@ -930,6 +957,15 @@ pub(crate) async fn bootstrap_and_save_store(
             cipher,
             custom_s3_serial,
         );
+        if matches!(
+            join_info,
+            CloudHomeJoinInfo::S3 {
+                endpoint: Some(_),
+                ..
+            }
+        ) {
+            config.cloud_home.s3_immutable_copies = custom_s3_immutable_copies;
+        }
         config.save_to_config_yaml()?;
         Ok(config)
     }

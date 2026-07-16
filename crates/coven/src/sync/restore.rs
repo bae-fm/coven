@@ -32,6 +32,7 @@ use crate::sync::session::SyncedTable;
 pub struct RestoreSource {
     pub join_info: CloudHomeJoinInfo,
     pub custom_s3_serial: Option<crate::CustomS3Serial>,
+    pub custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
     pub oauth_tokens: Option<OAuthTokens>,
     pub cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 }
@@ -72,6 +73,7 @@ async fn build_cloud_home(
     let RestoreSource {
         join_info,
         custom_s3_serial: _,
+        custom_s3_immutable_copies,
         oauth_tokens,
         cloudkit_ops,
     } = source;
@@ -96,6 +98,7 @@ async fn build_cloud_home(
                 access_key.clone(),
                 secret_key.clone(),
                 key_prefix.clone(),
+                custom_s3_immutable_copies,
             )
             .await?;
             let home = Arc::new(home);
@@ -226,7 +229,13 @@ pub async fn restore_from_cloud(
         actual_write_policy,
     )
     .map_err(|provider| BootstrapError::SerialCoordinationUnavailable { provider })?;
+    crate::storage::cloud::setup::require_immutable_copy_capabilities_join_info(
+        &source.join_info,
+        source.custom_s3_immutable_copies,
+    )
+    .map_err(|provider| BootstrapError::ImmutableCopiesUnavailable { provider })?;
     let custom_s3_serial = source.custom_s3_serial;
+    let custom_s3_immutable_copies = source.custom_s3_immutable_copies;
 
     let store_dir = layout.store_dir(store_id);
 
@@ -290,10 +299,8 @@ pub async fn restore_from_cloud(
             blob_paths,
             store_id.to_string(),
             keypair.clone(),
-        )
-        .with_copy_ids(std::sync::Arc::new(
-            crate::storage::cloud::RandomCopyIdGenerator,
-        ));
+            std::sync::Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
+        )?;
         let storage = match coordination {
             Some((primary, peer)) => storage.with_serial_coordination_clients(primary, peer),
             None => storage,
@@ -323,6 +330,7 @@ pub async fn restore_from_cloud(
             &join_info,
             store_name,
             custom_s3_serial,
+            custom_s3_immutable_copies,
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
@@ -365,6 +373,7 @@ pub async fn restore_from_code(
     migrations: &[Migration],
     expected_write_policy: crate::WritePolicy,
     custom_s3_serial: Option<crate::CustomS3Serial>,
+    custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
@@ -392,6 +401,11 @@ pub async fn restore_from_code(
         actual_write_policy,
     )
     .map_err(|provider| BootstrapError::SerialCoordinationUnavailable { provider })?;
+    crate::storage::cloud::setup::require_immutable_copy_capabilities_join_info(
+        &parsed.provider,
+        custom_s3_immutable_copies,
+    )
+    .map_err(|provider| BootstrapError::ImmutableCopiesUnavailable { provider })?;
     let custody = key_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
     let identity_custody = identity_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
 
@@ -416,6 +430,7 @@ pub async fn restore_from_code(
     let source = RestoreSource {
         join_info: parsed.provider,
         custom_s3_serial,
+        custom_s3_immutable_copies,
         oauth_tokens,
         cloudkit_ops,
     };
@@ -477,6 +492,7 @@ mod tests {
                 folder_path: "/Apps/coven/my-store".to_string(),
             },
             custom_s3_serial: None,
+            custom_s3_immutable_copies: None,
             oauth_tokens: Some(tokens.clone()),
             cloudkit_ops: None,
         };
@@ -527,6 +543,7 @@ mod build_cloud_home_tests {
                 key_prefix: Some("prefix/".to_string()),
             },
             custom_s3_serial: None,
+            custom_s3_immutable_copies: None,
             oauth_tokens: None,
             cloudkit_ops: None,
         };
@@ -558,6 +575,7 @@ mod build_cloud_home_tests {
                 zone_name: "zone".to_string(),
             },
             custom_s3_serial: None,
+            custom_s3_immutable_copies: None,
             oauth_tokens: None,
             cloudkit_ops: None,
         };

@@ -28,6 +28,15 @@ pub enum CustomS3Serial {
     ConditionalPutAndStrongReads,
 }
 
+/// Local operator assertion required before a custom S3 endpoint may store
+/// immutable protocol and blob copies. This is local configuration and is never
+/// accepted from invite or restore data.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomS3ImmutableCopies {
+    ConditionalCreateStrongReadsCompleteListing,
+}
+
 impl CloudProvider {
     /// Whether connecting, restoring, or joining on this provider requires
     /// running an OAuth flow first — true for the account-based consumer clouds
@@ -96,6 +105,8 @@ pub struct CloudHomeConfig {
     #[serde(default)]
     pub s3_serial: Option<CustomS3Serial>,
     #[serde(default)]
+    pub s3_immutable_copies: Option<CustomS3ImmutableCopies>,
+    #[serde(default)]
     pub google_drive_folder_id: Option<String>,
     #[serde(default)]
     pub dropbox_folder_path: Option<String>,
@@ -122,6 +133,7 @@ impl Default for CloudHomeConfig {
             s3_endpoint: None,
             s3_key_prefix: None,
             s3_serial: None,
+            s3_immutable_copies: None,
             google_drive_folder_id: None,
             dropbox_folder_path: None,
             onedrive_drive_id: None,
@@ -273,14 +285,32 @@ mod tests {
             provider: Some(CloudProvider::S3),
             s3_bucket: Some("bucket".to_string()),
             s3_region: Some("us-east-1".to_string()),
+            s3_immutable_copies: Some(
+                CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing,
+            ),
             storage: HomeStorage::Opaque,
             ..CloudHomeConfig::default()
         };
 
         config.save_to_config_yaml().expect("save");
+        let config_yaml = std::fs::read_to_string(config.store_dir.config_path())
+            .expect("read saved local config");
+        assert!(config_yaml.contains("s3_immutable_copies"));
         let loaded = Config::load_from_config_yaml(store_dir).expect("load");
 
         assert_eq!(loaded, config);
+
+        let join_info = crate::storage::cloud::CloudHomeJoinInfo::S3 {
+            bucket: "bucket".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: Some("https://objects.example".to_string()),
+            access_key: "access".to_string(),
+            secret_key: "secret".to_string(),
+            key_prefix: None,
+        };
+        let shared_wire = serde_json::to_string(&join_info).expect("serialize shared join info");
+        assert!(!shared_wire.contains("s3_immutable_copies"));
+        assert!(!shared_wire.contains("strong_reads"));
     }
 
     /// A CloudKit share join persists `cloudkit_owner_name` and

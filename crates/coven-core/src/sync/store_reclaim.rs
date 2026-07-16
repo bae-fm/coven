@@ -543,8 +543,9 @@ mod tests {
             BlobPathScheme::Plain,
             "reclaim-store-test",
             signer.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(source)),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(source)))
+        .expect("in-memory home supports immutable copies")
     }
 
     async fn setup(with_member: bool) -> ReclaimSetup {
@@ -1194,8 +1195,9 @@ mod tests {
             BlobPathScheme::Plain,
             "serial-reclaim-store",
             owner.clone(),
+            Arc::new(SequentialCopyIdGenerator::new("serial-reclaim")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("serial-reclaim")))
+        .expect("in-memory home supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()));
         let db = open_serial_test_db();
         let store_root_hash = publish_test_serial_store_protocol_root(
@@ -1448,10 +1450,11 @@ mod tests {
             BlobPathScheme::Plain,
             "serial-reclaim-coverage-auth",
             founder.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(
+                "serial-reclaim-coverage-auth",
+            )),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
-            "serial-reclaim-coverage-auth",
-        )))
+        .expect("in-memory home supports immutable copies")
         .with_test_serial_coordination(Arc::new(home));
         let db = open_serial_test_db();
         let root = publish_test_serial_store_protocol_root(

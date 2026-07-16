@@ -466,6 +466,7 @@ pub struct CloudSyncStorage {
     /// the life of a stream and reads across awaits, so the home is genuinely
     /// shared between this storage and the readers it spawns, not owned by one.
     home: Arc<dyn CloudHome>,
+    immutable: Arc<dyn crate::storage::cloud::ImmutableCopyStorage>,
     cipher: Arc<CloudCipherState>,
     /// Whether a committed rotation is outstanding — see [`PendingRotation`].
     /// Shared the same way `cipher` is, so a member removal or a refresh cycle
@@ -476,7 +477,7 @@ pub struct CloudSyncStorage {
     /// over a home's life, so it is a plain field with no lock.
     blob_paths: BlobPathScheme,
     store_id: String,
-    copy_ids: Option<CopyIdRef>,
+    copy_ids: CopyIdRef,
     coordination: Option<Arc<dyn CloudHeadStorage>>,
     coordination_probe_peer: Option<Arc<dyn CloudHeadStorage>>,
     /// The device's signing identity. The control objects this storage writes
@@ -493,25 +494,25 @@ impl CloudSyncStorage {
         blob_paths: BlobPathScheme,
         store_id: impl Into<String>,
         keypair: UserKeypair,
-    ) -> Self {
-        CloudSyncStorage {
+        copy_ids: CopyIdRef,
+    ) -> Result<Self, crate::storage::cloud::CloudHomeError> {
+        let immutable = home.clone().immutable_copy_storage().ok_or_else(|| {
+            crate::storage::cloud::CloudHomeError::Configuration(
+                "CloudSyncStorage requires immutable-copy storage".to_string(),
+            )
+        })?;
+        Ok(CloudSyncStorage {
             home,
+            immutable,
             cipher: Arc::new(CloudCipherState::new(cipher)),
             pending_rotation: Arc::new(PendingRotation::none()),
             blob_paths,
             store_id: store_id.into(),
             keypair,
-            copy_ids: None,
+            copy_ids,
             coordination: None,
             coordination_probe_peer: None,
-        }
-    }
-
-    /// Install the composition root's physical-copy id source. Store protocol
-    /// appends fail loudly until this is supplied.
-    pub fn with_copy_ids(mut self, copy_ids: CopyIdRef) -> Self {
-        self.copy_ids = Some(copy_ids);
-        self
+        })
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -573,14 +574,9 @@ impl CloudSyncStorage {
     }
 
     pub(crate) fn next_coordination_probe_key(&self) -> Result<String, CoordinationError> {
-        let copy_ids = self.copy_ids.as_ref().ok_or_else(|| {
-            CoordinationError::Unavailable(
-                "coordination probe id source is not configured".to_string(),
-            )
-        })?;
         Ok(format!(
             "coven-probes-v1/serial-coordination/{}/head",
-            copy_ids.next_copy_id()
+            self.copy_ids.next_copy_id()
         ))
     }
 
@@ -628,6 +624,29 @@ impl CloudSyncStorage {
             )));
         }
         Ok(())
+    }
+
+    async fn bind_appended_object(
+        &self,
+        logical_key: String,
+        expected_physical_key: &str,
+        physical: crate::storage::cloud::AppendedObject,
+    ) -> Result<ImmutableObjectLocator, StorageError> {
+        if physical.logical_key() == expected_physical_key {
+            return Ok(ImmutableObjectLocator::new(logical_key, physical));
+        }
+
+        let operation = StorageError::Parse(format!(
+            "immutable append returned physical key {:?} for requested key {expected_physical_key:?}",
+            physical.logical_key()
+        ));
+        match self.immutable.delete_appended(&physical).await {
+            Ok(()) => Err(operation),
+            Err(cleanup) => Err(StorageError::CleanupFailed {
+                operation: Box::new(operation),
+                cleanup: Box::new(cleanup.into()),
+            }),
+        }
     }
 
     pub(crate) fn user_keypair(&self) -> &UserKeypair {
@@ -812,6 +831,17 @@ fn coordination_home_error(error: crate::storage::cloud::CloudHomeError) -> Coor
         }
         crate::storage::cloud::CloudHomeError::Io(error) => {
             CoordinationError::Storage(format!("I/O error: {error}"))
+        }
+        error @ crate::storage::cloud::CloudHomeError::CleanupFailed { .. }
+            if error.is_retryable() =>
+        {
+            CoordinationError::Storage(error.to_string())
+        }
+        crate::storage::cloud::CloudHomeError::AlreadyExists(key) => {
+            CoordinationError::Unavailable(format!("coordination object already exists: {key}"))
+        }
+        error @ crate::storage::cloud::CloudHomeError::CleanupFailed { .. } => {
+            CoordinationError::Unavailable(error.to_string())
         }
     }
 }
@@ -1350,28 +1380,21 @@ impl SyncStorage for CloudSyncStorage {
     ) -> Result<ImmutableObjectLocator, StorageError> {
         context.validate_path(semantic_prefix)?;
         context.validate_extension(extension)?;
-        let copy_id = self
-            .copy_ids
-            .as_ref()
-            .ok_or_else(|| {
-                StorageError::Storage(
-                    "Store protocol append has no injected CopyIdGenerator".to_string(),
-                )
-            })?
-            .next_copy_id();
+        let copy_id = self.copy_ids.next_copy_id();
         let logical_key = format!("{semantic_prefix}/copies/{copy_id}{extension}");
         let physical_key = format!("{logical_key}{}", self.suffix());
         let aad = protocol_object_aad_context(context, semantic_prefix);
         let stored = self.protocol_cipher_for_seal(context)?.seal(data, &aad);
         let physical = self
-            .home
+            .immutable
             .append_object(
                 &physical_key,
                 BlobBody::from_bytes(stored),
                 &crate::storage::cloud::no_progress(),
             )
             .await?;
-        Ok(ImmutableObjectLocator::new(logical_key, physical))
+        self.bind_appended_object(logical_key, &physical_key, physical)
+            .await
     }
 
     async fn list_protocol_objects(
@@ -1384,7 +1407,7 @@ impl SyncStorage for CloudSyncStorage {
             )));
         }
         let suffix = self.suffix();
-        let listing = self.home.list_appended(prefix).await?;
+        let listing = self.immutable.list_appended(prefix).await?;
         let mut objects = Vec::with_capacity(listing.objects.len());
         for physical in listing.objects {
             let logical_key = physical
@@ -1420,7 +1443,7 @@ impl SyncStorage for CloudSyncStorage {
                 object.physical().logical_key()
             )));
         }
-        let stored = self.home.read_appended(object.physical()).await?;
+        let stored = self.immutable.read_appended(object.physical()).await?;
         let aad = protocol_object_aad_context(context, semantic_prefix);
         self.protocol_cipher_for_open(context)
             .open(stored, &aad)
@@ -1436,7 +1459,7 @@ impl SyncStorage for CloudSyncStorage {
         &self,
         object: &ImmutableObjectLocator,
     ) -> Result<(), StorageError> {
-        self.home.delete_appended(object.physical()).await?;
+        self.immutable.delete_appended(object.physical()).await?;
         Ok(())
     }
 
@@ -1447,13 +1470,7 @@ impl SyncStorage for CloudSyncStorage {
     ) -> Result<ImmutableObjectLocator, StorageError> {
         self.validate_blob_locator_home(locator)?;
         self.validate_blob_append_authority(locator)?;
-        let copy_id = self
-            .copy_ids
-            .as_ref()
-            .ok_or_else(|| {
-                StorageError::Storage("blob append has no injected CopyIdGenerator".to_string())
-            })?
-            .next_copy_id();
+        let copy_id = self.copy_ids.next_copy_id();
         let logical_key = blob_copy_key(locator, copy_id)?;
         let stored_len = crate::local_blob::file_len(stored_file)
             .await
@@ -1462,20 +1479,15 @@ impl SyncStorage for CloudSyncStorage {
             .await
             .map_err(StorageError::LocalFilesystem)?;
         let physical = self
-            .home
+            .immutable
             .append_object(
                 &logical_key,
                 BlobBody::from_file_with_prefix(stored_len, reader, None, Vec::new()),
                 &crate::storage::cloud::no_progress(),
             )
             .await?;
-        if physical.logical_key() != logical_key {
-            return Err(StorageError::Parse(format!(
-                "blob append returned physical key {:?} for logical key {logical_key:?}",
-                physical.logical_key()
-            )));
-        }
-        Ok(ImmutableObjectLocator::new(logical_key, physical))
+        self.bind_appended_object(logical_key.clone(), &logical_key, physical)
+            .await
     }
 
     async fn list_blob_copies(
@@ -1484,7 +1496,7 @@ impl SyncStorage for CloudSyncStorage {
     ) -> Result<ImmutableObjectListing, StorageError> {
         self.validate_blob_locator_home(locator)?;
         let prefix = blob_copy_prefix(locator)?;
-        let listing = self.home.list_appended(&prefix).await?;
+        let listing = self.immutable.list_appended(&prefix).await?;
         let mut objects = Vec::with_capacity(listing.objects.len());
         for physical in listing.objects {
             let logical_key = physical.logical_key().to_string();
@@ -1513,7 +1525,7 @@ impl SyncStorage for CloudSyncStorage {
                 copy.physical().logical_key()
             )));
         }
-        self.home
+        self.immutable
             .read_appended_to_file(copy.physical(), dest)
             .await
             .map_err(|error| match error {
@@ -1536,7 +1548,7 @@ impl SyncStorage for CloudSyncStorage {
                 copy.physical().logical_key()
             )));
         }
-        self.home.delete_appended(copy.physical()).await?;
+        self.immutable.delete_appended(copy.physical()).await?;
         Ok(())
     }
 
@@ -1770,8 +1782,9 @@ mod tests {
     use crate::config::HomeStorage;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
-        BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHomeError, CopyId, CopyIdGenerator,
-        SequentialCopyIdGenerator,
+        AppendedListing, AppendedObject, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+        CloudFileReadError, CloudHomeError, CopyId, CopyIdGenerator, ImmutableCopyStorage,
+        SequentialCopyIdGenerator, UploadProgress,
     };
     use crate::sync::test_helpers::{open_test_db, TestCustody};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1823,7 +1836,8 @@ mod tests {
         let logical_key = blob_copy_key(locator, copy_id).expect("blob copy key");
         let copy = ImmutableObjectLocator::new(
             logical_key.clone(),
-            crate::storage::cloud::AppendedObject::from_provider(logical_key, "unused".to_string()),
+            crate::storage::cloud::AppendedObject::from_provider(logical_key, "unused".to_string())
+                .expect("test appended identity is non-empty"),
         );
         let temp = tempfile::tempdir().expect("mode mismatch temp dir");
 
@@ -1930,8 +1944,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "blob-copy-store",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("blob-copy")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("blob-copy")));
+        .expect("test cloud storage supports immutable copies");
         let locator = opaque_locator(storage.self_uploader());
 
         exercise_blob_copy_storage(&storage, &locator).await;
@@ -1954,8 +1969,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "opaque-mode-gate",
             UserKeypair::generate(),
+            copy_ids.clone(),
         )
-        .with_copy_ids(copy_ids.clone());
+        .expect("test cloud storage supports immutable copies");
         let locator = BlobLocator::browsable(
             "audio",
             "abcd-track",
@@ -1979,8 +1995,9 @@ mod tests {
             BlobPathScheme::Plain,
             "browsable-mode-gate",
             UserKeypair::generate(),
+            copy_ids.clone(),
         )
-        .with_copy_ids(copy_ids.clone());
+        .expect("test cloud storage supports immutable copies");
         let locator = opaque_locator(storage.self_uploader());
 
         assert_locator_mode_rejected_before_io(&storage, &home, &copy_ids, &locator).await;
@@ -1996,8 +2013,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "blob-uploader-authority",
             UserKeypair::generate(),
+            copy_ids.clone(),
         )
-        .with_copy_ids(copy_ids.clone());
+        .expect("test cloud storage supports immutable copies");
         let locator = opaque_locator("11".repeat(32));
         let temp = tempfile::tempdir().expect("foreign uploader temp dir");
 
@@ -2020,7 +2038,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "foreign-blob-reader",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("foreign-blob-reader")),
+        )
+        .expect("test cloud storage supports immutable copies");
         let locator = opaque_locator("11".repeat(32));
         let copy_id: CopyId = "22".repeat(32).parse().expect("canonical copy id");
         let logical_key = blob_copy_key(&locator, copy_id).expect("blob copy key");
@@ -2064,10 +2084,11 @@ mod tests {
             BlobPathScheme::Hashed,
             "blob-copy-provider-duplicates",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new(
+                "blob-copy-provider-duplicates",
+            )),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
-            "blob-copy-provider-duplicates",
-        )));
+        .expect("test cloud storage supports immutable copies");
         let locator = opaque_locator(storage.self_uploader());
         let temp = tempfile::tempdir().expect("blob-copy duplicate temp dir");
         let stored_file = temp.path().join("stored.bin");
@@ -2129,10 +2150,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "blob-copy-slot-binding",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("blob-copy-slot-binding")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
-            "blob-copy-slot-binding",
-        )));
+        .expect("test cloud storage supports immutable copies");
         let first_locator = opaque_locator(storage.self_uploader());
         let other_locator = BlobLocator::opaque(
             first_locator.namespace(),
@@ -2213,7 +2233,8 @@ mod tests {
         let logical_key = blob_copy_key(&browsable, copy_id).expect("browsable copy key");
         let copy = ImmutableObjectLocator::new(
             logical_key.clone(),
-            crate::storage::cloud::AppendedObject::from_provider(logical_key, "unused".to_string()),
+            crate::storage::cloud::AppendedObject::from_provider(logical_key, "unused".to_string())
+                .expect("test appended identity is non-empty"),
         );
         assert!(matches!(
             storage.list_blob_copies(&browsable).await,
@@ -2280,10 +2301,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "blob-copy-coverage",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("blob-copy-coverage")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
-            "blob-copy-coverage",
-        )));
+        .expect("test cloud storage supports immutable copies");
         let locator = opaque_locator(storage.self_uploader());
 
         let listing = storage
@@ -2307,10 +2327,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "blob-copy-malformed",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("blob-copy-malformed")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
-            "blob-copy-malformed",
-        )));
+        .expect("test cloud storage supports immutable copies");
         let locator = opaque_locator(storage.self_uploader());
         home.insert_appended_candidate(
             &format!("{}/copies/not-a-copy-id.enc", locator.semantic_key()),
@@ -2332,8 +2351,9 @@ mod tests {
             BlobPathScheme::Plain,
             "browsable-copy-store",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("browsable-copy")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("browsable-copy")));
+        .expect("test cloud storage supports immutable copies");
         let locator = BlobLocator::browsable(
             "audio",
             "abcd-track",
@@ -2418,6 +2438,138 @@ mod tests {
         range_reads: Arc<AtomicUsize>,
     }
 
+    #[derive(Clone)]
+    struct MisdirectedAppendHome {
+        inner: InMemoryCloudHome,
+        actual: Arc<std::sync::Mutex<std::collections::HashMap<String, AppendedObject>>>,
+    }
+
+    impl MisdirectedAppendHome {
+        fn new(inner: InMemoryCloudHome) -> Self {
+            Self {
+                inner,
+                actual: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CloudHome for MisdirectedAppendHome {
+        fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn ImmutableCopyStorage>> {
+            Some(self)
+        }
+
+        async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+            self.inner.put_object(key, data).await
+        }
+
+        async fn open_multipart<'a>(
+            &'a self,
+            key: &str,
+            total_len: u64,
+        ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+            self.inner.open_multipart(key, total_len).await
+        }
+
+        fn multipart_threshold(&self) -> u64 {
+            self.inner.multipart_threshold()
+        }
+
+        async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+            self.inner.read(key).await
+        }
+
+        async fn read_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: u64,
+        ) -> Result<Vec<u8>, CloudHomeError> {
+            self.inner.read_range(key, start, end).await
+        }
+
+        async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+            self.inner.list(prefix).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+            self.inner.delete(key).await
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+            self.inner.exists(key).await
+        }
+
+        async fn set_access(
+            &self,
+            desired: CloudAccessState,
+        ) -> Result<CloudAccessOutcome, CloudHomeError> {
+            self.inner.set_access(desired).await
+        }
+    }
+
+    #[async_trait]
+    impl ImmutableCopyStorage for MisdirectedAppendHome {
+        async fn append_object(
+            &self,
+            key: &str,
+            body: BlobBody,
+            progress: &UploadProgress<'_>,
+        ) -> Result<AppendedObject, CloudHomeError> {
+            let actual = self.inner.append_object(key, body, progress).await?;
+            let provider_id = actual.opaque_provider_id().to_string();
+            self.actual
+                .lock()
+                .unwrap()
+                .insert(provider_id.clone(), actual);
+            AppendedObject::from_provider("misdirected/object".to_string(), provider_id)
+        }
+
+        async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+            self.inner.list_appended(prefix).await
+        }
+
+        async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+            let actual = self
+                .actual
+                .lock()
+                .unwrap()
+                .get(object.opaque_provider_id())
+                .cloned()
+                .ok_or_else(|| CloudHomeError::NotFound(object.opaque_provider_id().to_string()))?;
+            self.inner.read_appended(&actual).await
+        }
+
+        async fn read_appended_to_file(
+            &self,
+            object: &AppendedObject,
+            destination: &Path,
+        ) -> Result<(), CloudFileReadError> {
+            let actual = self
+                .actual
+                .lock()
+                .unwrap()
+                .get(object.opaque_provider_id())
+                .cloned()
+                .ok_or_else(|| {
+                    CloudFileReadError::Source(CloudHomeError::NotFound(
+                        object.opaque_provider_id().to_string(),
+                    ))
+                })?;
+            self.inner.read_appended_to_file(&actual, destination).await
+        }
+
+        async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+            let actual = self
+                .actual
+                .lock()
+                .unwrap()
+                .remove(object.opaque_provider_id())
+                .ok_or_else(|| CloudHomeError::NotFound(object.opaque_provider_id().to_string()))?;
+            self.inner.delete_appended(&actual).await
+        }
+    }
+
     impl RecordingCloudHome {
         fn new(inner: InMemoryCloudHome) -> Self {
             Self {
@@ -2442,6 +2594,10 @@ mod tests {
 
     #[async_trait]
     impl CloudHome for RecordingCloudHome {
+        fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn ImmutableCopyStorage>> {
+            Some(self)
+        }
+
         async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
             self.inner.put_object(key, data).await
         }
@@ -2490,6 +2646,38 @@ mod tests {
             desired: CloudAccessState,
         ) -> Result<CloudAccessOutcome, CloudHomeError> {
             self.inner.set_access(desired).await
+        }
+    }
+
+    #[async_trait]
+    impl ImmutableCopyStorage for RecordingCloudHome {
+        async fn append_object(
+            &self,
+            key: &str,
+            body: BlobBody,
+            progress: &UploadProgress<'_>,
+        ) -> Result<AppendedObject, CloudHomeError> {
+            self.inner.append_object(key, body, progress).await
+        }
+
+        async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+            self.inner.list_appended(prefix).await
+        }
+
+        async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+            self.inner.read_appended(object).await
+        }
+
+        async fn read_appended_to_file(
+            &self,
+            object: &AppendedObject,
+            destination: &Path,
+        ) -> Result<(), CloudFileReadError> {
+            self.inner.read_appended_to_file(object, destination).await
+        }
+
+        async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+            self.inner.delete_appended(object).await
         }
     }
 
@@ -2547,7 +2735,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("put-blob-file")),
+        )
+        .expect("test cloud storage supports immutable copies");
         let plaintext: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("blob.bin");
@@ -2588,7 +2778,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("read-blob-file")),
+        )
+        .expect("test cloud storage supports immutable copies");
         let plaintext: Vec<u8> = (0..180_000u32).map(|i| (i % 251) as u8).collect();
         storage
             .put_blob(
@@ -2642,7 +2834,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "hash-mismatch-store",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("hash-mismatch")),
+        )
+        .expect("test cloud storage supports immutable copies");
         let actual = b"actual-bytes";
         storage
             .put_blob(
@@ -2688,7 +2882,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "local-write-store",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("local-write")),
+        )
+        .expect("test cloud storage supports immutable copies");
         let bytes = b"cache-bytes";
         storage
             .put_blob(
@@ -2764,10 +2960,11 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             owner.clone(),
+            Arc::new(crate::storage::cloud::SequentialCopyIdGenerator::new(
+                "membership-rotation",
+            )),
         )
-        .with_copy_ids(Arc::new(
-            crate::storage::cloud::SequentialCopyIdGenerator::new("membership-rotation"),
-        ));
+        .expect("test cloud storage supports immutable copies");
 
         let first =
             crate::sync::membership::founder_entry("test-lib", &owner, "0000000000001-0000-owner");
@@ -2863,7 +3060,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             owner.clone(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("generation-one-reader")),
+        )
+        .expect("test cloud storage supports immutable copies");
         assert!(
             generation_one_storage
                 .read_protocol_object(&context, &generation_two, &semantic_prefix)
@@ -2878,7 +3077,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             owner,
-        );
+            Arc::new(SequentialCopyIdGenerator::new("relabeled-reader")),
+        )
+        .expect("test cloud storage supports immutable copies");
         assert!(
             old_key_labeled_generation_two
                 .read_protocol_object(&context, &generation_two, &semantic_prefix)
@@ -2897,7 +3098,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("moved-blob")),
+        )
+        .expect("test cloud storage supports immutable copies");
 
         storage
             .put_blob(
@@ -2965,8 +3168,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("plaintext-copy")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("plaintext-copy")));
+        .expect("test cloud storage supports immutable copies");
 
         let semantic_prefix = "store-v1/packages/dev1/1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let package = b"changeset-plaintext-bytes".to_vec();
@@ -3036,7 +3240,9 @@ mod tests {
             BlobPathScheme::Plain,
             "test-lib",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("plain-path")),
+        )
+        .expect("test cloud storage supports immutable copies");
 
         let cloud_path = "Artist - Album/cover-cover-row-id.jpg";
         let bytes = b"cover-art-bytes".to_vec();
@@ -3102,7 +3308,9 @@ mod tests {
             BlobPathScheme::Plain,
             "test-lib",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("missing-cloud-path")),
+        )
+        .expect("test cloud storage supports immutable copies");
         assert!(
             storage
                 .put_blob("images", "id-1", BlobScope::Master, None, b"x".to_vec())
@@ -3125,7 +3333,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("encrypted-range")),
+        )
+        .expect("test cloud storage supports immutable copies");
 
         // Larger than two 64 KB chunks so a window can straddle a boundary.
         let plaintext: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
@@ -3182,7 +3392,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("plaintext-range")),
+        )
+        .expect("test cloud storage supports immutable copies");
         let plaintext: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
         storage
             .put_blob(
@@ -3229,7 +3441,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("derived-range")),
+        )
+        .expect("test cloud storage supports immutable copies");
 
         let scope_id = "release-42".to_string();
         let plaintext: Vec<u8> = (0..80_000u32).map(|i| (i % 251) as u8).collect();
@@ -3294,7 +3508,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "test-lib",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("invalid-range")),
+        )
+        .expect("test cloud storage supports immutable copies");
         let plaintext = b"a short blob".to_vec();
         storage
             .put_blob(
@@ -3338,8 +3554,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "append-store",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("append-copy")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("append-copy")));
+        .expect("test cloud storage supports immutable copies");
         let semantic = format!(
             "store-v1/store-protocol-root/{}",
             crate::sync::store_commit::ObjectHash::digest(b"store protocol root")
@@ -3384,6 +3601,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_rejects_and_removes_a_copy_returned_for_another_key() {
+        let inner = InMemoryCloudHome::new();
+        let home = MisdirectedAppendHome::new(inner.clone());
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+            BlobPathScheme::Hashed,
+            "misdirected-store",
+            UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("misdirected-copy")),
+        )
+        .expect("test cloud storage supports immutable copies");
+        let root = crate::sync::store_commit::ObjectHash::digest(b"misdirected-root");
+        let semantic = format!("store-v1/store-protocol-root/{root}");
+        let context = crate::sync::storage::ProtocolObjectContext::store(
+            root,
+            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
+        );
+
+        assert!(matches!(
+            storage
+                .append_protocol_object(&context, &semantic, ".json", b"protocol".to_vec())
+                .await,
+            Err(StorageError::Parse(_))
+        ));
+
+        let temp = tempfile::tempdir().expect("blob temp dir");
+        let stored = temp.path().join("stored.bin");
+        crate::local_blob::write_atomic(&stored, b"stored blob")
+            .await
+            .expect("write stored blob");
+        let locator = opaque_locator(storage.self_uploader());
+        assert!(matches!(
+            storage.append_blob_copy_from_file(&locator, &stored).await,
+            Err(StorageError::Parse(_))
+        ));
+
+        assert_eq!(inner.appended_delete_count(), 2);
+        assert!(inner
+            .list_appended("")
+            .await
+            .expect("list after rejected appends")
+            .objects
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn append_reports_both_wrong_key_and_cleanup_failure() {
+        let inner = InMemoryCloudHome::new();
+        inner.fail_appended_delete_on_call(1);
+        let storage = CloudSyncStorage::new(
+            Arc::new(MisdirectedAppendHome::new(inner.clone())),
+            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+            BlobPathScheme::Hashed,
+            "misdirected-cleanup-store",
+            UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("misdirected-cleanup-copy")),
+        )
+        .expect("test cloud storage supports immutable copies");
+        let root = crate::sync::store_commit::ObjectHash::digest(b"misdirected-cleanup-root");
+        let semantic = format!("store-v1/store-protocol-root/{root}");
+        let context = crate::sync::storage::ProtocolObjectContext::store(
+            root,
+            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
+        );
+
+        let error = storage
+            .append_protocol_object(&context, &semantic, ".json", b"protocol".to_vec())
+            .await
+            .expect_err("wrong provider key and failed cleanup must be reported");
+        let Some((operation, cleanup)) = error.cleanup_causes() else {
+            panic!("expected typed cleanup failure, got {error:?}");
+        };
+        assert!(matches!(operation, StorageError::Parse(_)));
+        assert!(matches!(cleanup, StorageError::Storage(_)));
+        assert_eq!(
+            inner
+                .list_appended("")
+                .await
+                .expect("list failed cleanup object")
+                .objects
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn protocol_object_read_rejects_a_noncanonical_copy_id() {
         let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
@@ -3392,8 +3696,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "copy-id-store",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("copy-id")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("copy-id")));
+        .expect("test cloud storage supports immutable copies");
         let root = crate::sync::store_commit::ObjectHash::digest(b"copy-id-root");
         let commit_hash = crate::sync::store_commit::ObjectHash::digest(b"commit");
         let semantic = crate::sync::store_commit::commit_semantic_prefix("device", 1, commit_hash);
@@ -3433,8 +3738,9 @@ mod tests {
             BlobPathScheme::Hashed,
             "aad-store",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("aad-copy")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("aad-copy")));
+        .expect("test cloud storage supports immutable copies");
         let root = crate::sync::store_commit::ObjectHash::digest(b"root-a");
         let other_root = crate::sync::store_commit::ObjectHash::digest(b"root-b");
         let commit_hash = crate::sync::store_commit::ObjectHash::digest(b"commit");
@@ -3496,7 +3802,9 @@ mod tests {
             BlobPathScheme::Plain,
             "coordination-probe",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("coordination-first")),
         )
+        .expect("test cloud storage supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()));
         let second = CloudSyncStorage::new(
             Arc::new(home.clone()),
@@ -3504,7 +3812,9 @@ mod tests {
             BlobPathScheme::Plain,
             "coordination-probe",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("coordination-second")),
         )
+        .expect("test cloud storage supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()));
 
         crate::sync::storage::probe_serial_coordination(
@@ -3532,7 +3842,9 @@ mod tests {
             BlobPathScheme::Plain,
             "unsupported-coordination",
             UserKeypair::generate(),
-        );
+            Arc::new(SequentialCopyIdGenerator::new("unsupported-coordination")),
+        )
+        .expect("test cloud storage supports immutable copies");
 
         assert!(matches!(
             storage.serial_coordination(),
@@ -3550,7 +3862,9 @@ mod tests {
             BlobPathScheme::Plain,
             "coordination-cleanup",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("coordination-cleanup")),
         )
+        .expect("test cloud storage supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()));
         let key = "store-v1/__coordination-probe__/cleanup-head";
 

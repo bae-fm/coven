@@ -1034,8 +1034,8 @@ pub async fn unwrap_store_keyring(
         BlobPathScheme::for_storage(HomeStorage::Opaque),
         store_id.to_string(),
         keypair.clone(),
-    )
-    .with_copy_ids(Arc::new(crate::storage::cloud::RandomCopyIdGenerator));
+        Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
+    )?;
     let entry_keys = list_membership_entries(&storage, store_root_hash)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?;
@@ -3532,8 +3532,9 @@ mod tests {
             BlobPathScheme::for_storage(HomeStorage::Opaque),
             LIB_ID,
             signer.clone(),
+            Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
         )
-        .with_copy_ids(Arc::new(crate::storage::cloud::RandomCopyIdGenerator))
+        .expect("test cloud storage supports immutable copies")
     }
 
     /// A member invited but not yet joined is a current member, so revoking a

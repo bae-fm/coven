@@ -1827,7 +1827,7 @@ mod tests {
     use crate::encryption::KeyFingerprint;
     use crate::keys::UserKeypair;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
-    use crate::storage::cloud::{CloudHome, SequentialCopyIdGenerator};
+    use crate::storage::cloud::{ImmutableCopyStorage, SequentialCopyIdGenerator};
     use crate::sync::circle::{CircleControlCoord, CircleId};
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::membership::{
@@ -1860,8 +1860,9 @@ mod tests {
             BlobPathScheme::Plain,
             "causal-ordering-test",
             keypair.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(copy_source)),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(copy_source)))
+        .expect("in-memory home supports immutable copies")
     }
 
     fn serial_storage(
@@ -1876,8 +1877,9 @@ mod tests {
             BlobPathScheme::Plain,
             store_id,
             keypair.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(copy_source)),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(copy_source)))
+        .expect("in-memory home supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()))
     }
 

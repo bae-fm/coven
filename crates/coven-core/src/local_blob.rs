@@ -27,6 +27,11 @@ impl PlaintextReader {
             .await
             .map_err(|error| error.to_string())
     }
+
+    #[cfg(feature = "test-utils")]
+    pub fn from_test_reader(reader: impl PlaintextChunkReader + 'static) -> Self {
+        Self(Box::new(reader))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

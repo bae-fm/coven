@@ -144,10 +144,11 @@ async fn serial_join_receives_the_exact_invite_floor() {
         crate::sync::cloud_storage::BlobPathScheme::Hashed,
         store_id,
         owner.clone(),
+        Arc::new(crate::storage::cloud::SequentialCopyIdGenerator::new(
+            "serial-join-owner",
+        )),
     )
-    .with_copy_ids(Arc::new(
-        crate::storage::cloud::SequentialCopyIdGenerator::new("serial-join-owner"),
-    ))
+    .expect("build owner cloud storage")
     .with_test_serial_coordination(Arc::new(home.clone()));
     let owner_db = crate::sync::test_helpers::open_serial_test_db();
     let store_root_hash = crate::sync::test_helpers::publish_test_serial_store_protocol_root(
@@ -278,6 +279,7 @@ async fn serial_join_receives_the_exact_invite_floor() {
         Arc::new(home.clone()),
         Some((Arc::new(home.clone()), Arc::new(home))),
         None,
+        None,
         Arc::new(SystemClock),
         &ids,
         |_status| {},
@@ -390,6 +392,7 @@ async fn join_result_for(
         &test_migrations(),
         crate::WritePolicy::MergeConcurrent,
         None,
+        Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
         None,
@@ -413,6 +416,7 @@ async fn join_refuses_the_invite_policy_before_any_provider_or_local_write() {
         &test_synced_tables(),
         &test_migrations(),
         crate::WritePolicy::Serial,
+        None,
         None,
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
@@ -454,6 +458,7 @@ async fn join_refuses_a_known_unsupported_serial_provider_before_any_provider_or
         &test_migrations(),
         crate::WritePolicy::Serial,
         None,
+        None,
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
         None,
@@ -471,6 +476,44 @@ async fn join_refuses_a_known_unsupported_serial_provider_before_any_provider_or
         })
     ));
     assert!(!app.path().join("stores/join-serial-google-drive").exists());
+}
+
+#[tokio::test]
+async fn join_accepts_blob_schema_for_google_drive_and_reaches_provider_setup() {
+    let store_id = "join-immutable-google-drive";
+    let mut code = invite_code_with_store_id(store_id);
+    code.join_info = CloudHomeJoinInfo::GoogleDrive {
+        folder_id: "never-read".to_string(),
+    };
+    let tables = test_synced_tables_with_blob(crate::BlobDecl::new(
+        "photos",
+        crate::Provenance::HostProvided,
+        crate::CacheFill::CacheLazy,
+    ));
+    let app = tempfile::tempdir().expect("app directory");
+
+    let result = join_from_invite_code(
+        &encode(&code),
+        &seed_join_request(),
+        &crate::store_dir::StoreLayout::new(app.path()),
+        &tables,
+        &test_migrations(),
+        crate::WritePolicy::MergeConcurrent,
+        None,
+        None,
+        crate::custody::KeyCustody::Keyring,
+        crate::identity_custody::IdentityCustody::Keyring,
+        None,
+        None,
+        Arc::new(SystemClock),
+        Arc::new(SequentialIdProvider::new("device")),
+        |_| {},
+        &never_cancelled(),
+    )
+    .await;
+
+    assert!(matches!(result, Err(BootstrapError::Provider(_))));
+    assert!(!app.path().join("stores").join(store_id).exists());
 }
 
 /// Every traversal-shaped `store_id` is refused at the decode boundary: `decode`
@@ -715,6 +758,7 @@ async fn join_failure_after_oauth_persist_but_before_create_dir_all_cleans_the_k
         &test_migrations(),
         crate::WritePolicy::MergeConcurrent,
         None,
+        None,
         crate::custody::KeyCustody::Keyring,
         crate::identity_custody::IdentityCustody::Keyring,
         Some(oauth_tokens),
@@ -783,6 +827,7 @@ async fn join_store_refuses_when_completed_store_exists_and_leaves_it_untouched(
             "ak".to_string(),
             "sk".to_string(),
             None,
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
         )
         .await
         .expect("construct S3 cloud home"),
@@ -877,10 +922,11 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         blob_paths,
         store_id.to_string(),
         owner_keypair.clone(),
+        Arc::new(crate::storage::cloud::SequentialCopyIdGenerator::new(
+            "join-custody-owner",
+        )),
     )
-    .with_copy_ids(Arc::new(
-        crate::storage::cloud::SequentialCopyIdGenerator::new("join-custody-owner"),
-    ));
+    .expect("build owner cloud storage");
     let db = open_test_db();
     let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
         &db,
@@ -948,10 +994,11 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         blob_paths,
         store_id.to_string(),
         UserKeypair::generate(),
+        Arc::new(crate::storage::cloud::SequentialCopyIdGenerator::new(
+            "join-custody-reader",
+        )),
     )
-    .with_copy_ids(Arc::new(
-        crate::storage::cloud::SequentialCopyIdGenerator::new("join-custody-reader"),
-    ));
+    .expect("build joiner cloud storage");
     let (_tmp_b, store_dir) = temp_store_dir();
     let store_keys = crate::keys::StoreKeys::new(store_id.to_string());
     let custody = Arc::new(RecordingCustody::default());
@@ -1007,6 +1054,7 @@ async fn join_bootstrap_persists_the_unwrapped_keyring_through_custody_never_the
         &join_info,
         "Joined Store",
         None,
+        None,
         &store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
@@ -1052,6 +1100,7 @@ async fn join_failure_calls_forget_on_the_selected_custody() {
         &test_migrations(),
         crate::WritePolicy::MergeConcurrent,
         None,
+        Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
         crate::custody::KeyCustody::Custom(custody.clone()),
         crate::identity_custody::IdentityCustody::Keyring,
         None,
@@ -2053,10 +2102,11 @@ async fn joiner_fixture() -> JoinerFixture {
         blob_paths,
         store_id.clone(),
         owner_keypair.clone(),
+        Arc::new(crate::storage::cloud::SequentialCopyIdGenerator::new(
+            &format!("{store_id}-owner"),
+        )),
     )
-    .with_copy_ids(Arc::new(
-        crate::storage::cloud::SequentialCopyIdGenerator::new(&format!("{store_id}-owner")),
-    ));
+    .expect("build owner cloud storage");
     let db = open_test_db();
     let store_root_hash = crate::sync::test_helpers::publish_test_store_protocol_root(
         &db,
@@ -2153,10 +2203,11 @@ async fn joiner_fixture() -> JoinerFixture {
         blob_paths,
         store_id.clone(),
         joiner_identity.clone(),
+        Arc::new(crate::storage::cloud::SequentialCopyIdGenerator::new(
+            &format!("{store_id}-reader"),
+        )),
     )
-    .with_copy_ids(Arc::new(
-        crate::storage::cloud::SequentialCopyIdGenerator::new(&format!("{store_id}-reader")),
-    ));
+    .expect("build joiner cloud storage");
     let (_tmp, store_dir) = temp_store_dir();
     let store_keys = crate::keys::StoreKeys::new(store_id.clone());
 
@@ -2205,6 +2256,7 @@ async fn bootstrap_registers_the_joiner_and_first_cycle_publishes_its_ack() {
         &test_migrations(),
         &f.join_info,
         "Joined Store",
+        None,
         None,
         &f.store_keys,
         custody.as_ref(),
@@ -2341,6 +2393,7 @@ async fn bootstrap_establishes_the_joiners_identity_before_the_marker() {
         &f.join_info,
         "Joined Store",
         None,
+        None,
         &f.store_keys,
         custody.as_ref(),
         identity_custody.as_ref(),
@@ -2413,6 +2466,7 @@ async fn bootstrap_failure_publishes_a_retired_registration_successor() {
         &test_migrations(),
         &f.join_info,
         "Joined Store",
+        None,
         None,
         &f.store_keys,
         &FailPersistCustody,
@@ -2492,6 +2546,7 @@ async fn retirement_append_failure_preserves_the_exact_outbox_for_retry() {
         &test_migrations(),
         &f.join_info,
         "Joined Store",
+        None,
         None,
         &f.store_keys,
         &FailPersistCustody,

@@ -99,9 +99,15 @@ fn cloud_test_storage(
     store_id: &str,
     keypair: UserKeypair,
 ) -> CloudSyncStorage {
-    CloudSyncStorage::new(home, cipher, blob_paths, store_id, keypair).with_copy_ids(
+    CloudSyncStorage::new(
+        home,
+        cipher,
+        blob_paths,
+        store_id,
+        keypair,
         std::sync::Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
     )
+    .expect("test cloud storage supports immutable copies")
 }
 
 /// Publish exact package bytes through the durable Store write ledger.

@@ -52,7 +52,9 @@ fn member_storage(home: &InMemoryCloudHome, member: &UserKeypair) -> CloudSyncSt
         BlobPathScheme::Hashed,
         STORE_ID,
         member.clone(),
+        Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
     )
+    .expect("test cloud storage supports immutable copies")
 }
 
 /// A user-provided, cache-lazy blob in the `photos` namespace — Remote reads go

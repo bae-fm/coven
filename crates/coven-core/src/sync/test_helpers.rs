@@ -761,7 +761,8 @@ impl MockSyncStorage {
         let store_protocol_root_object = crate::storage::cloud::AppendedObject::from_provider(
             store_protocol_root_key,
             "mock-protocol-0".to_string(),
-        );
+        )
+        .expect("mock protocol identity is non-empty");
         MockSyncStorage {
             objects: Mutex::new(HashMap::new()),
             protocol_objects: Mutex::new(vec![(
@@ -832,7 +833,7 @@ impl MockSyncStorage {
         let physical = crate::storage::cloud::AppendedObject::from_provider(
             logical_key.clone(),
             format!("mock-inserted-blob-copy-{copy_id}"),
-        );
+        )?;
         self.blob_copies
             .lock()
             .unwrap()
@@ -950,7 +951,8 @@ impl MockSyncStorage {
         let physical = crate::storage::cloud::AppendedObject::from_provider(
             logical_key.clone(),
             format!("mock-protocol-{id}"),
-        );
+        )
+        .expect("mock protocol identity is non-empty");
         self.protocol_objects
             .lock()
             .unwrap()
@@ -1634,7 +1636,7 @@ impl SyncStorage for MockSyncStorage {
         let physical = crate::storage::cloud::AppendedObject::from_provider(
             logical_key.clone(),
             format!("mock-blob-copy-{id}"),
-        );
+        )?;
         let bytes = crate::local_blob::read(stored_file)
             .await
             .map_err(StorageError::LocalFilesystem)?;

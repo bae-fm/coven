@@ -227,10 +227,9 @@ mod tests {
             BlobPathScheme::Plain,
             "independent-probe-clients",
             keypair.clone(),
+            Arc::new(SequentialCopyIdGenerator::new("independent-probe-clients")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
-            "independent-probe-clients",
-        )))
+        .expect("in-memory home supports immutable copies")
         .with_serial_coordination_clients(
             Arc::new(RecordingHeadClient {
                 id: 1,
@@ -270,10 +269,9 @@ mod tests {
             BlobPathScheme::Plain,
             "probe-cleanup-retry",
             keypair.clone(),
+            Arc::new(SequentialCopyIdGenerator::new("probe-cleanup-retry")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
-            "probe-cleanup-retry",
-        )))
+        .expect("in-memory home supports immutable copies")
         .with_serial_coordination_clients(Arc::new(home.clone()), Arc::new(home));
         let db = open_serial_test_db();
 

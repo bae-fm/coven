@@ -717,8 +717,9 @@ mod tests {
             BlobPathScheme::Plain,
             name,
             signer.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(name)),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(name)))
+        .expect("test cloud storage supports immutable copies")
     }
 
     fn serial_storage(

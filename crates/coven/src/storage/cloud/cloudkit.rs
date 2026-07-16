@@ -3,24 +3,26 @@
 //! CloudKit's CKAsset has a 50MB limit, so large files are split into 10MB
 //! chunks stored as tokened part records plus a manifest record.
 //!
-//! The `CloudKitOps` trait defines synchronous record operations that are
-//! implemented in Swift via a UniFFI callback interface. `CloudKitCloudHome`
-//! wraps these ops, adds chunking logic, and implements `CloudHome`.
+//! The `CloudKitOps` trait defines synchronous record operations implemented by
+//! a host bridge to its CloudKit driver. `CloudKitCloudHome` wraps these ops,
+//! adds chunking logic, and implements `CloudHome`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::id_provider::{IdRef, UuidProvider};
 
 use super::{
-    CloudAccessOutcome, CloudAccessState, CloudHeadCreateError, CloudHeadReplaceError,
-    CloudHeadStorage, CloudHeadVersion, CloudHome, CloudHomeError, CloudHomeJoinInfo,
-    CloudVersionedHead, RevokeOutcome,
+    AppendedListing, AppendedObject, BlobBody, CloudAccessOutcome, CloudAccessState,
+    CloudHeadCreateError, CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome,
+    CloudHomeError, CloudHomeJoinInfo, CloudVersionedHead, ImmutableCopyStorage, ListingCoverage,
+    RevokeOutcome, UploadProgress,
 };
 
 const CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10MB
@@ -28,7 +30,7 @@ const CHUNK_MANIFEST_MAGIC: &[u8] = b"coven-cloudkit-chunk-manifest-v1\0";
 const CHUNK_MANIFEST_SUFFIX: &str = ".manifest";
 
 /// Synchronous interface for raw CloudKit record operations.
-/// Implemented in Swift via UniFFI callback interface.
+/// Implemented by a host bridge to its platform CloudKit driver.
 /// Methods block the calling thread while CloudKit async operations complete.
 pub trait CloudKitOps: Send + Sync {
     fn write_record(
@@ -67,6 +69,52 @@ pub trait CloudKitOps: Send + Sync {
         expected: &CloudHeadVersion,
         data: Vec<u8>,
     ) -> Result<CloudVersionedHead, CloudHeadReplaceError>;
+    /// Open a host-owned local staging batch. Staging never creates CloudKit
+    /// records; the host keeps payloads in temporary CKAsset files until commit.
+    fn begin_atomic_create(
+        &self,
+        scope: &CloudKitScope,
+    ) -> Result<CloudKitAtomicCreateBatch, CloudHomeError>;
+    /// Stage one bounded record payload in the host-owned batch.
+    fn stage_atomic_create_record(
+        &self,
+        scope: &CloudKitScope,
+        batch: &CloudKitAtomicCreateBatch,
+        record: CloudKitRecordCreate,
+    ) -> Result<(), CloudHomeError>;
+    /// Create every staged record as one atomic custom-zone modification. Every
+    /// record uses CloudKit's create-only save policy. A known precommit failure
+    /// leaves no record present. If the commit response is lost, the whole batch
+    /// may be present; preserve those records so `record_changes` can report them.
+    /// Returned versions follow staging order when the response is received.
+    fn commit_atomic_create(
+        &self,
+        scope: &CloudKitScope,
+        batch: &CloudKitAtomicCreateBatch,
+    ) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError>;
+    /// Discard host-local staging without deleting any CloudKit records the batch
+    /// may have committed. This is idempotent. On failure, return an error naming
+    /// the batch; the caller surfaces it and does not hide or retry it.
+    fn discard_atomic_create(
+        &self,
+        scope: &CloudKitScope,
+        batch: &CloudKitAtomicCreateBatch,
+    ) -> Result<(), CloudHomeError>;
+    /// Return one ordered page of the custom zone's record history. `after=None`
+    /// starts a complete enumeration; the terminal page carries the server token
+    /// that bounds the resulting live-record view.
+    fn record_changes(
+        &self,
+        scope: &CloudKitScope,
+        after: Option<&CloudKitChangeToken>,
+    ) -> Result<CloudKitRecordChangesPage, CloudHomeError>;
+    /// Delete exactly these fetched record versions as one CloudKit atomic zone
+    /// modification. A changed or missing record fails the whole deletion.
+    fn delete_record_versions(
+        &self,
+        scope: &CloudKitScope,
+        records: &[CloudKitRecordVersion],
+    ) -> Result<(), CloudHomeError>;
     fn share_for_member(
         &self,
         member_pubkey: &str,
@@ -74,6 +122,72 @@ pub trait CloudKitOps: Send + Sync {
     fn grant_share(&self, member_pubkey: &str) -> Result<CloudKitShare, CloudHomeError>;
     fn revoke_share(&self, member_pubkey: &str) -> Result<(), CloudHomeError>;
     fn accept_share(&self, share_url: &str) -> Result<CloudKitShare, CloudHomeError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudKitChangeToken(String);
+
+impl CloudKitChangeToken {
+    pub fn from_provider(value: String) -> Result<Self, CloudHomeError> {
+        if value.is_empty() {
+            return Err(CloudHomeError::Transport(
+                "CloudKit returned an empty zone change token".to_string(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_provider(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudKitRecordVersion {
+    pub key: String,
+    pub version: CloudHeadVersion,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudKitRecordCreate {
+    pub key: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CloudKitAtomicCreateBatch(String);
+
+impl CloudKitAtomicCreateBatch {
+    pub fn from_provider(value: String) -> Result<Self, CloudHomeError> {
+        if value.is_empty() {
+            return Err(CloudHomeError::Transport(
+                "CloudKit returned an empty atomic-create batch id".to_string(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_provider(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloudKitRecordChange {
+    Present(CloudKitRecordVersion),
+    Deleted { key: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloudKitRecordChangesContinuation {
+    More(CloudKitChangeToken),
+    Complete(CloudKitChangeToken),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudKitRecordChangesPage {
+    pub changes: Vec<CloudKitRecordChange>,
+    pub continuation: CloudKitRecordChangesContinuation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -239,11 +353,124 @@ struct ChunkManifest {
     upload_id: String,
 }
 
-enum CloudKitObjectLayout {
-    Single(Vec<u8>),
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CloudKitStoredRecordId {
+    key: String,
+    version: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "layout", rename_all = "snake_case", deny_unknown_fields)]
+enum CloudKitAppendedId {
+    Single {
+        record: CloudKitStoredRecordId,
+    },
+    Chunked {
+        manifest: CloudKitStoredRecordId,
+        parts: Vec<CloudKitStoredRecordId>,
+    },
+}
+
+impl CloudKitStoredRecordId {
+    fn from_record(record: &CloudKitRecordVersion) -> Self {
+        Self {
+            key: record.key.clone(),
+            version: record.version.as_provider().to_string(),
+        }
+    }
+
+    fn to_record(&self) -> Result<CloudKitRecordVersion, CloudHomeError> {
+        if self.key.is_empty() {
+            return Err(CloudHomeError::Configuration(
+                "CloudKit appended record key is empty".to_string(),
+            ));
+        }
+        Ok(CloudKitRecordVersion {
+            key: self.key.clone(),
+            version: CloudHeadVersion::from_provider(self.version.clone())?,
+        })
+    }
+}
+
+impl CloudKitAppendedId {
+    fn encode(&self) -> Result<String, CloudHomeError> {
+        serde_json::to_string(self).map_err(|error| {
+            CloudHomeError::Configuration(format!(
+                "encode CloudKit appended object identity: {error}"
+            ))
+        })
+    }
+
+    fn decode(object: &AppendedObject) -> Result<Self, CloudHomeError> {
+        let identity: Self =
+            serde_json::from_str(object.opaque_provider_id()).map_err(|error| {
+                CloudHomeError::Configuration(format!(
+                    "decode CloudKit appended object identity for {:?}: {error}",
+                    object.logical_key()
+                ))
+            })?;
+        identity.validate_for(object.logical_key())?;
+        Ok(identity)
+    }
+
+    fn validate_for(&self, logical_key: &str) -> Result<(), CloudHomeError> {
+        match self {
+            Self::Single { record } if record.key == logical_key => Ok(()),
+            Self::Chunked { manifest, parts }
+                if manifest.key == chunk_manifest_key(logical_key) && !parts.is_empty() =>
+            {
+                let mut expected_upload_id = None;
+                for (index, part) in parts.iter().enumerate() {
+                    let prefix = format!("{logical_key}.part{index}.");
+                    let upload_id = part.key.strip_prefix(&prefix).ok_or_else(|| {
+                        CloudHomeError::Configuration(format!(
+                            "CloudKit appended identity names an invalid part {index} for {logical_key:?}"
+                        ))
+                    })?;
+                    if upload_id.is_empty() {
+                        return Err(CloudHomeError::Configuration(format!(
+                            "CloudKit appended identity names an empty upload id for {logical_key:?} part {index}"
+                        )));
+                    }
+                    match expected_upload_id {
+                        Some(expected) if expected != upload_id => {
+                            return Err(CloudHomeError::Configuration(format!(
+                                "CloudKit appended object {logical_key:?} mixes multipart upload ids"
+                            )));
+                        }
+                        Some(_) => {}
+                        None => expected_upload_id = Some(upload_id),
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(CloudHomeError::Configuration(format!(
+                "CloudKit appended identity does not describe logical key {logical_key:?}"
+            ))),
+        }
+    }
+
+    fn records(self) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
+        match self {
+            Self::Single { record } => Ok(vec![record.to_record()?]),
+            Self::Chunked { manifest, parts } => {
+                let mut records = Vec::with_capacity(parts.len() + 1);
+                records.push(manifest.to_record()?);
+                for part in parts {
+                    records.push(part.to_record()?);
+                }
+                Ok(records)
+            }
+        }
+    }
+}
+
+enum ExactCloudKitObjectLayout {
+    Single(CloudKitRecordVersion),
     Chunked {
         manifest: ChunkManifest,
-        chunks: Vec<(usize, String)>,
+        parts: Vec<CloudKitRecordVersion>,
     },
 }
 
@@ -342,6 +569,332 @@ fn decode_chunk_manifest(data: &[u8]) -> Result<ChunkManifest, CloudHomeError> {
         total_len,
         upload_id,
     })
+}
+
+fn create_immutable_record(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    key: &str,
+    data: Vec<u8>,
+) -> Result<CloudKitRecordVersion, CloudHomeError> {
+    let created = ops
+        .create_record(scope, key, data)
+        .map_err(|error| match error {
+            CloudHeadCreateError::AlreadyExists => CloudHomeError::AlreadyExists(key.to_string()),
+            CloudHeadCreateError::Storage(error) => error,
+        })?;
+    Ok(CloudKitRecordVersion {
+        key: key.to_string(),
+        version: created.version,
+    })
+}
+
+fn read_immutable_record(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    expected: &CloudKitRecordVersion,
+) -> Result<Vec<u8>, CloudHomeError> {
+    let read = ops.read_versioned_record(scope, &expected.key)?;
+    if read.version != expected.version {
+        return Err(CloudHomeError::Transport(format!(
+            "CloudKit record {:?} changed from version {:?} to {:?}",
+            expected.key,
+            expected.version.as_provider(),
+            read.version.as_provider()
+        )));
+    }
+    Ok(read.bytes)
+}
+
+struct CloudKitStagingCleanup {
+    ops: Arc<dyn CloudKitOps>,
+    scope: CloudKitScope,
+    batch: CloudKitAtomicCreateBatch,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl CloudKitStagingCleanup {
+    fn disarm(&self) {
+        self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn cleanup_failure(&self, operation: CloudHomeError) -> CloudHomeError {
+        self.disarm();
+        match self.ops.discard_atomic_create(&self.scope, &self.batch) {
+            Ok(()) => operation,
+            Err(cleanup) => CloudHomeError::CleanupFailed {
+                operation: Box::new(operation),
+                cleanup: Box::new(CloudHomeError::Transport(format!(
+                    "discard CloudKit atomic-create batch {:?}: {cleanup}",
+                    self.batch.as_provider()
+                ))),
+            },
+        }
+    }
+}
+
+impl Drop for CloudKitStagingCleanup {
+    fn drop(&mut self) {
+        if !*self.armed.get_mut() {
+            return;
+        }
+        if let Err(error) = self.ops.discard_atomic_create(&self.scope, &self.batch) {
+            tracing::error!(
+                batch = self.batch.as_provider(),
+                %error,
+                "CloudKit cancellation failed to discard atomic-create batch"
+            );
+            std::process::abort();
+        }
+    }
+}
+
+async fn begin_atomic_create(
+    ops: Arc<dyn CloudKitOps>,
+    scope: CloudKitScope,
+) -> Result<Arc<CloudKitStagingCleanup>, CloudHomeError> {
+    tokio::task::spawn_blocking(move || {
+        let batch = ops.begin_atomic_create(&scope)?;
+        Ok(Arc::new(CloudKitStagingCleanup {
+            ops,
+            scope,
+            batch,
+            armed: std::sync::atomic::AtomicBool::new(true),
+        }))
+    })
+    .await
+    .map_err(|error| {
+        CloudHomeError::Transport(format!(
+            "CloudKit atomic-create staging task failed: {error}"
+        ))
+    })?
+}
+
+async fn stage_atomic_create_record(
+    staging: Arc<CloudKitStagingCleanup>,
+    record: CloudKitRecordCreate,
+) -> Result<(), CloudHomeError> {
+    if record.data.len() > CHUNK_SIZE {
+        return Err(CloudHomeError::Configuration(format!(
+            "CloudKit staged record {:?} has {} bytes, above the {CHUNK_SIZE}-byte bound",
+            record.key,
+            record.data.len()
+        )));
+    }
+    tokio::task::spawn_blocking(move || {
+        staging
+            .ops
+            .stage_atomic_create_record(&staging.scope, &staging.batch, record)
+    })
+    .await
+    .map_err(|error| {
+        CloudHomeError::Transport(format!(
+            "CloudKit atomic-create staging task failed: {error}"
+        ))
+    })?
+}
+
+async fn commit_atomic_create(
+    staging: Arc<CloudKitStagingCleanup>,
+) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
+    tokio::task::spawn_blocking(move || {
+        let created = staging
+            .ops
+            .commit_atomic_create(&staging.scope, &staging.batch)?;
+        staging.disarm();
+        Ok(created)
+    })
+    .await
+    .map_err(|error| {
+        CloudHomeError::Transport(format!(
+            "CloudKit atomic-create commit task failed: {error}"
+        ))
+    })?
+}
+
+async fn authoritative_created_records(
+    ops: Arc<dyn CloudKitOps>,
+    scope: CloudKitScope,
+    keys: Vec<String>,
+) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
+    blocking(move || {
+        keys.into_iter()
+            .map(|key| {
+                let record = ops.read_versioned_record(&scope, &key).map_err(|error| {
+                    CloudHomeError::Transport(format!(
+                        "read committed CloudKit atomic-create record {key:?}: {error}"
+                    ))
+                })?;
+                Ok(CloudKitRecordVersion {
+                    key,
+                    version: record.version,
+                })
+            })
+            .collect()
+    })
+    .await
+}
+
+fn live_record_versions(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+) -> Result<BTreeMap<String, CloudKitRecordVersion>, CloudHomeError> {
+    let mut live = BTreeMap::new();
+    let mut after = None;
+    let mut seen_tokens = BTreeSet::new();
+
+    loop {
+        let page = ops.record_changes(scope, after.as_ref())?;
+        for change in page.changes {
+            match change {
+                CloudKitRecordChange::Present(record) => {
+                    live.insert(record.key.clone(), record);
+                }
+                CloudKitRecordChange::Deleted { key } => {
+                    live.remove(&key);
+                }
+            }
+        }
+        match page.continuation {
+            CloudKitRecordChangesContinuation::More(token) => {
+                if !seen_tokens.insert(token.as_provider().to_string()) {
+                    return Err(CloudHomeError::Transport(format!(
+                        "CloudKit repeated zone change token {:?} before completing the scan",
+                        token.as_provider()
+                    )));
+                }
+                after = Some(token);
+            }
+            CloudKitRecordChangesContinuation::Complete(_) => return Ok(live),
+        }
+    }
+}
+
+fn appended_listing_from_zone(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    prefix: &str,
+) -> Result<AppendedListing, CloudHomeError> {
+    let live = live_record_versions(ops, scope)?;
+    let mut objects = Vec::new();
+
+    for (key, record) in live.iter().filter(|(key, _)| key.starts_with(prefix)) {
+        let Some(logical_key) = key.strip_suffix(CHUNK_MANIFEST_SUFFIX) else {
+            if strip_part_suffix(key) == key {
+                if live.contains_key(&chunk_manifest_key(key)) {
+                    return Err(CloudHomeError::Transport(format!(
+                        "CloudKit has both bounded and multipart records for {key:?}"
+                    )));
+                }
+                let identity = CloudKitAppendedId::Single {
+                    record: CloudKitStoredRecordId::from_record(record),
+                };
+                objects.push(AppendedObject::from_provider(
+                    key.clone(),
+                    identity.encode()?,
+                )?);
+            }
+            continue;
+        };
+
+        if !logical_key.starts_with(prefix) {
+            continue;
+        }
+        if live.contains_key(logical_key) {
+            return Err(CloudHomeError::Transport(format!(
+                "CloudKit has both bounded and multipart records for {logical_key:?}"
+            )));
+        }
+        let manifest_data = read_immutable_record(ops, scope, record)?;
+        let manifest = decode_chunk_manifest(&manifest_data)?;
+        let mut parts = Vec::with_capacity(manifest.part_count);
+        for index in 0..manifest.part_count {
+            let part_key = chunk_part_key(logical_key, &manifest.upload_id, index);
+            let part = live.get(&part_key).ok_or_else(|| {
+                CloudHomeError::Transport(format!(
+                    "CloudKit object {logical_key:?} is missing exact part {index}"
+                ))
+            })?;
+            parts.push(CloudKitStoredRecordId::from_record(part));
+        }
+        let identity = CloudKitAppendedId::Chunked {
+            manifest: CloudKitStoredRecordId::from_record(record),
+            parts,
+        };
+        objects.push(AppendedObject::from_provider(
+            logical_key.to_string(),
+            identity.encode()?,
+        )?);
+    }
+
+    objects.sort_by(|left, right| left.logical_key().cmp(right.logical_key()));
+    Ok(AppendedListing {
+        objects,
+        coverage: ListingCoverage::CompleteAtScan,
+    })
+}
+
+fn exact_object_layout(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    object: &AppendedObject,
+) -> Result<ExactCloudKitObjectLayout, CloudHomeError> {
+    match CloudKitAppendedId::decode(object)? {
+        CloudKitAppendedId::Single { record } => {
+            Ok(ExactCloudKitObjectLayout::Single(record.to_record()?))
+        }
+        CloudKitAppendedId::Chunked { manifest, parts } => {
+            let manifest_record = manifest.to_record()?;
+            let manifest_data = read_immutable_record(ops, scope, &manifest_record)?;
+            let decoded = decode_chunk_manifest(&manifest_data)?;
+            if decoded.part_count != parts.len() {
+                return Err(CloudHomeError::Configuration(format!(
+                    "CloudKit appended identity for {:?} has {} parts, manifest requires {}",
+                    object.logical_key(),
+                    parts.len(),
+                    decoded.part_count
+                )));
+            }
+            let mut exact_parts = Vec::with_capacity(parts.len());
+            for (index, part) in parts.iter().enumerate() {
+                let expected_key = chunk_part_key(object.logical_key(), &decoded.upload_id, index);
+                if part.key != expected_key {
+                    return Err(CloudHomeError::Configuration(format!(
+                        "CloudKit appended identity for {:?} names part {index} as {:?}, expected {:?}",
+                        object.logical_key(), part.key, expected_key
+                    )));
+                }
+                exact_parts.push(part.to_record()?);
+            }
+            Ok(ExactCloudKitObjectLayout::Chunked {
+                manifest: decoded,
+                parts: exact_parts,
+            })
+        }
+    }
+}
+
+fn read_exact_part(
+    ops: &dyn CloudKitOps,
+    scope: &CloudKitScope,
+    logical_key: &str,
+    manifest: &ChunkManifest,
+    index: usize,
+    part: &CloudKitRecordVersion,
+) -> Result<Vec<u8>, CloudHomeError> {
+    let bytes = read_immutable_record(ops, scope, part)?;
+    let expected_len = if index + 1 == manifest.part_count {
+        manifest.total_len - (CHUNK_SIZE * index)
+    } else {
+        CHUNK_SIZE
+    };
+    if bytes.len() != expected_len {
+        return Err(CloudHomeError::Transport(format!(
+            "CloudKit object {logical_key:?} exact part {index} has {} bytes, expected {expected_len}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
 }
 
 fn parse_chunk_key(key: &str, upload_id: &str) -> Result<Option<usize>, CloudHomeError> {
@@ -628,6 +1181,10 @@ impl super::PartSink for CloudKitPartSink {
 
 #[async_trait]
 impl CloudHome for CloudKitCloudHome {
+    fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn ImmutableCopyStorage>> {
+        Some(self)
+    }
+
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         let ops = self.ops.clone();
         let scope = self.scope.clone();
@@ -694,71 +1251,6 @@ impl CloudHome for CloudKitCloudHome {
             )))
         })
         .await
-    }
-
-    async fn read_appended_to_file(
-        &self,
-        object: &super::AppendedObject,
-        destination: &std::path::Path,
-    ) -> Result<(), super::CloudFileReadError> {
-        let ops = self.ops.clone();
-        let scope = self.scope.clone();
-        let key = object.logical_key().to_string();
-        let layout_key = key.clone();
-        let layout = blocking(move || {
-            match ops.read_record(&scope, &layout_key) {
-                Ok(data) => return Ok(CloudKitObjectLayout::Single(data)),
-                Err(CloudHomeError::NotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
-
-            match ops.read_record(&scope, &chunk_manifest_key(&layout_key)) {
-                Ok(data) => {
-                    let manifest = decode_chunk_manifest(&data)?;
-                    let chunks = list_numbered_chunks(&*ops, &scope, &layout_key, &manifest)?;
-                    verify_chunk_manifest(&layout_key, &manifest, &chunks)?;
-                    return Ok(CloudKitObjectLayout::Chunked { manifest, chunks });
-                }
-                Err(CloudHomeError::NotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
-
-            let chunks = ops.list_records(&scope, &format!("{layout_key}.part"))?;
-            if chunks.is_empty() {
-                return Err(CloudHomeError::NotFound(layout_key));
-            }
-            Err(CloudHomeError::Transport(format!(
-                "CloudKit object {layout_key} has chunk records but no manifest"
-            )))
-        })
-        .await?;
-
-        let stream: super::CloudObjectStream = match layout {
-            CloudKitObjectLayout::Single(data) => Box::pin(futures_util::stream::once(
-                async move { Ok(Bytes::from(data)) },
-            )),
-            CloudKitObjectLayout::Chunked { manifest, chunks } => {
-                let ops = self.ops.clone();
-                let scope = self.scope.clone();
-                Box::pin(
-                    futures_util::stream::iter(chunks).then(move |(index, chunk_key)| {
-                        let ops = ops.clone();
-                        let scope = scope.clone();
-                        let key = key.clone();
-                        let manifest = manifest.clone();
-                        async move {
-                            blocking(move || {
-                                read_chunk(&*ops, &scope, &key, &manifest, index, &chunk_key)
-                                    .map(Bytes::from)
-                            })
-                            .await
-                        }
-                    }),
-                )
-            }
-        };
-        super::write_cloud_object_stream(destination, stream).await?;
-        Ok(())
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
@@ -956,13 +1448,228 @@ impl CloudHome for CloudKitCloudHome {
     }
 }
 
+#[async_trait]
+impl ImmutableCopyStorage for CloudKitCloudHome {
+    async fn append_object(
+        &self,
+        full_logical_key: &str,
+        mut body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        let total_len = usize::try_from(body.len()).map_err(|_| {
+            CloudHomeError::Transport(format!(
+                "CloudKit object {full_logical_key:?} is too large for this platform"
+            ))
+        })?;
+
+        if total_len <= CHUNK_SIZE {
+            let data = body.collect().await?;
+            let ops = self.ops.clone();
+            let scope = self.scope.clone();
+            let key = full_logical_key.to_string();
+            let record =
+                blocking(move || create_immutable_record(&*ops, &scope, &key, data)).await?;
+            let identity = CloudKitAppendedId::Single {
+                record: CloudKitStoredRecordId::from_record(&record),
+            }
+            .encode()?;
+            progress(total_len as u64);
+            return AppendedObject::from_provider(full_logical_key.to_string(), identity);
+        }
+
+        let upload_id = self.ids.new_id();
+        let manifest = ChunkManifest::new(total_len, upload_id.clone());
+        let staging = begin_atomic_create(self.ops.clone(), self.scope.clone()).await?;
+        let mut requested_keys = Vec::with_capacity(manifest.part_count + 1);
+        let mut written_len = 0usize;
+        for index in 0..manifest.part_count {
+            let part = match body.next_part(CHUNK_SIZE).await {
+                Ok(Some(part)) => part,
+                Ok(None) => {
+                    let error = CloudHomeError::Transport(format!(
+                        "CloudKit object {full_logical_key:?} ended after {written_len} of {total_len} bytes"
+                    ));
+                    return Err(staging.cleanup_failure(error));
+                }
+                Err(error) => return Err(staging.cleanup_failure(error)),
+            };
+            written_len += part.len();
+            let key = chunk_part_key(full_logical_key, &upload_id, index);
+            if let Err(error) = stage_atomic_create_record(
+                staging.clone(),
+                CloudKitRecordCreate {
+                    key: key.clone(),
+                    data: part.to_vec(),
+                },
+            )
+            .await
+            {
+                return Err(staging.cleanup_failure(error));
+            }
+            requested_keys.push(key);
+        }
+        match body.next_part(CHUNK_SIZE).await {
+            Ok(None) if written_len == total_len => {}
+            Ok(None) => return Err(staging.cleanup_failure(CloudHomeError::Transport(format!(
+                    "CloudKit object {full_logical_key:?} yielded {written_len} bytes, expected {total_len}"
+                )))),
+            Ok(Some(extra)) => return Err(staging.cleanup_failure(CloudHomeError::Transport(format!(
+                    "CloudKit object {full_logical_key:?} yielded at least {} bytes, expected {total_len}",
+                    written_len + extra.len()
+                )))),
+            Err(error) => return Err(staging.cleanup_failure(error)),
+        }
+
+        let manifest_key = chunk_manifest_key(full_logical_key);
+        if let Err(error) = stage_atomic_create_record(
+            staging.clone(),
+            CloudKitRecordCreate {
+                key: manifest_key.clone(),
+                data: encode_chunk_manifest(manifest),
+            },
+        )
+        .await
+        {
+            return Err(staging.cleanup_failure(error));
+        }
+        requested_keys.push(manifest_key);
+        let mut created = match commit_atomic_create(staging.clone()).await {
+            Ok(created) => created,
+            Err(error) => return Err(staging.cleanup_failure(error)),
+        };
+        if created.len() != requested_keys.len()
+            || created
+                .iter()
+                .zip(&requested_keys)
+                .any(|(record, requested)| &record.key != requested)
+        {
+            created = authoritative_created_records(
+                self.ops.clone(),
+                self.scope.clone(),
+                requested_keys.clone(),
+            )
+            .await?;
+        }
+        let (manifest_record, parts) = created.split_last().ok_or_else(|| {
+            CloudHomeError::Transport(format!(
+                "CloudKit atomic create returned no records for {full_logical_key:?}"
+            ))
+        })?;
+        let identity = CloudKitAppendedId::Chunked {
+            manifest: CloudKitStoredRecordId::from_record(manifest_record),
+            parts: parts
+                .iter()
+                .map(CloudKitStoredRecordId::from_record)
+                .collect(),
+        }
+        .encode()?;
+        progress(total_len as u64);
+        AppendedObject::from_provider(full_logical_key.to_string(), identity)
+    }
+
+    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let prefix = prefix.to_string();
+        blocking(move || appended_listing_from_zone(&*ops, &scope, &prefix)).await
+    }
+
+    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let object = object.clone();
+        blocking(move || match exact_object_layout(&*ops, &scope, &object)? {
+            ExactCloudKitObjectLayout::Single(record) => {
+                read_immutable_record(&*ops, &scope, &record)
+            }
+            ExactCloudKitObjectLayout::Chunked { manifest, parts } => {
+                let mut bytes = Vec::with_capacity(manifest.total_len);
+                for (index, part) in parts.iter().enumerate() {
+                    bytes.extend_from_slice(&read_exact_part(
+                        &*ops,
+                        &scope,
+                        object.logical_key(),
+                        &manifest,
+                        index,
+                        part,
+                    )?);
+                }
+                Ok(bytes)
+            }
+        })
+        .await
+    }
+
+    async fn read_appended_to_file(
+        &self,
+        object: &AppendedObject,
+        destination: &std::path::Path,
+    ) -> Result<(), super::CloudFileReadError> {
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        let object_for_layout = object.clone();
+        let layout =
+            blocking(move || exact_object_layout(&*ops, &scope, &object_for_layout)).await?;
+        let logical_key = object.logical_key().to_string();
+        let stream: super::CloudObjectStream = match layout {
+            ExactCloudKitObjectLayout::Single(record) => {
+                let ops = self.ops.clone();
+                let scope = self.scope.clone();
+                Box::pin(futures_util::stream::once(async move {
+                    blocking(move || read_immutable_record(&*ops, &scope, &record))
+                        .await
+                        .map(Bytes::from)
+                }))
+            }
+            ExactCloudKitObjectLayout::Chunked { manifest, parts } => {
+                let ops = self.ops.clone();
+                let scope = self.scope.clone();
+                Box::pin(
+                    futures_util::stream::iter(parts.into_iter().enumerate()).then(
+                        move |(index, part)| {
+                            let ops = ops.clone();
+                            let scope = scope.clone();
+                            let logical_key = logical_key.clone();
+                            let manifest = manifest.clone();
+                            async move {
+                                blocking(move || {
+                                    read_exact_part(
+                                        &*ops,
+                                        &scope,
+                                        &logical_key,
+                                        &manifest,
+                                        index,
+                                        &part,
+                                    )
+                                    .map(Bytes::from)
+                                })
+                                .await
+                            }
+                        },
+                    ),
+                )
+            }
+        };
+        super::write_cloud_object_stream(destination, stream).await?;
+        Ok(())
+    }
+
+    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        let identity = CloudKitAppendedId::decode(object)?;
+        let records = identity.records()?;
+        let ops = self.ops.clone();
+        let scope = self.scope.clone();
+        blocking(move || ops.delete_record_versions(&scope, &records)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::id_provider::SequentialIdProvider;
     use crate::storage::cloud::{no_progress, BlobBody};
-    use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -972,6 +1679,13 @@ mod tests {
         List(String),
         Delete(String),
         Exists(String),
+        Create(String),
+        BeginBatch(String),
+        Stage(String),
+        CommitBatch(String),
+        DiscardBatch(String),
+        Changes(Option<String>),
+        DeleteVersions(Vec<String>),
     }
 
     struct MockCloudKitOps {
@@ -980,6 +1694,13 @@ mod tests {
         calls: Mutex<Vec<MockCall>>,
         fail_deletes: Mutex<HashSet<String>>,
         fail_writes: Mutex<HashSet<String>>,
+        staged_batches: Mutex<HashMap<String, Vec<CloudKitRecordCreate>>>,
+        next_batch: AtomicUsize,
+        max_stage_payload: AtomicUsize,
+        fail_discards: AtomicBool,
+        lose_commit_response: AtomicBool,
+        return_wrong_commit_keys: AtomicBool,
+        scripted_change_pages: Mutex<Option<VecDeque<CloudKitRecordChangesPage>>>,
         record_exists_calls: AtomicUsize,
         grant_share_calls: AtomicUsize,
         revoke_share_calls: AtomicUsize,
@@ -994,6 +1715,13 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 fail_deletes: Mutex::new(HashSet::new()),
                 fail_writes: Mutex::new(HashSet::new()),
+                staged_batches: Mutex::new(HashMap::new()),
+                next_batch: AtomicUsize::new(0),
+                max_stage_payload: AtomicUsize::new(0),
+                fail_discards: AtomicBool::new(false),
+                lose_commit_response: AtomicBool::new(false),
+                return_wrong_commit_keys: AtomicBool::new(false),
+                scripted_change_pages: Mutex::new(None),
                 record_exists_calls: AtomicUsize::new(0),
                 grant_share_calls: AtomicUsize::new(0),
                 revoke_share_calls: AtomicUsize::new(0),
@@ -1016,6 +1744,22 @@ mod tests {
         fn fail_write(&self, key: &str) {
             self.fail_writes.lock().unwrap().insert(key.to_string());
         }
+
+        fn fail_discard(&self) {
+            self.fail_discards.store(true, Ordering::SeqCst);
+        }
+
+        fn lose_commit_response(&self) {
+            self.lose_commit_response.store(true, Ordering::SeqCst);
+        }
+
+        fn return_wrong_commit_keys(&self) {
+            self.return_wrong_commit_keys.store(true, Ordering::SeqCst);
+        }
+
+        fn script_change_pages(&self, pages: Vec<CloudKitRecordChangesPage>) {
+            *self.scripted_change_pages.lock().unwrap() = Some(pages.into());
+        }
     }
 
     impl CloudKitOps for MockCloudKitOps {
@@ -1032,10 +1776,11 @@ mod tests {
             if self.fail_writes.lock().unwrap().contains(key) {
                 return Err(CloudHomeError::Transport(format!("write {key} failed")));
             }
-            self.store
-                .lock()
-                .unwrap()
-                .insert((scope.clone(), key.to_string()), data);
+            let record = (scope.clone(), key.to_string());
+            self.store.lock().unwrap().insert(record.clone(), data);
+            let mut versions = self.versions.lock().unwrap();
+            let next = versions.get(&record).copied().unwrap_or(0) + 1;
+            versions.insert(record, next);
             Ok(())
         }
 
@@ -1080,6 +1825,10 @@ mod tests {
                 return Err(CloudHomeError::Transport(format!("delete {key} failed")));
             }
             self.store
+                .lock()
+                .unwrap()
+                .remove(&(scope.clone(), key.to_string()));
+            self.versions
                 .lock()
                 .unwrap()
                 .remove(&(scope.clone(), key.to_string()));
@@ -1128,6 +1877,15 @@ mod tests {
             key: &str,
             data: Vec<u8>,
         ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::Create(key.to_string()));
+            if self.fail_writes.lock().unwrap().contains(key) {
+                return Err(CloudHeadCreateError::Storage(CloudHomeError::Transport(
+                    format!("create {key} failed"),
+                )));
+            }
             let record = (scope.clone(), key.to_string());
             let mut store = self.store.lock().unwrap();
             let mut versions = self.versions.lock().unwrap();
@@ -1140,6 +1898,223 @@ mod tests {
                 bytes: data,
                 version: CloudHeadVersion::from_provider("1".to_string())?,
             })
+        }
+
+        fn begin_atomic_create(
+            &self,
+            _scope: &CloudKitScope,
+        ) -> Result<CloudKitAtomicCreateBatch, CloudHomeError> {
+            let batch = CloudKitAtomicCreateBatch::from_provider(format!(
+                "batch-{}",
+                self.next_batch.fetch_add(1, Ordering::SeqCst)
+            ))?;
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::BeginBatch(batch.as_provider().to_string()));
+            self.staged_batches
+                .lock()
+                .unwrap()
+                .insert(batch.as_provider().to_string(), Vec::new());
+            Ok(batch)
+        }
+
+        fn stage_atomic_create_record(
+            &self,
+            _scope: &CloudKitScope,
+            batch: &CloudKitAtomicCreateBatch,
+            record: CloudKitRecordCreate,
+        ) -> Result<(), CloudHomeError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::Stage(record.key.clone()));
+            self.max_stage_payload
+                .fetch_max(record.data.len(), Ordering::SeqCst);
+            self.staged_batches
+                .lock()
+                .unwrap()
+                .get_mut(batch.as_provider())
+                .ok_or_else(|| {
+                    CloudHomeError::NotFound(format!(
+                        "CloudKit staging batch {:?}",
+                        batch.as_provider()
+                    ))
+                })?
+                .push(record);
+            Ok(())
+        }
+
+        fn commit_atomic_create(
+            &self,
+            scope: &CloudKitScope,
+            batch: &CloudKitAtomicCreateBatch,
+        ) -> Result<Vec<CloudKitRecordVersion>, CloudHomeError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::CommitBatch(batch.as_provider().to_string()));
+            let mut batches = self.staged_batches.lock().unwrap();
+            let records = batches.get(batch.as_provider()).ok_or_else(|| {
+                CloudHomeError::NotFound(format!(
+                    "CloudKit staging batch {:?}",
+                    batch.as_provider()
+                ))
+            })?;
+            let fail_writes = self.fail_writes.lock().unwrap();
+            let mut store = self.store.lock().unwrap();
+            let mut versions = self.versions.lock().unwrap();
+            for record in records {
+                if fail_writes.contains(&record.key) {
+                    return Err(CloudHomeError::Transport(format!(
+                        "atomic create {:?} failed",
+                        record.key
+                    )));
+                }
+                if store.contains_key(&(scope.clone(), record.key.clone())) {
+                    return Err(CloudHomeError::AlreadyExists(record.key.clone()));
+                }
+            }
+            let records = batches
+                .remove(batch.as_provider())
+                .expect("validated CloudKit staging batch disappeared");
+            let mut created = Vec::with_capacity(records.len());
+            for record in records {
+                let coordinate = (scope.clone(), record.key.clone());
+                store.insert(coordinate.clone(), record.data);
+                versions.insert(coordinate, 1);
+                created.push(CloudKitRecordVersion {
+                    key: record.key,
+                    version: CloudHeadVersion::from_provider("1".to_string())?,
+                });
+            }
+            if self.lose_commit_response.load(Ordering::SeqCst) {
+                return Err(CloudHomeError::Transport(
+                    "CloudKit commit response was lost".to_string(),
+                ));
+            }
+            if self.return_wrong_commit_keys.load(Ordering::SeqCst) {
+                for (index, record) in created.iter_mut().enumerate() {
+                    record.key = format!("unexpected-returned-record-{index}");
+                }
+            }
+            Ok(created)
+        }
+
+        fn discard_atomic_create(
+            &self,
+            _scope: &CloudKitScope,
+            batch: &CloudKitAtomicCreateBatch,
+        ) -> Result<(), CloudHomeError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(MockCall::DiscardBatch(batch.as_provider().to_string()));
+            if self.fail_discards.load(Ordering::SeqCst) {
+                return Err(CloudHomeError::Transport(format!(
+                    "discard staging batch {:?} failed",
+                    batch.as_provider()
+                )));
+            }
+            self.staged_batches
+                .lock()
+                .unwrap()
+                .remove(batch.as_provider());
+            Ok(())
+        }
+
+        fn record_changes(
+            &self,
+            scope: &CloudKitScope,
+            after: Option<&CloudKitChangeToken>,
+        ) -> Result<CloudKitRecordChangesPage, CloudHomeError> {
+            self.calls.lock().unwrap().push(MockCall::Changes(
+                after.map(|token| token.as_provider().to_string()),
+            ));
+            let mut scripted = self.scripted_change_pages.lock().unwrap();
+            if let Some(pages) = scripted.as_mut() {
+                return pages.pop_front().ok_or_else(|| {
+                    CloudHomeError::Transport(
+                        "CloudKit mock change-page script is exhausted".to_string(),
+                    )
+                });
+            }
+            if after.is_some() {
+                return Err(CloudHomeError::Transport(
+                    "CloudKit mock live scan received an unexpected continuation token".to_string(),
+                ));
+            }
+            let store = self.store.lock().unwrap();
+            let versions = self.versions.lock().unwrap();
+            let mut changes = Vec::new();
+            for ((record_scope, key), _) in store.iter() {
+                if record_scope != scope {
+                    continue;
+                }
+                let version = versions
+                    .get(&(record_scope.clone(), key.clone()))
+                    .ok_or_else(|| {
+                        CloudHomeError::Transport(format!(
+                            "CloudKit mock record {key:?} has no version"
+                        ))
+                    })?;
+                changes.push(CloudKitRecordChange::Present(CloudKitRecordVersion {
+                    key: key.clone(),
+                    version: CloudHeadVersion::from_provider(version.to_string())?,
+                }));
+            }
+            changes.sort_by(|left, right| match (left, right) {
+                (CloudKitRecordChange::Present(left), CloudKitRecordChange::Present(right)) => {
+                    left.key.cmp(&right.key)
+                }
+                _ => std::cmp::Ordering::Equal,
+            });
+            Ok(CloudKitRecordChangesPage {
+                changes,
+                continuation: CloudKitRecordChangesContinuation::Complete(
+                    CloudKitChangeToken::from_provider("live".to_string())?,
+                ),
+            })
+        }
+
+        fn delete_record_versions(
+            &self,
+            scope: &CloudKitScope,
+            records: &[CloudKitRecordVersion],
+        ) -> Result<(), CloudHomeError> {
+            self.calls.lock().unwrap().push(MockCall::DeleteVersions(
+                records.iter().map(|record| record.key.clone()).collect(),
+            ));
+            let fail_deletes = self.fail_deletes.lock().unwrap();
+            let mut store = self.store.lock().unwrap();
+            let mut versions = self.versions.lock().unwrap();
+            for record in records {
+                if fail_deletes.contains(&record.key) {
+                    return Err(CloudHomeError::Transport(format!(
+                        "delete {:?} failed",
+                        record.key
+                    )));
+                }
+                let storage_key = (scope.clone(), record.key.clone());
+                let current = versions
+                    .get(&storage_key)
+                    .ok_or_else(|| CloudHomeError::NotFound(record.key.clone()))?;
+                if current.to_string() != record.version.as_provider() {
+                    return Err(CloudHomeError::Transport(format!(
+                        "CloudKit record {:?} changed before exact deletion",
+                        record.key
+                    )));
+                }
+                if !store.contains_key(&storage_key) {
+                    return Err(CloudHomeError::NotFound(record.key.clone()));
+                }
+            }
+            for record in records {
+                let storage_key = (scope.clone(), record.key.clone());
+                store.remove(&storage_key);
+                versions.remove(&storage_key);
+            }
+            Ok(())
         }
 
         fn replace_record(
@@ -1823,6 +2798,389 @@ mod tests {
         // end == 0 returns empty (the underflow case)
         let slice = ch.read_range("range.bin", 0, 0).await.unwrap();
         assert!(slice.is_empty());
+    }
+
+    #[tokio::test]
+    async fn immutable_bounded_records_are_create_only_and_read_by_exact_version() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let appended = home
+            .append_object(
+                "copies/bounded",
+                BlobBody::from_bytes(b"first".to_vec()),
+                &no_progress(),
+            )
+            .await
+            .unwrap();
+
+        let collision = home
+            .append_object(
+                "copies/bounded",
+                BlobBody::from_bytes(b"second".to_vec()),
+                &no_progress(),
+            )
+            .await
+            .expect_err("an immutable record must never overwrite an existing key");
+        assert!(matches!(collision, CloudHomeError::AlreadyExists(key) if key == "copies/bounded"));
+        assert_eq!(home.read_appended(&appended).await.unwrap(), b"first");
+
+        ops.write_record(
+            &CloudKitScope::Private,
+            "copies/bounded",
+            b"replacement".to_vec(),
+        )
+        .unwrap();
+        let changed = home
+            .read_appended(&appended)
+            .await
+            .expect_err("an exact read must reject a later record version");
+        assert!(changed.to_string().contains("changed from version"));
+    }
+
+    #[tokio::test]
+    async fn immutable_multipart_stages_one_bounded_part_at_a_time_and_manifest_last() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let data = vec![7u8; CHUNK_SIZE + 13];
+
+        let appended = home
+            .append_object(
+                "copies/chunked",
+                BlobBody::from_bytes(data.clone()),
+                &no_progress(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ops.calls(),
+            vec![
+                MockCall::BeginBatch("batch-0".to_string()),
+                MockCall::Stage(chunk_part_key("copies/chunked", "cloudkit-upload-0", 0,)),
+                MockCall::Stage(chunk_part_key("copies/chunked", "cloudkit-upload-0", 1,)),
+                MockCall::Stage(chunk_manifest_key("copies/chunked")),
+                MockCall::CommitBatch("batch-0".to_string()),
+            ]
+        );
+        assert_eq!(ops.max_stage_payload.load(Ordering::SeqCst), CHUNK_SIZE);
+        assert_eq!(home.read_appended(&appended).await.unwrap(), data);
+
+        let CloudKitAppendedId::Chunked { manifest, parts } =
+            CloudKitAppendedId::decode(&appended).unwrap()
+        else {
+            panic!("multipart append returned a bounded identity");
+        };
+        assert_eq!(parts.len(), 2);
+        assert_eq!(manifest.key, chunk_manifest_key("copies/chunked"));
+        let manifest_bytes = ops
+            .read_record(&CloudKitScope::Private, &manifest.key)
+            .unwrap();
+        let decoded_manifest = decode_chunk_manifest(&manifest_bytes).unwrap();
+        for (index, part) in parts.iter().enumerate() {
+            assert_eq!(
+                part.key,
+                chunk_part_key("copies/chunked", &decoded_manifest.upload_id, index)
+            );
+        }
+
+        ops.write_record(
+            &CloudKitScope::Private,
+            &parts[0].key,
+            vec![6u8; CHUNK_SIZE],
+        )
+        .unwrap();
+        let mismatch = home
+            .read_appended(&appended)
+            .await
+            .expect_err("multipart reads must reject a changed exact part tag");
+        assert!(mismatch.to_string().contains("changed from version"));
+    }
+
+    #[tokio::test]
+    async fn lost_atomic_commit_response_preserves_records_for_authoritative_listing() {
+        let (home, ops) = make_cloud_home_with_ops();
+        ops.lose_commit_response();
+        let data = vec![2u8; CHUNK_SIZE + 1];
+
+        let error = home
+            .append_object(
+                "copies/ambiguous",
+                BlobBody::from_bytes(data.clone()),
+                &no_progress(),
+            )
+            .await
+            .expect_err("lost commit response must remain an unknown outcome");
+
+        assert!(error.to_string().contains("response was lost"), "{error}");
+        let listing = home.list_appended("copies/").await.unwrap();
+        assert_eq!(listing.objects.len(), 1);
+        assert_eq!(listing.objects[0].logical_key(), "copies/ambiguous");
+        assert_eq!(home.read_appended(&listing.objects[0]).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn mismatched_commit_locators_are_replaced_by_authoritative_versions() {
+        let (home, ops) = make_cloud_home_with_ops();
+        ops.return_wrong_commit_keys();
+        let data = vec![3u8; CHUNK_SIZE + 1];
+
+        let appended = home
+            .append_object(
+                "copies/locator-mismatch",
+                BlobBody::from_bytes(data.clone()),
+                &no_progress(),
+            )
+            .await
+            .expect("authoritative reads recover exact committed locators");
+
+        assert_eq!(home.read_appended(&appended).await.unwrap(), data);
+        let records = CloudKitAppendedId::decode(&appended)
+            .unwrap()
+            .records()
+            .unwrap();
+        assert!(records
+            .iter()
+            .all(|record| !record.key.starts_with("unexpected-returned-record-")));
+    }
+
+    #[tokio::test]
+    async fn immutable_atomic_multipart_failure_and_collision_create_no_partial_layout() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let first_part = chunk_part_key("copies/failed", "cloudkit-upload-0", 0);
+        let second_part = chunk_part_key("copies/failed", "cloudkit-upload-0", 1);
+        ops.fail_write(&second_part);
+        let data = vec![3u8; CHUNK_SIZE + 1];
+
+        let error = home
+            .append_object("copies/failed", BlobBody::from_bytes(data), &no_progress())
+            .await
+            .expect_err("part creation failure must abort the append");
+        assert!(matches!(error, CloudHomeError::Transport(_)));
+        assert!(!ops
+            .record_exists(&CloudKitScope::Private, &first_part)
+            .unwrap());
+        assert!(!ops
+            .record_exists(
+                &CloudKitScope::Private,
+                &chunk_manifest_key("copies/failed")
+            )
+            .unwrap());
+        assert!(ops.staged_batches.lock().unwrap().is_empty());
+
+        let (home, ops) = make_cloud_home_with_ops();
+        let first_part = chunk_part_key("copies/collision", "cloudkit-upload-0", 0);
+        let second_part = chunk_part_key("copies/collision", "cloudkit-upload-0", 1);
+        ops.create_record(&CloudKitScope::Private, &second_part, b"existing".to_vec())
+            .unwrap();
+        let error = home
+            .append_object(
+                "copies/collision",
+                BlobBody::from_bytes(vec![3u8; CHUNK_SIZE + 1]),
+                &no_progress(),
+            )
+            .await
+            .expect_err("a batch collision must reject the whole append");
+        assert!(matches!(error, CloudHomeError::AlreadyExists(key) if key == second_part));
+        assert!(!ops
+            .record_exists(&CloudKitScope::Private, &first_part)
+            .unwrap());
+        assert!(!ops
+            .record_exists(
+                &CloudKitScope::Private,
+                &chunk_manifest_key("copies/collision")
+            )
+            .unwrap());
+        assert!(ops
+            .record_exists(&CloudKitScope::Private, &second_part)
+            .unwrap());
+        assert!(ops.staged_batches.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn immutable_staging_cleanup_failure_is_typed_and_remote_state_stays_empty() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let second_part = chunk_part_key("copies/discard", "cloudkit-upload-0", 1);
+        ops.fail_write(&second_part);
+        ops.fail_discard();
+
+        let error = home
+            .append_object(
+                "copies/discard",
+                BlobBody::from_bytes(vec![4u8; CHUNK_SIZE + 1]),
+                &no_progress(),
+            )
+            .await
+            .expect_err("failed staging discard must be returned with the commit error");
+
+        assert!(matches!(error, CloudHomeError::CleanupFailed { .. }));
+        assert!(error.to_string().contains("batch-0"), "{error}");
+        assert!(ops.store.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropping_an_uncommitted_staging_batch_discards_host_local_payloads() {
+        let (_home, ops) = make_cloud_home_with_ops();
+        let staging = begin_atomic_create(ops.clone(), CloudKitScope::Private)
+            .await
+            .unwrap();
+        stage_atomic_create_record(
+            staging.clone(),
+            CloudKitRecordCreate {
+                key: "copies/cancelled.part0.upload".to_string(),
+                data: vec![8u8; CHUNK_SIZE],
+            },
+        )
+        .await
+        .unwrap();
+
+        drop(staging);
+
+        assert!(ops.staged_batches.lock().unwrap().is_empty());
+        assert!(ops.store.lock().unwrap().is_empty());
+        assert!(ops
+            .calls()
+            .contains(&MockCall::DiscardBatch("batch-0".to_string())));
+    }
+
+    #[test]
+    fn cancellation_discard_failure_terminates_the_process() {
+        const CHILD: &str = "COVEN_CLOUDKIT_CANCEL_DISCARD_ABORT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let ops = Arc::new(MockCloudKitOps::new());
+                let staging = begin_atomic_create(ops.clone(), CloudKitScope::Private)
+                    .await
+                    .unwrap();
+                stage_atomic_create_record(
+                    staging.clone(),
+                    CloudKitRecordCreate {
+                        key: "copies/cancelled.part0.upload".to_string(),
+                        data: vec![8u8; CHUNK_SIZE],
+                    },
+                )
+                .await
+                .unwrap();
+                ops.fail_discard();
+                let started = Arc::new(std::sync::Barrier::new(2));
+                let release = Arc::new(std::sync::Barrier::new(2));
+                let worker_started = started.clone();
+                let worker_release = release.clone();
+                let owner = tokio::spawn(async move {
+                    tokio::task::spawn_blocking(move || {
+                        worker_started.wait();
+                        worker_release.wait();
+                        drop(staging);
+                    })
+                    .await
+                    .unwrap();
+                });
+                started.wait();
+                owner.abort();
+                release.wait();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            });
+            panic!("failed cancellation discard did not abort the process");
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("cancellation_discard_failure_terminates_the_process")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .status()
+            .expect("run CloudKit cancellation sabotage subprocess");
+        assert!(
+            !status.success(),
+            "sabotage subprocess unexpectedly survived"
+        );
+    }
+
+    #[tokio::test]
+    async fn immutable_listing_consumes_change_pages_through_the_terminal_token() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let appended = home
+            .append_object(
+                "copies/paged",
+                BlobBody::from_bytes(vec![9u8; CHUNK_SIZE + 1]),
+                &no_progress(),
+            )
+            .await
+            .unwrap();
+        let records = CloudKitAppendedId::decode(&appended)
+            .unwrap()
+            .records()
+            .unwrap();
+        let deleted = CloudKitRecordVersion {
+            key: "copies/deleted".to_string(),
+            version: CloudHeadVersion::from_provider("deleted-version".to_string()).unwrap(),
+        };
+        ops.clear_calls();
+        ops.script_change_pages(vec![
+            CloudKitRecordChangesPage {
+                changes: vec![
+                    CloudKitRecordChange::Present(records[1].clone()),
+                    CloudKitRecordChange::Present(deleted),
+                ],
+                continuation: CloudKitRecordChangesContinuation::More(
+                    CloudKitChangeToken::from_provider("page-one".to_string()).unwrap(),
+                ),
+            },
+            CloudKitRecordChangesPage {
+                changes: vec![
+                    CloudKitRecordChange::Present(records[2].clone()),
+                    CloudKitRecordChange::Present(records[0].clone()),
+                    CloudKitRecordChange::Deleted {
+                        key: "copies/deleted".to_string(),
+                    },
+                ],
+                continuation: CloudKitRecordChangesContinuation::Complete(
+                    CloudKitChangeToken::from_provider("terminal".to_string()).unwrap(),
+                ),
+            },
+        ]);
+
+        let listing = home.list_appended("copies/").await.unwrap();
+
+        assert_eq!(listing.coverage, ListingCoverage::CompleteAtScan);
+        assert_eq!(listing.objects, vec![appended]);
+        assert_eq!(
+            ops.calls(),
+            vec![
+                MockCall::Changes(None),
+                MockCall::Changes(Some("page-one".to_string())),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn immutable_delete_is_atomic_over_exact_multipart_versions() {
+        let (home, ops) = make_cloud_home_with_ops();
+        let appended = home
+            .append_object(
+                "copies/delete",
+                BlobBody::from_bytes(vec![5u8; CHUNK_SIZE + 1]),
+                &no_progress(),
+            )
+            .await
+            .unwrap();
+        let records = CloudKitAppendedId::decode(&appended)
+            .unwrap()
+            .records()
+            .unwrap();
+        ops.write_record(
+            &CloudKitScope::Private,
+            &records[1].key,
+            vec![6u8; CHUNK_SIZE],
+        )
+        .unwrap();
+
+        home.delete_appended(&appended)
+            .await
+            .expect_err("a changed part must reject the whole exact deletion");
+
+        for record in records {
+            assert!(ops
+                .record_exists(&CloudKitScope::Private, &record.key)
+                .unwrap());
+        }
     }
 
     #[tokio::test]

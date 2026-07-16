@@ -51,10 +51,9 @@ fn storage_for(home: &InMemoryCloudHome, key: [u8; 32], keypair: &UserKeypair) -
         BlobPathScheme::Hashed,
         LIB_ID,
         keypair.clone(),
+        Arc::new(SequentialCopyIdGenerator::new("rotation-pending-copy")),
     )
-    .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
-        "rotation-pending-copy",
-    )))
+    .expect("test cloud storage supports immutable copies")
 }
 
 /// `InMemoryCloudHome` refuses `grant_access` — it models a backend with no
@@ -628,7 +627,9 @@ async fn assert_generation_two_opens_but_generation_one_does_not(
         BlobPathScheme::Hashed,
         LIB_ID,
         current_reader.clone(),
-    );
+        Arc::new(SequentialCopyIdGenerator::new("current-reader")),
+    )
+    .expect("test cloud storage supports immutable copies");
     let object = current_storage
         .list_protocol_objects(semantic_prefix)
         .await
@@ -648,7 +649,9 @@ async fn assert_generation_two_opens_but_generation_one_does_not(
         BlobPathScheme::Hashed,
         LIB_ID,
         removed_reader.clone(),
-    );
+        Arc::new(SequentialCopyIdGenerator::new("removed-reader")),
+    )
+    .expect("test cloud storage supports immutable copies");
     assert!(
         removed_member_storage
             .read_protocol_object(&context, &object, semantic_prefix)

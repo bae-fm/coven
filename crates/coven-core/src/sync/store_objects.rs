@@ -2162,8 +2162,9 @@ mod tests {
             BlobPathScheme::Plain,
             "store-object-tests",
             UserKeypair::generate(),
+            Arc::new(SequentialCopyIdGenerator::new("store-copy")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("store-copy")))
+        .expect("test cloud storage supports immutable copies")
     }
 
     fn validate_digest(expected: ObjectHash, bytes: &[u8]) -> Result<Vec<u8>, StoreProtocolError> {
@@ -2214,7 +2215,8 @@ mod tests {
         let locator = |key: String, provider: &str| {
             ImmutableObjectLocator::new(
                 key.clone(),
-                AppendedObject::from_provider(key, provider.to_string()),
+                AppendedObject::from_provider(key, provider.to_string())
+                    .expect("test appended identity is non-empty"),
             )
         };
         let first = locator(

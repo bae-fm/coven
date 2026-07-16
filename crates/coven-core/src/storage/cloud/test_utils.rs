@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::{
-    AppendedListing, AppendedObject, BlobBody, BoxPartSink, CloudHeadCreateError,
-    CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome, CloudHomeError,
-    CloudVersionedHead, ListingCoverage, PartSink, UploadProgress,
+    AppendedListing, AppendedObject, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+    CloudHeadCreateError, CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome,
+    CloudHomeError, CloudVersionedHead, ListingCoverage, PartSink, UploadProgress,
 };
 
 #[derive(Clone)]
@@ -314,7 +314,8 @@ impl InMemoryCloudHome {
         let locator = AppendedObject::from_provider(
             logical_key.to_string(),
             format!("in-memory-append-{id}"),
-        );
+        )
+        .expect("in-memory appended identity is non-empty");
         self.appended.lock().unwrap().push(MemoryAppendedObject {
             locator: locator.clone(),
             bytes,
@@ -490,8 +491,7 @@ impl PartSink for InMemoryPartSink {
     }
 }
 
-#[async_trait]
-impl CloudHome for InMemoryCloudHome {
+impl InMemoryCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err(CloudHomeError::Transport(
@@ -526,7 +526,6 @@ impl CloudHome for InMemoryCloudHome {
         // size matches so a multi-part blob ticks progress several times.
         super::PROGRESS_CHUNK_SIZE as u64
     }
-
     async fn append_object(
         &self,
         full_logical_key: &str,
@@ -588,14 +587,15 @@ impl CloudHome for InMemoryCloudHome {
             .filter(|candidate| candidate.locator.logical_key().starts_with(prefix))
             .map(|candidate| candidate.locator.clone())
             .collect();
-        objects.extend(
-            self.writes
-                .lock()
-                .unwrap()
-                .keys()
-                .filter(|key| key.starts_with(prefix))
-                .map(|key| AppendedObject::from_provider(key.clone(), key.clone())),
-        );
+        let written_objects = self
+            .writes
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .map(|key| AppendedObject::from_provider(key.clone(), key.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        objects.extend(written_objects);
         if self.sort_listings.load(Ordering::SeqCst) {
             objects.sort_by(|left, right| {
                 left.logical_key()
@@ -649,7 +649,6 @@ impl CloudHome for InMemoryCloudHome {
             .push(object.logical_key().to_string());
         Ok(())
     }
-
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         self.writes
             .lock()
@@ -718,6 +717,88 @@ impl CloudHome for InMemoryCloudHome {
                 super::RevokeOutcome::Unsupported,
             )),
         }
+    }
+}
+
+#[async_trait]
+impl CloudHome for InMemoryCloudHome {
+    fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn super::ImmutableCopyStorage>> {
+        Some(self)
+    }
+
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        InMemoryCloudHome::put_object(self, key, data).await
+    }
+
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        total_len: u64,
+    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+        InMemoryCloudHome::open_multipart(self, key, total_len).await
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        InMemoryCloudHome::multipart_threshold(self)
+    }
+
+    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        InMemoryCloudHome::read(self, key).await
+    }
+
+    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
+        InMemoryCloudHome::read_range(self, key, start, end).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+        InMemoryCloudHome::list(self, prefix).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+        InMemoryCloudHome::delete(self, key).await
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+        InMemoryCloudHome::exists(self, key).await
+    }
+
+    async fn set_access(
+        &self,
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
+        InMemoryCloudHome::set_access(self, desired).await
+    }
+}
+
+#[async_trait]
+impl super::ImmutableCopyStorage for InMemoryCloudHome {
+    async fn append_object(
+        &self,
+        key: &str,
+        body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        InMemoryCloudHome::append_object(self, key, body, progress).await
+    }
+
+    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        InMemoryCloudHome::list_appended(self, prefix).await
+    }
+
+    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        InMemoryCloudHome::read_appended(self, object).await
+    }
+
+    async fn read_appended_to_file(
+        &self,
+        object: &AppendedObject,
+        destination: &std::path::Path,
+    ) -> Result<(), super::CloudFileReadError> {
+        InMemoryCloudHome::read_appended_to_file(self, object, destination).await
+    }
+
+    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        InMemoryCloudHome::delete_appended(self, object).await
     }
 }
 

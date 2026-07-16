@@ -33,6 +33,8 @@ use crate::local_blob::PlaintextReader;
 pub enum CloudHomeError {
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
     /// The cloud home is misconfigured or its credentials are missing or invalid:
     /// a bucket/folder/drive that isn't set, credentials absent from the keyring, a
     /// provider unsupported by this build, OAuth that needs re-authorization. The
@@ -43,6 +45,12 @@ pub enum CloudHomeError {
     /// status, a malformed response. Transient — a later attempt may succeed.
     #[error("transport error: {0}")]
     Transport(String),
+    #[error("{operation}; cleanup failed: {cleanup}")]
+    CleanupFailed {
+        #[source]
+        operation: Box<CloudHomeError>,
+        cleanup: Box<CloudHomeError>,
+    },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -223,12 +231,25 @@ pub struct AppendedObject {
 }
 
 impl AppendedObject {
-    #[doc(hidden)]
-    pub fn from_provider(logical_key: String, opaque_provider_id: String) -> Self {
-        Self {
+    /// Build the exact physical identity returned by a provider append or scan.
+    pub fn from_provider(
+        logical_key: String,
+        opaque_provider_id: String,
+    ) -> Result<Self, CloudHomeError> {
+        if logical_key.is_empty() {
+            return Err(CloudHomeError::Configuration(
+                "appended object logical key is empty".to_string(),
+            ));
+        }
+        if opaque_provider_id.is_empty() {
+            return Err(CloudHomeError::Transport(
+                "appended object provider id is empty".to_string(),
+            ));
+        }
+        Ok(Self {
             logical_key,
             opaque_provider_id,
-        }
+        })
     }
 
     pub fn logical_key(&self) -> &str {
@@ -282,7 +303,17 @@ impl CloudHomeError {
     pub fn is_retryable(&self) -> bool {
         match self {
             CloudHomeError::Transport(_) | CloudHomeError::Io(_) => true,
-            CloudHomeError::NotFound(_) | CloudHomeError::Configuration(_) => false,
+            CloudHomeError::CleanupFailed { operation, .. } => operation.is_retryable(),
+            CloudHomeError::NotFound(_)
+            | CloudHomeError::AlreadyExists(_)
+            | CloudHomeError::Configuration(_) => false,
+        }
+    }
+
+    pub fn cleanup_causes(&self) -> Option<(&CloudHomeError, &CloudHomeError)> {
+        match self {
+            Self::CleanupFailed { operation, cleanup } => Some((operation, cleanup)),
+            _ => None,
         }
     }
 }
@@ -609,6 +640,11 @@ impl BlobBody {
         }
     }
 
+    #[cfg(feature = "test-utils")]
+    pub fn from_test_reader(len: u64, reader: PlaintextReader) -> Self {
+        Self::from_file_with_prefix(len, reader, None, Vec::new())
+    }
+
     pub(crate) fn from_file_with_prefix(
         len: u64,
         reader: PlaintextReader,
@@ -743,7 +779,33 @@ async fn write_blob<C: CloudHome + ?Sized>(
 /// All methods deal in raw bytes. No encryption or path layout logic.
 ///
 #[async_trait]
+pub trait ImmutableCopyStorage: Send + Sync {
+    async fn append_object(
+        &self,
+        full_logical_key: &str,
+        body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<AppendedObject, CloudHomeError>;
+
+    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError>;
+
+    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError>;
+
+    async fn read_appended_to_file(
+        &self,
+        object: &AppendedObject,
+        destination: &Path,
+    ) -> Result<(), CloudFileReadError>;
+
+    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError>;
+}
+
+#[async_trait]
 pub trait CloudHome: Send + Sync {
+    fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn ImmutableCopyStorage>> {
+        None
+    }
+
     /// Verify the backend is reachable with the configured credentials.
     /// Setup flows call this *before* persisting credentials, so a typo or
     /// missing bucket fails fast at setup time instead of via a delayed
@@ -781,66 +843,6 @@ pub trait CloudHome: Send + Sync {
         progress: &UploadProgress<'_>,
     ) -> Result<(), CloudHomeError> {
         write_blob(self, key, body, progress).await
-    }
-
-    /// Append one fresh physical object at `full_logical_key`.
-    ///
-    /// Store protocol callers include `/copies/{copy_id}` in this key, so the
-    /// default key-value-provider mapping never overwrites another attempt. The
-    /// object becomes listable only after [`write`](CloudHome::write) completes.
-    async fn append_object(
-        &self,
-        full_logical_key: &str,
-        body: BlobBody,
-        progress: &UploadProgress<'_>,
-    ) -> Result<AppendedObject, CloudHomeError> {
-        self.write(full_logical_key, body, progress).await?;
-        Ok(AppendedObject::from_provider(
-            full_logical_key.to_string(),
-            full_logical_key.to_string(),
-        ))
-    }
-
-    /// List every physical append copy under `prefix`, without coalescing equal
-    /// logical names or provider ids. Real providers currently report
-    /// best-effort coverage; the in-memory proof backend overrides this with an
-    /// authoritative scan.
-    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
-        let objects = self
-            .list(prefix)
-            .await?
-            .into_iter()
-            .map(|logical_key| AppendedObject::from_provider(logical_key.clone(), logical_key))
-            .collect();
-        Ok(AppendedListing {
-            objects,
-            coverage: ListingCoverage::BestEffort,
-        })
-    }
-
-    /// Read the exact physical copy named by `object`.
-    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-        self.read(object.logical_key()).await
-    }
-
-    /// Stream the exact physical copy named by `object` into an atomically
-    /// committed local file. Providers must override this rather than routing
-    /// blob-size objects through [`Self::read_appended`].
-    async fn read_appended_to_file(
-        &self,
-        object: &AppendedObject,
-        _destination: &Path,
-    ) -> Result<(), CloudFileReadError> {
-        Err(CloudHomeError::Configuration(format!(
-            "cloud provider cannot stream exact appended object {:?}",
-            object.logical_key()
-        ))
-        .into())
-    }
-
-    /// Delete the exact physical copy named by `object`.
-    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
-        self.delete(object.logical_key()).await
     }
 
     /// Read the full contents of a key.
@@ -958,6 +960,7 @@ mod retryable_tests {
         assert!(CloudHomeError::Io(std::io::Error::other("disk")).is_retryable());
         assert!(!CloudHomeError::Configuration("bucket not set".to_string()).is_retryable());
         assert!(!CloudHomeError::NotFound("key".to_string()).is_retryable());
+        assert!(!CloudHomeError::AlreadyExists("key".to_string()).is_retryable());
     }
 }
 

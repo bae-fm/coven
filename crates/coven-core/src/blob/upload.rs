@@ -223,10 +223,7 @@ impl UploadFailures {
 
     pub fn has_transport_failure(&self) -> bool {
         self.0.iter().any(|failure| {
-            matches!(
-                &failure.cause,
-                UploadFailureCause::Provider(CloudHomeError::Transport(_) | CloudHomeError::Io(_))
-            )
+            matches!(&failure.cause, UploadFailureCause::Provider(error) if error.is_retryable())
         })
     }
 }
@@ -248,9 +245,9 @@ impl std::fmt::Display for UploadFailures {
 impl std::error::Error for UploadFailures {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.0.iter().find_map(|failure| match &failure.cause {
-            UploadFailureCause::Provider(
-                error @ (CloudHomeError::Transport(_) | CloudHomeError::Io(_)),
-            ) => Some(error as &(dyn std::error::Error + 'static)),
+            UploadFailureCause::Provider(error) if error.is_retryable() => {
+                Some(error as &(dyn std::error::Error + 'static))
+            }
             _ => None,
         })
     }

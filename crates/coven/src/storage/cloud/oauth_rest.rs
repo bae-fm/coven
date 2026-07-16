@@ -9,6 +9,7 @@
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
+use std::collections::HashSet;
 use std::path::Path;
 
 use super::http::{body_text, ensure_ok, ok_bytes, NotFound};
@@ -20,6 +21,36 @@ use super::{CloudFileReadError, CloudHomeError};
 pub(super) struct ListPage {
     pub keys: Vec<String>,
     pub next: Option<String>,
+}
+
+pub(super) struct PageTokenTracker {
+    scan: &'static str,
+    seen: HashSet<String>,
+}
+
+impl PageTokenTracker {
+    pub(super) fn new(scan: &'static str) -> Self {
+        Self {
+            scan,
+            seen: HashSet::new(),
+        }
+    }
+
+    pub(super) fn record(&mut self, token: &str) -> Result<String, CloudHomeError> {
+        if token.is_empty() {
+            return Err(CloudHomeError::Transport(format!(
+                "{} returned an empty page token",
+                self.scan
+            )));
+        }
+        if !self.seen.insert(token.to_string()) {
+            return Err(CloudHomeError::Transport(format!(
+                "{} returned a repeated page token",
+                self.scan
+            )));
+        }
+        Ok(token.to_string())
+    }
 }
 
 /// The provider-specific differences the shared OAuth read methods need. Each
@@ -65,16 +96,6 @@ pub(super) async fn rest_read<T: OAuthRestHome + ?Sized>(
     let resp = home.send_read(key, None).await?;
     let resp = ensure_ok(resp, &format!("read {key}"), home.not_found()).await?;
     ok_bytes(resp, &format!("read body for {key}")).await
-}
-
-pub(super) async fn rest_read_to_file<T: OAuthRestHome + ?Sized>(
-    home: &T,
-    key: &str,
-    destination: &Path,
-) -> Result<(), CloudFileReadError> {
-    let response = home.send_read(key, None).await?;
-    let response = ensure_ok(response, &format!("read {key}"), home.not_found()).await?;
-    response_to_file(response, destination, &format!("read body for {key}")).await
 }
 
 pub(super) async fn response_to_file(

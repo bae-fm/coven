@@ -291,6 +291,8 @@ impl SyncManager {
         }
 
         self.require_configured_coordination(&config)?;
+        crate::storage::cloud::setup::require_immutable_copy_capabilities_config(&config)
+            .map_err(SyncError::StorageSetup)?;
 
         let routing_encryption = self.routing_encryption()?;
 
@@ -429,6 +431,11 @@ impl SyncManager {
         coordination: Option<std::sync::Arc<dyn crate::storage::cloud::CloudHeadStorage>>,
     ) -> Result<(), SyncError> {
         let config = (self.config_provider)();
+        crate::storage::cloud::setup::require_immutable_copy_capabilities_home(
+            home.clone(),
+            config.cloud_home.provider.clone(),
+        )
+        .map_err(SyncError::StorageSetup)?;
         let routing_encryption = self.routing_encryption()?;
         self.stop_current_connection()?;
 
@@ -444,8 +451,8 @@ impl SyncManager {
             blob_paths,
             config.store_id.clone(),
             keypair,
-        )
-        .with_copy_ids(Arc::new(crate::storage::cloud::RandomCopyIdGenerator));
+            Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
+        )?;
         if let Some(coordination) = coordination {
             storage = storage.with_test_serial_coordination(coordination);
         }
@@ -865,6 +872,59 @@ mod tests {
     use crate::store_dir::StoreDir;
     use std::sync::Arc;
 
+    struct NoImmutableCopyHome;
+
+    #[async_trait::async_trait]
+    impl CloudHome for NoImmutableCopyHome {
+        async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
+            panic!("incapable home must be rejected before I/O")
+        }
+
+        async fn open_multipart<'a>(
+            &'a self,
+            _key: &str,
+            _total_len: u64,
+        ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
+            panic!("incapable home must be rejected before I/O")
+        }
+
+        fn multipart_threshold(&self) -> u64 {
+            panic!("incapable home must be rejected before I/O")
+        }
+
+        async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
+            panic!("incapable home must be rejected before I/O")
+        }
+
+        async fn read_range(
+            &self,
+            _key: &str,
+            _start: u64,
+            _end: u64,
+        ) -> Result<Vec<u8>, CloudHomeError> {
+            panic!("incapable home must be rejected before I/O")
+        }
+
+        async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+            panic!("incapable home must be rejected before I/O")
+        }
+
+        async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
+            panic!("incapable home must be rejected before I/O")
+        }
+
+        async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
+            panic!("incapable home must be rejected before I/O")
+        }
+
+        async fn set_access(
+            &self,
+            _desired: crate::storage::cloud::CloudAccessState,
+        ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
+            panic!("incapable home must be rejected before I/O")
+        }
+    }
+
     /// A custody that never has a master key established — `unlock` always
     /// returns `None`. For tests exercising a locked/unestablished store, or
     /// a browsable home where custody is never consulted at all.
@@ -1040,6 +1100,76 @@ mod tests {
         ));
         assert!(manager.sync_loop_handle().is_none());
         assert!(manager.cloud_home().is_none());
+    }
+
+    #[tokio::test]
+    async fn immutable_copy_admission_refuses_before_stopping_the_active_loop() {
+        let (_tmp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        let open_guard = StoreOpenGuard::acquire_for_test(&store_dir);
+        let config = Arc::new(RwLock::new(Config::with_defaults(
+            "immutable-admission-before-stop".to_string(),
+            "test-device".to_string(),
+            store_dir,
+            "Blob Store".to_string(),
+        )));
+        let db = crate::sync::test_helpers::open_test_db_with_blob(crate::BlobDecl::new(
+            "photos",
+            crate::Provenance::HostProvided,
+            crate::CacheFill::CacheLazy,
+        ));
+        let manager = SyncManager::new(
+            {
+                let config = config.clone();
+                Arc::new(move || config.read().expect("read config").clone())
+            },
+            StoreKeys::new("immutable-admission-before-stop".to_string()),
+            Arc::new(NoKeyCustody),
+            established_identity_custody(),
+            db,
+            Arc::new(SystemClock),
+            None,
+            None,
+            open_guard,
+            tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
+        );
+        manager
+            .start_sync_with_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
+            .await
+            .expect("install active loop");
+        let active_loop = manager.sync_loop_handle().expect("active loop");
+
+        {
+            let mut config = config.write().expect("write config");
+            config.cloud_home.provider = Some(CloudProvider::S3);
+            config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
+            config.cloud_home.s3_immutable_copies = None;
+        }
+        let error = manager
+            .start_sync()
+            .await
+            .expect_err("unsupported immutable-copy provider is refused");
+
+        assert!(matches!(
+            error,
+            SyncError::StorageSetup(StorageSetupError::ImmutableCopiesUnavailable {
+                provider: CloudProvider::S3,
+            })
+        ));
+        assert!(active_loop.is_running());
+        assert!(manager.cloud_home().is_some());
+
+        let error = manager
+            .start_sync_with_home(Arc::new(NoImmutableCopyHome), CloudCipher::Plaintext)
+            .await
+            .expect_err("injected home without immutable-copy storage is refused");
+        assert!(matches!(
+            error,
+            SyncError::StorageSetup(StorageSetupError::ImmutableCopiesUnavailable {
+                provider: CloudProvider::S3,
+            })
+        ));
+        assert!(active_loop.is_running());
+        assert!(manager.cloud_home().is_some());
     }
 
     #[tokio::test]
@@ -1238,10 +1368,11 @@ mod tests {
             BlobPathScheme::Plain,
             store_id,
             attacker.clone(),
+            Arc::new(crate::storage::cloud::SequentialCopyIdGenerator::new(
+                "foreign-founder",
+            )),
         )
-        .with_copy_ids(Arc::new(
-            crate::storage::cloud::SequentialCopyIdGenerator::new("foreign-founder"),
-        ));
+        .expect("build attacker storage");
         crate::sync::test_helpers::publish_test_protocol_roots(
             &attacker_storage,
             store_id,

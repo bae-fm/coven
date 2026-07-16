@@ -159,8 +159,9 @@ mod tests {
             BlobPathScheme::Plain,
             "ack-store-test",
             signer.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(copy_source)),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(copy_source)));
+        .expect("in-memory home supports immutable copies");
         let db = open_test_db();
         let store_root_hash = publish_test_store_protocol_root(
             &db,
@@ -274,8 +275,9 @@ mod tests {
             BlobPathScheme::Plain,
             "serial-ack-store",
             signer.clone(),
+            Arc::new(SequentialCopyIdGenerator::new("serial-ack")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("serial-ack")));
+        .expect("in-memory home supports immutable copies");
         let db = open_serial_test_db();
         let store_root_hash = publish_test_serial_store_protocol_root(
             &db,

@@ -565,8 +565,9 @@ mod tests {
             BlobPathScheme::Plain,
             "registration-store-test",
             signer.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(source)),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(source)));
+        .expect("in-memory home supports immutable copies");
         let db = open_test_db();
         let store_root_hash = publish_test_store_protocol_root(
             &db,

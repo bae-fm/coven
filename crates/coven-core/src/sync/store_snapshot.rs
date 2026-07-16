@@ -344,7 +344,7 @@ mod tests {
 
     use super::*;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
-    use crate::storage::cloud::{CloudHome, SequentialCopyIdGenerator};
+    use crate::storage::cloud::{CloudHome, ImmutableCopyStorage, SequentialCopyIdGenerator};
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::membership::founder_entry;
     use crate::sync::snapshot::CreatedSnapshot;
@@ -370,8 +370,9 @@ mod tests {
             BlobPathScheme::Plain,
             "snapshot-store-test",
             signer.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(copy_source)),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(copy_source)))
+        .expect("in-memory home supports immutable copies")
     }
 
     async fn initialized_store(

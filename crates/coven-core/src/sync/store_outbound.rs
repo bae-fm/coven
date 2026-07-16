@@ -1090,8 +1090,9 @@ mod tests {
             BlobPathScheme::Plain,
             "serial-outbound",
             keypair.clone(),
+            Arc::new(SequentialCopyIdGenerator::new("serial-outbound")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("serial-outbound")))
+        .expect("in-memory home supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()));
         let db = open_serial_test_db();
         let store_root_hash = publish_test_serial_store_protocol_root(
@@ -1191,8 +1192,9 @@ mod tests {
             BlobPathScheme::Plain,
             name,
             keypair.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(name)),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(name)))
+        .expect("in-memory home supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()));
         let db = open_serial_test_db();
         let root =
@@ -1625,8 +1627,9 @@ mod tests {
             BlobPathScheme::Plain,
             "outbound-crash-test",
             keypair.clone(),
+            Arc::new(SequentialCopyIdGenerator::new(copy_source)),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(copy_source)));
+        .expect("in-memory home supports immutable copies");
         let db = open_test_db();
         publish_test_store_protocol_root(
             &db,
@@ -1953,8 +1956,9 @@ mod tests {
                 BlobPathScheme::Plain,
                 "prepared-root-status",
                 keypair.clone(),
+                Arc::new(SequentialCopyIdGenerator::new("root-status")),
             )
-            .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("root-status")));
+            .expect("in-memory home supports immutable copies");
             let db = open();
             publish_test_store_protocol_root(
                 &db,
@@ -2040,8 +2044,9 @@ mod tests {
             BlobPathScheme::Plain,
             "blocked-retry",
             keypair.clone(),
+            Arc::new(SequentialCopyIdGenerator::new("blocked-retry")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("blocked-retry")));
+        .expect("in-memory home supports immutable copies");
         let db = open_test_db();
         let root = publish_test_store_protocol_root(
             &db,
@@ -2172,8 +2177,9 @@ mod tests {
             BlobPathScheme::Plain,
             "blocked-discard",
             keypair.clone(),
+            Arc::new(SequentialCopyIdGenerator::new("blocked-discard")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new("blocked-discard")));
+        .expect("in-memory home supports immutable copies");
         let db = open_test_db();
         let root = publish_test_store_protocol_root(
             &db,

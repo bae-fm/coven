@@ -15,9 +15,10 @@ use super::s3_common::{
     apply_prefix, is_not_found_code, normalize_prefix, probe_error, strip_listed_key_prefix,
 };
 use super::{
-    range_header, CloudAccessOutcome, CloudAccessState, CloudHeadCreateError,
-    CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, CloudVersionedHead, RevokeOutcome,
+    range_header, AppendedListing, AppendedObject, BlobBody, CloudAccessOutcome, CloudAccessState,
+    CloudHeadCreateError, CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome,
+    CloudHomeError, CloudHomeJoinInfo, CloudVersionedHead, ImmutableCopyStorage, ListingCoverage,
+    PartSink, RevokeOutcome, UploadProgress,
 };
 
 /// A coven-owned tokio runtime whose worker threads have a large stack, used to
@@ -96,6 +97,7 @@ pub struct S3CloudHome {
     access_key: String,
     secret_key: String,
     key_prefix: Option<String>,
+    immutable_copies: bool,
 }
 
 fn coordination_version(key: &str, etag: Option<&str>) -> Result<CloudHeadVersion, CloudHomeError> {
@@ -228,6 +230,7 @@ impl S3CloudHome {
         access_key: String,
         secret_key: String,
         key_prefix: Option<String>,
+        custom_immutable_copies: Option<crate::config::CustomS3ImmutableCopies>,
     ) -> Result<(Self, Self), CloudHomeError> {
         let primary = Self::new(
             bucket.clone(),
@@ -236,9 +239,19 @@ impl S3CloudHome {
             access_key.clone(),
             secret_key.clone(),
             key_prefix.clone(),
+            custom_immutable_copies,
         )
         .await?;
-        let peer = Self::new(bucket, region, endpoint, access_key, secret_key, key_prefix).await?;
+        let peer = Self::new(
+            bucket,
+            region,
+            endpoint,
+            access_key,
+            secret_key,
+            key_prefix,
+            custom_immutable_copies,
+        )
+        .await?;
         Ok((primary, peer))
     }
 
@@ -249,7 +262,12 @@ impl S3CloudHome {
         access_key: String,
         secret_key: String,
         key_prefix: Option<String>,
+        custom_immutable_copies: Option<crate::config::CustomS3ImmutableCopies>,
     ) -> Result<Self, CloudHomeError> {
+        let immutable_copies = endpoint.is_none()
+            || custom_immutable_copies
+                == Some(crate::config::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing)
+        ;
         let credentials =
             Credentials::new(&access_key, &secret_key, None, None, "coven-cloud-home");
 
@@ -319,6 +337,7 @@ impl S3CloudHome {
             // Normalize once here (trim trailing slash, drop empty), so neither
             // full_key nor list re-trims it.
             key_prefix: normalize_prefix(key_prefix),
+            immutable_copies,
         })
     }
 
@@ -326,30 +345,154 @@ impl S3CloudHome {
     fn full_key(&self, key: &str) -> String {
         apply_prefix(self.key_prefix.as_deref(), key)
     }
+
+    async fn open_multipart_sink(
+        &self,
+        key: &str,
+        completion: MultipartCompletion,
+    ) -> Result<Box<S3PartSink>, CloudHomeError> {
+        let full = self.full_key(key);
+        let upload_id = {
+            let key = key.to_string();
+            let full = full.clone();
+            let client = self.client.clone();
+            let bucket = self.bucket.clone();
+            on_s3_rt(async move {
+                let create = client
+                    .create_multipart_upload()
+                    .bucket(&bucket)
+                    .key(&full)
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        CloudHomeError::Transport(format!("multipart create {key}: {error}"))
+                    })?;
+                create
+                    .upload_id()
+                    .ok_or_else(|| {
+                        CloudHomeError::Transport(format!(
+                            "multipart create {key}: no upload id returned"
+                        ))
+                    })
+                    .map(str::to_string)
+            })
+            .await?
+        };
+        Ok(Box::new(S3PartSink {
+            client: self.client.clone(),
+            bucket: self.bucket.clone(),
+            key: full,
+            logical_key: key.to_string(),
+            upload_id,
+            completed: Vec::new(),
+            next_part_number: 1,
+            completion,
+            settled: false,
+        }))
+    }
+
+    async fn put_create_only(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        let full = self.full_key(key);
+        let logical_key = key.to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        on_s3_rt(async move {
+            client
+                .put_object()
+                .bucket(&bucket)
+                .key(&full)
+                .if_none_match("*")
+                .body(data.into())
+                .send()
+                .await
+                .map_err(|error| {
+                    if conditional_put_failed(&error) {
+                        CloudHomeError::AlreadyExists(logical_key.clone())
+                    } else {
+                        put_object_error(&logical_key, error)
+                    }
+                })?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn append_create_only(
+        &self,
+        key: &str,
+        mut body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        if body.len() <= self.multipart_threshold() {
+            let data = body.collect().await?;
+            let length = data.len() as u64;
+            self.put_create_only(key, data).await?;
+            progress(length);
+            return Ok(());
+        }
+        let mut sink = self
+            .open_multipart_sink(key, MultipartCompletion::CreateOnly)
+            .await?;
+        let total = body.len();
+        let mut offset = 0;
+        loop {
+            let part = match body.next_part(sink.part_size()).await {
+                Ok(Some(part)) => part,
+                Ok(None) if offset == total => break,
+                Ok(None) => {
+                    let operation = CloudHomeError::Transport(format!(
+                        "append {key}: upload body ended after {offset} of {total} bytes"
+                    ));
+                    let cleanup = sink.abort().await;
+                    return Err(combine_cleanup_failure(operation, cleanup));
+                }
+                Err(operation) => {
+                    let cleanup = sink.abort().await;
+                    return Err(combine_cleanup_failure(operation, cleanup));
+                }
+            };
+            let length = part.len() as u64;
+            let is_last = offset + length >= total;
+            sink.send_part(part, offset, is_last).await?;
+            offset += length;
+            progress(offset);
+        }
+        sink.finish().await
+    }
 }
 
 /// A [`PartSink`] over an open S3 multipart upload: each `send_part` is one
 /// `upload_part` whose ETag is kept, and `finish` is `complete_multipart_upload`.
-/// On any part or completion failure the upload is aborted (best-effort) so the
-/// bucket isn't left holding orphaned parts that accrue storage charges.
+/// On any part or completion failure the upload is aborted before the failure is
+/// returned. Cancellation also aborts; an unreportable abort failure terminates
+/// the process instead of hiding orphaned parts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MultipartCompletion {
+    Mutable,
+    CreateOnly,
+}
+
 struct S3PartSink {
     client: Client,
     bucket: String,
     /// The prefixed object key (also used in error messages).
     key: String,
+    logical_key: String,
     upload_id: String,
     completed: Vec<aws_sdk_s3::types::CompletedPart>,
     next_part_number: i32,
+    completion: MultipartCompletion,
+    settled: bool,
 }
 
 impl S3PartSink {
-    /// Best-effort abort so a failed upload leaves no orphaned parts.
-    async fn abort(&self) {
+    async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        self.settled = true;
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         let key = self.key.clone();
         let upload_id = self.upload_id.clone();
-        let result = on_s3_rt(async move {
+        on_s3_rt(async move {
             client
                 .abort_multipart_upload()
                 .bucket(&bucket)
@@ -357,13 +500,65 @@ impl S3PartSink {
                 .upload_id(&upload_id)
                 .send()
                 .await
-                .map_err(|e| CloudHomeError::Transport(format!("{e}")))?;
+                .map_err(|error| {
+                    CloudHomeError::Transport(format!("abort multipart {key}: {error}"))
+                })?;
             Ok(())
         })
-        .await;
-        if let Err(e) = result {
-            warn!("Failed to abort multipart upload for {}: {e}", self.key);
+        .await?;
+        Ok(())
+    }
+}
+
+impl Drop for S3PartSink {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
         }
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let key = self.key.clone();
+        let cancellation_key = key.clone();
+        let upload_id = self.upload_id.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        s3_runtime().spawn(async move {
+            let result = client
+                .abort_multipart_upload()
+                .bucket(&bucket)
+                .key(&key)
+                .upload_id(&upload_id)
+                .send()
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("abort multipart {key}: {error}"));
+            if result_tx.send(result).is_err() {
+                std::process::abort();
+            }
+        });
+        match result_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, key = %cancellation_key, "S3 cancellation failed to abort multipart upload");
+                std::process::abort();
+            }
+            Err(error) => {
+                tracing::error!(%error, key = %cancellation_key, "S3 cancellation abort task disappeared");
+                std::process::abort();
+            }
+        }
+    }
+}
+
+fn combine_cleanup_failure(
+    operation: CloudHomeError,
+    cleanup: Result<(), CloudHomeError>,
+) -> CloudHomeError {
+    match cleanup {
+        Ok(()) => operation,
+        Err(cleanup) => CloudHomeError::CleanupFailed {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup),
+        },
     }
 }
 
@@ -411,8 +606,8 @@ impl super::PartSink for S3PartSink {
                 Ok(())
             }
             Err(e) => {
-                self.abort().await;
-                Err(e)
+                let cleanup = self.abort().await;
+                Err(combine_cleanup_failure(e, cleanup))
             }
         }
     }
@@ -424,24 +619,41 @@ impl super::PartSink for S3PartSink {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         let key = self.key.clone();
+        let logical_key = self.logical_key.clone();
         let upload_id = self.upload_id.clone();
+        let completion = self.completion;
         let result = on_s3_rt(async move {
-            client
+            let request = client
                 .complete_multipart_upload()
                 .bucket(&bucket)
                 .key(&key)
                 .upload_id(&upload_id)
-                .multipart_upload(completed_upload)
-                .send()
-                .await
-                .map_err(|e| CloudHomeError::Transport(format!("multipart complete {key}: {e}")))?;
+                .multipart_upload(completed_upload);
+            let request = match completion {
+                MultipartCompletion::Mutable => request,
+                MultipartCompletion::CreateOnly => request.if_none_match("*"),
+            };
+            request.send().await.map_err(|error| {
+                use aws_sdk_s3::error::ProvideErrorMetadata;
+                if completion == MultipartCompletion::CreateOnly
+                    && matches!(
+                        error.code(),
+                        Some("PreconditionFailed" | "ConditionalRequestConflict")
+                    )
+                {
+                    CloudHomeError::AlreadyExists(logical_key)
+                } else {
+                    CloudHomeError::Transport(format!("multipart complete {key}: {error}"))
+                }
+            })?;
             Ok(())
         })
         .await;
         if let Err(e) = result {
-            self.abort().await;
-            return Err(e);
+            let cleanup = self.abort().await;
+            return Err(combine_cleanup_failure(e, cleanup));
         }
+        self.settled = true;
         Ok(())
     }
 }
@@ -527,8 +739,7 @@ fn put_object_error(
     }
 }
 
-#[async_trait]
-impl CloudHome for S3CloudHome {
+impl S3CloudHome {
     /// HeadBucket — cheap auth + existence check, no listing cost.
     async fn probe(&self) -> Result<(), CloudHomeError> {
         let client = self.client.clone();
@@ -575,48 +786,24 @@ impl CloudHome for S3CloudHome {
         key: &str,
         _total_len: u64,
     ) -> Result<super::BoxPartSink<'a>, CloudHomeError> {
-        let full = self.full_key(key);
-        // Only the aws interaction goes on the big-stack runtime; the `S3PartSink`
-        // is built here so its borrow of `&self` stays out of the spawned
-        // `'static` future (the sink owns its own `client.clone()`).
-        let upload_id = {
-            let key = key.to_string();
-            let full = full.clone();
-            let client = self.client.clone();
-            let bucket = self.bucket.clone();
-            on_s3_rt(async move {
-                let create = client
-                    .create_multipart_upload()
-                    .bucket(&bucket)
-                    .key(&full)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        CloudHomeError::Transport(format!("multipart create {key}: {e}"))
-                    })?;
-                create
-                    .upload_id()
-                    .ok_or_else(|| {
-                        CloudHomeError::Transport(format!(
-                            "multipart create {key}: no upload id returned"
-                        ))
-                    })
-                    .map(str::to_string)
-            })
-            .await?
-        };
-        Ok(Box::new(S3PartSink {
-            client: self.client.clone(),
-            bucket: self.bucket.clone(),
-            key: full,
-            upload_id,
-            completed: Vec::new(),
-            next_part_number: 1,
-        }))
+        Ok(self
+            .open_multipart_sink(key, MultipartCompletion::Mutable)
+            .await?)
     }
 
     fn multipart_threshold(&self) -> u64 {
         MULTIPART_THRESHOLD as u64
+    }
+
+    async fn append_object(
+        &self,
+        full_logical_key: &str,
+        body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        self.append_create_only(full_logical_key, body, progress)
+            .await?;
+        AppendedObject::from_provider(full_logical_key.to_string(), full_logical_key.to_string())
     }
 
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
@@ -793,6 +980,87 @@ impl CloudHome for S3CloudHome {
         .await
     }
 
+    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        let full_prefix = self.full_key(prefix);
+        let key_prefix = self.key_prefix.clone();
+        let logical_prefix = prefix.to_string();
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let objects = on_s3_rt(async move {
+            let mut objects = Vec::new();
+            let mut continuation_token: Option<String> = None;
+            let mut seen_tokens = std::collections::HashSet::new();
+            loop {
+                let mut request = client
+                    .list_objects_v2()
+                    .bucket(&bucket)
+                    .prefix(&full_prefix);
+                if let Some(token) = continuation_token.take() {
+                    request = request.continuation_token(token);
+                }
+                let response = request.send().await.map_err(|error| {
+                    CloudHomeError::Transport(format!(
+                        "authoritative list {logical_prefix}: {error}"
+                    ))
+                })?;
+                for object in response.contents() {
+                    let key = object.key().ok_or_else(|| {
+                        CloudHomeError::Transport(format!(
+                            "authoritative list {logical_prefix}: S3 object omitted key"
+                        ))
+                    })?;
+                    let logical_key =
+                        strip_listed_key_prefix(key_prefix.as_deref(), &full_prefix, key)
+                            .ok_or_else(|| {
+                                CloudHomeError::Transport(format!(
+                                    "authoritative list {logical_prefix}: key {key:?} is outside configured prefix"
+                                ))
+                            })?;
+                    objects.push(AppendedObject::from_provider(
+                        logical_key.to_string(),
+                        logical_key.to_string(),
+                    )?);
+                }
+                match response.is_truncated() {
+                    Some(true) => {
+                        let token = response
+                            .next_continuation_token()
+                            .filter(|token| !token.is_empty())
+                            .ok_or_else(|| {
+                                CloudHomeError::Transport(format!(
+                                    "authoritative list {logical_prefix}: truncated page omitted continuation token"
+                                ))
+                            })?
+                            .to_string();
+                        if !seen_tokens.insert(token.clone()) {
+                            return Err(CloudHomeError::Transport(format!(
+                                "authoritative list {logical_prefix}: repeated continuation token"
+                            )));
+                        }
+                        continuation_token = Some(token);
+                    }
+                    Some(false) if response.next_continuation_token().is_none() => break,
+                    Some(false) => {
+                        return Err(CloudHomeError::Transport(format!(
+                            "authoritative list {logical_prefix}: terminal page returned a continuation token"
+                        )))
+                    }
+                    None => {
+                        return Err(CloudHomeError::Transport(format!(
+                            "authoritative list {logical_prefix}: page omitted IsTruncated"
+                        )))
+                    }
+                }
+            }
+            Ok(objects)
+        })
+        .await?;
+        Ok(AppendedListing {
+            objects,
+            coverage: ListingCoverage::CompleteAtScan,
+        })
+    }
+
     async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
         let full = self.full_key(key);
         let key = key.to_string();
@@ -871,17 +1139,112 @@ impl CloudHome for S3CloudHome {
     }
 }
 
+#[async_trait]
+impl CloudHome for S3CloudHome {
+    fn immutable_copy_storage(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn ImmutableCopyStorage>> {
+        self.immutable_copies.then_some(self)
+    }
+
+    async fn probe(&self) -> Result<(), CloudHomeError> {
+        S3CloudHome::probe(self).await
+    }
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        S3CloudHome::put_object(self, key, data).await
+    }
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        total_len: u64,
+    ) -> Result<super::BoxPartSink<'a>, CloudHomeError> {
+        S3CloudHome::open_multipart(self, key, total_len).await
+    }
+    fn multipart_threshold(&self) -> u64 {
+        S3CloudHome::multipart_threshold(self)
+    }
+    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        S3CloudHome::read(self, key).await
+    }
+    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
+        S3CloudHome::read_range(self, key, start, end).await
+    }
+    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+        S3CloudHome::list(self, prefix).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+        S3CloudHome::delete(self, key).await
+    }
+    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+        S3CloudHome::exists(self, key).await
+    }
+    async fn set_access(
+        &self,
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
+        S3CloudHome::set_access(self, desired).await
+    }
+}
+
+#[async_trait]
+impl ImmutableCopyStorage for S3CloudHome {
+    async fn append_object(
+        &self,
+        key: &str,
+        body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<AppendedObject, CloudHomeError> {
+        S3CloudHome::append_object(self, key, body, progress).await
+    }
+    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        S3CloudHome::list_appended(self, prefix).await
+    }
+    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
+        S3CloudHome::read(self, object.logical_key()).await
+    }
+    async fn read_appended_to_file(
+        &self,
+        object: &AppendedObject,
+        destination: &std::path::Path,
+    ) -> Result<(), super::CloudFileReadError> {
+        S3CloudHome::read_appended_to_file(self, object, destination).await
+    }
+    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        S3CloudHome::delete(self, object.logical_key()).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
     use axum::extract::State;
-    use axum::http::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+    use axum::http::header::{CONTENT_LENGTH, CONTENT_RANGE, IF_NONE_MATCH, RANGE};
     use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
     use axum::Router;
     use bytes::Bytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    struct FailingBodyReader {
+        emitted: bool,
+    }
+
+    #[async_trait]
+    impl crate::local_blob::PlaintextChunkReader for FailingBodyReader {
+        async fn next_chunk(
+            &mut self,
+            _max: usize,
+        ) -> Result<Vec<u8>, crate::local_blob::PlaintextChunkError> {
+            if !self.emitted {
+                self.emitted = true;
+                return Ok(vec![7; MULTIPART_PART_SIZE]);
+            }
+            Err(crate::local_blob::PlaintextChunkError::Local(
+                "injected body failure".to_string(),
+            ))
+        }
+    }
 
     #[test]
     fn full_key_prepends_prefix() {
@@ -1148,6 +1511,543 @@ mod tests {
         (endpoint, shutdown_tx, request_count)
     }
 
+    async fn fake_s3_two_page_list_endpoint(
+        State(state): State<FakeListState>,
+        method: Method,
+        uri: Uri,
+    ) -> Response<Body> {
+        let request = state.request_count.fetch_add(1, Ordering::SeqCst);
+        if method != Method::GET || uri.path() != format!("/{}/", state.bucket) {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from("unexpected list request"))
+                .expect("build response");
+        }
+        let (key, truncated, token) = match request {
+            0 => (
+                "objects/copy-a",
+                true,
+                "<NextContinuationToken>page-2</NextContinuationToken>",
+            ),
+            1 if uri
+                .query()
+                .is_some_and(|query| query.contains("continuation-token=page-2")) =>
+            {
+                ("objects/copy-b", false, "")
+            }
+            _ => {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::from(format!("unexpected list page: {uri}")))
+                    .expect("build response");
+            }
+        };
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/xml")
+            .body(Body::from(format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                 <Name>{}</Name><Prefix>objects/</Prefix><KeyCount>1</KeyCount>\
+                 <IsTruncated>{truncated}</IsTruncated>{token}\
+                 <Contents><Key>{key}</Key><Size>10</Size></Contents>\
+                 </ListBucketResult>",
+                state.bucket
+            )))
+            .expect("build response")
+    }
+
+    #[tokio::test]
+    async fn immutable_listing_exhausts_every_page_before_claiming_authoritative_coverage() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let bucket = "immutable-list-test".to_string();
+        let (endpoint, shutdown) = spawn_fake_s3(
+            Router::new()
+                .fallback(fake_s3_two_page_list_endpoint)
+                .with_state(FakeListState {
+                    bucket: bucket.clone(),
+                    request_count: requests.clone(),
+                }),
+        )
+        .await;
+        let home = S3CloudHome::new(
+            bucket,
+            "us-east-1".to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
+        )
+        .await
+        .expect("construct home");
+
+        let listing = home
+            .list_appended("objects/")
+            .await
+            .expect("list immutable copies");
+
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(listing.coverage, ListingCoverage::CompleteAtScan);
+        assert_eq!(
+            listing
+                .objects
+                .iter()
+                .map(|object| (object.logical_key(), object.opaque_provider_id()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("objects/copy-a", "objects/copy-a"),
+                ("objects/copy-b", "objects/copy-b"),
+            ]
+        );
+        let _ = shutdown.send(());
+    }
+
+    #[derive(Clone)]
+    struct FakeWriteState {
+        bucket: String,
+        conditional_headers: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    async fn fake_s3_write_endpoint(
+        State(state): State<FakeWriteState>,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+    ) -> Response<Body> {
+        if method != Method::PUT || !uri.path().starts_with(&format!("/{}/", state.bucket)) {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from("unexpected write request"))
+                .expect("build response");
+        }
+        state
+            .conditional_headers
+            .lock()
+            .expect("lock headers")
+            .push(
+                headers
+                    .get(IF_NONE_MATCH)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string),
+            );
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("etag", "\"write-etag\"")
+            .body(Body::empty())
+            .expect("build response")
+    }
+
+    #[tokio::test]
+    async fn immutable_append_is_create_only_but_generic_put_remains_mutable() {
+        let headers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bucket = "immutable-write-test".to_string();
+        let (endpoint, shutdown) =
+            spawn_fake_s3(Router::new().fallback(fake_s3_write_endpoint).with_state(
+                FakeWriteState {
+                    bucket: bucket.clone(),
+                    conditional_headers: headers.clone(),
+                },
+            ))
+            .await;
+        let home = S3CloudHome::new(
+            bucket,
+            "us-east-1".to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
+        )
+        .await
+        .expect("construct home");
+
+        home.put_object("mutable", b"first".to_vec())
+            .await
+            .expect("generic mutable put");
+        home.append_object(
+            "immutable/copy",
+            crate::storage::cloud::BlobBody::from_bytes(b"second".to_vec()),
+            &crate::storage::cloud::no_progress(),
+        )
+        .await
+        .expect("immutable append");
+
+        assert_eq!(
+            *headers.lock().expect("lock headers"),
+            vec![None, Some("*".to_string())]
+        );
+        assert!(home.immutable_copies);
+        let _ = shutdown.send(());
+    }
+
+    #[derive(Clone)]
+    struct FakeMultipartState {
+        bucket: String,
+        completion_headers: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        next_upload: Arc<AtomicUsize>,
+        uploaded_parts: Arc<std::sync::Mutex<Vec<(String, usize)>>>,
+        aborted_uploads: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    async fn fake_s3_multipart_endpoint(
+        State(state): State<FakeMultipartState>,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+    ) -> Response<Body> {
+        let path_ok = uri.path().starts_with(&format!("/{}/", state.bucket));
+        if method == Method::POST && path_ok && uri.query().is_some_and(|query| query == "uploads")
+        {
+            let upload_number = state.next_upload.fetch_add(1, Ordering::SeqCst) + 1;
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/xml")
+                .body(Body::from(format!(
+                    "<InitiateMultipartUploadResult><Bucket>{}</Bucket><Key>object</Key><UploadId>upload-{upload_number}</UploadId></InitiateMultipartUploadResult>", state.bucket
+                )))
+                .expect("build create response");
+        }
+        if method == Method::PUT && path_ok {
+            let query = uri.query().unwrap_or_default();
+            let upload_id = query
+                .split('&')
+                .find_map(|part| part.strip_prefix("uploadId="))
+                .unwrap_or_default()
+                .to_string();
+            let length = headers
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default();
+            state
+                .uploaded_parts
+                .lock()
+                .expect("lock parts")
+                .push((upload_id, length));
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("etag", "part-etag")
+                .body(Body::empty())
+                .expect("build part response");
+        }
+        if method == Method::POST
+            && path_ok
+            && uri
+                .query()
+                .is_some_and(|query| query.contains("uploadId=upload-"))
+        {
+            state.completion_headers.lock().expect("lock headers").push(
+                headers
+                    .get(IF_NONE_MATCH)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string),
+            );
+            let collision = uri
+                .query()
+                .is_some_and(|query| query.contains("uploadId=upload-2"));
+            return Response::builder()
+                .status(if collision {
+                    StatusCode::PRECONDITION_FAILED
+                } else {
+                    StatusCode::OK
+                })
+                .header("content-type", "application/xml")
+                .body(Body::from(if collision {
+                    "<Error><Code>PreconditionFailed</Code><Message>exists</Message></Error>"
+                } else {
+                    "<CompleteMultipartUploadResult><ETag>\"etag\"</ETag></CompleteMultipartUploadResult>"
+                }))
+                .expect("build complete response");
+        }
+        if method == Method::DELETE && path_ok {
+            let upload_id = uri
+                .query()
+                .unwrap_or_default()
+                .split('&')
+                .find_map(|part| part.strip_prefix("uploadId="))
+                .unwrap_or_default()
+                .to_string();
+            state
+                .aborted_uploads
+                .lock()
+                .expect("lock aborts")
+                .push(upload_id);
+            return Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .expect("build abort response");
+        }
+        Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(format!(
+                "unexpected multipart request: {method} {uri}"
+            )))
+            .expect("build response")
+    }
+
+    #[tokio::test]
+    async fn public_immutable_append_streams_parts_and_completes_create_only() {
+        let headers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let parts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let aborts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bucket = "immutable-multipart-test".to_string();
+        let (endpoint, shutdown) = spawn_fake_s3(
+            Router::new()
+                .fallback(fake_s3_multipart_endpoint)
+                .with_state(FakeMultipartState {
+                    bucket: bucket.clone(),
+                    completion_headers: headers.clone(),
+                    next_upload: Arc::new(AtomicUsize::new(0)),
+                    uploaded_parts: parts.clone(),
+                    aborted_uploads: aborts.clone(),
+                }),
+        )
+        .await;
+        let home = S3CloudHome::new(
+            bucket,
+            "us-east-1".to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
+        )
+        .await
+        .expect("construct home");
+
+        home.append_object(
+            "immutable",
+            BlobBody::from_bytes(vec![9; MULTIPART_THRESHOLD + 1]),
+            &super::super::no_progress(),
+        )
+        .await
+        .expect("append immutable multipart object");
+        let collision = home
+            .append_object(
+                "immutable",
+                BlobBody::from_bytes(vec![8; MULTIPART_THRESHOLD + 1]),
+                &super::super::no_progress(),
+            )
+            .await
+            .expect_err("second immutable append must collide");
+
+        assert!(
+            matches!(collision, CloudHomeError::AlreadyExists(_)),
+            "{collision}"
+        );
+        assert_eq!(
+            *headers.lock().expect("lock headers"),
+            vec![Some("*".to_string()), Some("*".to_string())]
+        );
+        let parts = parts.lock().expect("lock parts");
+        for upload_id in ["upload-1", "upload-2"] {
+            let lengths: Vec<_> = parts
+                .iter()
+                .filter_map(|(id, length)| (id == upload_id).then_some(*length))
+                .collect();
+            assert!(lengths.contains(&MULTIPART_PART_SIZE), "{parts:?}");
+            assert!(lengths.contains(&1), "{parts:?}");
+            assert!(
+                lengths
+                    .iter()
+                    .all(|length| matches!(*length, MULTIPART_PART_SIZE | 1)),
+                "{parts:?}"
+            );
+        }
+        assert_eq!(
+            *aborts.lock().expect("lock aborts"),
+            vec!["upload-2".to_string()]
+        );
+        let _ = shutdown.send(());
+    }
+
+    async fn fake_s3_body_failure_endpoint(
+        State(bucket): State<String>,
+        method: Method,
+        uri: Uri,
+    ) -> Response<Body> {
+        let path_ok = uri.path().starts_with(&format!("/{bucket}/"));
+        if method == Method::POST && path_ok && uri.query() == Some("uploads") {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/xml")
+                .body(Body::from(format!(
+                    "<InitiateMultipartUploadResult><Bucket>{bucket}</Bucket><Key>object</Key><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>"
+                )))
+                .expect("build create response");
+        }
+        if method == Method::PUT && path_ok {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("etag", "part-1")
+                .body(Body::empty())
+                .expect("build part response");
+        }
+        if method == Method::DELETE && path_ok {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("injected abort failure"))
+                .expect("build abort response");
+        }
+        Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(format!("unexpected request: {method} {uri}")))
+            .expect("build unexpected response")
+    }
+
+    async fn fake_s3_cancel_success_endpoint(
+        State((bucket, abort_seen)): State<(String, Arc<std::sync::atomic::AtomicBool>)>,
+        method: Method,
+        uri: Uri,
+    ) -> Response<Body> {
+        let path_ok = uri.path().starts_with(&format!("/{bucket}/"));
+        if method == Method::POST && path_ok && uri.query() == Some("uploads") {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/xml")
+                .body(Body::from(format!(
+                    "<InitiateMultipartUploadResult><Bucket>{bucket}</Bucket><Key>object</Key><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>"
+                )))
+                .expect("build create response");
+        }
+        if method == Method::DELETE && path_ok {
+            abort_seen.store(true, Ordering::SeqCst);
+            return Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .expect("build abort response");
+        }
+        Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(format!("unexpected request: {method} {uri}")))
+            .expect("build unexpected response")
+    }
+
+    #[tokio::test]
+    async fn cancellation_returns_only_after_multipart_abort_finishes() {
+        let bucket = "immutable-cancel-success-test".to_string();
+        let abort_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (endpoint, shutdown) = spawn_fake_s3(
+            Router::new()
+                .fallback(fake_s3_cancel_success_endpoint)
+                .with_state((bucket.clone(), abort_seen.clone())),
+        )
+        .await;
+        let home = S3CloudHome::new(
+            bucket,
+            "us-east-1".to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
+        )
+        .await
+        .unwrap();
+        let sink = home
+            .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly)
+            .await
+            .unwrap();
+
+        tokio::task::spawn_blocking(move || drop(sink))
+            .await
+            .unwrap();
+
+        assert!(abort_seen.load(Ordering::SeqCst));
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn immutable_append_reports_body_and_multipart_abort_failures() {
+        let bucket = "immutable-body-failure-test".to_string();
+        let (endpoint, shutdown) = spawn_fake_s3(
+            Router::new()
+                .fallback(fake_s3_body_failure_endpoint)
+                .with_state(bucket.clone()),
+        )
+        .await;
+        let home = S3CloudHome::new(
+            bucket,
+            "us-east-1".to_string(),
+            Some(endpoint),
+            "access-key".to_string(),
+            "secret-key".to_string(),
+            None,
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
+        )
+        .await
+        .expect("construct home");
+        let reader = crate::local_blob::PlaintextReader::from_test_reader(FailingBodyReader {
+            emitted: false,
+        });
+        let body = BlobBody::from_test_reader((MULTIPART_PART_SIZE + 1) as u64, reader);
+
+        let error = home
+            .append_object("immutable/body-failure", body, &super::super::no_progress())
+            .await
+            .expect_err("body failure must abort synchronously");
+
+        assert!(
+            matches!(error, CloudHomeError::CleanupFailed { .. }),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("injected body failure"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("abort multipart"), "{error}");
+        let _ = shutdown.send(());
+    }
+
+    #[test]
+    fn cancellation_abort_failure_terminates_the_process() {
+        const CHILD: &str = "COVEN_S3_CANCEL_ABORT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let bucket = "immutable-cancel-failure-test".to_string();
+                let (endpoint, _shutdown) = spawn_fake_s3(
+                    Router::new()
+                        .fallback(fake_s3_body_failure_endpoint)
+                        .with_state(bucket.clone()),
+                )
+                .await;
+                let home = S3CloudHome::new(
+                    bucket,
+                    "us-east-1".to_string(),
+                    Some(endpoint),
+                    "access-key".to_string(),
+                    "secret-key".to_string(),
+                    None,
+                    Some(
+                        crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing,
+                    ),
+                )
+                .await
+                .unwrap();
+                let sink = home
+                    .open_multipart_sink("immutable/cancelled", MultipartCompletion::CreateOnly)
+                    .await
+                    .unwrap();
+                drop(sink);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            });
+            panic!("failed cancellation abort did not terminate the process");
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("cancellation_abort_failure_terminates_the_process")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .status()
+            .expect("run S3 cancellation sabotage subprocess");
+        assert!(
+            !status.success(),
+            "sabotage subprocess unexpectedly survived"
+        );
+    }
+
     #[tokio::test]
     async fn read_range_accepts_s3_compatible_full_object_checksum_header() {
         let range_body = b"abcdefghijklmnopqrstuvwx".to_vec();
@@ -1162,16 +2062,13 @@ mod tests {
         })
         .await;
 
-        if !loopback_connects(&endpoint).await {
-            return;
-        }
-
         let home = S3CloudHome::new(
             bucket,
             "us-central1".to_string(),
             Some(endpoint),
             "access-key".to_string(),
             "secret-key".to_string(),
+            None,
             None,
         )
         .await
@@ -1202,16 +2099,13 @@ mod tests {
         })
         .await;
 
-        if !loopback_connects(&endpoint).await {
-            return;
-        }
-
         let home = S3CloudHome::new(
             bucket,
             "us-east-1".to_string(),
             Some(endpoint),
             "access-key".to_string(),
             "secret-key".to_string(),
+            None,
             None,
         )
         .await
@@ -1237,10 +2131,6 @@ mod tests {
         })
         .await;
 
-        if !loopback_connects(&endpoint).await {
-            return;
-        }
-
         let home = S3CloudHome::new(
             bucket,
             "us-east-1".to_string(),
@@ -1248,12 +2138,14 @@ mod tests {
             "access-key".to_string(),
             "secret-key".to_string(),
             None,
+            None,
         )
         .await
         .expect("construct S3CloudHome");
         let tmp = tempfile::tempdir().expect("temp dir");
         let destination = tmp.path().join("object.bin");
-        let object = coven_core::storage::cloud::AppendedObject::from_provider(key.clone(), key);
+        let object =
+            coven_core::storage::cloud::AppendedObject::from_provider(key.clone(), key).unwrap();
 
         home.read_appended_to_file(&object, &destination)
             .await
@@ -1285,16 +2177,13 @@ mod tests {
         })
         .await;
 
-        if !loopback_connects(&endpoint).await {
-            return;
-        }
-
         let home = S3CloudHome::new(
             bucket,
             "us-east-1".to_string(),
             Some(endpoint),
             "access-key".to_string(),
             "secret-key".to_string(),
+            None,
             None,
         )
         .await
@@ -1304,7 +2193,8 @@ mod tests {
         tokio::fs::write(&destination, b"committed")
             .await
             .expect("seed destination");
-        let object = coven_core::storage::cloud::AppendedObject::from_provider(key.clone(), key);
+        let object =
+            coven_core::storage::cloud::AppendedObject::from_provider(key.clone(), key).unwrap();
         let read_destination = destination.clone();
         let read =
             tokio::spawn(
@@ -1354,16 +2244,13 @@ mod tests {
         let (endpoint, shutdown, request_count) =
             spawn_fake_s3_truncated_list_endpoint(bucket.clone()).await;
 
-        if !loopback_connects(&endpoint).await {
-            return;
-        }
-
         let home = S3CloudHome::new(
             bucket,
             "us-central1".to_string(),
             Some(endpoint),
             "access-key".to_string(),
             "secret-key".to_string(),
+            None,
             None,
         )
         .await
@@ -1396,6 +2283,7 @@ mod tests {
             "access-key".to_string(),
             "secret-key".to_string(),
             None,
+            None,
         )
         .await
         .expect("construct S3CloudHome");
@@ -1413,27 +2301,6 @@ mod tests {
             CloudAccessOutcome::Absent(RevokeOutcome::Unsupported),
             "S3 hands out one static bucket credential that cannot be withdrawn per member, so it reports Unsupported rather than claiming a revocation it did not perform",
         );
-    }
-
-    async fn loopback_connects(endpoint: &str) -> bool {
-        let Some(addr) = endpoint.strip_prefix("http://") else {
-            panic!("fake S3 endpoint must be an http URL, got {endpoint}");
-        };
-        match tokio::net::TcpStream::connect(addr).await {
-            Ok(_) => true,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                tracing::debug!(
-                    "skipping fake S3 endpoint test: loopback connect unavailable: {e}"
-                );
-                false
-            }
-            Err(e) => panic!("fake S3 endpoint is not reachable at {endpoint}: {e}"),
-        }
     }
 
     // ── probe() against a real S3 endpoint ──────────────────────────────
@@ -1559,6 +2426,7 @@ mod tests {
             creds.access_key,
             creds.secret_key,
             None,
+            None,
         )
         .await
         .expect("construct S3CloudHome");
@@ -1595,6 +2463,7 @@ mod tests {
             Some(env.endpoint),
             env.access_key,
             env.secret_key,
+            None,
             None,
         )
         .await
@@ -1646,6 +2515,7 @@ mod tests {
             creds.access_key,
             creds.secret_key,
             None,
+            None,
         )
         .await
         .expect("construct S3CloudHome");
@@ -1664,6 +2534,7 @@ mod tests {
             Some(creds.endpoint),
             creds.access_key,
             creds.secret_key,
+            None,
             None,
         )
         .await
@@ -1693,6 +2564,7 @@ mod tests {
             creds.access_key.clone(),
             creds.secret_key,
             None,
+            None,
         )
         .await
         .expect("construct good S3CloudHome");
@@ -1704,6 +2576,7 @@ mod tests {
             Some(creds.endpoint),
             creds.access_key,
             "wrong-secret".to_string(),
+            None,
             None,
         )
         .await

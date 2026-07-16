@@ -195,10 +195,9 @@ mod bootstrap_capability_tests {
             BlobPathScheme::Plain,
             STORE_ID,
             owner.clone(),
+            Arc::new(SequentialCopyIdGenerator::new("bootstrap-capability")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
-            "bootstrap-capability",
-        )));
+        .expect("test cloud storage supports immutable copies");
         let source = open_test_db();
         let store_root_hash =
             publish_test_store_protocol_root(&source, &storage, STORE_ID, "source", &owner).await;
@@ -273,10 +272,9 @@ mod bootstrap_capability_tests {
             BlobPathScheme::Plain,
             "snapshot-registration-store",
             owner.clone(),
+            Arc::new(SequentialCopyIdGenerator::new("snapshot-registration")),
         )
-        .with_copy_ids(Arc::new(SequentialCopyIdGenerator::new(
-            "snapshot-registration",
-        )));
+        .expect("test cloud storage supports immutable copies");
         let source = open_test_db();
         publish_test_store_protocol_root(
             &source,

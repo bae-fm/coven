@@ -45,8 +45,15 @@ fn cycle_cloud_storage(
     store_id: &str,
     keypair: UserKeypair,
 ) -> CloudSyncStorage {
-    CloudSyncStorage::new(home, cipher, blob_paths, store_id, keypair)
-        .with_copy_ids(Arc::new(crate::storage::cloud::RandomCopyIdGenerator))
+    CloudSyncStorage::new(
+        home,
+        cipher,
+        blob_paths,
+        store_id,
+        keypair,
+        Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
+    )
+    .expect("test cloud storage supports immutable copies")
 }
 
 /// Run one sync cycle for device "M" with no cloud home (no outbox drain).

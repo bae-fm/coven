@@ -148,7 +148,8 @@ pub use sync::session::{BlobDecl, RowIdentity, SyncedTable};
 
 // Config.
 pub use config::{
-    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3Serial, HomeStorage,
+    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ImmutableCopies, CustomS3Serial,
+    HomeStorage,
 };
 
 // Keys / oauth / keyring bootstrap. The keyring service name has a setter and the
@@ -200,8 +201,9 @@ pub use write::{
 
 // Managed local blob store: the host constructs it; coven never does.
 pub use storage::cloud::{
-    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, PartSink, UploadProgress,
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHeadCreateError,
+    CloudHeadReplaceError, CloudHeadVersion, CloudHome, CloudHomeError, CloudHomeJoinInfo,
+    CloudVersionedHead, PartSink, UploadProgress,
 };
 
 // Mobile OAuth: hosts whose OS captures the redirect drive the flow through

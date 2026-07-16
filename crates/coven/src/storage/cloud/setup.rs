@@ -389,12 +389,6 @@ pub fn generate_restore_code(
     Ok(encode_restore_code(&code))
 }
 
-/// Build the [`CloudCipher`] a store's config selects: an opaque home seals
-/// every object under the keyring's store key; a browsable home
-/// (`cloud_home.storage == Browsable`) stores objects in the clear.
-///
-/// A browsable home has no store key, so it never reads the keyring — the
-/// absence of a key there is expected, not an error.
 /// Why building the sync storage from config failed. Each arm preserves the
 /// typed error the layer below produced — notably [`CloudHomeError`], so the
 /// [`CloudHomeError::is_retryable`] verdict survives up to the caller rather than
@@ -409,8 +403,91 @@ pub enum StorageSetupError {
     NoEncryptionKey,
     #[error("{provider:?} cannot coordinate a Serial Store with this configuration")]
     SerialCoordinationUnavailable { provider: CloudProvider },
+    #[error(
+        "{provider:?} cannot store immutable protocol and blob copies with this configuration"
+    )]
+    ImmutableCopiesUnavailable { provider: CloudProvider },
 }
 
+pub(crate) fn require_immutable_copy_capabilities_config(
+    config: &Config,
+) -> Result<(), StorageSetupError> {
+    let provider = config.cloud_home.provider.clone().ok_or_else(|| {
+        super::CloudHomeError::Configuration(
+            "sync requires a cloud provider with immutable-copy storage".to_string(),
+        )
+    })?;
+    if immutable_copy_capabilities_supported(
+        &provider,
+        config.cloud_home.s3_endpoint.is_some(),
+        config.cloud_home.s3_immutable_copies,
+    ) {
+        Ok(())
+    } else {
+        Err(StorageSetupError::ImmutableCopiesUnavailable { provider })
+    }
+}
+
+pub(crate) fn require_immutable_copy_capabilities_join_info(
+    join_info: &crate::storage::cloud::CloudHomeJoinInfo,
+    custom_s3_immutable_copies: Option<crate::config::CustomS3ImmutableCopies>,
+) -> Result<(), CloudProvider> {
+    let provider = join_info.cloud_provider();
+    let custom_endpoint = matches!(
+        join_info,
+        crate::storage::cloud::CloudHomeJoinInfo::S3 {
+            endpoint: Some(_),
+            ..
+        }
+    );
+    if immutable_copy_capabilities_supported(&provider, custom_endpoint, custom_s3_immutable_copies)
+    {
+        Ok(())
+    } else {
+        Err(provider)
+    }
+}
+
+pub(crate) fn require_immutable_copy_capabilities_home(
+    home: std::sync::Arc<dyn super::CloudHome>,
+    provider: Option<CloudProvider>,
+) -> Result<(), StorageSetupError> {
+    if home.immutable_copy_storage().is_some() {
+        Ok(())
+    } else if let Some(provider) = provider {
+        Err(StorageSetupError::ImmutableCopiesUnavailable { provider })
+    } else {
+        Err(super::CloudHomeError::Configuration(
+            "sync requires a cloud provider with immutable-copy storage".to_string(),
+        )
+        .into())
+    }
+}
+
+fn immutable_copy_capabilities_supported(
+    provider: &CloudProvider,
+    custom_s3_endpoint: bool,
+    custom_s3_immutable_copies: Option<crate::config::CustomS3ImmutableCopies>,
+) -> bool {
+    match provider {
+        CloudProvider::S3 if !custom_s3_endpoint => true,
+        CloudProvider::S3 => custom_s3_immutable_copies
+            == Some(
+                crate::config::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing,
+            ),
+        CloudProvider::GoogleDrive
+        | CloudProvider::Dropbox
+        | CloudProvider::OneDrive
+        | CloudProvider::CloudKit => true,
+    }
+}
+
+/// Build the [`CloudCipher`] a store's config selects: an opaque home seals
+/// every object under the keyring's store key; a browsable home
+/// (`cloud_home.storage == Browsable`) stores objects in the clear.
+///
+/// A browsable home has no store key, so it never reads the keyring — the
+/// absence of a key there is expected, not an error.
 pub(crate) fn build_cloud_cipher(
     config: &Config,
     custody: &dyn MasterKeyCustody,
@@ -442,6 +519,7 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
     clock: crate::clock::ClockRef,
     cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
+    require_immutable_copy_capabilities_config(config)?;
     let cloud_home =
         super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops.clone())
             .await?;
@@ -547,6 +625,7 @@ async fn s3_coordination(
         access_key,
         secret_key,
         config.cloud_home.s3_key_prefix.clone(),
+        config.cloud_home.s3_immutable_copies,
     )
     .await?;
     Ok(Some((Arc::new(primary), Arc::new(peer))))
@@ -630,6 +709,7 @@ pub(crate) fn create_sync_storage_with_home(
     home: Arc<dyn super::CloudHome>,
     cipher: Option<CloudCipher>,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
+    require_immutable_copy_capabilities_home(home.clone(), config.cloud_home.provider.clone())?;
     let cipher = match cipher {
         Some(c) => c,
         None => build_cloud_cipher(config, custody)?,
@@ -648,10 +728,8 @@ pub(crate) fn create_sync_storage_with_home(
         BlobPathScheme::for_storage(config.cloud_home.storage),
         config.store_id.clone(),
         keypair,
-    )
-    .with_copy_ids(std::sync::Arc::new(
-        crate::storage::cloud::RandomCopyIdGenerator,
-    )))
+        std::sync::Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
+    )?)
 }
 
 /// Cloud provider setup error.
@@ -733,6 +811,118 @@ mod tests {
             config.cloud_home.provider = Some(provider);
             assert!(!serial_coordination_eligible(&config));
         }
+    }
+
+    #[test]
+    fn immutable_copy_admission_is_universal_and_uses_local_s3_assertions() {
+        let mut config = Config::with_defaults(
+            "store-1".to_string(),
+            "device-1".to_string(),
+            StoreDir::new("unused-store-dir"),
+            "Provider matrix".to_string(),
+        );
+
+        config.cloud_home.provider = Some(CloudProvider::S3);
+        config.cloud_home.s3_endpoint = None;
+        assert!(require_immutable_copy_capabilities_config(&config).is_ok());
+
+        config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
+        assert!(matches!(
+            require_immutable_copy_capabilities_config(&config),
+            Err(StorageSetupError::ImmutableCopiesUnavailable {
+                provider: CloudProvider::S3
+            })
+        ));
+        config.cloud_home.s3_immutable_copies =
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing);
+        assert!(require_immutable_copy_capabilities_config(&config).is_ok());
+
+        for provider in [
+            CloudProvider::GoogleDrive,
+            CloudProvider::Dropbox,
+            CloudProvider::OneDrive,
+            CloudProvider::CloudKit,
+        ] {
+            config.cloud_home.provider = Some(provider.clone());
+            assert!(require_immutable_copy_capabilities_config(&config).is_ok());
+        }
+    }
+
+    #[test]
+    fn custom_s3_join_requires_the_local_immutable_copy_assertion() {
+        let join_info = CloudHomeJoinInfo::S3 {
+            bucket: "bucket".to_string(),
+            region: "region".to_string(),
+            endpoint: Some("https://objects.example".to_string()),
+            access_key: "access".to_string(),
+            secret_key: "secret".to_string(),
+            key_prefix: None,
+        };
+
+        assert_eq!(
+            require_immutable_copy_capabilities_join_info(&join_info, None),
+            Err(CloudProvider::S3),
+        );
+        assert!(require_immutable_copy_capabilities_join_info(
+            &join_info,
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn custom_s3_immutable_assertion_stays_out_of_restore_wire() {
+        crate::keys::test_keyring::install();
+        let dir = tempfile::tempdir().expect("store directory");
+        let mut config = Config::with_defaults(
+            "local-assertion-wire-test".to_string(),
+            "device-1".to_string(),
+            StoreDir::new(dir.path()),
+            "Wire Test".to_string(),
+        );
+        config.cloud_home.provider = Some(CloudProvider::S3);
+        config.cloud_home.storage = HomeStorage::Browsable;
+        config.cloud_home.s3_bucket = Some("bucket".to_string());
+        config.cloud_home.s3_region = Some("region".to_string());
+        config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
+        config.cloud_home.s3_immutable_copies =
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing);
+        let key_service = StoreKeys::new(config.store_id.clone());
+        key_service
+            .set_cloud_home_credentials(&crate::keys::CloudHomeCredentials::S3 {
+                access_key: "access".to_string(),
+                secret_key: "secret".to_string(),
+            })
+            .expect("store credentials");
+        let custody =
+            crate::custody::KeyCustody::InMemory(crate::encryption::MasterKeyring::generate())
+                .resolve(&config.store_id, &config.store_dir);
+        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(
+            crate::keys::UserKeypair::generate(),
+        )
+        .resolve(&config.store_id, &config.store_dir);
+
+        let encoded = generate_restore_code(
+            &config,
+            &key_service,
+            custody.as_ref(),
+            identity_custody.as_ref(),
+            crate::sync::store_commit::ObjectHash::digest(b"wire test root"),
+            hex::encode([7u8; 32]),
+            crate::join_code::MembershipFloor::MergeConcurrent(membership_floor(hex::encode(
+                [7u8; 32],
+            ))),
+        )
+        .expect("generate restore code");
+        let decoded = decode_restore_code(&encoded).expect("decode restore code");
+        let provider_wire = serde_json::to_string(&decoded.provider).expect("serialize provider");
+
+        assert!(!provider_wire.contains("s3_immutable_copies"));
+        assert!(!provider_wire.contains("strong_reads"));
+        assert_eq!(
+            config.cloud_home.s3_immutable_copies,
+            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
+        );
     }
 
     #[test]
