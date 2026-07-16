@@ -2147,7 +2147,7 @@ mod tests {
             .expect("read range");
 
         assert_eq!(bytes, range_body);
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down fake S3");
     }
 
     /// A provider that ignores `Range` and answers a ranged GET with 200 and the
@@ -2183,7 +2183,7 @@ mod tests {
             .await
             .expect_err("a 200 full-object response to a range request must error");
         assert!(matches!(err, CloudHomeError::Transport(_)), "got {err:?}");
-        let _ = shutdown.send(());
+        shutdown.send(()).expect("shut down fake S3");
     }
 
     #[tokio::test]
