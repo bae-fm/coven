@@ -4600,6 +4600,47 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn select_membership_author_stream(
+        &self,
+        author_pubkey: &str,
+        author_owner_grant: &crate::sync::membership::MembershipGrantId,
+        reusable: std::collections::BTreeSet<crate::sync::membership::AuthorStreamId>,
+    ) -> Result<crate::sync::membership::AuthorStreamId, DbError> {
+        let candidate = crate::sync::membership::AuthorStreamId::generate(self.id_provider());
+        let key = format!("membership_author_stream/{author_pubkey}/{author_owner_grant}");
+        self.call(move |conn| {
+            let existing = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?
+                .map(|value| {
+                    value.parse().map_err(|error| {
+                        DbError::Message(format!(
+                            "membership author stream state is malformed: {error}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            if let Some(existing) = existing {
+                if reusable.contains(&existing) {
+                    return Ok(existing);
+                }
+            }
+            conn.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, candidate.to_string()],
+            )
+            .map_err(DbError::from)?;
+            Ok(candidate)
+        })
+        .await
+    }
+
     pub(crate) async fn stage_membership_mutation(
         &self,
         plan_bytes: Vec<u8>,
@@ -5885,7 +5926,7 @@ impl Database {
                     serde_json::from_slice(&metadata_bytes).map_err(|error| {
                         DbError::Message(format!("parse activated circle metadata: {error}"))
                     })?;
-                let roster: crate::sync::circle::CircleRoster =
+                let roster: crate::sync::circle::CircleMaterializedRoster =
                     serde_json::from_slice(&roster_bytes).map_err(|error| {
                         DbError::Message(format!("parse activated circle roster: {error}"))
                     })?;
@@ -5894,16 +5935,34 @@ impl Database {
                     || !roster.verify()
                     || control.circle_id != circle_id
                     || metadata.circle_id != circle_id
-                    || roster.circle_id != circle_id
-                    || control.metadata_hash != metadata.metadata_hash()
-                    || control.roster_hash != roster.roster_hash()
+                    || match &control.metadata {
+                        crate::sync::circle::CircleMetadataStateRef::MergeConcurrent {
+                            selected,
+                            state_hash,
+                            ..
+                        } => {
+                            selected != &metadata.coord() || *state_hash != metadata.metadata_hash()
+                        }
+                        crate::sync::circle::CircleMetadataStateRef::Serial { current } => {
+                            current != &metadata.coord()
+                        }
+                    }
+                    || match &control.roster {
+                        crate::sync::circle::CircleRosterStateRef::MergeConcurrent {
+                            state_hash,
+                            ..
+                        }
+                        | crate::sync::circle::CircleRosterStateRef::Serial { state_hash } => {
+                            *state_hash != roster.state_hash()
+                        }
+                    }
                 {
                     return Err(DbError::Message(format!(
                         "activated circle {circle_id} has inconsistent cached state"
                     )));
                 }
                 let role = roster
-                    .members
+                    .members()
                     .get(&identity_pubkey)
                     .copied()
                     .ok_or_else(|| {
@@ -5973,9 +6032,10 @@ impl Database {
                 ));
             }
             let creation = &journal.creation;
+            let resolved_roster = creation.resolved_roster();
             if !creation.control.verify()
                 || !creation.metadata.verify()
-                || !creation.roster.verify()
+                || !resolved_roster.verify()
             {
                 return Err(DbError::Message(
                     "circle operation contains invalid signed objects".to_string(),
@@ -6006,10 +6066,7 @@ impl Database {
                 commit.seq(),
             )
             .map_err(|error| DbError::Message(format!("verify circle Store commit: {error}")))?;
-            let expected_ref = crate::sync::store_commit::CircleControlRef {
-                circle_id: creation.circle_id,
-                control: creation.control.coord.clone(),
-            };
+            let expected_ref = creation.control_ref();
             if commit.circle_controls.as_slice() != [expected_ref]
                 || commit.store_package.is_some()
                 || !commit.circle_packages.is_empty()
@@ -6523,11 +6580,11 @@ impl Database {
         let stream_id = commit.order.stream_id(&commit.device_id);
         let seq = Self::sequence_to_sqlite(stream_id, commit.seq())?;
         for activation in activations {
-            let expected = crate::sync::store_commit::CircleControlRef {
-                circle_id: activation.circle_id,
-                control: activation.control.coord.clone(),
-            };
-            if !commit.circle_controls.contains(&expected) || !activation.control.verify() {
+            if !commit.circle_controls.contains(&activation.reference)
+                || activation.reference.circle_id() != activation.circle_id
+                || activation.reference.control() != &activation.control.coord
+                || !activation.control.verify()
+            {
                 return Err(DbError::Message(
                     "verified circle activation differs from Store control reference".to_string(),
                 ));
@@ -8851,6 +8908,7 @@ mod tests {
             WritePolicy::MergeConcurrent => serde_json::json!({
                 "merge_concurrent": {
                     "device_id": "restart-control-device",
+                    "stream_id": "55".repeat(16),
                     "author_pubkey": "restart-owner",
                     "author_owner_grant": "11".repeat(32),
                     "seq": 1,

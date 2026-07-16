@@ -706,7 +706,11 @@ async fn ensure_owner_anchored_chain_founds_pins_and_refuses_tampering() {
         "the persisted chain is still founded by the owner after re-connect",
     );
     let owner_before = db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap();
-    let floor_key = format!("membership_head_seq/{owner_pk}");
+    let founder_coord = store_protocol_root.founder.coord();
+    let floor_key = format!(
+        "membership_head_seq/{}/{}",
+        founder_coord.author_owner_grant, founder_coord.stream_id
+    );
     let floor_before = db.get_protocol_state(&floor_key).await.unwrap();
 
     // Wiped membership/* with the owner still pinned → refuse (do not re-found).
@@ -922,8 +926,8 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
     .expect("parse founder head copy");
     let floor: crate::sync::membership::MembershipCoord = serde_json::from_str(
         &db.get_protocol_state(&format!(
-            "membership_head_seq/{}",
-            head_slot.author_owner_grant
+            "membership_head_seq/{}/{}",
+            head_slot.author_owner_grant, head_slot.stream_id
         ))
         .await
         .unwrap()
@@ -935,6 +939,7 @@ async fn initializing_plaintext_storage_commits_and_pins_its_founder() {
         crate::sync::membership::MembershipCoord {
             author_pubkey: head_slot.author,
             author_owner_grant: head_slot.author_owner_grant,
+            stream_id: head_slot.stream_id,
             seq: head_slot.sequence,
             entry_hash: founder_head.tip_hash,
         },
@@ -1638,8 +1643,8 @@ async fn initialization_pins_a_committed_self_founder_without_cloud_rewrite() {
     );
     let floor: crate::sync::membership::MembershipCoord = serde_json::from_str(
         &db.get_protocol_state(&format!(
-            "membership_head_seq/{}",
-            founder.author_owner_grant
+            "membership_head_seq/{}/{}",
+            founder.author_owner_grant, founder.stream_id
         ))
         .await
         .unwrap()
@@ -1688,7 +1693,6 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
     let cloud_before = cloud_objects(&home);
 
     let victim = UserKeypair::generate();
-    let victim_pk = pubkey_hex(&victim);
     let db = open_test_db();
     let cipher = CloudCipher::Plaintext;
     let victim_storage = cycle_cloud_storage(
@@ -1714,12 +1718,18 @@ async fn plaintext_initialization_refuses_a_committed_foreign_founder_without_mu
         db.get_protocol_state(OWNER_PUBKEY_STATE_KEY).await.unwrap(),
         None,
     );
-    assert_eq!(
-        db.get_protocol_state(&format!("membership_head_seq/{victim_pk}"))
-            .await
-            .unwrap(),
-        None,
-    );
+    let watermark_count = db
+        .call(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM protocol_state WHERE key LIKE 'membership_head_seq/%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(crate::database::DbError::from)
+        })
+        .await
+        .unwrap();
+    assert_eq!(watermark_count, 0);
     let cloud_after = cloud_objects(&home);
     assert_eq!(cloud_after, cloud_before, "cloud objects are unchanged");
 }

@@ -98,8 +98,8 @@ opaque byte store. It sees:
   store-v1/heads/{device}/{seq}/{hash}/copies/{copy_id}.json
   store-v1/snapshot-images/{author}/{hash}/copies/{copy_id}.db
   store-v1/snapshots/{author}/{hash}/copies/{copy_id}.json
-  store-v1/membership/entries/{author}/{grant}/{seq}/{hash}/copies/{copy_id}.json
-  store-v1/membership/heads/{author}/{grant}/{seq}/{hash}/copies/{copy_id}.json
+  store-v1/membership/entries/{author}/{grant}/{stream_id}/{seq}/{hash}/copies/{copy_id}.json
+  store-v1/membership/heads/{author}/{grant}/{stream_id}/{seq}/{hash}/copies/{copy_id}.json
   images/{ab}/{cd}/{id}                       encrypted application blobs
   keys/{owner_pubkey}/{recipient_pubkey}.enc  store keyring wrapped to a member
   ```

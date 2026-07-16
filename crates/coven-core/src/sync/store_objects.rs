@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::storage::cloud::ListingCoverage;
 
 use super::membership::{
-    entry_hash, verify_membership_entry, AuthorHead, MembershipCoord, MembershipEntry, OwnerGrantId,
+    entry_hash, verify_membership_entry, AuthorHead, AuthorStreamId, MembershipCoord,
+    MembershipEntry, MembershipGrantId,
 };
 use super::storage::{
     ProtocolObjectContext, ProtocolObjectDomain, ProtocolObjectLocator, StorageError, SyncStorage,
@@ -489,18 +490,29 @@ pub async fn load_package(
     .await
 }
 
-fn membership_entry_slot_prefix(author: &str, grant: &OwnerGrantId, seq: u64) -> String {
-    format!("{STORE_MEMBERSHIP_ENTRY_PREFIX}{author}/{grant}/{seq}")
+fn membership_entry_slot_prefix(
+    author: &str,
+    grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
+    seq: u64,
+) -> String {
+    format!("{STORE_MEMBERSHIP_ENTRY_PREFIX}{author}/{grant}/{stream_id}/{seq}")
 }
 
-fn membership_head_slot_prefix(author: &str, grant: &OwnerGrantId, seq: u64) -> String {
-    format!("{STORE_MEMBERSHIP_HEAD_PREFIX}{author}/{grant}/{seq}")
+fn membership_head_slot_prefix(
+    author: &str,
+    grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
+    seq: u64,
+) -> String {
+    format!("{STORE_MEMBERSHIP_HEAD_PREFIX}{author}/{grant}/{stream_id}/{seq}")
 }
 
 fn parse_membership_entry_at(
     semantic_hash: ObjectHash,
     author: &str,
-    grant: &OwnerGrantId,
+    grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
     seq: u64,
     bytes: &[u8],
 ) -> Result<MembershipEntry, StoreProtocolError> {
@@ -512,20 +524,27 @@ fn parse_membership_entry_at(
     }
     let entry: MembershipEntry = serde_json::from_slice(bytes)
         .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-    if entry.author_pubkey != author || entry.author_owner_grant != *grant || entry.seq != seq {
+    if entry.author_pubkey != author
+        || entry.author_owner_grant != *grant
+        || entry.stream_id != stream_id
+        || entry.seq != seq
+    {
         return Err(StoreProtocolError::MembershipCoordinateMismatch {
-            expected_author: author.to_string(),
-            expected_grant: grant.to_string(),
-            expected_seq: seq,
-            declared_author: entry.author_pubkey,
-            declared_grant: entry.author_owner_grant.to_string(),
-            declared_seq: entry.seq,
+            expected: Box::new(MembershipCoord {
+                author_pubkey: author.to_string(),
+                author_owner_grant: grant.clone(),
+                stream_id,
+                seq,
+                entry_hash: semantic_hash,
+            }),
+            declared: Box::new(entry.coord()),
         });
     }
     if seq == 0 {
         return Err(StoreProtocolError::InvalidMembershipCoordinate {
             author: author.to_string(),
             grant: grant.to_string(),
+            stream_id: stream_id.to_string(),
             seq,
             entry_hash: semantic_hash.to_string(),
         });
@@ -546,7 +565,8 @@ fn parse_membership_entry_at(
 fn parse_membership_head_at(
     semantic_hash: ObjectHash,
     author: &str,
-    grant: &OwnerGrantId,
+    grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
     seq: u64,
     bytes: &[u8],
 ) -> Result<AuthorHead, StoreProtocolError> {
@@ -558,12 +578,17 @@ fn parse_membership_head_at(
     }
     let head: AuthorHead = serde_json::from_slice(bytes)
         .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
-    if head.author_pubkey != author || head.author_owner_grant != *grant || head.seq != seq {
+    if head.author_pubkey != author
+        || head.author_owner_grant != *grant
+        || head.stream_id != stream_id
+        || head.seq != seq
+    {
         return Err(StoreProtocolError::RelocatedSlot {
-            expected: membership_head_slot_prefix(author, grant, seq),
+            expected: membership_head_slot_prefix(author, grant, stream_id, seq),
             actual: membership_head_slot_prefix(
                 &head.author_pubkey,
                 &head.author_owner_grant,
+                head.stream_id,
                 head.seq,
             ),
         });
@@ -586,11 +611,13 @@ pub async fn append_membership_entry_object(
             semantic_prefix: membership_entry_slot_prefix(
                 &coord.author_pubkey,
                 &coord.author_owner_grant,
+                coord.stream_id,
                 coord.seq,
             ),
             key: membership_entry_slot_prefix(
                 &coord.author_pubkey,
                 &coord.author_owner_grant,
+                coord.stream_id,
                 coord.seq,
             ),
             reason: error.to_string(),
@@ -600,6 +627,7 @@ pub async fn append_membership_entry_object(
         semantic_hash,
         &coord.author_pubkey,
         &coord.author_owner_grant,
+        coord.stream_id,
         coord.seq,
         &bytes,
     )
@@ -607,11 +635,13 @@ pub async fn append_membership_entry_object(
         semantic_prefix: membership_entry_slot_prefix(
             &coord.author_pubkey,
             &coord.author_owner_grant,
+            coord.stream_id,
             coord.seq,
         ),
         key: membership_entry_slot_prefix(
             &coord.author_pubkey,
             &coord.author_owner_grant,
+            coord.stream_id,
             coord.seq,
         ),
         reason: error.to_string(),
@@ -619,6 +649,7 @@ pub async fn append_membership_entry_object(
     let semantic_prefix = super::store_commit::membership_entry_semantic_prefix(
         &coord.author_pubkey,
         &coord.author_owner_grant,
+        coord.stream_id,
         coord.seq,
         semantic_hash,
     );
@@ -635,6 +666,7 @@ pub async fn append_membership_entry_object(
         store_root_hash,
         &coord.author_pubkey,
         &coord.author_owner_grant,
+        coord.stream_id,
         coord.seq,
     )
     .await?
@@ -645,16 +677,17 @@ pub async fn load_membership_entry_slot(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
     author: &str,
-    grant: &OwnerGrantId,
+    grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
     seq: u64,
 ) -> Result<Option<VerifiedCopies<MembershipEntry>>, StoreObjectError> {
-    let slot = membership_entry_slot_prefix(author, grant, seq);
+    let slot = membership_entry_slot_prefix(author, grant, stream_id, seq);
     load_singleton_slot(
         storage,
         &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipEntry),
         &slot,
         |key| Ok(parse_membership_entry_copy_key(key)?.semantic_hash),
-        |hash, bytes| parse_membership_entry_at(hash, author, grant, seq, bytes),
+        |hash, bytes| parse_membership_entry_at(hash, author, grant, stream_id, seq, bytes),
     )
     .await
 }
@@ -666,8 +699,10 @@ pub async fn list_membership_entry_objects(
     let listing = storage
         .list_protocol_objects(STORE_MEMBERSHIP_ENTRY_PREFIX)
         .await?;
-    let mut slots: BTreeMap<(String, OwnerGrantId, u64), Vec<ProtocolObjectLocator>> =
-        BTreeMap::new();
+    let mut slots: BTreeMap<
+        (String, MembershipGrantId, AuthorStreamId, u64),
+        Vec<ProtocolObjectLocator>,
+    > = BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_membership_entry_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
@@ -679,13 +714,18 @@ pub async fn list_membership_entry_objects(
             }
         })?;
         slots
-            .entry((parsed.author, parsed.author_owner_grant, parsed.sequence))
+            .entry((
+                parsed.author,
+                parsed.author_owner_grant,
+                parsed.stream_id,
+                parsed.sequence,
+            ))
             .or_default()
             .push(object);
     }
     let mut entries = Vec::with_capacity(slots.len());
-    for ((author, grant, seq), objects) in slots {
-        let slot = membership_entry_slot_prefix(&author, &grant, seq);
+    for ((author, grant, stream_id, seq), objects) in slots {
+        let slot = membership_entry_slot_prefix(&author, &grant, stream_id, seq);
         if let Some(entry) = load_singleton_candidates(
             storage,
             &ProtocolObjectContext::store(
@@ -696,7 +736,7 @@ pub async fn list_membership_entry_objects(
             objects,
             listing.coverage,
             |key| Ok(parse_membership_entry_copy_key(key)?.semantic_hash),
-            |hash, bytes| parse_membership_entry_at(hash, &author, &grant, seq, bytes),
+            |hash, bytes| parse_membership_entry_at(hash, &author, &grant, stream_id, seq, bytes),
         )
         .await?
         {
@@ -704,6 +744,7 @@ pub async fn list_membership_entry_objects(
                 MembershipCoord {
                     author_pubkey: author,
                     author_owner_grant: grant,
+                    stream_id,
                     seq,
                     entry_hash: entry.semantic_hash,
                 },
@@ -728,11 +769,13 @@ pub async fn append_membership_head_object(
             semantic_prefix: membership_head_slot_prefix(
                 &head.author_pubkey,
                 &head.author_owner_grant,
+                head.stream_id,
                 head.seq,
             ),
             key: membership_head_slot_prefix(
                 &head.author_pubkey,
                 &head.author_owner_grant,
+                head.stream_id,
                 head.seq,
             ),
             reason: error.to_string(),
@@ -742,6 +785,7 @@ pub async fn append_membership_head_object(
         semantic_hash,
         &head.author_pubkey,
         &head.author_owner_grant,
+        head.stream_id,
         head.seq,
         &bytes,
     )
@@ -749,14 +793,21 @@ pub async fn append_membership_head_object(
         semantic_prefix: membership_head_slot_prefix(
             &head.author_pubkey,
             &head.author_owner_grant,
+            head.stream_id,
             head.seq,
         ),
-        key: membership_head_slot_prefix(&head.author_pubkey, &head.author_owner_grant, head.seq),
+        key: membership_head_slot_prefix(
+            &head.author_pubkey,
+            &head.author_owner_grant,
+            head.stream_id,
+            head.seq,
+        ),
         reason: error.to_string(),
     })?;
     let semantic_prefix = super::store_commit::membership_head_semantic_prefix(
         &head.author_pubkey,
         &head.author_owner_grant,
+        head.stream_id,
         head.seq,
         semantic_hash,
     );
@@ -773,6 +824,7 @@ pub async fn append_membership_head_object(
         store_root_hash,
         &head.author_pubkey,
         &head.author_owner_grant,
+        head.stream_id,
         head.seq,
     )
     .await?
@@ -783,16 +835,17 @@ pub async fn load_membership_head_slot(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
     author: &str,
-    grant: &OwnerGrantId,
+    grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
     seq: u64,
 ) -> Result<Option<VerifiedCopies<AuthorHead>>, StoreObjectError> {
-    let slot = membership_head_slot_prefix(author, grant, seq);
+    let slot = membership_head_slot_prefix(author, grant, stream_id, seq);
     load_singleton_slot(
         storage,
         &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipHead),
         &slot,
         |key| Ok(parse_membership_head_copy_key(key)?.semantic_hash),
-        |hash, bytes| parse_membership_head_at(hash, author, grant, seq, bytes),
+        |hash, bytes| parse_membership_head_at(hash, author, grant, stream_id, seq, bytes),
     )
     .await
 }
@@ -804,8 +857,10 @@ pub async fn list_membership_head_objects(
     let listing = storage
         .list_protocol_objects(STORE_MEMBERSHIP_HEAD_PREFIX)
         .await?;
-    let mut slots: BTreeMap<(String, OwnerGrantId, u64), Vec<ProtocolObjectLocator>> =
-        BTreeMap::new();
+    let mut slots: BTreeMap<
+        (String, MembershipGrantId, AuthorStreamId, u64),
+        Vec<ProtocolObjectLocator>,
+    > = BTreeMap::new();
     for object in listing.objects {
         let parsed = parse_membership_head_copy_key(object.logical_key()).map_err(|error| {
             StoreObjectError::Collision {
@@ -817,13 +872,18 @@ pub async fn list_membership_head_objects(
             }
         })?;
         slots
-            .entry((parsed.author, parsed.author_owner_grant, parsed.sequence))
+            .entry((
+                parsed.author,
+                parsed.author_owner_grant,
+                parsed.stream_id,
+                parsed.sequence,
+            ))
             .or_default()
             .push(object);
     }
     let mut heads = Vec::with_capacity(slots.len());
-    for ((author, grant, seq), objects) in slots {
-        let slot = membership_head_slot_prefix(&author, &grant, seq);
+    for ((author, grant, stream_id, seq), objects) in slots {
+        let slot = membership_head_slot_prefix(&author, &grant, stream_id, seq);
         if let Some(head) = load_singleton_candidates(
             storage,
             &ProtocolObjectContext::store(
@@ -834,7 +894,7 @@ pub async fn list_membership_head_objects(
             objects,
             listing.coverage,
             |key| Ok(parse_membership_head_copy_key(key)?.semantic_hash),
-            |hash, bytes| parse_membership_head_at(hash, &author, &grant, seq, bytes),
+            |hash, bytes| parse_membership_head_at(hash, &author, &grant, stream_id, seq, bytes),
         )
         .await?
         {

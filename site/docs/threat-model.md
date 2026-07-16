@@ -21,7 +21,7 @@ them:
   cipher is authenticated: a flipped byte fails to open. The associated data of
   each sealed object binds it to its `(store_id, cloud_key)` position, so an
   object copied to a different key fails to open there.
-- **Signed membership.** `MergeConcurrent` uses causal, per-owner membership
+- **Signed membership.** `MergeConcurrent` uses causal, per-author membership
   streams. `Serial` puts exact-state membership changes into its global commit
   chain. Both begin at the founder bound into the signed Store protocol root
   (see [Sharing](/docs/sharing)). Heads, snapshot metadata, and wrapped keys are
@@ -120,7 +120,7 @@ retains is scheduling power over what it serves: it can withhold an object,
 serve an older version, or reorder what a reader sees.
 
 Rollback of *membership* is bounded by the write policy. `MergeConcurrent`
-readers persist per-author head watermarks and refuse regressions. `Serial`
+readers persist per-author-stream head watermarks and refuse regressions. `Serial`
 readers verify the signed global head and its complete predecessor chain. Invite
 and restore codes carry the corresponding causal frontier or exact global
 position, so a fresh device refuses membership older than the code it received

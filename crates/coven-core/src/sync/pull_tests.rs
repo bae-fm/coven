@@ -4889,7 +4889,7 @@ async fn pull_skips_a_removed_members_changeset() {
     assert_eq!(updated.get("devM"), None);
 }
 
-/// A hash-linked membership chain detects a missing MIDDLE entry via `prev_hash`,
+/// A hash-linked membership chain detects a missing MIDDLE entry via `previous_hash`,
 /// but nothing points forward to a missing TAIL entry, so a listing that omits a
 /// committed `Remove` still hash-links cleanly and reads the removed member as
 /// current. The owner removes the member at (owner, 3) and publishes a head
@@ -5067,6 +5067,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
     let relocated_prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
         &relocated_author,
         &owner_grant.author_owner_grant,
+        owner_grant.stream_id,
         2,
         owner_grant.entry_hash,
     );
@@ -5100,6 +5101,7 @@ async fn relocated_membership_grant_cannot_authorize_a_changeset() {
         Some(MembershipCoord {
             author_pubkey: relocated_author,
             author_owner_grant: owner_grant.author_owner_grant,
+            stream_id: owner_grant.stream_id,
             seq: 2,
             entry_hash: owner_grant.entry_hash,
         }),
@@ -5241,6 +5243,7 @@ async fn pull_refuses_a_membership_head_that_regresses_the_watermark_across_cycl
     let stale = AuthorHead::signed(
         "test-store".to_string(),
         add_member.author_owner_grant.clone(),
+        add_member.stream_id,
         2,
         entry_hash(&add_member),
         &owner,

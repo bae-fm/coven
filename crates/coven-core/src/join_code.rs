@@ -4,7 +4,7 @@ use crate::code_envelope::{self, EnvelopeError};
 use crate::storage::cloud::CloudHomeJoinInfo;
 use crate::sync::membership::MembershipCoord;
 #[cfg(test)]
-use crate::sync::membership::OwnerGrantId;
+use crate::sync::membership::MembershipGrantId;
 #[cfg(test)]
 use crate::sync::store_commit::ObjectHash;
 
@@ -212,7 +212,8 @@ mod tests {
     fn test_membership_floor() -> Vec<MembershipCoord> {
         vec![MembershipCoord {
             author_pubkey: test_owner_pubkey(),
-            author_owner_grant: OwnerGrantId(ObjectHash::digest(b"test owner grant")),
+            author_owner_grant: MembershipGrantId(ObjectHash::digest(b"test owner grant")),
+            stream_id: crate::sync::membership::AuthorStreamId::from_bytes([1; 16]),
             seq: 1,
             entry_hash: ObjectHash::digest(b"test membership entry"),
         }]

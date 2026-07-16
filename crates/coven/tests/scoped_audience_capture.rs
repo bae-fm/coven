@@ -44,6 +44,7 @@ fn circle_control_coord(policy: WritePolicy) -> String {
         WritePolicy::MergeConcurrent => serde_json::json!({
             "merge_concurrent": {
                 "device_id": "control-device",
+                "stream_id": "00".repeat(16),
                 "author_pubkey": "owner-pubkey",
                 "author_owner_grant": "11".repeat(32),
                 "seq": 1,

@@ -670,9 +670,12 @@ mod tests {
     fn membership_floor(author_pubkey: String) -> Vec<crate::sync::membership::MembershipCoord> {
         vec![crate::sync::membership::MembershipCoord {
             author_pubkey,
-            author_owner_grant: crate::sync::membership::OwnerGrantId(
+            author_owner_grant: crate::sync::membership::MembershipGrantId(
                 crate::sync::store_commit::ObjectHash::digest(b"restore test owner grant"),
             ),
+            stream_id: "00000000000000000000000000000001"
+                .parse()
+                .expect("canonical test author stream id"),
             seq: 1,
             entry_hash: crate::sync::store_commit::ObjectHash::digest(
                 b"restore test founder entry",

@@ -221,9 +221,12 @@ impl CloudKitOps for RestoreCloudKitOps {
 fn membership_floor(author_pubkey: String) -> MembershipFloor {
     MembershipFloor::MergeConcurrent(vec![crate::sync::membership::MembershipCoord {
         author_pubkey,
-        author_owner_grant: crate::sync::membership::OwnerGrantId(
+        author_owner_grant: crate::sync::membership::MembershipGrantId(
             crate::sync::store_commit::ObjectHash::digest(b"restore test owner grant"),
         ),
+        stream_id: "00000000000000000000000000000001"
+            .parse()
+            .expect("canonical test author stream id"),
         seq: 1,
         entry_hash: crate::sync::store_commit::ObjectHash::digest(b"restore test founder entry"),
     }])
@@ -1265,6 +1268,7 @@ async fn a_fresh_restorer_refuses_a_rolled_back_membership_head_during_bootstrap
     let stale_head = AuthorHead::signed(
         "test-lib".to_string(),
         add_member.author_owner_grant.clone(),
+        add_member.stream_id,
         2,
         entry_hash(&add_member),
         &owner,

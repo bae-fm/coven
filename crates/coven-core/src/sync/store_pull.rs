@@ -1803,7 +1803,7 @@ mod tests {
     use crate::sync::circle::{CircleControlCoord, CircleId};
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
     use crate::sync::membership::{
-        founder_entry, MemberRole, MembershipChain, OwnerGrantId, SerialAuthorizationState,
+        founder_entry, MemberRole, MembershipChain, MembershipGrantId, SerialAuthorizationState,
     };
     use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain};
     use crate::sync::store_commit::{
@@ -2165,6 +2165,7 @@ mod tests {
         let circle_id = CircleId::from_bytes([6; 16]);
         let control = CircleControlCoord::MergeConcurrent {
             device_id: "source".to_string(),
+            stream_id: crate::sync::membership::AuthorStreamId::from_bytes([4; 16]),
             author_pubkey: crate::keys::public_key_hex(&keypair),
             author_owner_grant: founder.author_owner_grant.clone(),
             seq: 1,
@@ -2282,15 +2283,19 @@ mod tests {
             None,
             None,
             Vec::new(),
-            vec![CircleControlRef {
+            vec![CircleControlRef::MergeConcurrent {
                 circle_id: CircleId::from_bytes([7; 16]),
                 control: CircleControlCoord::MergeConcurrent {
                     device_id: "source".to_string(),
+                    stream_id: crate::sync::membership::AuthorStreamId::from_bytes([4; 16]),
                     author_pubkey: crate::keys::public_key_hex(&keypair),
-                    author_owner_grant: OwnerGrantId(ObjectHash::digest(b"circle-owner-grant")),
+                    author_owner_grant: MembershipGrantId(ObjectHash::digest(
+                        b"circle-owner-grant",
+                    )),
                     seq: 1,
                     control_hash: ObjectHash::digest(b"circle-control"),
                 },
+                head_hash: ObjectHash::digest(b"circle-control-head"),
             }],
             None,
             &[],
@@ -2656,7 +2661,7 @@ mod tests {
             None,
             None,
             Vec::new(),
-            vec![CircleControlRef {
+            vec![CircleControlRef::Serial {
                 circle_id: CircleId::from_bytes([9; 16]),
                 control: CircleControlCoord::Serial {
                     author_pubkey: crate::keys::public_key_hex(&keypair),

@@ -117,9 +117,12 @@ impl crate::storage::cloud::CloudHome for GrantingCloudHome {
 fn membership_floor(author_pubkey: String) -> MembershipFloor {
     MembershipFloor::MergeConcurrent(vec![crate::sync::membership::MembershipCoord {
         author_pubkey,
-        author_owner_grant: crate::sync::membership::OwnerGrantId(
+        author_owner_grant: crate::sync::membership::MembershipGrantId(
             crate::sync::store_commit::ObjectHash::digest(b"invite test owner grant"),
         ),
+        stream_id: "00000000000000000000000000000001"
+            .parse()
+            .expect("canonical test author stream id"),
         seq: 1,
         entry_hash: crate::sync::store_commit::ObjectHash::digest(b"invite test founder entry"),
     }])
@@ -1385,8 +1388,9 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
     append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
-    // Mint an invite AFTER the removal: its floor reflects the post-removal,
-    // post-invite chain state (the invitee's own Add lands at seq 4).
+    // Mint an invite after the removal. The durable author-stream selection
+    // opens an independent stream for this database, so the floor must cover
+    // both the founder stream and the invite stream.
     let membership_db = crate::sync::test_helpers::open_test_db();
     membership_db
         .set_protocol_state(
@@ -1419,18 +1423,33 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
     )
     .await
     .expect("mint invite");
-    let invited_entry: crate::sync::membership::MembershipEntry = serde_json::from_slice(
-        &storage
-            .read_membership_entry_bytes(&owner_pk, 4)
+    let visible = storage.discover_membership_entries().await;
+    chain =
+        crate::sync::membership_ops::download_chain(&storage, storage.store_root_hash(), &visible)
             .await
-            .expect("read invited member entry"),
-    )
-    .expect("parse invited member entry");
+            .expect("chain including the invite entry");
+    let invited_entry = chain
+        .entries()
+        .iter()
+        .find(|entry| {
+            matches!(
+                &entry.change,
+                crate::sync::membership::MembershipChange::SetMember {
+                    user_pubkey,
+                    ..
+                } if user_pubkey == &pubkey_hex(&invitee)
+            )
+        })
+        .expect("invited member entry")
+        .clone();
     assert_eq!(
         invite.membership_floor,
-        MembershipFloor::MergeConcurrent(vec![invited_entry.coord()]),
+        MembershipFloor::MergeConcurrent(chain.author_heads()),
         "the invite's floor must reflect the post-removal, post-invite chain state",
     );
+    let current_invite_head = chain
+        .signed_head_for_stream(&owner, invited_entry.stream_id)
+        .expect("invite stream head");
 
     // The owner publishes a snapshot so bootstrap has something to adopt.
     let db_owner = open_test_db();
@@ -1461,11 +1480,16 @@ async fn a_fresh_joiner_refuses_a_rolled_back_membership_head() {
     let stale_head = AuthorHead::signed(
         "test-lib".to_string(),
         add_member.author_owner_grant.clone(),
+        add_member.stream_id,
         2,
         entry_hash(&add_member),
         &owner,
     );
     storage.remove_membership_head(&owner_pk);
+    storage
+        .append_membership_head_bytes(&owner_pk, serde_json::to_vec(&current_invite_head).unwrap())
+        .await
+        .expect("provider keeps the invite stream head");
     storage
         .append_membership_head_bytes(&owner_pk, serde_json::to_vec(&stale_head).unwrap())
         .await
@@ -1522,8 +1546,8 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
     .unwrap();
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
-    // Mint the invite right after founding: floor lands at seq 2 (the
-    // invitee's own Add).
+    // Mint the invite right after founding. Its floor covers both the founder
+    // stream and the database-selected invite stream.
     let membership_db = crate::sync::test_helpers::open_test_db();
     membership_db
         .set_protocol_state(
@@ -1556,28 +1580,24 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
     )
     .await
     .expect("mint invite");
-    assert_eq!(
-        match &invite.membership_floor {
-            MembershipFloor::MergeConcurrent(coords) => coords[0].seq,
-            MembershipFloor::Serial(_) => panic!("MergeConcurrent invite returned Serial floor"),
-        },
-        2,
-        "floor lands at the invitee's Add"
-    );
 
     // `invite_member` appended the invitee's Add straight to storage, so the
     // `chain` built above (founder only) is stale; re-derive it from storage
-    // before appending further, so the next entry's `prev_hash` links to the
+    // before appending further, so the next entry's `previous_hash` links to the
     // invitee's Add rather than skipping over it.
     let visible = storage.discover_membership_entries().await;
     let mut chain =
         crate::sync::membership_ops::download_chain(&storage, storage.store_root_hash(), &visible)
             .await
             .expect("chain including the invite's own Add");
+    assert_eq!(
+        invite.membership_floor,
+        MembershipFloor::MergeConcurrent(chain.author_heads()),
+        "floor covers the exact author-stream heads at invite time",
+    );
 
     // Between mint and this device's first sync, the chain moved forward
-    // further: the owner adds a second member, advancing the real head to
-    // seq 3.
+    // further: the owner adds a second member on its selected reusable stream.
     let add_second_member = chain
         .signed_set_member(
             &owner,
@@ -1587,7 +1607,15 @@ async fn a_fresh_joiner_accepts_a_membership_head_later_than_its_seeded_floor() 
             "0000000004000-0000-owner".to_string(),
         )
         .unwrap();
-    append_membership_entry(&storage, &mut chain, &owner_pk, 3, add_second_member).await;
+    let add_second_seq = add_second_member.seq;
+    append_membership_entry(
+        &storage,
+        &mut chain,
+        &owner_pk,
+        add_second_seq,
+        add_second_member,
+    )
+    .await;
     publish_membership_chain_head(&storage, &chain, &owner).await;
 
     let db_owner = open_test_db();

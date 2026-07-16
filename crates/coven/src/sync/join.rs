@@ -39,7 +39,7 @@ pub enum BootstrapError {
     #[error("encryption: {0}")]
     Encryption(#[from] EncryptionError),
     #[error("invite: {0}")]
-    Invite(#[from] InviteError),
+    Invite(#[source] Box<InviteError>),
     #[error("snapshot: {0}")]
     Snapshot(#[from] SnapshotError),
     #[error("pull: {0}")]
@@ -101,6 +101,12 @@ pub enum BootstrapError {
         rollback: String,
         cause: Box<BootstrapError>,
     },
+}
+
+impl From<InviteError> for BootstrapError {
+    fn from(error: InviteError) -> Self {
+        Self::Invite(Box::new(error))
+    }
 }
 
 impl BootstrapError {
@@ -1035,7 +1041,7 @@ pub(crate) async fn open_db_and_pull(
         )
         .await?;
 
-    // Seed this device's per-author membership-head watermark from the invite
+    // Seed this device's per-author-stream membership-head watermark from the invite
     // or restore code's floor BEFORE the pull below loads and anchors the
     // membership chain for the first time. A fresh joiner or restorer has no
     // watermark yet, so without this, the first load would accept any signed

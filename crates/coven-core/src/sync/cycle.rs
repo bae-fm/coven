@@ -1598,6 +1598,7 @@ async fn publish_or_complete_founder(
         store_root_hash,
         &owner_pubkey,
         &founder_coord.author_owner_grant,
+        founder_coord.stream_id,
         1,
     )
     .await
@@ -1623,11 +1624,12 @@ async fn publish_or_complete_founder(
             append_membership_entry_object(storage, store_root_hash, &coord, &entry)
                 .await
                 .map_err(|error| format!("re-publish interrupted founder entry: {error}"))?;
-            super::membership_ops::publish_membership_head(
+            super::membership_ops::publish_membership_stream_head(
                 storage,
                 store_root_hash,
                 &chain,
                 owner_keypair,
+                founder_coord.stream_id,
             )
             .await
             .map_err(|error| format!("publish interrupted founder head: {error}"))?;
@@ -1648,11 +1650,12 @@ async fn publish_or_complete_founder(
                 store_protocol_root_founder.clone(),
             )])
             .map_err(|error| format!("store protocol root founder is invalid: {error}"))?;
-            super::membership_ops::publish_membership_head(
+            super::membership_ops::publish_membership_stream_head(
                 storage,
                 store_root_hash,
                 &chain,
                 owner_keypair,
+                store_protocol_root_founder.stream_id,
             )
             .await
             .map(|_| ())

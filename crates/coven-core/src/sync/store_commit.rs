@@ -9,8 +9,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use super::membership::{
-    derive_founder_grant_id, verify_membership_entry, MembershipChange, MembershipCoord,
-    MembershipEntry, OwnerGrantId,
+    derive_founder_grant_id, verify_membership_entry, AuthorStreamId, MembershipChange,
+    MembershipCoord, MembershipEntry, MembershipGrantId,
 };
 use crate::keys::{self, UserKeypair};
 use crate::storage::cloud::CopyId;
@@ -265,10 +265,38 @@ pub struct CirclePackageRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CircleControlRef {
-    pub circle_id: CircleId,
-    pub control: CircleControlCoord,
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CircleControlRef {
+    MergeConcurrent {
+        circle_id: CircleId,
+        control: CircleControlCoord,
+        head_hash: ObjectHash,
+    },
+    Serial {
+        circle_id: CircleId,
+        control: CircleControlCoord,
+    },
+}
+
+impl CircleControlRef {
+    pub fn circle_id(&self) -> CircleId {
+        match self {
+            Self::MergeConcurrent { circle_id, .. } | Self::Serial { circle_id, .. } => *circle_id,
+        }
+    }
+
+    pub fn control(&self) -> &CircleControlCoord {
+        match self {
+            Self::MergeConcurrent { control, .. } | Self::Serial { control, .. } => control,
+        }
+    }
+
+    pub fn head_hash(&self) -> Option<ObjectHash> {
+        match self {
+            Self::MergeConcurrent { head_hash, .. } => Some(*head_hash),
+            Self::Serial { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -870,12 +898,23 @@ fn validate_circle_control_refs(
 ) -> Result<(), StoreProtocolError> {
     let mut seen = BTreeSet::new();
     for control_ref in controls {
-        if !seen.insert(control_ref.circle_id) {
+        if !seen.insert(control_ref.circle_id()) {
             return Err(StoreProtocolError::DuplicateCircleControl(
-                control_ref.circle_id,
+                control_ref.circle_id(),
             ));
         }
-        validate_circle_control_coord(policy, &control_ref.control)?;
+        validate_circle_control_coord(policy, control_ref.control())?;
+        if matches!(policy, WritePolicy::MergeConcurrent)
+            != matches!(control_ref, CircleControlRef::MergeConcurrent { .. })
+        {
+            return Err(StoreProtocolError::CircleControlPolicyMismatch {
+                expected: policy,
+                actual: match control_ref {
+                    CircleControlRef::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
+                    CircleControlRef::Serial { .. } => WritePolicy::Serial,
+                },
+            });
+        }
     }
     Ok(())
 }
@@ -1721,23 +1760,20 @@ pub enum StoreProtocolError {
     MissingControlPredecessor,
     #[error("Store commit for {0:?} must not name its own device as a dependency")]
     OwnDependency(String),
-    #[error("invalid membership coordinate {author}/{grant}/{seq} with entry hash {entry_hash}")]
+    #[error(
+        "invalid membership coordinate {author}/{grant}/{stream_id}/{seq} with entry hash {entry_hash}"
+    )]
     InvalidMembershipCoordinate {
         author: String,
         grant: String,
+        stream_id: String,
         seq: u64,
         entry_hash: String,
     },
-    #[error(
-        "membership object coordinate {expected_author}/{expected_grant}/{expected_seq} differs from signed entry {declared_author}/{declared_grant}/{declared_seq}"
-    )]
+    #[error("membership object coordinate {expected:?} differs from signed entry {declared:?}")]
     MembershipCoordinateMismatch {
-        expected_author: String,
-        expected_grant: String,
-        expected_seq: u64,
-        declared_author: String,
-        declared_grant: String,
-        declared_seq: u64,
+        expected: Box<MembershipCoord>,
+        declared: Box<MembershipCoord>,
     },
     #[error("Store package length exceeds the platform address space")]
     PackageTooLarge,
@@ -1770,7 +1806,8 @@ pub struct HashedCopySlot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipCopySlot {
     pub author: String,
-    pub author_owner_grant: OwnerGrantId,
+    pub author_owner_grant: MembershipGrantId,
+    pub stream_id: AuthorStreamId,
     pub sequence: u64,
     pub semantic_hash: ObjectHash,
     pub copy_id: CopyId,
@@ -1876,22 +1913,25 @@ fn parse_membership_copy_key(
         return Err(StoreProtocolError::MalformedPath(path.to_string()));
     };
     let segments: Vec<&str> = relative.split('/').collect();
-    if segments.len() != 6 || segments[4] != "copies" {
+    if segments.len() != 7 || segments[5] != "copies" {
         return Err(StoreProtocolError::MalformedPath(path.to_string()));
     }
     validate_device_id(segments[0])?;
     Ok(MembershipCopySlot {
         author: segments[0].to_string(),
-        author_owner_grant: OwnerGrantId(
+        author_owner_grant: MembershipGrantId(
             segments[1]
                 .parse()
                 .map_err(|_| StoreProtocolError::MalformedPath(path.to_string()))?,
         ),
-        sequence: parse_decimal(segments[2], false, path)?,
-        semantic_hash: segments[3]
+        stream_id: segments[2]
             .parse()
             .map_err(|_| StoreProtocolError::MalformedPath(path.to_string()))?,
-        copy_id: parse_copy_filename(segments[5], ".json", path)?,
+        sequence: parse_decimal(segments[3], false, path)?,
+        semantic_hash: segments[4]
+            .parse()
+            .map_err(|_| StoreProtocolError::MalformedPath(path.to_string()))?,
+        copy_id: parse_copy_filename(segments[6], ".json", path)?,
     })
 }
 
@@ -2065,45 +2105,53 @@ pub fn ack_copy_key(
 
 pub fn membership_entry_semantic_prefix(
     author: &str,
-    author_owner_grant: &OwnerGrantId,
+    author_owner_grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
     seq: u64,
     entry_hash: ObjectHash,
 ) -> String {
-    format!("{STORE_MEMBERSHIP_ENTRY_PREFIX}{author}/{author_owner_grant}/{seq}/{entry_hash}")
+    format!(
+        "{STORE_MEMBERSHIP_ENTRY_PREFIX}{author}/{author_owner_grant}/{stream_id}/{seq}/{entry_hash}"
+    )
 }
 
 pub fn membership_entry_copy_key(
     author: &str,
-    author_owner_grant: &OwnerGrantId,
+    author_owner_grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
     seq: u64,
     entry_hash: ObjectHash,
     copy_id: CopyId,
 ) -> String {
     format!(
         "{}/copies/{copy_id}.json",
-        membership_entry_semantic_prefix(author, author_owner_grant, seq, entry_hash)
+        membership_entry_semantic_prefix(author, author_owner_grant, stream_id, seq, entry_hash)
     )
 }
 
 pub fn membership_head_semantic_prefix(
     author: &str,
-    author_owner_grant: &OwnerGrantId,
+    author_owner_grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
     seq: u64,
     head_hash: ObjectHash,
 ) -> String {
-    format!("{STORE_MEMBERSHIP_HEAD_PREFIX}{author}/{author_owner_grant}/{seq}/{head_hash}")
+    format!(
+        "{STORE_MEMBERSHIP_HEAD_PREFIX}{author}/{author_owner_grant}/{stream_id}/{seq}/{head_hash}"
+    )
 }
 
 pub fn membership_head_copy_key(
     author: &str,
-    author_owner_grant: &OwnerGrantId,
+    author_owner_grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
     seq: u64,
     head_hash: ObjectHash,
     copy_id: CopyId,
 ) -> String {
     format!(
         "{}/copies/{copy_id}.json",
-        membership_head_semantic_prefix(author, author_owner_grant, seq, head_hash)
+        membership_head_semantic_prefix(author, author_owner_grant, stream_id, seq, head_hash)
     )
 }
 
@@ -2185,6 +2233,7 @@ fn validate_membership_coord(coord: &MembershipCoord) -> Result<(), StoreProtoco
         return Err(StoreProtocolError::InvalidMembershipCoordinate {
             author: coord.author_pubkey.clone(),
             grant: coord.author_owner_grant.to_string(),
+            stream_id: coord.stream_id.to_string(),
             seq: coord.seq,
             entry_hash: coord.entry_hash.to_string(),
         });
@@ -2237,6 +2286,7 @@ mod tests {
             Some(MembershipCoord {
                 author_pubkey: keys::public_key_hex(&signer),
                 author_owner_grant: store_protocol_root.founder.author_owner_grant.clone(),
+                stream_id: store_protocol_root.founder.stream_id,
                 seq: 1,
                 entry_hash: crate::sync::membership::entry_hash(&store_protocol_root.founder),
             }),
@@ -2411,15 +2461,17 @@ mod tests {
     fn batch_rejects_two_control_refs_for_one_circle() {
         let (signer, root, _, _) = fixture();
         let circle_id = CircleId::from_bytes([3; 16]);
-        let control = CircleControlRef {
+        let control = CircleControlRef::MergeConcurrent {
             circle_id,
             control: CircleControlCoord::MergeConcurrent {
                 device_id: "device-a".to_string(),
+                stream_id: AuthorStreamId::from_bytes([4; 16]),
                 author_pubkey: keys::public_key_hex(&signer),
                 author_owner_grant: root.founder.author_owner_grant.clone(),
                 seq: 1,
                 control_hash: ObjectHash::digest(b"circle-control"),
             },
+            head_hash: ObjectHash::digest(b"circle-control-head"),
         };
         assert!(matches!(
             StoreBatchCommit::signed_batch(
@@ -2434,6 +2486,7 @@ mod tests {
                 Some(MembershipCoord {
                     author_pubkey: keys::public_key_hex(&signer),
                     author_owner_grant: root.founder.author_owner_grant.clone(),
+                    stream_id: root.founder.stream_id,
                     seq: 1,
                     entry_hash: crate::sync::membership::entry_hash(&root.founder),
                 }),
@@ -2473,6 +2526,7 @@ mod tests {
             Some(MembershipCoord {
                 author_pubkey: keys::public_key_hex(&signer),
                 author_owner_grant: root.founder.author_owner_grant.clone(),
+                stream_id: root.founder.stream_id,
                 seq: 1,
                 entry_hash: crate::sync::membership::entry_hash(&root.founder),
             }),
@@ -2573,5 +2627,47 @@ mod tests {
             ),
             Err(StoreProtocolError::ControlRequiresSerial)
         ));
+    }
+}
+
+#[cfg(test)]
+mod membership_path_tests {
+    use super::*;
+
+    #[test]
+    fn membership_copy_paths_bind_the_author_stream() {
+        let author = hex::encode([7; 32]);
+        let grant = MembershipGrantId(ObjectHash::digest(b"membership path grant"));
+        let stream_id = AuthorStreamId::from_bytes([8; 16]);
+        let semantic_hash = ObjectHash::digest(b"membership path object");
+        let copy_id: CopyId = "09".repeat(32).parse().unwrap();
+
+        let entry_key =
+            membership_entry_copy_key(&author, &grant, stream_id, 3, semantic_hash, copy_id);
+        let entry = parse_membership_entry_copy_key(&entry_key).unwrap();
+        assert_eq!(entry.author, author);
+        assert_eq!(entry.author_owner_grant, grant);
+        assert_eq!(entry.stream_id, stream_id);
+        assert_eq!(entry.sequence, 3);
+        assert_eq!(entry.semantic_hash, semantic_hash);
+        assert_eq!(entry.copy_id, copy_id);
+
+        let head_key = membership_head_copy_key(
+            &entry.author,
+            &entry.author_owner_grant,
+            entry.stream_id,
+            entry.sequence,
+            entry.semantic_hash,
+            entry.copy_id,
+        );
+        assert_eq!(
+            parse_membership_head_copy_key(&head_key).unwrap().stream_id,
+            stream_id
+        );
+        assert!(parse_membership_entry_copy_key(&format!(
+            "{STORE_MEMBERSHIP_ENTRY_PREFIX}{}/{}/3/{semantic_hash}/copies/{copy_id}.json",
+            entry.author, entry.author_owner_grant
+        ))
+        .is_err());
     }
 }

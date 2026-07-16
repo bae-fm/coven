@@ -1,29 +1,23 @@
 //! Store-bound causal membership protocol.
 //!
-//! Every Owner grant has its own author stream. Re-adding the same public key as
-//! an Owner creates a new grant and therefore a new stream beginning at sequence
-//! one. Entries carry the complete observed stream frontier; authorization is
-//! derived from that causal past, never from `created_at`.
+//! Every causal author stream is identified by its author, the Owner grant that
+//! authorizes it, and an independently generated stream id. Entries carry the
+//! complete observed stream frontier; authorization is derived from that causal
+//! past, never from `created_at`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::causal_grants::{
+    self, CausalAssignment, CausalChange, CausalCoordinate, CausalEntry, CausalGrantError,
+    OwnerGrantBarrier,
+};
+pub use super::causal_grants::{AuthorStreamId, MembershipGrantId};
 use super::store_commit::{
     ObjectHash, StoreBatchCommit, StoreControl, StoreDeviceRegistration, STORE_PROTOCOL_VERSION,
 };
 use crate::keys::{self, UserKeypair};
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct OwnerGrantId(pub ObjectHash);
-
-impl fmt::Display for OwnerGrantId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, formatter)
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MemberRole {
@@ -216,6 +210,7 @@ impl SerialMembershipState {
         };
         if founder.author_pubkey != *owner_pubkey
             || founder.author_owner_grant != *owner_grant_id
+            || founder.stream_id != derive_founder_stream_id(&founder.store_id, owner_pubkey)
             || founder.seq != 1
             || founder.previous_hash.is_some()
             || !founder.dependencies.is_empty()
@@ -466,21 +461,21 @@ pub struct MemberInfo {
 pub enum MembershipChange {
     Founder {
         owner_pubkey: String,
-        owner_grant_id: OwnerGrantId,
+        owner_grant_id: MembershipGrantId,
     },
     SetMember {
         user_pubkey: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_account_email: Option<String>,
         role: MemberRole,
-        grant_id: OwnerGrantId,
-        replaces: BTreeSet<OwnerGrantId>,
-        owner_barriers: BTreeMap<OwnerGrantId, OwnerStreamBarrier>,
+        grant_id: MembershipGrantId,
+        replaces: BTreeSet<MembershipGrantId>,
+        owner_barriers: BTreeMap<MembershipGrantId, OwnerStreamBarrier>,
     },
     RemoveMember {
         user_pubkey: String,
-        removes: BTreeSet<OwnerGrantId>,
-        owner_barriers: BTreeMap<OwnerGrantId, OwnerStreamBarrier>,
+        removes: BTreeSet<MembershipGrantId>,
+        owner_barriers: BTreeMap<MembershipGrantId, OwnerStreamBarrier>,
     },
 }
 
@@ -499,25 +494,69 @@ impl MembershipChange {
 #[serde(deny_unknown_fields)]
 pub struct MembershipCoord {
     pub author_pubkey: String,
-    pub author_owner_grant: OwnerGrantId,
+    pub author_owner_grant: MembershipGrantId,
+    pub stream_id: AuthorStreamId,
     pub seq: u64,
     pub entry_hash: ObjectHash,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub enum OwnerStreamBarrier {
-    BeforeFirst,
-    Through(MembershipCoord),
-}
-
-impl OwnerStreamBarrier {
-    fn includes(&self, coord: &MembershipCoord) -> bool {
-        match self {
-            Self::BeforeFirst => false,
-            Self::Through(barrier) => coord.seq <= barrier.seq,
+impl MembershipCoord {
+    pub(crate) fn stream_key(&self) -> MembershipStreamKey {
+        MembershipStreamKey {
+            author_pubkey: self.author_pubkey.clone(),
+            author_owner_grant: self.author_owner_grant.clone(),
+            stream_id: self.stream_id,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct MembershipStreamKey {
+    pub(crate) author_pubkey: String,
+    pub(crate) author_owner_grant: MembershipGrantId,
+    pub(crate) stream_id: AuthorStreamId,
+}
+
+impl CausalCoordinate for MembershipCoord {
+    type StreamKey = MembershipStreamKey;
+
+    fn stream_key(&self) -> Self::StreamKey {
+        MembershipCoord::stream_key(self)
+    }
+
+    fn author_pubkey(&self) -> &str {
+        &self.author_pubkey
+    }
+
+    fn author_owner_grant(&self) -> &MembershipGrantId {
+        &self.author_owner_grant
+    }
+
+    fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    fn entry_hash(&self) -> ObjectHash {
+        self.entry_hash
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoreAssignment {
+    role: MemberRole,
+    provider_account_email: Option<String>,
+}
+
+impl CausalAssignment for StoreAssignment {
+    fn is_owner(&self) -> bool {
+        self.role == MemberRole::Owner
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerStreamBarrier {
+    pub observed_streams: Vec<MembershipCoord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -526,11 +565,12 @@ pub struct MembershipEntry {
     pub version: u32,
     pub store_id: String,
     pub author_pubkey: String,
-    pub author_owner_grant: OwnerGrantId,
+    pub author_owner_grant: MembershipGrantId,
+    pub stream_id: AuthorStreamId,
     pub seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_hash: Option<ObjectHash>,
-    pub dependencies: BTreeMap<OwnerGrantId, MembershipCoord>,
+    pub dependencies: Vec<MembershipCoord>,
     pub created_at: String,
     pub change: MembershipChange,
     pub signature: String,
@@ -541,6 +581,7 @@ impl MembershipEntry {
         MembershipCoord {
             author_pubkey: self.author_pubkey.clone(),
             author_owner_grant: self.author_owner_grant.clone(),
+            stream_id: self.stream_id,
             seq: self.seq,
             entry_hash: entry_hash(self),
         }
@@ -563,7 +604,8 @@ pub struct AuthorHead {
     pub version: u32,
     pub store_id: String,
     pub author_pubkey: String,
-    pub author_owner_grant: OwnerGrantId,
+    pub author_owner_grant: MembershipGrantId,
+    pub stream_id: AuthorStreamId,
     pub seq: u64,
     pub tip_hash: ObjectHash,
     pub signature: String,
@@ -592,13 +634,13 @@ pub enum MembershipError {
     #[error("membership stream {author}/{grant} is missing sequence {seq}")]
     MissingSequence {
         author: String,
-        grant: OwnerGrantId,
+        grant: MembershipGrantId,
         seq: u64,
     },
     #[error("membership stream {author}/{grant} has conflicting entries at sequence {seq}")]
     ConflictingSequence {
         author: String,
-        grant: OwnerGrantId,
+        grant: MembershipGrantId,
         seq: u64,
     },
     #[error("membership entry {index} has predecessor {actual:?}, expected {expected:?}")]
@@ -614,48 +656,58 @@ pub enum MembershipError {
         index: usize,
         dependency: MembershipCoord,
     },
-    #[error("membership entry {index} has dependency key {key} for stream {actual}")]
-    DependencyStreamMismatch {
-        index: usize,
-        key: OwnerGrantId,
-        actual: OwnerGrantId,
-    },
+    #[error(
+        "membership entry {index} dependency frontier is not strictly ordered by author stream"
+    )]
+    NonCanonicalDependencyFrontier { index: usize },
     #[error("membership dependency graph contains a cycle")]
     DependencyCycle,
     #[error("membership founder entry is invalid")]
     InvalidFounder,
     #[error("membership entry {index} author is not active under Owner grant {grant}")]
-    AuthorGrantInactive { index: usize, grant: OwnerGrantId },
+    AuthorGrantInactive {
+        index: usize,
+        grant: MembershipGrantId,
+    },
     #[error("membership entry {index} creates an already-defined grant {grant}")]
-    DuplicateGrant { index: usize, grant: OwnerGrantId },
+    DuplicateGrant {
+        index: usize,
+        grant: MembershipGrantId,
+    },
     #[error("membership entry {index} replaces or removes grant {grant} owned by another member")]
-    GrantOwnerMismatch { index: usize, grant: OwnerGrantId },
+    GrantOwnerMismatch {
+        index: usize,
+        grant: MembershipGrantId,
+    },
+    #[error("membership entry {index} does not name the exact active grants for member {pubkey}")]
+    GrantSetMismatch { index: usize, pubkey: String },
     #[error("membership entry {index} removes no exact grants")]
     EmptyRemoval { index: usize },
     #[error("membership entry {index} removes Owner grant {grant} without its exact observed-through coordinate")]
-    MissingOwnerRevocationBarrier { index: usize, grant: OwnerGrantId },
+    MissingOwnerRevocationBarrier {
+        index: usize,
+        grant: MembershipGrantId,
+    },
     #[error(
         "membership entry {index} carries an invalid revocation barrier for Owner grant {grant}"
     )]
-    InvalidOwnerRevocationBarrier { index: usize, grant: OwnerGrantId },
-    #[error("membership entry {index} depends on {dependency:?} beyond revoked Owner grant {grant}'s barrier {barrier:?}")]
-    DependencyBeyondRevocationBarrier {
+    InvalidOwnerRevocationBarrier {
         index: usize,
-        grant: OwnerGrantId,
-        dependency: Box<MembershipCoord>,
-        barrier: Box<OwnerStreamBarrier>,
+        grant: MembershipGrantId,
     },
     #[error("concurrent Owner revocations leave no active Owner")]
     ConcurrentOwnerRevocationConflict,
     #[error("member {pubkey} has concurrent active grants {grants:?}")]
     ConcurrentMemberGrantConflict {
         pubkey: String,
-        grants: Vec<OwnerGrantId>,
+        grants: Vec<MembershipGrantId>,
     },
     #[error("signer {0} has no active Owner grant")]
     SignerIsNotOwner(String),
     #[error("member {0} has no active grants")]
     NotAMember(String),
+    #[error("membership author stream contains a pruned suffix and cannot be extended")]
+    PrunedAuthorStream,
 }
 
 #[derive(Debug, Clone)]
@@ -668,124 +720,8 @@ struct GrantRecord {
 
 #[derive(Debug, Clone, Default)]
 struct CausalState {
-    grants: BTreeMap<OwnerGrantId, GrantRecord>,
-    removed: BTreeSet<OwnerGrantId>,
-}
-
-impl CausalState {
-    fn merge(&mut self, other: &Self) {
-        for (grant, record) in &other.grants {
-            self.grants
-                .entry(grant.clone())
-                .or_insert_with(|| record.clone());
-        }
-        self.removed.extend(other.removed.iter().cloned());
-    }
-
-    fn active_grant(&self, grant: &OwnerGrantId) -> Option<&GrantRecord> {
-        (!self.removed.contains(grant))
-            .then(|| self.grants.get(grant))
-            .flatten()
-    }
-
-    fn active_owner(&self, grant: &OwnerGrantId, pubkey: &str) -> bool {
-        self.active_grant(grant)
-            .is_some_and(|record| record.pubkey == pubkey && record.role == MemberRole::Owner)
-    }
-
-    fn apply_change(
-        &mut self,
-        coord: &MembershipCoord,
-        change: &MembershipChange,
-        index: usize,
-    ) -> Result<(), MembershipError> {
-        match change {
-            MembershipChange::Founder {
-                owner_pubkey,
-                owner_grant_id,
-            } => {
-                if self.grants.contains_key(owner_grant_id) {
-                    return Err(MembershipError::DuplicateGrant {
-                        index,
-                        grant: owner_grant_id.clone(),
-                    });
-                }
-                self.grants.insert(
-                    owner_grant_id.clone(),
-                    GrantRecord {
-                        pubkey: owner_pubkey.clone(),
-                        role: MemberRole::Owner,
-                        provider_account_email: None,
-                        created_at: coord.clone(),
-                    },
-                );
-            }
-            MembershipChange::SetMember {
-                user_pubkey,
-                provider_account_email,
-                role,
-                grant_id,
-                replaces,
-                ..
-            } => {
-                if self.grants.contains_key(grant_id) {
-                    return Err(MembershipError::DuplicateGrant {
-                        index,
-                        grant: grant_id.clone(),
-                    });
-                }
-                for replaced in replaces {
-                    let Some(record) = self.grants.get(replaced) else {
-                        return Err(MembershipError::GrantOwnerMismatch {
-                            index,
-                            grant: replaced.clone(),
-                        });
-                    };
-                    if record.pubkey != *user_pubkey {
-                        return Err(MembershipError::GrantOwnerMismatch {
-                            index,
-                            grant: replaced.clone(),
-                        });
-                    }
-                    self.removed.insert(replaced.clone());
-                }
-                self.grants.insert(
-                    grant_id.clone(),
-                    GrantRecord {
-                        pubkey: user_pubkey.clone(),
-                        role: role.clone(),
-                        provider_account_email: provider_account_email.clone(),
-                        created_at: coord.clone(),
-                    },
-                );
-            }
-            MembershipChange::RemoveMember {
-                user_pubkey,
-                removes,
-                ..
-            } => {
-                if removes.is_empty() {
-                    return Err(MembershipError::EmptyRemoval { index });
-                }
-                for removed in removes {
-                    let Some(record) = self.grants.get(removed) else {
-                        return Err(MembershipError::GrantOwnerMismatch {
-                            index,
-                            grant: removed.clone(),
-                        });
-                    };
-                    if record.pubkey != *user_pubkey {
-                        return Err(MembershipError::GrantOwnerMismatch {
-                            index,
-                            grant: removed.clone(),
-                        });
-                    }
-                    self.removed.insert(removed.clone());
-                }
-            }
-        }
-        Ok(())
-    }
+    grants: BTreeMap<MembershipGrantId, GrantRecord>,
+    removed: BTreeSet<MembershipGrantId>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -793,7 +729,7 @@ pub struct MembershipChain {
     entries: Vec<MembershipEntry>,
     coords: Vec<MembershipCoord>,
     state: CausalState,
-    caps: BTreeMap<OwnerGrantId, OwnerStreamBarrier>,
+    included: BTreeSet<MembershipCoord>,
 }
 
 impl MembershipChain {
@@ -821,7 +757,7 @@ impl MembershipChain {
             entries,
             coords,
             state: CausalState::default(),
-            caps: BTreeMap::new(),
+            included: BTreeSet::new(),
         };
         chain.rebuild()?;
         Ok(chain)
@@ -933,32 +869,70 @@ impl MembershipChain {
             .map(|(_, record)| record.created_at.clone())
     }
 
-    pub fn active_grant_ids(&self, pubkey: &str) -> BTreeSet<OwnerGrantId> {
+    pub fn active_grant_ids(&self, pubkey: &str) -> BTreeSet<MembershipGrantId> {
         self.active_grants_for(pubkey)
             .into_iter()
             .map(|(grant, _)| grant.clone())
             .collect()
     }
 
-    pub fn active_owner_grant(&self, pubkey: &str) -> Option<OwnerGrantId> {
+    pub fn active_owner_grant(&self, pubkey: &str) -> Option<MembershipGrantId> {
         self.active_grants_for(pubkey)
             .into_iter()
             .find(|(_, record)| record.role == MemberRole::Owner)
             .map(|(grant, _)| grant.clone())
     }
 
+    pub(crate) fn reusable_author_streams(
+        &self,
+        author_pubkey: &str,
+        grant: &MembershipGrantId,
+    ) -> BTreeSet<AuthorStreamId> {
+        self.effective_frontier()
+            .into_iter()
+            .filter(|coord| {
+                coord.author_pubkey == author_pubkey
+                    && coord.author_owner_grant == *grant
+                    && self.raw_stream_tip(author_pubkey, grant, coord.stream_id)
+                        == Some(coord.clone())
+            })
+            .map(|coord| coord.stream_id)
+            .collect()
+    }
+
+    pub(crate) fn preferred_author_stream(
+        &self,
+        author_pubkey: &str,
+        grant: &MembershipGrantId,
+    ) -> Option<AuthorStreamId> {
+        self.reusable_author_streams(author_pubkey, grant)
+            .into_iter()
+            .next_back()
+    }
+
+    /// Raw signed coverage: the greatest loaded coordinate in every stream,
+    /// including suffixes removed by causal pruning.
     pub fn author_heads(&self) -> Vec<MembershipCoord> {
-        let mut heads = BTreeMap::<OwnerGrantId, MembershipCoord>::new();
-        for coord in &self.coords {
-            if self
-                .caps
-                .get(&coord.author_owner_grant)
-                .is_some_and(|barrier| !barrier.includes(coord))
-            {
-                continue;
-            }
+        self.frontier_from_coords(self.coords.iter())
+    }
+
+    /// Effective authoring frontier after causal pruning.
+    pub fn effective_frontier(&self) -> Vec<MembershipCoord> {
+        self.frontier_from_coords(
+            self.coords
+                .iter()
+                .filter(|coord| self.included.contains(*coord)),
+        )
+    }
+
+    fn frontier_from_coords<'a>(
+        &self,
+        coords: impl Iterator<Item = &'a MembershipCoord>,
+    ) -> Vec<MembershipCoord> {
+        let mut heads = BTreeMap::<MembershipStreamKey, MembershipCoord>::new();
+        for coord in coords {
             heads
-                .entry(coord.author_owner_grant.clone())
+                .entry(coord.stream_key())
                 .and_modify(|current| {
                     if coord.seq > current.seq {
                         *current = coord.clone();
@@ -969,39 +943,74 @@ impl MembershipChain {
         heads.into_values().collect()
     }
 
-    pub fn stream_tip(&self, author_pubkey: &str, grant: &OwnerGrantId) -> Option<MembershipCoord> {
-        self.author_heads().into_iter().find(|coord| {
-            coord.author_pubkey == author_pubkey && coord.author_owner_grant == *grant
+    pub fn stream_tip(
+        &self,
+        author_pubkey: &str,
+        grant: &MembershipGrantId,
+        stream_id: AuthorStreamId,
+    ) -> Option<MembershipCoord> {
+        self.effective_frontier().into_iter().find(|coord| {
+            coord.author_pubkey == author_pubkey
+                && coord.author_owner_grant == *grant
+                && coord.stream_id == stream_id
         })
     }
 
     pub fn raw_stream_tip(
         &self,
         author_pubkey: &str,
-        grant: &OwnerGrantId,
+        grant: &MembershipGrantId,
+        stream_id: AuthorStreamId,
     ) -> Option<MembershipCoord> {
         self.coords
             .iter()
             .filter(|coord| {
-                coord.author_pubkey == author_pubkey && coord.author_owner_grant == *grant
+                coord.author_pubkey == author_pubkey
+                    && coord.author_owner_grant == *grant
+                    && coord.stream_id == stream_id
             })
             .max_by_key(|coord| coord.seq)
             .cloned()
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn signed_head(&self, signer: &UserKeypair) -> Option<AuthorHead> {
         let author = keys::public_key_hex(signer);
         let grant = self.active_owner_grant(&author)?;
-        let tip = self.stream_tip(&author, &grant)?;
+        let tip = self
+            .effective_frontier()
+            .into_iter()
+            .filter(|coord| coord.author_pubkey == author && coord.author_owner_grant == grant)
+            .max_by_key(|coord| coord.stream_id)?;
         Some(AuthorHead::signed(
             self.store_id()?.to_string(),
             grant,
+            tip.stream_id,
             tip.seq,
             tip.entry_hash,
             signer,
         ))
     }
 
+    pub fn signed_head_for_stream(
+        &self,
+        signer: &UserKeypair,
+        stream_id: AuthorStreamId,
+    ) -> Option<AuthorHead> {
+        let author = keys::public_key_hex(signer);
+        let grant = self.active_owner_grant(&author)?;
+        let tip = self.stream_tip(&author, &grant, stream_id)?;
+        Some(AuthorHead::signed(
+            self.store_id()?.to_string(),
+            grant,
+            stream_id,
+            tip.seq,
+            tip.entry_hash,
+            signer,
+        ))
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn signed_set_member(
         &self,
         signer: &UserKeypair,
@@ -1011,14 +1020,45 @@ impl MembershipChain {
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
         let author = keys::public_key_hex(signer);
+        let grant = self
+            .active_owner_grant(&author)
+            .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
+        let stream_id = self
+            .preferred_author_stream(&author, &grant)
+            .unwrap_or_else(|| {
+                AuthorStreamId::from_digest(ObjectHash::digest(
+                    format!("coven.test-membership-author-stream.v1\0{author}\0{grant}").as_bytes(),
+                ))
+            });
+        self.signed_set_member_in_stream(
+            signer,
+            stream_id,
+            user_pubkey,
+            provider_account_email,
+            role,
+            created_at,
+        )
+    }
+
+    pub fn signed_set_member_in_stream(
+        &self,
+        signer: &UserKeypair,
+        stream_id: AuthorStreamId,
+        user_pubkey: String,
+        provider_account_email: Option<String>,
+        role: MemberRole,
+        created_at: String,
+    ) -> Result<MembershipEntry, MembershipError> {
+        let author = keys::public_key_hex(signer);
         let author_grant = self
             .active_owner_grant(&author)
             .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
-        let (seq, previous_hash) = self.next_stream_position(&author, &author_grant);
+        let (seq, previous_hash) = self.next_stream_position(&author, &author_grant, stream_id)?;
         let grant_id = derive_grant_id(
             self.store_id().expect("validated chain has a store id"),
             &author,
             &author_grant,
+            stream_id,
             seq,
             &user_pubkey,
         );
@@ -1032,6 +1072,7 @@ impl MembershipChain {
                 .to_string(),
             author_pubkey: author,
             author_owner_grant: author_grant,
+            stream_id,
             seq,
             previous_hash,
             dependencies: self.frontier(),
@@ -1047,12 +1088,36 @@ impl MembershipChain {
             signature: String::new(),
         };
         sign_membership_entry(&mut entry, signer);
+        let mut candidate = self.clone();
+        candidate.add_entry(entry.clone())?;
         Ok(entry)
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn signed_remove_member(
         &self,
         signer: &UserKeypair,
+        user_pubkey: String,
+        created_at: String,
+    ) -> Result<MembershipEntry, MembershipError> {
+        let author = keys::public_key_hex(signer);
+        let grant = self
+            .active_owner_grant(&author)
+            .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
+        let stream_id = self
+            .preferred_author_stream(&author, &grant)
+            .unwrap_or_else(|| {
+                AuthorStreamId::from_digest(ObjectHash::digest(
+                    format!("coven.test-membership-author-stream.v1\0{author}\0{grant}").as_bytes(),
+                ))
+            });
+        self.signed_remove_member_in_stream(signer, stream_id, user_pubkey, created_at)
+    }
+
+    pub fn signed_remove_member_in_stream(
+        &self,
+        signer: &UserKeypair,
+        stream_id: AuthorStreamId,
         user_pubkey: String,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
@@ -1064,7 +1129,7 @@ impl MembershipChain {
         let author_grant = self
             .active_owner_grant(&author)
             .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
-        let (seq, previous_hash) = self.next_stream_position(&author, &author_grant);
+        let (seq, previous_hash) = self.next_stream_position(&author, &author_grant, stream_id)?;
         let owner_barriers = self.owner_barriers(&removes);
         let mut entry = MembershipEntry {
             version: STORE_PROTOCOL_VERSION,
@@ -1074,6 +1139,7 @@ impl MembershipChain {
                 .to_string(),
             author_pubkey: author,
             author_owner_grant: author_grant,
+            stream_id,
             seq,
             previous_hash,
             dependencies: self.frontier(),
@@ -1086,44 +1152,50 @@ impl MembershipChain {
             signature: String::new(),
         };
         sign_membership_entry(&mut entry, signer);
+        let mut candidate = self.clone();
+        candidate.add_entry(entry.clone())?;
         Ok(entry)
     }
 
     fn next_stream_position(
         &self,
         author: &str,
-        grant: &OwnerGrantId,
-    ) -> (u64, Option<ObjectHash>) {
-        self.stream_tip(author, grant)
-            .map_or((1, None), |tip| (tip.seq + 1, Some(tip.entry_hash)))
+        grant: &MembershipGrantId,
+        stream_id: AuthorStreamId,
+    ) -> Result<(u64, Option<ObjectHash>), MembershipError> {
+        let raw_tip = self.raw_stream_tip(author, grant, stream_id);
+        let effective_tip = self.stream_tip(author, grant, stream_id);
+        if raw_tip != effective_tip {
+            return Err(MembershipError::PrunedAuthorStream);
+        }
+        Ok(effective_tip.map_or((1, None), |tip| (tip.seq + 1, Some(tip.entry_hash))))
     }
 
-    fn frontier(&self) -> BTreeMap<OwnerGrantId, MembershipCoord> {
-        self.author_heads()
-            .into_iter()
-            .map(|coord| (coord.author_owner_grant.clone(), coord))
-            .collect()
+    fn frontier(&self) -> Vec<MembershipCoord> {
+        self.effective_frontier()
     }
 
     fn owner_barriers(
         &self,
-        grants: &BTreeSet<OwnerGrantId>,
-    ) -> BTreeMap<OwnerGrantId, OwnerStreamBarrier> {
+        grants: &BTreeSet<MembershipGrantId>,
+    ) -> BTreeMap<MembershipGrantId, OwnerStreamBarrier> {
         grants
             .iter()
             .filter_map(|grant| {
                 let record = self.state.grants.get(grant)?;
                 (record.role == MemberRole::Owner).then(|| {
-                    let barrier = self
-                        .stream_tip(&record.pubkey, grant)
-                        .map_or(OwnerStreamBarrier::BeforeFirst, OwnerStreamBarrier::Through);
-                    (grant.clone(), barrier)
+                    let observed_streams = self
+                        .effective_frontier()
+                        .into_iter()
+                        .filter(|coord| coord.author_owner_grant == *grant)
+                        .collect();
+                    (grant.clone(), OwnerStreamBarrier { observed_streams })
                 })
             })
             .collect()
     }
 
-    fn active_grants_for(&self, pubkey: &str) -> Vec<(&OwnerGrantId, &GrantRecord)> {
+    fn active_grants_for(&self, pubkey: &str) -> Vec<(&MembershipGrantId, &GrantRecord)> {
         self.state
             .grants
             .iter()
@@ -1144,8 +1216,6 @@ impl MembershipChain {
             return Err(MembershipError::InvalidFounder);
         }
 
-        let mut index_by_coord = BTreeMap::new();
-        let mut streams = BTreeMap::<(String, OwnerGrantId), BTreeMap<u64, usize>>::new();
         for (index, (coord, entry)) in self.entries_with_coords().enumerate() {
             if entry.version != STORE_PROTOCOL_VERSION {
                 return Err(MembershipError::UnsupportedVersion(index));
@@ -1168,340 +1238,252 @@ impl MembershipChain {
                     actual: Box::new(actual),
                 });
             }
-            if index_by_coord.insert(coord.clone(), index).is_some() {
-                return Err(MembershipError::CoordinateMismatch {
+            if !entry
+                .dependencies
+                .windows(2)
+                .all(|pair| pair[0].stream_key() < pair[1].stream_key())
+            {
+                return Err(MembershipError::NonCanonicalDependencyFrontier { index });
+            }
+            let barriers = match &entry.change {
+                MembershipChange::SetMember { owner_barriers, .. }
+                | MembershipChange::RemoveMember { owner_barriers, .. } => owner_barriers,
+                MembershipChange::Founder { .. } => continue,
+            };
+            if let Some((grant, _)) = barriers.iter().find(|(_, barrier)| {
+                !barrier
+                    .observed_streams
+                    .windows(2)
+                    .all(|pair| pair[0].stream_key() < pair[1].stream_key())
+            }) {
+                return Err(MembershipError::InvalidOwnerRevocationBarrier {
                     index,
-                    expected: Box::new(coord.clone()),
-                    actual: Box::new(coord.clone()),
-                });
-            }
-            let replaced = streams
-                .entry((
-                    coord.author_pubkey.clone(),
-                    coord.author_owner_grant.clone(),
-                ))
-                .or_default()
-                .insert(coord.seq, index);
-            if replaced.is_some() {
-                return Err(MembershipError::ConflictingSequence {
-                    author: coord.author_pubkey.clone(),
-                    grant: coord.author_owner_grant.clone(),
-                    seq: coord.seq,
+                    grant: grant.clone(),
                 });
             }
         }
 
-        for ((author, grant), entries) in &streams {
-            let max_seq = *entries
-                .keys()
-                .next_back()
-                .expect("stream group is non-empty");
-            let mut previous = None;
-            for seq in 1..=max_seq {
-                let Some(index) = entries.get(&seq) else {
-                    return Err(MembershipError::MissingSequence {
-                        author: author.clone(),
-                        grant: grant.clone(),
-                        seq,
-                    });
-                };
-                let entry = &self.entries[*index];
-                if entry.previous_hash != previous {
-                    return Err(MembershipError::BrokenStreamLink {
-                        index: *index,
-                        expected: previous,
-                        actual: entry.previous_hash,
-                    });
-                }
-                if seq == 1 {
-                    if entry.dependencies.contains_key(grant) {
-                        return Err(MembershipError::MissingOwnDependency { index: *index });
-                    }
-                } else {
-                    let previous_index = entries
-                        .get(&(seq - 1))
-                        .expect("contiguous stream retains predecessor");
-                    if entry.dependencies.get(grant) != Some(&self.coords[*previous_index]) {
-                        return Err(MembershipError::MissingOwnDependency { index: *index });
-                    }
-                }
-                previous = Some(self.coords[*index].entry_hash);
-            }
-        }
-
-        for (index, entry) in self.entries.iter().enumerate() {
-            for (grant, dependency) in &entry.dependencies {
-                if grant != &dependency.author_owner_grant {
-                    return Err(MembershipError::DependencyStreamMismatch {
-                        index,
-                        key: grant.clone(),
-                        actual: dependency.author_owner_grant.clone(),
-                    });
-                }
-                if !index_by_coord.contains_key(dependency) {
-                    return Err(MembershipError::MissingDependency {
-                        index,
-                        dependency: dependency.clone(),
-                    });
-                }
-            }
-        }
-
-        let founder_indices: Vec<_> = self
+        let founders = self
             .entries
             .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                matches!(entry.change, MembershipChange::Founder { .. }).then_some(index)
-            })
-            .collect();
-        if founder_indices.len() != 1 {
-            return Err(MembershipError::InvalidFounder);
-        }
-        let founder_index = founder_indices[0];
-        let founder = &self.entries[founder_index];
-        let MembershipChange::Founder {
-            owner_pubkey,
-            owner_grant_id,
-        } = &founder.change
-        else {
-            unreachable!()
-        };
-        if founder.seq != 1
-            || founder.author_pubkey != *owner_pubkey
-            || founder.author_owner_grant != *owner_grant_id
-            || founder.previous_hash.is_some()
-            || !founder.dependencies.is_empty()
-            || owner_grant_id != &derive_founder_grant_id(&founder.store_id, owner_pubkey)
-        {
-            return Err(MembershipError::InvalidFounder);
-        }
-
-        let mut remaining: BTreeSet<usize> = (0..self.entries.len()).collect();
-        let mut states = BTreeMap::<MembershipCoord, CausalState>::new();
-        let mut causal_order = Vec::with_capacity(self.entries.len());
-        while !remaining.is_empty() {
-            let ready: Vec<_> = remaining
-                .iter()
-                .copied()
-                .filter(|index| {
-                    self.entries[*index]
-                        .dependencies
-                        .values()
-                        .all(|coord| states.contains_key(coord))
-                })
-                .collect();
-            if ready.is_empty() {
-                return Err(MembershipError::DependencyCycle);
-            }
-            for index in ready {
-                remaining.remove(&index);
-                causal_order.push(index);
-                let entry = &self.entries[index];
-                let coord = &self.coords[index];
-                let mut state = CausalState::default();
-                for dependency in entry.dependencies.values() {
-                    state.merge(
-                        states
-                            .get(dependency)
-                            .expect("ready entry has every dependency state"),
-                    );
-                }
-                if index != founder_index
-                    && !state.active_owner(&entry.author_owner_grant, &entry.author_pubkey)
-                {
-                    return Err(MembershipError::AuthorGrantInactive {
-                        index,
-                        grant: entry.author_owner_grant.clone(),
-                    });
-                }
-                if let MembershipChange::RemoveMember {
-                    removes,
-                    owner_barriers,
-                    ..
-                }
-                | MembershipChange::SetMember {
-                    replaces: removes,
-                    owner_barriers,
-                    ..
+            .filter_map(|entry| {
+                let MembershipChange::Founder {
+                    owner_pubkey,
+                    owner_grant_id,
                 } = &entry.change
-                {
-                    for grant in owner_barriers.keys() {
-                        if !removes.contains(grant)
-                            || !state
-                                .grants
-                                .get(grant)
-                                .is_some_and(|record| record.role == MemberRole::Owner)
-                        {
-                            return Err(MembershipError::InvalidOwnerRevocationBarrier {
-                                index,
-                                grant: grant.clone(),
-                            });
-                        }
-                    }
-                    for removed in removes {
-                        let is_owner = state
-                            .grants
-                            .get(removed)
-                            .is_some_and(|record| record.role == MemberRole::Owner);
-                        if !is_owner {
-                            continue;
-                        }
-                        let Some(barrier) = owner_barriers.get(removed) else {
-                            return Err(MembershipError::MissingOwnerRevocationBarrier {
-                                index,
-                                grant: removed.clone(),
-                            });
-                        };
-                        let exact = match barrier {
-                            OwnerStreamBarrier::BeforeFirst => {
-                                !entry.dependencies.contains_key(removed)
-                            }
-                            OwnerStreamBarrier::Through(coord) => {
-                                coord.author_owner_grant == *removed
-                                    && entry.dependencies.get(removed) == Some(coord)
-                            }
-                        };
-                        if !exact {
-                            return Err(MembershipError::InvalidOwnerRevocationBarrier {
-                                index,
-                                grant: removed.clone(),
-                            });
-                        }
-                    }
-                }
-                state.apply_change(coord, &entry.change, index)?;
-                states.insert(coord.clone(), state);
-            }
-        }
-
-        let mut raw_state = CausalState::default();
-        for state in states.values() {
-            raw_state.merge(state);
-        }
-        if !raw_state.grants.is_empty()
-            && !raw_state.grants.iter().any(|(grant, record)| {
-                record.role == MemberRole::Owner && !raw_state.removed.contains(grant)
+                else {
+                    return None;
+                };
+                Some((entry, owner_pubkey, owner_grant_id))
             })
+            .collect::<Vec<_>>();
+        let [(founder, owner_pubkey, owner_grant_id)] = founders.as_slice() else {
+            return Err(MembershipError::InvalidFounder);
+        };
+        if founder.author_pubkey != **owner_pubkey
+            || founder.author_owner_grant != **owner_grant_id
+            || owner_grant_id != &&derive_founder_grant_id(&founder.store_id, owner_pubkey)
+            || founder.stream_id != derive_founder_stream_id(&founder.store_id, owner_pubkey)
         {
-            return Err(MembershipError::ConcurrentOwnerRevocationConflict);
+            return Err(MembershipError::InvalidFounder);
         }
 
-        let mut caps = BTreeMap::<OwnerGrantId, OwnerStreamBarrier>::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            if let MembershipChange::RemoveMember {
-                removes,
-                owner_barriers,
-                ..
-            }
-            | MembershipChange::SetMember {
-                replaces: removes,
-                owner_barriers,
-                ..
-            } = &entry.change
-            {
-                for removed in removes {
-                    if raw_state
-                        .grants
-                        .get(removed)
-                        .is_some_and(|record| record.role == MemberRole::Owner)
-                    {
-                        let barrier = owner_barriers.get(removed).ok_or_else(|| {
-                            MembershipError::MissingOwnerRevocationBarrier {
-                                index,
-                                grant: removed.clone(),
-                            }
-                        })?;
-                        caps.entry(removed.clone())
-                            .and_modify(|current| {
-                                let replace = match (&*current, barrier) {
-                                    (OwnerStreamBarrier::BeforeFirst, _) => false,
-                                    (_, OwnerStreamBarrier::BeforeFirst) => true,
-                                    (
-                                        OwnerStreamBarrier::Through(current),
-                                        OwnerStreamBarrier::Through(candidate),
-                                    ) => candidate.seq < current.seq,
-                                };
-                                if replace {
-                                    current.clone_from(barrier);
-                                }
-                            })
-                            .or_insert_with(|| barrier.clone());
-                    }
-                }
-            }
-        }
-
-        for (index, entry) in self.entries.iter().enumerate() {
-            for (grant, dependency) in &entry.dependencies {
-                if let Some(barrier) = caps.get(grant) {
-                    if !barrier.includes(dependency) {
-                        return Err(MembershipError::DependencyBeyondRevocationBarrier {
-                            index,
-                            grant: grant.clone(),
-                            dependency: Box::new(dependency.clone()),
-                            barrier: Box::new(barrier.clone()),
-                        });
-                    }
-                }
-            }
-        }
-
-        let mut effective = CausalState::default();
-        for index in causal_order {
-            let coord = &self.coords[index];
-            if caps
-                .get(&coord.author_owner_grant)
-                .is_some_and(|barrier| !barrier.includes(coord))
-            {
-                continue;
-            }
-            effective.apply_change(coord, &self.entries[index].change, index)?;
-        }
-
-        let mut active_by_member = BTreeMap::<String, Vec<OwnerGrantId>>::new();
-        for (grant, record) in &effective.grants {
-            if !effective.removed.contains(grant) {
-                active_by_member
-                    .entry(record.pubkey.clone())
-                    .or_default()
-                    .push(grant.clone());
-            }
-        }
-        if let Some((pubkey, grants)) = active_by_member
-            .into_iter()
-            .find(|(_, grants)| grants.len() > 1)
-        {
-            return Err(MembershipError::ConcurrentMemberGrantConflict { pubkey, grants });
-        }
-        if !effective.grants.iter().any(|(grant, record)| {
-            record.role == MemberRole::Owner && !effective.removed.contains(grant)
-        }) {
-            return Err(MembershipError::ConcurrentOwnerRevocationConflict);
-        }
-
-        self.state = effective;
-        self.caps = caps;
+        let reduced = reduce_store_membership(&self.entries)?;
+        self.state = CausalState {
+            grants: reduced
+                .grants
+                .into_iter()
+                .map(|(grant, record)| {
+                    (
+                        grant,
+                        GrantRecord {
+                            pubkey: record.member_pubkey,
+                            role: record.assignment.role,
+                            provider_account_email: record.assignment.provider_account_email,
+                            created_at: record.created_at,
+                        },
+                    )
+                })
+                .collect(),
+            removed: reduced.removed,
+        };
+        self.included = reduced.included;
         Ok(())
     }
 }
 
-pub fn derive_founder_grant_id(store_id: &str, owner_pubkey: &str) -> OwnerGrantId {
-    OwnerGrantId(ObjectHash::digest(
+fn reduce_store_membership(
+    entries: &[MembershipEntry],
+) -> Result<causal_grants::ReducedGrants<MembershipCoord, StoreAssignment>, MembershipError> {
+    let normalized = entries
+        .iter()
+        .map(|entry| {
+            let dependencies = entry
+                .dependencies
+                .iter()
+                .cloned()
+                .map(|coord| (coord.stream_key(), coord))
+                .collect();
+            let change = match &entry.change {
+                MembershipChange::Founder {
+                    owner_pubkey,
+                    owner_grant_id,
+                } => CausalChange::Founder {
+                    member_pubkey: owner_pubkey.clone(),
+                    grant_id: owner_grant_id.clone(),
+                    assignment: StoreAssignment {
+                        role: MemberRole::Owner,
+                        provider_account_email: None,
+                    },
+                },
+                MembershipChange::SetMember {
+                    user_pubkey,
+                    provider_account_email,
+                    role,
+                    grant_id,
+                    replaces,
+                    owner_barriers,
+                } => CausalChange::SetMember {
+                    member_pubkey: user_pubkey.clone(),
+                    assignment: StoreAssignment {
+                        role: role.clone(),
+                        provider_account_email: provider_account_email.clone(),
+                    },
+                    grant_id: grant_id.clone(),
+                    replaces: replaces.clone(),
+                    owner_barriers: owner_barriers
+                        .iter()
+                        .map(|(grant, barrier)| (grant.clone(), shared_store_barrier(barrier)))
+                        .collect(),
+                },
+                MembershipChange::RemoveMember {
+                    user_pubkey,
+                    removes,
+                    owner_barriers,
+                } => CausalChange::RemoveMember {
+                    member_pubkey: user_pubkey.clone(),
+                    removes: removes.clone(),
+                    owner_barriers: owner_barriers
+                        .iter()
+                        .map(|(grant, barrier)| (grant.clone(), shared_store_barrier(barrier)))
+                        .collect(),
+                },
+            };
+            CausalEntry {
+                coord: entry.coord(),
+                previous_hash: entry.previous_hash,
+                dependencies,
+                change,
+            }
+        })
+        .collect::<Vec<_>>();
+    causal_grants::reduce(&normalized).map_err(map_store_causal_error)
+}
+
+fn shared_store_barrier(barrier: &OwnerStreamBarrier) -> OwnerGrantBarrier<MembershipCoord> {
+    let observed_streams = barrier
+        .observed_streams
+        .iter()
+        .cloned()
+        .map(|coord| (coord.stream_key(), coord))
+        .collect();
+    OwnerGrantBarrier { observed_streams }
+}
+
+fn map_store_causal_error(error: CausalGrantError<MembershipCoord>) -> MembershipError {
+    match error {
+        CausalGrantError::Empty => MembershipError::EmptyChain,
+        CausalGrantError::ConflictingSequence { stream, seq } => {
+            MembershipError::ConflictingSequence {
+                author: stream.author_pubkey,
+                grant: stream.author_owner_grant,
+                seq,
+            }
+        }
+        CausalGrantError::MissingSequence { stream, seq } => MembershipError::MissingSequence {
+            author: stream.author_pubkey,
+            grant: stream.author_owner_grant,
+            seq,
+        },
+        CausalGrantError::BrokenStreamLink {
+            index,
+            expected,
+            actual,
+        } => MembershipError::BrokenStreamLink {
+            index,
+            expected,
+            actual,
+        },
+        CausalGrantError::MissingOwnDependency { index } => {
+            MembershipError::MissingOwnDependency { index }
+        }
+        CausalGrantError::DependencyStreamMismatch { .. } => {
+            unreachable!("Store dependencies are normalized from their signed coordinates")
+        }
+        CausalGrantError::MissingDependency { index, dependency } => {
+            MembershipError::MissingDependency { index, dependency }
+        }
+        CausalGrantError::DependencyCycle => MembershipError::DependencyCycle,
+        CausalGrantError::InvalidFounder => MembershipError::InvalidFounder,
+        CausalGrantError::AuthorGrantInactive { index, grant } => {
+            MembershipError::AuthorGrantInactive { index, grant }
+        }
+        CausalGrantError::DuplicateGrant { index, grant } => {
+            MembershipError::DuplicateGrant { index, grant }
+        }
+        CausalGrantError::GrantOwnerMismatch { index, grant } => {
+            MembershipError::GrantOwnerMismatch { index, grant }
+        }
+        CausalGrantError::GrantSetMismatch {
+            index,
+            member_pubkey,
+        } => MembershipError::GrantSetMismatch {
+            index,
+            pubkey: member_pubkey,
+        },
+        CausalGrantError::EmptyRemoval { index } => MembershipError::EmptyRemoval { index },
+        CausalGrantError::MissingOwnerRevocationBarrier { index, grant } => {
+            MembershipError::MissingOwnerRevocationBarrier { index, grant }
+        }
+        CausalGrantError::InvalidOwnerRevocationBarrier { index, grant } => {
+            MembershipError::InvalidOwnerRevocationBarrier { index, grant }
+        }
+        CausalGrantError::ConcurrentOwnerRevocationConflict => {
+            MembershipError::ConcurrentOwnerRevocationConflict
+        }
+        CausalGrantError::ConcurrentMemberGrantConflict {
+            member_pubkey,
+            grants,
+        } => MembershipError::ConcurrentMemberGrantConflict {
+            pubkey: member_pubkey,
+            grants,
+        },
+    }
+}
+
+pub fn derive_founder_grant_id(store_id: &str, owner_pubkey: &str) -> MembershipGrantId {
+    MembershipGrantId(ObjectHash::digest(
         format!("coven.membership-founder-grant.v1\0{store_id}\0{owner_pubkey}").as_bytes(),
+    ))
+}
+
+fn derive_founder_stream_id(store_id: &str, owner_pubkey: &str) -> AuthorStreamId {
+    AuthorStreamId::from_digest(ObjectHash::digest(
+        format!("coven.membership-founder-stream.v1\0{store_id}\0{owner_pubkey}").as_bytes(),
     ))
 }
 
 pub fn derive_grant_id(
     store_id: &str,
     author_pubkey: &str,
-    author_grant: &OwnerGrantId,
+    author_grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
     seq: u64,
     user_pubkey: &str,
-) -> OwnerGrantId {
-    OwnerGrantId(ObjectHash::digest(
+) -> MembershipGrantId {
+    MembershipGrantId(ObjectHash::digest(
         format!(
-            "coven.membership-grant.v1\0{store_id}\0{author_pubkey}\0{author_grant}\0{seq}\0{user_pubkey}"
+            "coven.membership-grant.v1\0{store_id}\0{author_pubkey}\0{author_grant}\0{stream_id}\0{seq}\0{user_pubkey}"
         )
         .as_bytes(),
     ))
@@ -1510,14 +1492,16 @@ pub fn derive_grant_id(
 pub fn founder_entry(store_id: &str, owner: &UserKeypair, created_at: &str) -> MembershipEntry {
     let owner_pubkey = keys::public_key_hex(owner);
     let owner_grant_id = derive_founder_grant_id(store_id, &owner_pubkey);
+    let stream_id = derive_founder_stream_id(store_id, &owner_pubkey);
     let mut entry = MembershipEntry {
         version: STORE_PROTOCOL_VERSION,
         store_id: store_id.to_string(),
         author_pubkey: owner_pubkey.clone(),
         author_owner_grant: owner_grant_id.clone(),
+        stream_id,
         seq: 1,
         previous_hash: None,
-        dependencies: BTreeMap::new(),
+        dependencies: Vec::new(),
         created_at: created_at.to_string(),
         change: MembershipChange::Founder {
             owner_pubkey,
@@ -1535,11 +1519,12 @@ pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
         version: u32,
         store_id: &'a str,
         author_pubkey: &'a str,
-        author_owner_grant: &'a OwnerGrantId,
+        author_owner_grant: &'a MembershipGrantId,
+        stream_id: AuthorStreamId,
         seq: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         previous_hash: Option<ObjectHash>,
-        dependencies: &'a BTreeMap<OwnerGrantId, MembershipCoord>,
+        dependencies: &'a [MembershipCoord],
         created_at: &'a str,
         change: &'a MembershipChange,
     }
@@ -1548,6 +1533,7 @@ pub fn canonical_bytes(entry: &MembershipEntry) -> Vec<u8> {
         store_id: &entry.store_id,
         author_pubkey: &entry.author_pubkey,
         author_owner_grant: &entry.author_owner_grant,
+        stream_id: entry.stream_id,
         seq: entry.seq,
         previous_hash: entry.previous_hash,
         dependencies: &entry.dependencies,
@@ -1580,7 +1566,8 @@ pub fn verify_membership_entry(entry: &MembershipEntry) -> bool {
 impl AuthorHead {
     pub fn signed(
         store_id: String,
-        author_owner_grant: OwnerGrantId,
+        author_owner_grant: MembershipGrantId,
+        stream_id: AuthorStreamId,
         seq: u64,
         tip_hash: ObjectHash,
         signer: &UserKeypair,
@@ -1591,6 +1578,7 @@ impl AuthorHead {
             store_id,
             author_pubkey,
             author_owner_grant,
+            stream_id,
             seq,
             tip_hash,
             signature: String::new(),
@@ -1615,7 +1603,8 @@ impl AuthorHead {
             version: u32,
             store_id: &'a str,
             author_pubkey: &'a str,
-            author_owner_grant: &'a OwnerGrantId,
+            author_owner_grant: &'a MembershipGrantId,
+            stream_id: AuthorStreamId,
             seq: u64,
             tip_hash: ObjectHash,
         }
@@ -1624,6 +1613,7 @@ impl AuthorHead {
             store_id: &self.store_id,
             author_pubkey: &self.author_pubkey,
             author_owner_grant: &self.author_owner_grant,
+            stream_id: self.stream_id,
             seq: self.seq,
             tip_hash: self.tip_hash,
         })
@@ -1820,6 +1810,118 @@ mod tests {
     }
 
     #[test]
+    fn signed_candidate_is_validated_before_it_is_returned() {
+        let owner = key();
+        let chain = founded("store", &owner);
+
+        assert!(matches!(
+            chain.signed_remove_member(
+                &owner,
+                keys::public_key_hex(&owner),
+                "remove last owner".to_string(),
+            ),
+            Err(MembershipError::ConcurrentOwnerRevocationConflict)
+        ));
+    }
+
+    #[test]
+    fn dependency_frontier_must_be_strictly_ordered_by_author_stream() {
+        let founder = key();
+        let second_owner = key();
+        let mut chain = founded("store", &founder);
+        let add_owner = chain
+            .signed_set_member(
+                &founder,
+                keys::public_key_hex(&second_owner),
+                None,
+                MemberRole::Owner,
+                "add owner".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(add_owner).unwrap();
+        let second_stream = chain
+            .signed_set_member(
+                &second_owner,
+                keys::public_key_hex(&key()),
+                None,
+                MemberRole::Member,
+                "second stream".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(second_stream).unwrap();
+        let mut unsorted = chain
+            .signed_set_member(
+                &founder,
+                keys::public_key_hex(&key()),
+                None,
+                MemberRole::Member,
+                "candidate".to_string(),
+            )
+            .unwrap();
+        assert!(unsorted.dependencies.len() > 1);
+        unsorted.dependencies.reverse();
+        sign_membership_entry(&mut unsorted, &founder);
+
+        assert!(matches!(
+            chain.add_entry(unsorted),
+            Err(MembershipError::NonCanonicalDependencyFrontier { .. })
+        ));
+    }
+
+    #[test]
+    fn owner_barrier_must_be_strictly_ordered_by_author_stream() {
+        let founder = key();
+        let second_owner = key();
+        let second_owner_pubkey = keys::public_key_hex(&second_owner);
+        let mut chain = founded("store", &founder);
+        let add_owner = chain
+            .signed_set_member(
+                &founder,
+                second_owner_pubkey.clone(),
+                None,
+                MemberRole::Owner,
+                "add owner".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(add_owner).unwrap();
+        for (stream_id, timestamp) in [
+            (AuthorStreamId::from_bytes([1; 16]), "first stream"),
+            (AuthorStreamId::from_bytes([2; 16]), "second stream"),
+        ] {
+            let authored = chain
+                .signed_set_member_in_stream(
+                    &second_owner,
+                    stream_id,
+                    keys::public_key_hex(&key()),
+                    None,
+                    MemberRole::Member,
+                    timestamp.to_string(),
+                )
+                .unwrap();
+            chain.add_entry(authored).unwrap();
+        }
+        let mut removal = chain
+            .signed_remove_member(&founder, second_owner_pubkey, "remove owner".to_string())
+            .unwrap();
+        let MembershipChange::RemoveMember { owner_barriers, .. } = &mut removal.change else {
+            unreachable!();
+        };
+        let observed = &mut owner_barriers
+            .values_mut()
+            .next()
+            .expect("owner removal barrier")
+            .observed_streams;
+        assert!(observed.len() > 1);
+        observed.reverse();
+        sign_membership_entry(&mut removal, &founder);
+
+        assert!(matches!(
+            chain.add_entry(removal),
+            Err(MembershipError::InvalidOwnerRevocationBarrier { .. })
+        ));
+    }
+
+    #[test]
     fn owner_readd_uses_a_new_sequence_one_stream() {
         let owner = key();
         let second = key();
@@ -1869,6 +1971,40 @@ mod tests {
     }
 
     #[test]
+    fn owner_self_removal_remains_effective_when_its_grant_is_capped_before_first() {
+        let founder = key();
+        let departing_owner = key();
+        let departing_pubkey = keys::public_key_hex(&departing_owner);
+        let mut chain = founded("store", &founder);
+        let add_owner = chain
+            .signed_set_member(
+                &founder,
+                departing_pubkey.clone(),
+                None,
+                MemberRole::Owner,
+                "add owner".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(add_owner).unwrap();
+
+        let self_removal = chain
+            .signed_remove_member(
+                &departing_owner,
+                departing_pubkey.clone(),
+                "self removal".to_string(),
+            )
+            .unwrap();
+        assert!(matches!(
+            &self_removal.change,
+            MembershipChange::RemoveMember { owner_barriers, .. }
+                if owner_barriers.values().all(|barrier| barrier.observed_streams.is_empty())
+        ));
+        chain.add_entry(self_removal).unwrap();
+
+        assert!(!chain.is_owner_now(&departing_pubkey));
+    }
+
+    #[test]
     fn before_first_barrier_excludes_every_entry_from_the_revoked_owner_stream() {
         let founder = key();
         let second_owner = key();
@@ -1904,7 +2040,7 @@ mod tests {
         assert!(matches!(
             &removal.change,
             MembershipChange::RemoveMember { owner_barriers, .. }
-                if owner_barriers.values().all(|barrier| *barrier == OwnerStreamBarrier::BeforeFirst)
+                if owner_barriers.values().all(|barrier| barrier.observed_streams.is_empty())
         ));
 
         let mut entries = observed.entries().to_vec();
@@ -1914,11 +2050,15 @@ mod tests {
         assert!(chain
             .author_heads()
             .iter()
+            .any(|coord| coord.author_pubkey == keys::public_key_hex(&second_owner)));
+        assert!(chain
+            .effective_frontier()
+            .iter()
             .all(|coord| coord.author_pubkey != keys::public_key_hex(&second_owner)));
     }
 
     #[test]
-    fn through_barrier_accepts_its_exact_prefix_and_refuses_dependencies_beyond_it() {
+    fn through_barrier_keeps_its_exact_prefix_and_prunes_the_stale_suffix() {
         let founder = key();
         let second_owner = key();
         let first_target = key();
@@ -1956,7 +2096,7 @@ mod tests {
         assert!(matches!(
             &removal.change,
             MembershipChange::RemoveMember { owner_barriers, .. }
-                if owner_barriers.values().any(|barrier| barrier == &OwnerStreamBarrier::Through(first.coord()))
+                if owner_barriers.values().any(|barrier| barrier.observed_streams == vec![first.coord()])
         ));
 
         let second = observed
@@ -1988,11 +2128,10 @@ mod tests {
         stale.add_entry(third.clone()).unwrap();
         let mut beyond_entries = stale.entries().to_vec();
         beyond_entries.push(removal);
-        assert!(matches!(
-            MembershipChain::from_entries(beyond_entries),
-            Err(MembershipError::DependencyBeyondRevocationBarrier { dependency, .. })
-                if *dependency == third.dependencies[&third.author_owner_grant]
-        ));
+        let pruned = MembershipChain::from_entries(beyond_entries).unwrap();
+        assert!(pruned.can_write_now(&keys::public_key_hex(&first_target)));
+        assert!(!pruned.can_write_now(&keys::public_key_hex(&second_target)));
+        assert!(!pruned.can_write_now(&keys::public_key_hex(&third_target)));
     }
 
     #[test]
@@ -2030,13 +2169,13 @@ mod tests {
         let MembershipChange::RemoveMember { owner_barriers, .. } = &mut removal.change else {
             unreachable!();
         };
-        let OwnerStreamBarrier::Through(barrier) = owner_barriers
+        let barrier = owner_barriers
             .values_mut()
             .next()
             .expect("owner removal barrier")
-        else {
-            unreachable!();
-        };
+            .observed_streams
+            .first_mut()
+            .expect("observed owner stream");
         barrier.entry_hash = ObjectHash::digest(b"wrong barrier hash");
         sign_membership_entry(&mut removal, &founder);
         assert!(matches!(

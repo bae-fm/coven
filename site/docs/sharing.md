@@ -55,10 +55,11 @@ pub struct MembershipEntry {
     pub version: u32,
     pub store_id: String,
     pub author_pubkey: String,
-    pub author_owner_grant: OwnerGrantId,
+    pub author_owner_grant: MembershipGrantId,
+    pub stream_id: AuthorStreamId,
     pub seq: u64,
     pub previous_hash: Option<ObjectHash>,
-    pub dependencies: BTreeMap<OwnerGrantId, MembershipCoord>,
+    pub dependencies: Vec<MembershipCoord>,
     pub created_at: String,
     pub change: MembershipChange,
     pub signature: String,
@@ -76,27 +77,31 @@ The `created_at` value is an HLC string used for display ordering, not to author
 anything. It is author-supplied and therefore spoofable, so no access decision
 reads it (see [Revocation](#revocation-is-key-rotation)).
 
-## MergeConcurrent: per-author commitment
+## MergeConcurrent: per-author-stream commitment
 
 Two owners inviting people at the same moment must not be able to erase each
 other's work. Any design with one shared "latest" object has that failure
 built in: the second writer wins, the first invite vanishes. So there is no
-shared object anywhere in membership. Entries live in per-owner streams,
-exactly like changesets:
+shared object anywhere in membership. Entries live in streams identified by
+their author, the Owner grant authorizing that author, and a random stream id:
 
 ```
-store-v1/membership/entries/{author}/{owner_grant}/{seq}/…
-store-v1/membership/heads/{author}/{owner_grant}/{seq}/…
+store-v1/membership/entries/{author}/{owner_grant}/{stream_id}/{seq}/…
+store-v1/membership/heads/{author}/{owner_grant}/{stream_id}/{seq}/…
 ```
 
-Each owner appends entries only under its own prefix and hash-links them
-(`prev_hash`), and publishes an
+Each owner appends entries only under a stream it created and hash-links them
+(`previous_hash`). A dependency frontier names the greatest effective
+coordinate in every observed stream. Dependencies are ordered by full stream
+identity, so one signed byte representation exists. The owner then publishes an
 [`AuthorHead`](rustdoc:struct:coven::sync::membership::AuthorHead): a signed
-statement that entries `1..=seq` of its own prefix exist and that the entry at
+statement that entries `1..=seq` of that exact stream exist and that the entry at
 `seq` hashes to `tip_hash`. A reader admits an author's prefix only up to that
 author's head, so an entry is uncommitted until its own author's head covers
-it. The committed membership set is the union of every current owner's
-committed prefix.
+it. The committed membership set is the causally reduced union of every signed
+stream prefix. If causal revocation removes a stream suffix, coven never extends
+that raw stream again; its author creates and persists a fresh stream id whose
+first entry depends on the effective frontier.
 
 <svg class="flow" viewBox="0 0 660 234" role="img" aria-label="An owner appends entries under its own prefix, its signed head commits them, and readers union every current owner's committed prefix">
 <text class="hdr" x="150" y="22" text-anchor="middle">OWNER A'S PREFIX</text>
@@ -133,7 +138,7 @@ committed prefix.
 <text class="sub" x="330" y="224" text-anchor="middle">1 an owner appends under its own prefix · 2 its signed head commits the prefix · 3 readers union the committed prefixes</text>
 </svg>
 
-Under `MergeConcurrent`, every owner commits under its own prefix, so concurrent owners never race
+Under `MergeConcurrent`, every owner commits under its own stream, so concurrent owners never race
 each other: there is no shared last-writer-wins object one writer can overwrite
 over another's entry, and a failed publish leaves at most that one author's
 head behind its entries, never a wedged chain.
@@ -146,8 +151,8 @@ enforces, in order:
    (`author_pubkey == user_pubkey`). This is the founder; any other shape is
    rejected. A chain whose founder is not the store's established owner is a
    takeover attempt and is refused outright.
-2. Every entry must carry a valid signature and a correct `prev_hash` link to
-   its author's previous entry.
+2. Every entry must carry a valid signature and a correct `previous_hash` link
+   to the previous entry in its exact author, Owner-grant, and stream-id prefix.
 3. Every entry after the first must be signed by an author who is a current
    `Owner` at that point.
 

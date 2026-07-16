@@ -19,7 +19,7 @@ use crate::store_dir::StoreDir;
 /// the chain) both saves the round-trips and — more importantly — makes every
 /// authorization decision in the cycle judge the *same* chain state, so two reads
 /// can't disagree mid-cycle. Because [`load_anchored_chain`] writes the reader's
-/// per-author head watermark, loading once also writes that watermark once.
+/// per-author-stream head watermark, loading once also writes each watermark once.
 ///
 /// [`load_anchored_chain`]: super::membership_ops::load_anchored_chain
 pub struct CycleMembership {

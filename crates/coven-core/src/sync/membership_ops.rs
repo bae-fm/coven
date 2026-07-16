@@ -20,7 +20,7 @@ use super::invite::InviteError;
 use super::membership::founder_entry;
 use super::membership::{
     AuthorHead, MemberInfo, MemberRole, MembershipChain, MembershipCoord, MembershipEntry,
-    OwnerGrantId,
+    MembershipGrantId, MembershipStreamKey,
 };
 use super::storage::{CoordinationStorage, StorageError, SyncStorage};
 use super::store_commit::{ObjectHash, StoreControl};
@@ -55,21 +55,22 @@ async fn read_membership_entry(
         store_root_hash,
         &coord.author_pubkey,
         &coord.author_owner_grant,
+        coord.stream_id,
         coord.seq,
     )
     .await?
     .map(|entry| entry.bytes)
     .ok_or_else(|| {
         StorageError::NotFound(format!(
-            "membership entry {}/{}/{}",
-            coord.author_pubkey, coord.author_owner_grant, coord.seq
+            "membership entry {}/{}/{}/{}",
+            coord.author_pubkey, coord.author_owner_grant, coord.stream_id, coord.seq
         ))
         .into()
     })
 }
 
 struct VisibleMembershipHeads {
-    by_grant: BTreeMap<OwnerGrantId, AuthorHead>,
+    by_stream: BTreeMap<MembershipStreamKey, AuthorHead>,
     coverage: ListingCoverage,
 }
 
@@ -78,18 +79,29 @@ async fn visible_membership_heads(
     store_root_hash: ObjectHash,
 ) -> Result<VisibleMembershipHeads, StoreObjectError> {
     let listing = list_membership_head_objects(storage, store_root_hash).await?;
-    let mut latest = BTreeMap::<OwnerGrantId, AuthorHead>::new();
+    let mut latest = BTreeMap::<MembershipStreamKey, AuthorHead>::new();
     for verified in listing.heads {
         let head = verified.value;
         if latest
-            .get(&head.author_owner_grant)
+            .get(&MembershipStreamKey {
+                author_pubkey: head.author_pubkey.clone(),
+                author_owner_grant: head.author_owner_grant.clone(),
+                stream_id: head.stream_id,
+            })
             .is_none_or(|current| current.seq < head.seq)
         {
-            latest.insert(head.author_owner_grant.clone(), head);
+            latest.insert(
+                MembershipStreamKey {
+                    author_pubkey: head.author_pubkey.clone(),
+                    author_owner_grant: head.author_owner_grant.clone(),
+                    stream_id: head.stream_id,
+                },
+                head,
+            );
         }
     }
     Ok(VisibleMembershipHeads {
-        by_grant: latest,
+        by_stream: latest,
         coverage: listing.coverage,
     })
 }
@@ -170,8 +182,8 @@ pub struct SerialMembershipContext<'a> {
     pub device_id: String,
 }
 
-/// The per-author membership-head floor at the chain's current committed state:
-/// every author's highest committed seq ([`MembershipChain::author_heads`]). A
+/// The per-author-stream membership-head floor at the chain's current committed
+/// state: every stream's highest signed seq ([`MembershipChain::author_heads`]). A
 /// pre-initialization bootstrap read can return an empty floor before a founder is
 /// established. Minted into an invite or restore code so the joiner or restorer
 /// can seed its watermark ([`seed_head_watermark`]) before its first sync cycle.
@@ -417,7 +429,7 @@ pub async fn invite_member_with_coordination(
         .to_string();
 
     // The chain as it stands after this invite is committed (including the
-    // invitee's own Add and the head just published for it): its per-author
+    // invitee's own Add and the head just published for it): its per-author-stream
     // heads are the floor the joiner seeds its watermark from, so a provider
     // can never roll the joiner back to a state before this invite.
     let membership_floor = chain.author_heads();
@@ -1214,11 +1226,12 @@ fn validate_membership_entry_at(
 ) -> Result<(), String> {
     if entry.author_pubkey != coord.author_pubkey
         || entry.author_owner_grant != coord.author_owner_grant
+        || entry.stream_id != coord.stream_id
         || entry.seq != coord.seq
     {
         return Err(format!(
-            "membership entry {coord:?} declares stream {}/{}/{}",
-            entry.author_pubkey, entry.author_owner_grant, entry.seq
+            "membership entry {coord:?} declares stream {}/{}/{}/{}",
+            entry.author_pubkey, entry.author_owner_grant, entry.stream_id, entry.seq
         ));
     }
     let actual_hash = super::membership::entry_hash(entry);
@@ -1250,27 +1263,26 @@ pub(crate) async fn committed_head_seq(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
     author: &str,
-    grant: &OwnerGrantId,
+    grant: &MembershipGrantId,
+    stream_id: super::membership::AuthorStreamId,
 ) -> Result<Option<u64>, String> {
     visible_membership_heads(storage, store_root_hash)
         .await
         .map(|heads| {
             heads
-                .by_grant
-                .get(grant)
-                .and_then(|head| (head.author_pubkey == author).then_some(head.seq))
+                .by_stream
+                .get(&MembershipStreamKey {
+                    author_pubkey: author.to_string(),
+                    author_owner_grant: grant.clone(),
+                    stream_id,
+                })
+                .map(|head| head.seq)
         })
         .map_err(|error| format!("Failed to read membership heads: {error}"))
 }
 
-/// Publish `signer`'s membership head, certifying its own committed prefix in
-/// `chain`. The write is monotonic: it refuses to publish a head whose seq does
-/// not advance the one already stored, so a device working from a stale view fails
-/// loud (and retries on top of the observed head) instead of rolling the head back
-/// over a peer's newer commit.
-///
-/// Two different valid heads at the same sequence occupy the same semantic slot
-/// and are therefore an immutable fork that every reader rejects.
+/// Test convenience for chains where the intended signer stream is unambiguous.
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn publish_membership_head(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
@@ -1280,11 +1292,29 @@ pub async fn publish_membership_head(
     let head = chain
         .signed_head(signer)
         .ok_or_else(|| "cannot publish a head for an author with no entries".to_string())?;
+    publish_membership_stream_head(storage, store_root_hash, chain, signer, head.stream_id).await
+}
+
+/// Publish `signer`'s head for one exact membership author stream. The write is
+/// monotonic within that stream: it refuses to publish a head whose seq does not
+/// advance the one already stored. Two different valid heads at the same sequence
+/// occupy the same semantic slot and are an immutable fork every reader rejects.
+pub async fn publish_membership_stream_head(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    chain: &MembershipChain,
+    signer: &UserKeypair,
+    stream_id: super::membership::AuthorStreamId,
+) -> Result<AuthorHead, String> {
+    let head = chain
+        .signed_head_for_stream(signer, stream_id)
+        .ok_or_else(|| "cannot publish a head for an author stream with no entries".to_string())?;
     if let Some(stored_seq) = committed_head_seq(
         storage,
         store_root_hash,
         &head.author_pubkey,
         &head.author_owner_grant,
+        head.stream_id,
     )
     .await?
     {
@@ -1404,11 +1434,11 @@ pub(crate) fn authorize_loaded_membership_author(
 /// those entries stay uncommitted until it publishes a head covering them. An
 /// author with a persisted floor must retain a readable head at or above it.
 ///
-/// `watermark_db`, when present, makes the read monotonic per author: a head whose
-/// seq regresses the last one this reader accepted (persisted in `protocol_state`) is
-/// refused, and each accepted head advances the watermark. This closes the window
-/// where a stale head replica (or a same-author two-device overwrite) would rewind
-/// a reader's committed view.
+/// `watermark_db`, when present, makes the read monotonic per author stream: a
+/// head whose seq regresses the last one this reader accepted (persisted in
+/// `protocol_state`) is refused, and each accepted head advances that stream's
+/// watermark. This closes the window where a stale head replica would rewind a
+/// reader's committed view.
 pub(crate) async fn load_anchored_chain(
     storage: &dyn SyncStorage,
     store_root_hash: ObjectHash,
@@ -1497,6 +1527,7 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
             store_root_hash,
             &coord.author_pubkey,
             &coord.author_owner_grant,
+            coord.stream_id,
             coord.seq,
         )
         .await
@@ -1510,6 +1541,7 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
         let head = loaded.value;
         if head.author_pubkey != coord.author_pubkey
             || head.author_owner_grant != coord.author_owner_grant
+            || head.stream_id != coord.stream_id
             || head.seq != coord.seq
             || head.tip_hash != coord.entry_hash
             || !head.verify()
@@ -1541,12 +1573,12 @@ pub(crate) async fn load_anchored_chain_at_exact_heads(
 
 pub(crate) fn membership_floor_by_grant(
     floor: &[MembershipCoord],
-) -> Result<BTreeMap<OwnerGrantId, MembershipCoord>, String> {
+) -> Result<BTreeMap<MembershipStreamKey, MembershipCoord>, String> {
     if floor.is_empty() {
         return Err("membership floor is empty".to_string());
     }
     let mut floors = BTreeMap::new();
-    for coord in floor {
+    for (index, coord) in floor.iter().enumerate() {
         if coord.seq == 0 {
             return Err(format!(
                 "membership floor contains seq zero for {}",
@@ -1567,10 +1599,14 @@ pub(crate) fn membership_floor_by_grant(
                 author.len()
             ));
         }
-        if let Some(existing) = floors.insert(coord.author_owner_grant.clone(), coord.clone()) {
+        let stream = coord.stream_key();
+        if index > 0 && floor[index - 1].stream_key() >= stream {
+            return Err("membership floor is not strictly ordered by author stream".to_string());
+        }
+        if let Some(existing) = floors.insert(stream, coord.clone()) {
             return Err(format!(
-                "membership floor repeats grant {} at {:?} and {:?}",
-                coord.author_owner_grant, existing, coord
+                "membership floor repeats author stream at {:?} and {:?}",
+                existing, coord
             ));
         }
     }
@@ -1665,11 +1701,12 @@ async fn validate_anchored_chain(
     store_root_hash: ObjectHash,
     entry_keys: &[MembershipCoord],
     owner_pubkey: Option<&str>,
-    persisted_floors: &BTreeMap<OwnerGrantId, MembershipCoord>,
+    persisted_floors: &BTreeMap<MembershipStreamKey, MembershipCoord>,
 ) -> Result<ValidatedAnchoredLoad, AnchoredChainError> {
-    let mut streams = BTreeMap::<OwnerGrantId, String>::new();
+    let mut grant_authors = BTreeMap::<MembershipGrantId, String>::new();
+    let mut streams = std::collections::BTreeSet::<MembershipStreamKey>::new();
     for coord in entry_keys.iter().chain(persisted_floors.values()) {
-        if let Some(existing) = streams.insert(
+        if let Some(existing) = grant_authors.insert(
             coord.author_owner_grant.clone(),
             coord.author_pubkey.clone(),
         ) {
@@ -1680,16 +1717,25 @@ async fn validate_anchored_chain(
                 )));
             }
         }
+        streams.insert(coord.stream_key());
     }
     let visible = visible_membership_heads(storage, store_root_hash)
         .await
         .map_err(map_membership_object_error)?;
     let head_coverage = visible.coverage;
-    let mut visible_heads = visible.by_grant;
-    for head in visible_heads.values() {
-        streams
-            .entry(head.author_owner_grant.clone())
-            .or_insert_with(|| head.author_pubkey.clone());
+    let mut visible_heads = visible.by_stream;
+    for (stream, head) in &visible_heads {
+        if let Some(existing) =
+            grant_authors.insert(head.author_owner_grant.clone(), head.author_pubkey.clone())
+        {
+            if existing != head.author_pubkey {
+                return Err(AnchoredChainError::LoadFailed(format!(
+                    "membership grant {} is claimed by both {existing} and {}",
+                    head.author_owner_grant, head.author_pubkey
+                )));
+            }
+        }
+        streams.insert(stream.clone());
     }
     if streams.is_empty() {
         return Ok(ValidatedAnchoredLoad {
@@ -1697,52 +1743,70 @@ async fn validate_anchored_chain(
             head_coverage,
         });
     }
-    let mut requested = BTreeMap::<OwnerGrantId, (String, u64)>::new();
+    let mut requested = BTreeMap::<MembershipStreamKey, u64>::new();
     for coord in entry_keys.iter().chain(persisted_floors.values()) {
         requested
-            .entry(coord.author_owner_grant.clone())
-            .and_modify(|(_, current)| *current = (*current).max(coord.seq))
-            .or_insert_with(|| (coord.author_pubkey.clone(), coord.seq));
+            .entry(coord.stream_key())
+            .and_modify(|current| *current = (*current).max(coord.seq))
+            .or_insert(coord.seq);
     }
-    for (grant, (author, seq)) in requested {
-        if let Some(exact) =
-            load_membership_head_slot(storage, store_root_hash, &author, &grant, seq)
-                .await
-                .map_err(map_membership_object_error)?
+    for (stream, seq) in requested {
+        if let Some(exact) = load_membership_head_slot(
+            storage,
+            store_root_hash,
+            &stream.author_pubkey,
+            &stream.author_owner_grant,
+            stream.stream_id,
+            seq,
+        )
+        .await
+        .map_err(map_membership_object_error)?
         {
             let head = exact.value;
             if visible_heads
-                .get(&grant)
+                .get(&stream)
                 .is_none_or(|current| current.seq < head.seq)
             {
-                visible_heads.insert(grant, head);
+                visible_heads.insert(stream, head);
             }
         }
     }
 
     let mut heads: Vec<AuthorHead> = Vec::new();
-    for (grant, author) in &streams {
-        let Some(head) = visible_heads.remove(grant) else {
-            if let Some(accepted) = persisted_floors.get(grant) {
+    for stream in &streams {
+        let Some(head) = visible_heads.remove(stream) else {
+            if let Some(accepted) = persisted_floors.get(stream) {
                 return Err(AnchoredChainError::LoadFailed(format!(
-                    "membership head {author}/{grant} is missing below the accepted floor {}",
-                    accepted.seq,
+                    "membership head {}/{}/{} is missing below the accepted floor {}",
+                    stream.author_pubkey, stream.author_owner_grant, stream.stream_id, accepted.seq,
                 )));
             }
-            debug!(%author, %grant, "membership head absent; stream entries are uncommitted");
+            debug!(author = %stream.author_pubkey, grant = %stream.author_owner_grant, stream_id = %stream.stream_id, "membership head absent; stream entries are uncommitted");
             continue;
         };
-        if head.author_pubkey != *author || head.author_owner_grant != *grant {
+        if head.author_pubkey != stream.author_pubkey
+            || head.author_owner_grant != stream.author_owner_grant
+            || head.stream_id != stream.stream_id
+        {
             return Err(AnchoredChainError::LoadFailed(format!(
-                "membership head for {author}/{grant} declares {}/{}",
-                head.author_pubkey, head.author_owner_grant
+                "membership head for {}/{}/{} declares {}/{}/{}",
+                stream.author_pubkey,
+                stream.author_owner_grant,
+                stream.stream_id,
+                head.author_pubkey,
+                head.author_owner_grant,
+                head.stream_id,
             )));
         }
-        if let Some(accepted) = persisted_floors.get(grant) {
+        if let Some(accepted) = persisted_floors.get(stream) {
             if head.seq < accepted.seq {
                 return Err(AnchoredChainError::LoadFailed(format!(
-                    "membership head {author}/{grant} regressed to seq {} below the accepted {}",
-                    head.seq, accepted.seq,
+                    "membership head {}/{}/{} regressed to seq {} below the accepted {}",
+                    stream.author_pubkey,
+                    stream.author_owner_grant,
+                    stream.stream_id,
+                    head.seq,
+                    accepted.seq,
                 )));
             }
         }
@@ -1760,12 +1824,20 @@ async fn validate_anchored_chain(
 
     // Each head must match the prefix it certifies: same tip seq, same tip hash.
     for head in &heads {
-        match chain.raw_stream_tip(&head.author_pubkey, &head.author_owner_grant) {
+        match chain.raw_stream_tip(
+            &head.author_pubkey,
+            &head.author_owner_grant,
+            head.stream_id,
+        ) {
             Some(coord) if coord.seq == head.seq && coord.entry_hash == head.tip_hash => {}
             other => {
                 return Err(AnchoredChainError::LoadFailed(format!(
-                    "membership head {}/{} claims seq {}/{} but the chain tip is {other:?}",
-                    head.author_pubkey, head.author_owner_grant, head.seq, head.tip_hash
+                    "membership head {}/{}/{} claims seq {}/{} but the chain tip is {other:?}",
+                    head.author_pubkey,
+                    head.author_owner_grant,
+                    head.stream_id,
+                    head.seq,
+                    head.tip_hash
                 )))
             }
         }
@@ -1851,19 +1923,21 @@ async fn download_committed_chain(
                 store_root_hash,
                 &head.author_pubkey,
                 &head.author_owner_grant,
+                head.stream_id,
                 seq,
             )
             .await
             .map_err(map_membership_object_error)?
             .ok_or_else(|| {
                 AnchoredChainError::LoadFailed(format!(
-                    "membership entry {}/{}/{} is missing",
-                    head.author_pubkey, head.author_owner_grant, seq
+                    "membership entry {}/{}/{}/{} is missing",
+                    head.author_pubkey, head.author_owner_grant, head.stream_id, seq
                 ))
             })?;
             let coord = MembershipCoord {
                 author_pubkey: head.author_pubkey.clone(),
                 author_owner_grant: head.author_owner_grant.clone(),
+                stream_id: head.stream_id,
                 seq,
                 entry_hash: loaded.semantic_hash,
             };
@@ -1911,16 +1985,17 @@ pub(crate) async fn load_and_persist_owner_anchor(
     }
 }
 
-/// `protocol_state` key holding the greatest membership-head seq this reader has
-/// accepted from `author`. The read path refuses any later head that regresses it.
-fn head_watermark_key(grant: &str) -> String {
-    format!("membership_head_seq/{grant}")
+/// `protocol_state` key holding the greatest membership-head coordinate this
+/// reader has accepted from one exact author stream. The read path refuses any
+/// later head that regresses it.
+fn head_watermark_key(grant: &str, stream_id: &str) -> String {
+    format!("membership_head_seq/{grant}/{stream_id}")
 }
 
 async fn read_head_watermarks(
     db: &Database,
-) -> Result<BTreeMap<OwnerGrantId, MembershipCoord>, String> {
-    let prefix = head_watermark_key("");
+) -> Result<BTreeMap<MembershipStreamKey, MembershipCoord>, String> {
+    let prefix = "membership_head_seq/".to_string();
     db.call(move |conn| {
         let mut statement = conn
             .prepare(
@@ -1937,32 +2012,47 @@ async fn read_head_watermarks(
         let mut watermarks = BTreeMap::new();
         for row in rows {
             let (key, value) = row.map_err(crate::database::DbError::from)?;
-            let grant = key.strip_prefix(&prefix).ok_or_else(|| {
+            let suffix = key.strip_prefix(&prefix).ok_or_else(|| {
                 crate::database::DbError::Message(format!(
                     "membership head watermark key {key:?} is outside its queried prefix"
                 ))
             })?;
-            if grant.is_empty() {
+            let Some((grant, stream_id)) = suffix.split_once('/') else {
                 return Err(crate::database::DbError::Message(
-                    "membership head watermark has an empty grant".to_string(),
+                    "membership head watermark must name a grant and author stream".to_string(),
+                ));
+            };
+            if grant.is_empty() || stream_id.is_empty() || stream_id.contains('/') {
+                return Err(crate::database::DbError::Message(
+                    "membership head watermark has a malformed stream key".to_string(),
                 ));
             }
-            let grant = OwnerGrantId(grant.parse().map_err(|error| {
+            let grant = MembershipGrantId(grant.parse().map_err(|error| {
                 crate::database::DbError::Message(format!(
                     "membership head watermark grant is malformed: {error}"
                 ))
             })?);
+            let stream_id = stream_id.parse().map_err(|error| {
+                crate::database::DbError::Message(format!(
+                    "membership head watermark stream id is malformed: {error}"
+                ))
+            })?;
             let coord: MembershipCoord = serde_json::from_str(&value).map_err(|error| {
                 crate::database::DbError::Message(format!(
                     "membership head watermark for {grant} is malformed: {error}"
                 ))
             })?;
-            if coord.author_owner_grant != grant || coord.seq == 0 {
+            if coord.author_owner_grant != grant || coord.stream_id != stream_id || coord.seq == 0 {
                 return Err(crate::database::DbError::Message(format!(
                     "membership head watermark for {grant} has an invalid exact coordinate"
                 )));
             }
-            watermarks.insert(grant, coord);
+            let stream = coord.stream_key();
+            if watermarks.insert(stream, coord).is_some() {
+                return Err(crate::database::DbError::Message(
+                    "membership head watermarks repeat an author stream".to_string(),
+                ));
+            }
         }
         Ok(watermarks)
     })
@@ -1970,20 +2060,22 @@ async fn read_head_watermarks(
     .map_err(|error| format!("read membership head watermarks: {error}"))
 }
 
-/// Persist `seq` as `author`'s head watermark, monotonically: a write at or
+/// Persist an exact author-stream head watermark monotonically: a write at or
 /// below the stored value leaves it untouched. The regression *check* runs
 /// against a read taken earlier, so two concurrent watermark-writing loads (the
 /// cycle's membership load and a user-triggered restore-code floor computation)
 /// can both pass it and then persist out of order — a plain overwrite would let
 /// the lower value land last, and a provider replaying the pre-removal head
 /// below it would then be accepted, the exact rollback the watermark exists to
-/// refuse. The values are unpadded decimal strings, so the guard compares
-/// numerically, never lexically.
+/// refuse.
 fn upsert_head_watermark_on(
     conn: &rusqlite::Connection,
     coord: &MembershipCoord,
 ) -> Result<(), crate::database::DbError> {
-    let key = head_watermark_key(&coord.author_owner_grant.to_string());
+    let key = head_watermark_key(
+        &coord.author_owner_grant.to_string(),
+        &coord.stream_id.to_string(),
+    );
     let existing: Option<String> = conn
         .query_row(
             "SELECT value FROM protocol_state WHERE key = ?1",
@@ -1999,6 +2091,12 @@ fn upsert_head_watermark_on(
                 coord.author_pubkey
             ))
         })?;
+        if existing.stream_key() != coord.stream_key() {
+            return Err(crate::database::DbError::Message(format!(
+                "membership head watermark key for {}/{}/{} contains coordinate {:?}",
+                coord.author_pubkey, coord.author_owner_grant, coord.stream_id, existing,
+            )));
+        }
         if existing.seq > coord.seq {
             return Ok(());
         }
@@ -2080,8 +2178,8 @@ async fn persist_owner_and_head_watermarks(
     .map_err(|error| format!("persist owner and membership head watermarks: {error}"))
 }
 
-/// Seed this reader's per-author membership-head watermark from `floor` — the
-/// `(author_pubkey, seq)` pairs an invite or restore code carries from mint time
+/// Seed this reader's per-author-stream membership-head watermark from `floor` —
+/// the exact stream coordinates an invite or restore code carries from mint time
 /// ([`current_membership_floor`]). Persists through the exact `protocol_state`
 /// entries [`load_anchored_chain`]'s monotonic guard reads, so from this
 /// device's first sync cycle on, any head at or below the seeded floor is
@@ -2601,7 +2699,10 @@ mod tests {
 
     async fn pin_fixture_anchor(
         fixture: &CommittedRemoval,
-    ) -> (Option<String>, BTreeMap<OwnerGrantId, MembershipCoord>) {
+    ) -> (
+        Option<String>,
+        BTreeMap<MembershipStreamKey, MembershipCoord>,
+    ) {
         let visible = fixture.storage.discover_membership_entries().await;
         load_and_persist_owner_anchor(
             &fixture.storage,
@@ -2625,7 +2726,7 @@ mod tests {
     async fn assert_fixture_trust_state(
         fixture: &CommittedRemoval,
         expected_owner: &Option<String>,
-        expected_floors: &BTreeMap<OwnerGrantId, MembershipCoord>,
+        expected_floors: &BTreeMap<MembershipStreamKey, MembershipCoord>,
     ) {
         assert_eq!(
             &fixture
@@ -2937,6 +3038,7 @@ mod tests {
         let mismatched = AuthorHead::signed(
             current.store_id,
             current.author_owner_grant,
+            current.stream_id,
             3,
             super::super::store_commit::ObjectHash::digest(b"mismatched membership tip"),
             &fixture.founder,
@@ -2974,6 +3076,7 @@ mod tests {
         let prefix = super::super::store_commit::membership_entry_semantic_prefix(
             &other_author,
             &entry.author_owner_grant,
+            entry.stream_id,
             1,
             super::super::store_commit::ObjectHash::digest(&bytes),
         );
@@ -2995,6 +3098,7 @@ mod tests {
             &[MembershipCoord {
                 author_pubkey: other_author.clone(),
                 author_owner_grant: entry.author_owner_grant.clone(),
+                stream_id: entry.stream_id,
                 seq: 1,
                 entry_hash: entry.coord().entry_hash,
             }],
@@ -3618,23 +3722,23 @@ mod tests {
     /// value and then persist out of order; a plain overwrite would let the lower
     /// seq land last, and a provider replaying the pre-removal head below it would
     /// then be accepted. The out-of-order persist must leave the higher value.
-    /// The values are unpadded decimal strings, so this also pins the comparison
-    /// as numeric — lexically, "9" beats "10".
     #[tokio::test]
     async fn head_watermark_persist_never_regresses() {
         use crate::sync::test_helpers::open_test_db;
 
         let db = open_test_db();
         let author = "aabbccdd";
-        let grant = OwnerGrantId(super::super::store_commit::ObjectHash::digest(
+        let grant = MembershipGrantId(super::super::store_commit::ObjectHash::digest(
             b"watermark grant",
         ));
+        let stream_id = super::super::membership::AuthorStreamId::from_bytes([1; 16]);
 
         persist_head_watermarks(
             &db,
             &[MembershipCoord {
                 author_pubkey: author.to_string(),
                 author_owner_grant: grant.clone(),
+                stream_id,
                 seq: 10,
                 entry_hash: super::super::store_commit::ObjectHash::digest(b"entry 10"),
             }],
@@ -3646,6 +3750,7 @@ mod tests {
             &[MembershipCoord {
                 author_pubkey: author.to_string(),
                 author_owner_grant: grant.clone(),
+                stream_id,
                 seq: 9,
                 entry_hash: super::super::store_commit::ObjectHash::digest(b"entry 9"),
             }],
@@ -3656,7 +3761,11 @@ mod tests {
             read_head_watermarks(&db)
                 .await
                 .unwrap()
-                .get(&grant)
+                .get(&MembershipStreamKey {
+                    author_pubkey: author.to_string(),
+                    author_owner_grant: grant.clone(),
+                    stream_id,
+                })
                 .map(|coord| coord.seq),
             Some(10),
             "an out-of-order lower persist must not regress the stored watermark",
@@ -3667,6 +3776,7 @@ mod tests {
             &[MembershipCoord {
                 author_pubkey: author.to_string(),
                 author_owner_grant: grant.clone(),
+                stream_id,
                 seq: 11,
                 entry_hash: super::super::store_commit::ObjectHash::digest(b"entry 11"),
             }],
@@ -3677,7 +3787,11 @@ mod tests {
             read_head_watermarks(&db)
                 .await
                 .unwrap()
-                .get(&grant)
+                .get(&MembershipStreamKey {
+                    author_pubkey: author.to_string(),
+                    author_owner_grant: grant.clone(),
+                    stream_id,
+                })
                 .map(|coord| coord.seq),
             Some(11),
             "a higher persist still advances it",
@@ -3685,17 +3799,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn head_watermark_rejects_a_coordinate_from_another_author_stream() {
+        use crate::sync::test_helpers::open_test_db;
+
+        let db = open_test_db();
+        let grant = MembershipGrantId(super::super::store_commit::ObjectHash::digest(
+            b"watermark stream identity grant",
+        ));
+        let stream_id = super::super::membership::AuthorStreamId::from_bytes([3; 16]);
+        let stored = MembershipCoord {
+            author_pubkey: "stored-author".to_string(),
+            author_owner_grant: grant.clone(),
+            stream_id,
+            seq: 10,
+            entry_hash: super::super::store_commit::ObjectHash::digest(b"stored entry"),
+        };
+        db.set_protocol_state(
+            &head_watermark_key(&grant.to_string(), &stream_id.to_string()),
+            &serde_json::to_string(&stored).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mismatched = MembershipCoord {
+            author_pubkey: "different-author".to_string(),
+            author_owner_grant: grant,
+            stream_id,
+            seq: 9,
+            entry_hash: super::super::store_commit::ObjectHash::digest(b"different entry"),
+        };
+
+        assert!(persist_head_watermarks(&db, &[mismatched]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn pruned_membership_author_stream_is_replaced_and_persisted() {
+        use crate::sync::test_helpers::open_test_db;
+
+        let db = open_test_db();
+        let author = hex::encode([3; crate::keys::SIGN_PUBLICKEYBYTES]);
+        let grant = MembershipGrantId(super::super::store_commit::ObjectHash::digest(
+            b"local author stream grant",
+        ));
+        let first = db
+            .select_membership_author_stream(&author, &grant, std::collections::BTreeSet::new())
+            .await
+            .unwrap();
+        let reused = db
+            .select_membership_author_stream(
+                &author,
+                &grant,
+                std::collections::BTreeSet::from([first]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reused, first);
+
+        let replacement = db
+            .select_membership_author_stream(&author, &grant, std::collections::BTreeSet::new())
+            .await
+            .unwrap();
+        assert_ne!(replacement, first);
+        let persisted = db
+            .select_membership_author_stream(
+                &author,
+                &grant,
+                std::collections::BTreeSet::from([replacement]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(persisted, replacement);
+    }
+
+    #[test]
+    fn membership_floor_rejects_unsorted_author_streams() {
+        let grant = MembershipGrantId(super::super::store_commit::ObjectHash::digest(
+            b"floor ordering grant",
+        ));
+        let later = MembershipCoord {
+            author_pubkey: hex::encode([9; crate::keys::SIGN_PUBLICKEYBYTES]),
+            author_owner_grant: grant.clone(),
+            stream_id: super::super::membership::AuthorStreamId::from_bytes([2; 16]),
+            seq: 1,
+            entry_hash: super::super::store_commit::ObjectHash::digest(b"later stream"),
+        };
+        let earlier = MembershipCoord {
+            author_pubkey: hex::encode([8; crate::keys::SIGN_PUBLICKEYBYTES]),
+            author_owner_grant: grant,
+            stream_id: super::super::membership::AuthorStreamId::from_bytes([1; 16]),
+            seq: 1,
+            entry_hash: super::super::store_commit::ObjectHash::digest(b"earlier stream"),
+        };
+
+        assert!(membership_floor_by_grant(&[later, earlier]).is_err());
+    }
+
+    #[tokio::test]
     async fn seeding_a_complete_head_floor_is_atomic() {
         use crate::sync::test_helpers::open_test_db;
 
         let db = open_test_db();
-        let first_grant = OwnerGrantId(super::super::store_commit::ObjectHash::digest(
+        let first_grant = MembershipGrantId(super::super::store_commit::ObjectHash::digest(
             b"first floor grant",
         ));
-        let second_grant = OwnerGrantId(super::super::store_commit::ObjectHash::digest(
+        let second_grant = MembershipGrantId(super::super::store_commit::ObjectHash::digest(
             b"second floor grant",
         ));
-        let rejected_key = head_watermark_key(&second_grant.to_string());
+        let first_stream = super::super::membership::AuthorStreamId::from_bytes([1; 16]);
+        let second_stream = super::super::membership::AuthorStreamId::from_bytes([2; 16]);
+        let rejected_key =
+            head_watermark_key(&second_grant.to_string(), &second_stream.to_string());
         db.call(move |conn| {
             conn.execute_batch(&format!(
                 "CREATE TRIGGER reject_second_membership_floor \
@@ -3711,12 +3923,14 @@ mod tests {
             MembershipCoord {
                 author_pubkey: "aaaa".to_string(),
                 author_owner_grant: first_grant,
+                stream_id: first_stream,
                 seq: 3,
                 entry_hash: super::super::store_commit::ObjectHash::digest(b"first floor"),
             },
             MembershipCoord {
                 author_pubkey: "bbbb".to_string(),
                 author_owner_grant: second_grant,
+                stream_id: second_stream,
                 seq: 7,
                 entry_hash: super::super::store_commit::ObjectHash::digest(b"second floor"),
             },
@@ -3745,12 +3959,17 @@ mod tests {
         )
         .await
         .unwrap();
-        let rejected_key = head_watermark_key(
-            &chain
-                .active_owner_grant(&fixture.second_owner_pubkey)
-                .expect("second owner grant")
-                .to_string(),
-        );
+        let second_grant = chain
+            .active_owner_grant(&fixture.second_owner_pubkey)
+            .expect("second owner grant");
+        let second_stream = chain
+            .author_heads()
+            .into_iter()
+            .find(|coord| coord.author_owner_grant == second_grant)
+            .expect("second owner author stream")
+            .stream_id;
+        let rejected_key =
+            head_watermark_key(&second_grant.to_string(), &second_stream.to_string());
         db.call(move |conn| {
             conn.execute_batch(&format!(
                 "CREATE TRIGGER reject_second_anchor_floor \
@@ -3838,6 +4057,7 @@ mod tests {
         let stale = AuthorHead::signed(
             "test-store".to_string(),
             add.author_owner_grant.clone(),
+            add.stream_id,
             2,
             entry_hash(&add),
             &owner,
@@ -3852,5 +4072,90 @@ mod tests {
             result.is_err(),
             "a head regressing below the accepted watermark must be refused"
         );
+    }
+
+    #[tokio::test]
+    async fn publishing_a_membership_head_targets_the_requested_author_stream() {
+        use crate::sync::membership::AuthorStreamId;
+
+        let owner = UserKeypair::generate();
+        let storage = MockSyncStorage::with_keypair(owner.clone());
+        let owner_pk = pubkey_hex(&owner);
+        let mut chain = MembershipChain::new();
+        let founder = storage.store_protocol_root().founder.clone();
+        append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
+
+        let requested_stream = AuthorStreamId::from_bytes([1; 16]);
+        let other_stream = AuthorStreamId::from_bytes([255; 16]);
+        let requested_entry = chain
+            .signed_set_member_in_stream(
+                &owner,
+                requested_stream,
+                pubkey_hex(&UserKeypair::generate()),
+                None,
+                MemberRole::Member,
+                "0000000002000-0000-f".to_string(),
+            )
+            .expect("sign requested-stream entry");
+        append_membership_entry(
+            &storage,
+            &mut chain,
+            &owner_pk,
+            requested_entry.seq,
+            requested_entry,
+        )
+        .await;
+        let other_entry = chain
+            .signed_set_member_in_stream(
+                &owner,
+                other_stream,
+                pubkey_hex(&UserKeypair::generate()),
+                None,
+                MemberRole::Member,
+                "0000000003000-0000-f".to_string(),
+            )
+            .expect("sign other-stream entry");
+        append_membership_entry(
+            &storage,
+            &mut chain,
+            &owner_pk,
+            other_entry.seq,
+            other_entry,
+        )
+        .await;
+
+        let head = super::publish_membership_stream_head(
+            &storage,
+            storage.store_root_hash(),
+            &chain,
+            &owner,
+            requested_stream,
+        )
+        .await
+        .expect("publish requested-stream head");
+
+        assert_eq!(head.stream_id, requested_stream);
+        assert!(crate::sync::store_objects::load_membership_head_slot(
+            &storage,
+            storage.store_root_hash(),
+            &owner_pk,
+            &head.author_owner_grant,
+            requested_stream,
+            head.seq,
+        )
+        .await
+        .expect("load requested-stream head")
+        .is_some());
+        assert!(crate::sync::store_objects::load_membership_head_slot(
+            &storage,
+            storage.store_root_hash(),
+            &owner_pk,
+            &head.author_owner_grant,
+            other_stream,
+            head.seq,
+        )
+        .await
+        .expect("load other-stream head")
+        .is_none());
     }
 }

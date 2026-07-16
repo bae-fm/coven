@@ -16,7 +16,9 @@ use crate::migration::Migration;
 use crate::storage::cloud::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
 use crate::store_dir::StoreDir;
 use crate::sync::apply::resolve_and_apply_changeset;
-use crate::sync::membership::{MembershipChain, MembershipCoord, MembershipEntry, OwnerGrantId};
+use crate::sync::membership::{
+    MembershipChain, MembershipCoord, MembershipEntry, MembershipGrantId,
+};
 use crate::sync::session::{BlobDecl, SyncedTable};
 use crate::sync::storage::{
     ProtocolObjectListing, ProtocolObjectLocator, StorageError, SyncStorage,
@@ -569,6 +571,7 @@ pub async fn append_membership_entry_bytes(
     let prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
         author_pubkey,
         &entry.author_owner_grant,
+        entry.stream_id,
         seq,
         hash,
     );
@@ -653,12 +656,19 @@ pub struct MockSyncStorage {
     fail_membership_list_on: std::sync::atomic::AtomicUsize,
     membership_list_count: std::sync::atomic::AtomicUsize,
     membership_entry_read_count: std::sync::atomic::AtomicUsize,
-    /// `(author_pubkey, seq)` entries the LIST omits but a keyed GET still serves.
+    /// Exact author-stream coordinates the LIST omits but a keyed GET still serves.
     /// Simulates the eventual-consistency window where a freshly-written
     /// membership entry isn't in the LIST yet, but a direct GET (read-after-write
     /// consistent) resolves it — the exact lag issue #84's grant-coordinate fetch
     /// is built for.
-    hidden_from_listing: Mutex<std::collections::HashSet<(String, OwnerGrantId, u64)>>,
+    hidden_from_listing: Mutex<
+        std::collections::HashSet<(
+            String,
+            MembershipGrantId,
+            crate::sync::membership::AuthorStreamId,
+            u64,
+        )>,
+    >,
     fail_blob_puts: std::sync::atomic::AtomicUsize,
     blob_put_count: std::sync::atomic::AtomicUsize,
     blob_put_from_file_count: std::sync::atomic::AtomicUsize,
@@ -966,6 +976,7 @@ impl MockSyncStorage {
             .map(|slot| MembershipCoord {
                 author_pubkey: slot.author,
                 author_owner_grant: slot.author_owner_grant,
+                stream_id: slot.stream_id,
                 seq: slot.sequence,
                 entry_hash: slot.semantic_hash,
             })
@@ -1003,6 +1014,7 @@ impl MockSyncStorage {
             self.store_protocol_root().object_hash(),
             author_pubkey,
             &coord.author_owner_grant,
+            coord.stream_id,
             seq,
         )
         .await
@@ -1029,6 +1041,7 @@ impl MockSyncStorage {
         let prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
             author_pubkey,
             &entry.author_owner_grant,
+            entry.stream_id,
             seq,
             hash,
         );
@@ -1075,6 +1088,7 @@ impl MockSyncStorage {
         let prefix = crate::sync::store_commit::membership_head_semantic_prefix(
             author_pubkey,
             &head.author_owner_grant,
+            head.stream_id,
             head.seq,
             hash,
         );
@@ -1109,6 +1123,7 @@ impl MockSyncStorage {
         self.hidden_from_listing.lock().unwrap().insert((
             coord.author_pubkey.clone(),
             coord.author_owner_grant.clone(),
+            coord.stream_id,
             coord.seq,
         ));
     }
@@ -1136,8 +1151,8 @@ impl MockSyncStorage {
             "membership slot must identify one grant stream"
         );
         let prefix = format!(
-            "store-v1/membership/entries/{author_pubkey}/{}/{seq}/",
-            matches[0].author_owner_grant
+            "store-v1/membership/entries/{author_pubkey}/{}/{}/{seq}/",
+            matches[0].author_owner_grant, matches[0].stream_id
         );
         let mut objects = self.protocol_objects.lock().unwrap();
         let before = objects.len();
@@ -1480,6 +1495,7 @@ impl SyncStorage for MockSyncStorage {
                         !hidden.contains(&(
                             parsed.author,
                             parsed.author_owner_grant,
+                            parsed.stream_id,
                             parsed.sequence,
                         ))
                     })

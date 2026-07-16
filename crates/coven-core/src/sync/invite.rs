@@ -16,10 +16,10 @@ use crate::storage::cloud::{
 
 use super::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use super::membership::{
-    AuthorHead, MemberRole, MembershipChain, MembershipChange, MembershipCoord, MembershipEntry,
-    MembershipError, OwnerGrantId,
+    AuthorHead, AuthorStreamId, MemberRole, MembershipChain, MembershipChange, MembershipCoord,
+    MembershipEntry, MembershipError, MembershipGrantId,
 };
-use super::membership_ops::{list_membership_entries, publish_membership_head};
+use super::membership_ops::{list_membership_entries, publish_membership_stream_head};
 use super::storage::{StorageError, SyncStorage};
 use super::wrapped_store_key::{WrappedKeyActivation, WrappedStoreKey};
 
@@ -171,28 +171,28 @@ impl MutationPersistence<'_> {
     }
 }
 
-/// Refuse to write over `author`'s committed prefix. The intended `seq` must sit
-/// past the head already in storage; if another device (or another of this owner's
-/// devices) advanced the head first, the committed entry at that seq must not be
-/// clobbered, so fail loud and let the caller retry on top of the head it now
-/// observes.
-///
-/// This is a read-then-write guard, not a conditional put — two devices holding the
-/// same restored keypair that read the head at the same instant can both pass and
-/// race the entry object. The design accepts that residual window (a shared keypair
-/// is one identity, not coordinated writers); the losing device's next load fails
-/// the head's tip-hash check and it republishes on the observed head.
+/// Refuse to write over the exact author stream's committed prefix. The intended
+/// `seq` must sit past the head already in storage. Author stream ids are generated
+/// and persisted per database, so independently restored devices write different
+/// streams. If local protocol state is copied and two devices do reuse one stream,
+/// immutable same-sequence objects expose the fork and readers reject it.
 async fn guard_extends_committed_head(
     storage: &dyn SyncStorage,
     store_root_hash: super::store_commit::ObjectHash,
     author: &str,
-    grant: &OwnerGrantId,
+    grant: &MembershipGrantId,
+    stream_id: AuthorStreamId,
     seq: u64,
 ) -> Result<(), InviteError> {
-    if let Some(committed) =
-        super::membership_ops::committed_head_seq(storage, store_root_hash, author, grant)
-            .await
-            .map_err(InviteError::Crypto)?
+    if let Some(committed) = super::membership_ops::committed_head_seq(
+        storage,
+        store_root_hash,
+        author,
+        grant,
+        stream_id,
+    )
+    .await
+    .map_err(InviteError::Crypto)?
     {
         if committed >= seq {
             return Err(InviteError::StaleMembershipHead {
@@ -518,6 +518,7 @@ fn validate_planned_head(entry: &MembershipEntry, head: &AuthorHead) -> Result<(
         || head.store_id != entry.store_id
         || head.author_pubkey != coord.author_pubkey
         || head.author_owner_grant != coord.author_owner_grant
+        || head.stream_id != coord.stream_id
         || head.seq != coord.seq
         || head.tip_hash != coord.entry_hash
     {
@@ -531,6 +532,7 @@ fn validate_planned_head(entry: &MembershipEntry, head: &AuthorHead) -> Result<(
 fn build_invite_mutation(
     chain: &MembershipChain,
     owner_keypair: &UserKeypair,
+    stream_id: AuthorStreamId,
     invitee_ed25519_pubkey: &str,
     invitee_email: Option<&str>,
     role: MemberRole,
@@ -545,8 +547,9 @@ fn build_invite_mutation(
         )));
     }
     let invitee_x25519_pk = ed25519_hex_to_x25519(invitee_ed25519_pubkey)?;
-    let entry = chain.signed_set_member(
+    let entry = chain.signed_set_member_in_stream(
         owner_keypair,
+        stream_id,
         invitee_ed25519_pubkey.to_string(),
         invitee_email.map(str::to_string),
         role.clone(),
@@ -555,11 +558,13 @@ fn build_invite_mutation(
     let entry_coord = entry.coord();
     let mut validated = chain.clone();
     validated.add_entry_at(entry_coord.clone(), entry.clone())?;
-    let head = validated.signed_head(owner_keypair).ok_or_else(|| {
-        InviteError::InvalidDurableMutation(
-            "invitation leaves its author without a membership head".to_string(),
-        )
-    })?;
+    let head = validated
+        .signed_head_for_stream(owner_keypair, stream_id)
+        .ok_or_else(|| {
+            InviteError::InvalidDurableMutation(
+                "invitation leaves its author without a membership head".to_string(),
+            )
+        })?;
     validate_planned_head(&entry, &head)?;
     let wrapped_key = signed_wrapped_key_with_activation(
         store_id,
@@ -730,9 +735,21 @@ pub(crate) async fn create_invitation_with_encryption_durable(
             (plan, progress, intent_hash)
         }
         None => {
+            let author = hex::encode(owner_keypair.public_key());
+            let grant = chain
+                .active_owner_grant(&author)
+                .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
+            let stream_id = db
+                .select_membership_author_stream(
+                    &author,
+                    &grant,
+                    chain.reusable_author_streams(&author, &grant),
+                )
+                .await?;
             let plan = build_invite_mutation(
                 chain,
                 owner_keypair,
+                stream_id,
                 invitee_ed25519_pubkey,
                 invitee_email,
                 role,
@@ -792,8 +809,15 @@ pub async fn create_invitation_with_encryption(
 
     // Create and sign a membership entry.
     let author_pubkey_hex = hex::encode(owner_keypair.public_key());
-    let entry = chain.signed_set_member(
+    let author_grant = chain
+        .active_owner_grant(&author_pubkey_hex)
+        .ok_or_else(|| MembershipError::SignerIsNotOwner(author_pubkey_hex.clone()))?;
+    let stream_id = chain
+        .preferred_author_stream(&author_pubkey_hex, &author_grant)
+        .ok_or(MembershipError::PrunedAuthorStream)?;
+    let entry = chain.signed_set_member_in_stream(
         owner_keypair,
+        stream_id,
         invitee_ed25519_pubkey.to_string(),
         invitee_email.map(str::to_string),
         role,
@@ -896,6 +920,7 @@ pub async fn create_invitation_with_encryption(
         store_root_hash,
         &author_pubkey_hex,
         &entry_coord.author_owner_grant,
+        entry_coord.stream_id,
         entry_coord.seq,
     )
     .await
@@ -942,9 +967,15 @@ pub async fn create_invitation_with_encryption(
         }
         return Err(original);
     }
-    publish_membership_head(storage, store_root_hash, &validated_chain, owner_keypair)
-        .await
-        .map_err(|e| InviteError::Crypto(format!("publish membership head: {e}")))?;
+    publish_membership_stream_head(
+        storage,
+        store_root_hash,
+        &validated_chain,
+        owner_keypair,
+        stream_id,
+    )
+    .await
+    .map_err(|e| InviteError::Crypto(format!("publish membership head: {e}")))?;
 
     *chain = validated_chain;
 
@@ -1301,6 +1332,7 @@ async fn build_revoke_mutation(
     cloud_home: &dyn CloudHome,
     chain: &MembershipChain,
     owner_keypair: &UserKeypair,
+    stream_id: AuthorStreamId,
     revokee_pubkey: &str,
     store_id: &str,
     timestamp: &str,
@@ -1324,19 +1356,22 @@ async fn build_revoke_mutation(
     if current_owners.is_empty() {
         return Err(InviteError::LastOwner);
     }
-    let entry = chain.signed_remove_member(
+    let entry = chain.signed_remove_member_in_stream(
         owner_keypair,
+        stream_id,
         revokee_pubkey.to_string(),
         timestamp.to_string(),
     )?;
     let remove_coord = entry.coord();
     let mut validated = chain.clone();
     validated.add_entry_at(remove_coord.clone(), entry.clone())?;
-    let head = validated.signed_head(owner_keypair).ok_or_else(|| {
-        InviteError::InvalidDurableMutation(
-            "removal leaves its author without a membership head".to_string(),
-        )
-    })?;
+    let head = validated
+        .signed_head_for_stream(owner_keypair, stream_id)
+        .ok_or_else(|| {
+            InviteError::InvalidDurableMutation(
+                "removal leaves its author without a membership head".to_string(),
+            )
+        })?;
     validate_planned_head(&entry, &head)?;
     let author = hex::encode(owner_keypair.public_key());
     let visible_coords = visible_membership_activations(chain, Some(remove_coord.clone()));
@@ -1576,10 +1611,22 @@ pub(crate) async fn revoke_member_durable(
                 )
                 .await;
             }
+            let author = hex::encode(owner_keypair.public_key());
+            let grant = chain
+                .active_owner_grant(&author)
+                .ok_or_else(|| MembershipError::SignerIsNotOwner(author.clone()))?;
+            let stream_id = db
+                .select_membership_author_stream(
+                    &author,
+                    &grant,
+                    chain.reusable_author_streams(&author, &grant),
+                )
+                .await?;
             let plan = build_revoke_mutation(
                 cloud_home,
                 chain,
                 owner_keypair,
+                stream_id,
                 revokee_pubkey,
                 store_id,
                 timestamp,
@@ -1675,8 +1722,15 @@ pub async fn revoke_member(
         return Ok(keyring);
     }
 
-    let entry = chain.signed_remove_member(
+    let author_grant = chain
+        .active_owner_grant(&author_pubkey_hex)
+        .ok_or_else(|| MembershipError::SignerIsNotOwner(author_pubkey_hex.clone()))?;
+    let stream_id = chain
+        .preferred_author_stream(&author_pubkey_hex, &author_grant)
+        .ok_or(MembershipError::PrunedAuthorStream)?;
+    let entry = chain.signed_remove_member_in_stream(
         owner_keypair,
+        stream_id,
         revokee_pubkey.to_string(),
         timestamp.to_string(),
     )?;
@@ -1793,6 +1847,7 @@ pub async fn revoke_member(
         store_root_hash,
         &author_pubkey_hex,
         &remove_coord.author_owner_grant,
+        remove_coord.stream_id,
         remove_coord.seq,
     )
     .await
@@ -1882,8 +1937,14 @@ pub async fn revoke_member(
             return Err(original);
         }
     };
-    if let Err(error) =
-        publish_membership_head(storage, store_root_hash, &validated_chain, owner_keypair).await
+    if let Err(error) = publish_membership_stream_head(
+        storage,
+        store_root_hash,
+        &validated_chain,
+        owner_keypair,
+        stream_id,
+    )
+    .await
     {
         let original = format!("publish membership head: {error}");
         rollback_revocation(
@@ -3412,6 +3473,14 @@ mod tests {
             author_owner_grant: chain
                 .active_owner_grant(&owner_pk)
                 .expect("founder Owner grant"),
+            stream_id: chain
+                .preferred_author_stream(
+                    &owner_pk,
+                    &chain
+                        .active_owner_grant(&owner_pk)
+                        .expect("founder Owner grant"),
+                )
+                .expect("founder author stream"),
             seq: 3,
             entry_hash: crate::sync::store_commit::ObjectHash::digest(b"uncommitted removal"),
         };
@@ -3605,6 +3674,14 @@ mod tests {
             author_owner_grant: chain
                 .active_owner_grant(&owner_pk)
                 .expect("founder Owner grant"),
+            stream_id: chain
+                .preferred_author_stream(
+                    &owner_pk,
+                    &chain
+                        .active_owner_grant(&owner_pk)
+                        .expect("founder Owner grant"),
+                )
+                .expect("founder author stream"),
             seq: 99,
             entry_hash: crate::sync::store_commit::ObjectHash::digest(b"missing removal"),
         };
@@ -3660,7 +3737,7 @@ mod tests {
         let founder_storage = opaque_storage(home.clone(), key, &founder);
         let (store_protocol_root, mut chain) = publish_test_protocol_roots(
             &founder_storage,
-            "test-store",
+            LIB_ID,
             &founder,
             "0000000001000-0000-dev1",
         )
@@ -3685,7 +3762,8 @@ mod tests {
 
         // B, signing under its own identity, invites C.
         let second_owner_storage = opaque_storage(home.clone(), key, &second_owner);
-        super::create_invitation(
+        let second_owner_db = crate::sync::test_helpers::open_test_db();
+        super::create_invitation_with_encryption_durable(
             &second_owner_storage,
             &MockCloudHome,
             store_protocol_root.object_hash(),
@@ -3694,9 +3772,10 @@ mod tests {
             &pubkey_hex(&joiner),
             None,
             MemberRole::Member,
-            &key,
+            &EncryptionService::from_key(key),
             LIB_ID,
             "0000000003000-0000-dev1",
+            &second_owner_db,
         )
         .await
         .unwrap();
@@ -3733,7 +3812,7 @@ mod tests {
         let founder_storage = opaque_storage(home.clone(), key, &founder);
         let (store_protocol_root, mut chain) = publish_test_protocol_roots(
             &founder_storage,
-            "test-store",
+            LIB_ID,
             &founder,
             "0000000001000-0000-dev1",
         )
@@ -3756,7 +3835,8 @@ mod tests {
         .await
         .unwrap();
         let second_owner_storage = opaque_storage(home.clone(), key, &second_owner);
-        super::create_invitation(
+        let second_owner_db = crate::sync::test_helpers::open_test_db();
+        super::create_invitation_with_encryption_durable(
             &second_owner_storage,
             &MockCloudHome,
             store_protocol_root.object_hash(),
@@ -3765,9 +3845,10 @@ mod tests {
             &pubkey_hex(&joiner),
             None,
             MemberRole::Member,
-            &key,
+            &EncryptionService::from_key(key),
             LIB_ID,
             "0000000003000-0000-dev1",
+            &second_owner_db,
         )
         .await
         .unwrap();
@@ -3794,11 +3875,12 @@ mod tests {
         )
         .await
         .unwrap();
-        publish_membership_head(
+        crate::sync::membership_ops::publish_membership_stream_head(
             &founder_storage,
             store_protocol_root.object_hash(),
             &chain,
             &founder,
+            remove_b.stream_id,
         )
         .await
         .unwrap();

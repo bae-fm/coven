@@ -21,8 +21,8 @@ use crate::sync::cloud_storage::{CloudCipher, PendingRotation, PENDING_ROTATION_
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::invite::{
-    revoke_member, signed_wrapped_key_for_test, signed_wrapped_keyring_for_test,
-    unwrap_store_keyring_for_owners_with_activation,
+    revoke_member, revoke_member_durable, signed_wrapped_key_for_test,
+    signed_wrapped_keyring_for_test, unwrap_store_keyring_for_owners_with_activation,
 };
 use crate::sync::membership::{MemberRole, MembershipChain, MembershipCoord};
 use crate::sync::membership_ops::{
@@ -333,6 +333,14 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         author_owner_grant: chain
             .active_owner_grant(&owner_pk)
             .expect("founder Owner grant"),
+        stream_id: chain
+            .preferred_author_stream(
+                &owner_pk,
+                &chain
+                    .active_owner_grant(&owner_pk)
+                    .expect("founder Owner grant"),
+            )
+            .expect("founder author stream"),
         seq: 4,
         entry_hash: crate::sync::store_commit::ObjectHash::digest(b"pending removal"),
     };
@@ -614,7 +622,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let founder_pk = pubkey_hex(&founder);
     let old_key: [u8; 32] = [15u8; 32];
 
-    let storage = MockSyncStorage::with_keypair(founder.clone());
+    let storage = MockSyncStorage::with_store_and_keypair(LIB_ID, founder.clone());
     let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
     {
         let entry = chain
@@ -663,7 +671,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
     let (_tmp_b, ld_b) = temp_store_dir();
 
-    let new_key = revoke_member(
+    let new_key = revoke_member_durable(
         &storage,
         &storage,
         storage.store_root_hash(),
@@ -673,6 +681,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         LIB_ID,
         "0000000005000-0000-B",
         &EncryptionService::from_key(old_key),
+        &db_b,
     )
     .await
     .expect("second owner can revoke");

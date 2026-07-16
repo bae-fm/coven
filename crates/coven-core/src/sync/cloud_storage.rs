@@ -2071,6 +2071,7 @@ mod tests {
                 store_root_hash,
                 &owner_pubkey,
                 &first_coord.author_owner_grant,
+                first_coord.stream_id,
                 1,
             )
             .await
@@ -2103,6 +2104,7 @@ mod tests {
         let semantic_prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
             &owner_pubkey,
             &second_coord.author_owner_grant,
+            second_coord.stream_id,
             2,
             second_coord.entry_hash,
         );

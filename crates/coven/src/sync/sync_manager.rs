@@ -64,7 +64,7 @@ pub enum SyncError {
     #[error("{0}")]
     Setup(#[from] SetupError),
     #[error("membership error: {0}")]
-    Membership(crate::sync::membership_ops::MembershipOpsError),
+    Membership(Box<crate::sync::membership_ops::MembershipOpsError>),
     #[error("circle operation: {0}")]
     Circle(#[from] crate::sync::circle_ops::CircleOperationError),
     #[error("{0}")]
@@ -73,6 +73,12 @@ pub enum SyncError {
     BlobUpload(DbError),
     #[error("sync loop error: {0}")]
     Loop(SyncLoopError),
+}
+
+impl From<crate::sync::membership_ops::MembershipOpsError> for SyncError {
+    fn from(error: crate::sync::membership_ops::MembershipOpsError) -> Self {
+        Self::Membership(Box::new(error))
+    }
 }
 
 /// High-level sync manager.
@@ -692,7 +698,7 @@ impl SyncManager {
             &self.db,
         )
         .await
-        .map_err(SyncError::Membership)
+        .map_err(SyncError::from)
     }
 
     /// Build a restore code for this store: fetch the current membership-head
@@ -720,8 +726,8 @@ impl SyncManager {
             .db
             .get_protocol_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
             .await?;
-        let founder_pubkey = pinned_owner.clone().ok_or({
-            SyncError::Membership(crate::sync::membership_ops::MembershipOpsError::NoFounderChain)
+        let founder_pubkey = pinned_owner.clone().ok_or_else(|| {
+            SyncError::from(crate::sync::membership_ops::MembershipOpsError::NoFounderChain)
         })?;
         let store_root_hash = self
             .db
@@ -740,7 +746,7 @@ impl SyncManager {
                         Some(&self.db),
                     )
                     .await
-                    .map_err(SyncError::Membership)?,
+                    .map_err(SyncError::from)?,
                 )
             }
             crate::WritePolicy::Serial => {
@@ -794,7 +800,7 @@ impl SyncManager {
         let invite_code = sync_loop
             .invite_member(public_key_hex, invitee_email, role, &store_name)
             .await
-            .map_err(SyncError::Membership)?;
+            .map_err(SyncError::from)?;
 
         Ok(crate::join_code::encode(&invite_code))
     }
@@ -835,7 +841,7 @@ impl SyncManager {
         // this deletes the durable record.
         sync_loop.persist_pending_rotation().await?;
 
-        let fingerprint = outcome.map_err(SyncError::Membership)?;
+        let fingerprint = outcome.map_err(SyncError::from)?;
         Ok(fingerprint)
     }
 
