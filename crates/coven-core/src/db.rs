@@ -343,6 +343,164 @@ macro_rules! coven_routing_tables {
     };
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CovenSchemaManifest {
+    objects: Vec<CovenSchemaObject>,
+    tables: Vec<CovenTableShape>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CovenSchemaObject {
+    kind: String,
+    name: String,
+    table_name: String,
+    sql: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CovenTableShape {
+    name: String,
+    columns: i64,
+    without_rowid: bool,
+    strict: bool,
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut normalized = String::with_capacity(sql.len());
+    let mut index = 0;
+    let mut pending_separator = false;
+    let mut quote = None;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(delimiter) = quote {
+            normalized.push(char::from(byte));
+            if byte == delimiter {
+                if bytes.get(index + 1) == Some(&delimiter) {
+                    normalized.push(char::from(delimiter));
+                    index += 1;
+                } else {
+                    quote = None;
+                }
+            }
+            index += 1;
+            continue;
+        }
+
+        if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
+            index += 2;
+            while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                index += 1;
+            }
+            pending_separator = true;
+            continue;
+        }
+        if byte.is_ascii_whitespace() {
+            pending_separator = true;
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            if pending_separator
+                && normalized
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+            {
+                normalized.push(' ');
+            }
+            pending_separator = false;
+            quote = Some(byte);
+            normalized.push(char::from(byte));
+            index += 1;
+            continue;
+        }
+        if pending_separator
+            && byte.is_ascii_alphanumeric()
+            && normalized
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+        {
+            normalized.push(' ');
+        }
+        pending_separator = false;
+        normalized.push(char::from(byte.to_ascii_lowercase()));
+        index += 1;
+    }
+
+    normalized
+}
+
+fn all_coven_table_names() -> std::collections::BTreeSet<&'static str> {
+    let mut names = std::collections::BTreeSet::new();
+    macro_rules! collect_name {
+        ($name:ident, $columns:literal) => {
+            names.insert(stringify!($name));
+        };
+    }
+
+    coven_tables!(collect_name);
+    coven_routing_tables!(collect_name);
+    names
+}
+
+pub(crate) fn live_coven_schema_manifest(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<CovenSchemaManifest> {
+    let names = all_coven_table_names();
+    let mut objects = conn
+        .prepare(
+            "SELECT type, name, tbl_name, sql
+             FROM main.sqlite_schema
+             WHERE type IN ('table', 'index')
+             ORDER BY type, name",
+        )?
+        .query_map([], |row| {
+            Ok(CovenSchemaObject {
+                kind: row.get(0)?,
+                name: row.get(1)?,
+                table_name: row.get(2)?,
+                sql: row
+                    .get::<_, Option<String>>(3)?
+                    .map(|sql| normalize_schema_sql(&sql)),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    objects.retain(|object| names.contains(object.table_name.as_str()));
+
+    let mut tables = conn
+        .prepare("PRAGMA main.table_list")?
+        .query_map([], |row| {
+            Ok(CovenTableShape {
+                name: row.get(1)?,
+                columns: row.get(3)?,
+                without_rowid: row.get::<_, i64>(4)? != 0,
+                strict: row.get::<_, i64>(5)? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    tables.retain(|table| names.contains(table.name.as_str()));
+    tables.sort_by(|left, right| left.name.cmp(&right.name));
+
+    Ok(CovenSchemaManifest { objects, tables })
+}
+
+pub(crate) fn expected_coven_schema_manifest(
+    include_routing: bool,
+) -> rusqlite::Result<CovenSchemaManifest> {
+    let conn = rusqlite::Connection::open_in_memory()?;
+    apply_coven_schema(&conn)?;
+    if include_routing {
+        apply_coven_routing_schema(&conn)?;
+    }
+    live_coven_schema_manifest(&conn)
+}
+
 /// Creates Coven's bookkeeping tables after the fresh host schema has passed
 /// sync-routing validation, inside the same open transaction. Idempotent (`IF
 /// NOT EXISTS`). STRICT: every column here is already TEXT/INTEGER/BLOB, so
@@ -418,6 +576,25 @@ pub(crate) fn table_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_sql_normalization_ignores_formatting_but_keeps_constraints() {
+        let formatted = normalize_schema_sql(
+            "CREATE TABLE t (
+                id INTEGER PRIMARY KEY, -- explanatory text
+                value TEXT CHECK (length(value) = 64)
+             ) STRICT",
+        );
+        let compact = normalize_schema_sql(
+            "create table t(id integer primary key,value text check(length(value)=64)) strict",
+        );
+        let changed = normalize_schema_sql(
+            "create table t(id integer primary key,value text check(length(value)=32)) strict",
+        );
+
+        assert_eq!(formatted, compact);
+        assert_ne!(formatted, changed);
+    }
 
     /// Every bookkeeping table [`apply_coven_schema`] creates is declared STRICT
     /// — the same guarantee the synced-table contract now requires of the host's
