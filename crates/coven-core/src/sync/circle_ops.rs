@@ -12,7 +12,8 @@ use super::circle::{
 };
 use super::membership::SerialAuthorizationState;
 use super::storage::{
-    PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage, VersionToken,
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
+    VersionToken,
 };
 use super::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
@@ -74,6 +75,55 @@ impl CircleOperationJournal {
         serde_json::from_slice(&self.commit_bytes)
             .map_err(|error| CircleOperationError::Journal(format!("parse Store commit: {error}")))
     }
+}
+
+fn verify_prepared_objects_are_signed(
+    journal: &CircleOperationJournal,
+    reference: &super::store_commit::CircleControlRef,
+) -> Result<(), CircleOperationError> {
+    let objects = reference.objects();
+    let mut signed = BTreeSet::<ExactObjectRef>::from([
+        journal.commit_ref.object.clone(),
+        objects.control.clone(),
+    ]);
+    signed.extend(objects.control_head.iter().map(|head| head.object.clone()));
+    signed.extend(objects.roster_entries.values().cloned());
+    signed.extend(
+        objects
+            .roster_heads
+            .values()
+            .map(|head| head.object.clone()),
+    );
+    signed.extend(objects.roster_resolutions.values().cloned());
+    signed.extend(
+        objects
+            .metadata_entries
+            .values()
+            .map(|metadata| metadata.object.clone()),
+    );
+    signed.extend(
+        objects
+            .metadata_heads
+            .values()
+            .map(|head| head.object.clone()),
+    );
+    for access in &objects.access {
+        signed.insert(access.leaf.object.clone());
+        signed.insert(access.envelope.object.clone());
+    }
+    for (step, prepared) in &journal.prepared_objects {
+        let is_merge_head = step == "store-head"
+            && matches!(
+                journal.policy,
+                CircleOperationPolicy::MergeConcurrent { .. }
+            );
+        if !is_merge_head && !signed.contains(prepared.reference()) {
+            return Err(CircleOperationError::Journal(format!(
+                "Circle upload step {step:?} names an object outside its signed Store commit graph"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn signed_circle_commit(
@@ -874,6 +924,7 @@ async fn publish_circle_operation(
         &commit,
         &author,
     )?;
+    verify_prepared_objects_are_signed(&journal, reference)?;
     if creation.access.iter().any(|access| {
         !access.leaf.verify_envelope(
             &creation.control,
@@ -893,6 +944,42 @@ async fn publish_circle_operation(
             .to_string();
         db.block_circle_operation(circle_id, reason.clone()).await?;
         return Err(CircleOperationError::Blocked { circle_id, reason });
+    }
+    if let CircleOperationPolicy::MergeConcurrent { head } = &journal.policy {
+        let root = db
+            .local_store_root_ref()
+            .await?
+            .ok_or(CircleOperationError::MissingState("Store root reference"))?;
+        let (expected_slot, predecessor_head) =
+            super::store_outbound::exact_next_announcement_slot(
+                storage,
+                &root,
+                &commit.author_registration,
+                &author,
+                commit.order.predecessor(),
+            )
+            .await?;
+        let prepared_head = journal.prepared_objects.get("store-head").ok_or_else(|| {
+            CircleOperationError::Journal(
+                "Merge Circle operation lacks its prepared Store head".to_string(),
+            )
+        })?;
+        StoreDeviceHead::parse_at(
+            &head.to_bytes(),
+            store_root_hash,
+            &author,
+            &journal.commit_ref,
+        )
+        .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+        if prepared_head.reference().slot() != &expected_slot
+            || head.successor.activation
+                != StreamActivationId::store_announcements(&root, &commit.author_registration)
+            || head.successor.predecessor != predecessor_head.map(|reference| reference.object)
+        {
+            return Err(CircleOperationError::Journal(
+                "Merge Circle Store head differs from its reserved successor slot".to_string(),
+            ));
+        }
     }
 
     let metadata_encryption = circle_encryption
@@ -1793,6 +1880,80 @@ mod tests {
         assert!(error
             .to_string()
             .contains("sealed leaf differs from its journaled value"));
+        assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+    }
+
+    #[tokio::test]
+    async fn local_publication_rejects_a_prepared_object_outside_the_signed_graph() {
+        let db = open_test_db();
+        let (store, signer, mut journal) =
+            persist_merge_operation(&db, "circle-substituted-local-object-ref").await;
+        let original = journal
+            .prepared_objects
+            .get("metadata")
+            .expect("operation carries exact metadata object");
+        let substituted_slot = crate::storage::cloud::ObjectSlot::opaque(
+            original.reference().slot().logical_key().to_string(),
+            "substituted-metadata-object".to_string(),
+        )
+        .expect("construct alternate provider object slot");
+        let substituted = PreparedExactObject::new(
+            super::super::storage::ExactObjectRef::new(
+                substituted_slot,
+                original.reference().stored_size(),
+                original.reference().stored_hash(),
+            ),
+            original.stored_bytes().to_vec(),
+        )
+        .expect("construct substituted prepared metadata object");
+        journal
+            .prepared_objects
+            .insert("metadata".to_string(), substituted);
+        db.update_circle_operation(journal.clone())
+            .await
+            .expect("persist substituted journal object");
+
+        resume_circle_operations(&db, &store.storage, None, &signer)
+            .await
+            .expect_err("local publication must reject objects outside the signed graph");
+
+        assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+    }
+
+    #[tokio::test]
+    async fn local_publication_rejects_a_store_head_outside_its_reserved_slot() {
+        let db = open_test_db();
+        let (store, signer, mut journal) =
+            persist_merge_operation(&db, "circle-substituted-local-head-slot").await;
+        let original = journal
+            .prepared_objects
+            .get("store-head")
+            .expect("Merge operation carries an exact Store head");
+        let substituted_slot = crate::storage::cloud::ObjectSlot::opaque(
+            original.reference().slot().logical_key().to_string(),
+            "substituted-store-head".to_string(),
+        )
+        .expect("construct alternate Store head slot");
+        let substituted = PreparedExactObject::new(
+            super::super::storage::ExactObjectRef::new(
+                substituted_slot,
+                original.reference().stored_size(),
+                original.reference().stored_hash(),
+            ),
+            original.stored_bytes().to_vec(),
+        )
+        .expect("construct substituted prepared Store head");
+        journal
+            .prepared_objects
+            .insert("store-head".to_string(), substituted);
+        db.update_circle_operation(journal.clone())
+            .await
+            .expect("persist substituted Store head slot");
+
+        resume_circle_operations(&db, &store.storage, None, &signer)
+            .await
+            .expect_err("local publication must reject an unreserved Store head slot");
+
         assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
     }
 

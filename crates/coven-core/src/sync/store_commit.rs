@@ -1639,20 +1639,6 @@ impl StoreBatchCommit {
             })
             .collect::<Result<Vec<_>, StoreProtocolError>>()?;
         validate_circle_control_refs(order.policy(), &circle_controls)?;
-        if control.is_none()
-            && device_join_attempts.is_empty()
-            && device_join_outcomes.is_empty()
-            && device_join_abandonments.is_empty()
-            && device_join_cleanup_receipts.is_empty()
-            && provider_access_grants.is_empty()
-            && provider_access_withdrawals.is_empty()
-            && device_registrations.is_empty()
-            && circle_controls.is_empty()
-            && store_package.is_none()
-            && circle_packages.is_empty()
-        {
-            return Err(StoreProtocolError::EmptyBatch);
-        }
         let operations = StoreCommitOperations {
             control,
             device_join_attempts,
@@ -1666,6 +1652,9 @@ impl StoreBatchCommit {
             store_package,
             circle_packages,
         };
+        if operations.is_empty() {
+            return Err(StoreProtocolError::EmptyBatch);
+        }
         Self::finish_signed_body(
             store_root_hash,
             write_id,
