@@ -209,7 +209,7 @@ fn parse_candidate_store_package(
         || package.candidate_family() != candidate.commit.candidate_family()
         || candidate
             .commit
-            .store_package
+            .store_package()
             .as_ref()
             .is_none_or(|reference| package.schema_version() != reference.schema_version)
     {
@@ -434,8 +434,8 @@ async fn load_commit_registrations(
         predecessor,
     ))
     .await?;
-    let mut registrations = Vec::with_capacity(commit.device_registrations.len());
-    for activated in &commit.device_registrations {
+    let mut registrations = Vec::with_capacity(commit.device_registrations().len());
+    for activated in commit.device_registrations() {
         let registration = load_registration_ref(storage, root, &activated.registration)
             .await
             .map_err(RegistrationLoadError::Object)?
@@ -452,13 +452,13 @@ async fn load_commit_registrations(
             &registration,
             activating_author,
             &commit.order,
-            commit.serial_recovery_activation.as_ref(),
+            commit.serial_recovery_activation(),
             predecessor,
         )
         .await?;
         registrations.push((registration, authority));
     }
-    for retirement in &commit.device_retirements {
+    for retirement in commit.device_retirements() {
         if retirement.target != commit.author_registration {
             return Err(RegistrationLoadError::Invalid(
                 "self-retirement targets a different exact registration".to_string(),
@@ -473,7 +473,9 @@ async fn load_commit_registrations(
                 &context,
                 &retirement.object,
                 &super::store_commit::device_self_retirement_semantic_prefix(
+                    commit.candidate_family(),
                     &retirement.target.device_id,
+                    retirement.retirement_hash,
                 ),
             )
             .await
@@ -495,7 +497,7 @@ async fn validate_commit_join_abandonments(
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
 ) -> Result<(), RegistrationLoadError> {
-    if commit.device_join_abandonments.is_empty() {
+    if commit.device_join_abandonments().is_empty() {
         return Ok(());
     }
     let predecessor = predecessor.ok_or_else(|| {
@@ -508,9 +510,9 @@ async fn validate_commit_join_abandonments(
             "device join abandonment activation author is not an active Owner".to_string(),
         ));
     }
-    for reference in &commit.device_join_abandonments {
+    for reference in commit.device_join_abandonments() {
         if commit
-            .device_join_attempts
+            .device_join_attempts()
             .iter()
             .any(|attempt| attempt.attempt_id == reference.attempt_id)
         {
@@ -555,7 +557,7 @@ async fn validate_commit_join_cleanup_receipts(
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
 ) -> Result<(), RegistrationLoadError> {
-    if commit.device_join_cleanup_receipts.is_empty() {
+    if commit.device_join_cleanup_receipts().is_empty() {
         return Ok(());
     }
     let predecessor = predecessor.ok_or_else(|| {
@@ -568,7 +570,7 @@ async fn validate_commit_join_cleanup_receipts(
             "device join cleanup activation author is not an active Owner".to_string(),
         ));
     }
-    for reference in &commit.device_join_cleanup_receipts {
+    for reference in commit.device_join_cleanup_receipts() {
         let context = ProtocolObjectContext::store(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinCleanupReceipt,
@@ -690,7 +692,7 @@ async fn validate_commit_join_outcomes(
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
 ) -> Result<(), RegistrationLoadError> {
-    if commit.device_join_outcomes.is_empty() {
+    if commit.device_join_outcomes().is_empty() {
         return Ok(());
     }
     let predecessor = predecessor.ok_or_else(|| {
@@ -704,7 +706,7 @@ async fn validate_commit_join_outcomes(
                 .to_string(),
         ));
     }
-    for outcome_ref in &commit.device_join_outcomes {
+    for outcome_ref in commit.device_join_outcomes() {
         if !predecessor_contains_join_attempt(storage, root, &commit.order, outcome_ref.attempt())
             .await?
         {
@@ -754,7 +756,7 @@ async fn validate_commit_join_outcomes(
                 "device join outcome signer differs from its attempt".to_string(),
             ));
         }
-        let activation = commit.device_registrations.iter().find(|activation| {
+        let activation = commit.device_registrations().iter().find(|activation| {
             matches!(
                 &activation.authority,
                 StoreDeviceRegistrationActivationRef::Join { outcome, .. }
@@ -778,7 +780,7 @@ async fn validate_commit_join_attempts(
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
 ) -> Result<(), RegistrationLoadError> {
-    if commit.device_join_attempts.is_empty() {
+    if commit.device_join_attempts().is_empty() {
         return Ok(());
     }
     let predecessor = predecessor.ok_or_else(|| {
@@ -797,7 +799,7 @@ async fn validate_commit_join_attempts(
         .order
         .predecessor_cut()
         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-    for reference in &commit.device_join_attempts {
+    for reference in commit.device_join_attempts() {
         let attempt = Box::pin(load_device_join_attempt_ref(
             storage,
             root,
@@ -1047,7 +1049,11 @@ async fn predecessor_contains_join_attempt(
         let (commit, _) = load_commit_with_author(storage, root, &reference)
             .await
             .map_err(RegistrationLoadError::Object)?;
-        if commit.device_join_attempts.binary_search(expected).is_ok() {
+        if commit
+            .device_join_attempts()
+            .binary_search(expected)
+            .is_ok()
+        {
             return Ok(true);
         }
         match commit.order {
@@ -1105,7 +1111,11 @@ async fn predecessor_contains_join_outcome(
         let (commit, _) = load_commit_with_author(storage, root, &reference)
             .await
             .map_err(RegistrationLoadError::Object)?;
-        if commit.device_join_outcomes.binary_search(expected).is_ok() {
+        if commit
+            .device_join_outcomes()
+            .binary_search(expected)
+            .is_ok()
+        {
             return Ok(true);
         }
         match commit.order {
@@ -1313,12 +1323,12 @@ pub async fn pull_store_commits_with_identity(
                 continue;
             }
             if commit
-                .store_package
+                .store_package()
                 .as_ref()
                 .is_some_and(|package| package.schema_version > db.schema_version())
             {
                 let required = commit
-                    .store_package
+                    .store_package()
                     .as_ref()
                     .expect("checked Store package")
                     .schema_version;
@@ -1331,11 +1341,11 @@ pub async fn pull_store_commits_with_identity(
                 ));
                 continue;
             }
-            let predecessor_membership = if commit.device_join_attempts.is_empty()
-                && commit.device_join_outcomes.is_empty()
-                && commit.device_join_abandonments.is_empty()
-                && commit.device_join_cleanup_receipts.is_empty()
-                && commit.device_registrations.is_empty()
+            let predecessor_membership = if commit.device_join_attempts().is_empty()
+                && commit.device_join_outcomes().is_empty()
+                && commit.device_join_abandonments().is_empty()
+                && commit.device_join_cleanup_receipts().is_empty()
+                && commit.device_registrations().is_empty()
             {
                 None
             } else {
@@ -1839,12 +1849,13 @@ pub(crate) async fn load_commit_with_author(
     root: &StoreRootRef,
     reference: &StoreBatchCommitRef,
 ) -> Result<(StoreBatchCommit, StoreDeviceRegistration), StoreObjectError> {
-    let stream_id = commit_stream_id(&reference.coord);
-    let semantic_prefix = super::store_commit::commit_semantic_prefix(
-        &stream_id,
-        reference.coord.sequence(),
-        reference.commit_hash,
-    );
+    let semantic_prefix =
+        super::store_commit::semantic_prefix_from_exact_object(&reference.object, ".json")
+            .map_err(|source| StoreObjectError::InvalidObject {
+                semantic_prefix: "Store candidate commit".to_string(),
+                key: reference.object.slot().logical_key().to_string(),
+                source: Box::new(source),
+            })?;
     let context =
         ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreCommit);
     let bytes = storage
@@ -2077,11 +2088,11 @@ pub(crate) async fn prepare_device_join_bootstrap(
                     .to_string(),
             ));
         }
-        let carries_lifecycle = !(commit.device_join_attempts.is_empty()
-            && commit.device_join_outcomes.is_empty()
-            && commit.device_join_abandonments.is_empty()
-            && commit.device_join_cleanup_receipts.is_empty()
-            && commit.device_registrations.is_empty());
+        let carries_lifecycle = !(commit.device_join_attempts().is_empty()
+            && commit.device_join_outcomes().is_empty()
+            && commit.device_join_abandonments().is_empty()
+            && commit.device_join_cleanup_receipts().is_empty()
+            && commit.device_registrations().is_empty());
         let verified_state = match verified_authorization {
             DeviceJoinBootstrapAuthorization::MergeConcurrent { state, .. }
             | DeviceJoinBootstrapAuthorization::Serial { state, .. } => state,
@@ -2118,12 +2129,12 @@ pub(crate) async fn prepare_device_join_bootstrap(
             RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
         })?;
         let mut state = predecessor_state;
-        for activation in &commit.device_registrations {
+        for activation in commit.device_registrations() {
             state = state
                 .activate_registration(activation.registration.clone(), None)
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
         }
-        for retirement in &commit.device_retirements {
+        for retirement in commit.device_retirements() {
             state = state
                 .self_retire(retirement.clone())
                 .map_err(|error| StorePullError::Database(error.to_string()))?;
@@ -2170,19 +2181,19 @@ pub(crate) async fn materialize_device_join_activation(
         )));
     }
     let (commit, author) = Box::pin(load_commit_with_author(storage, root, reference)).await?;
-    if commit.device_join_outcomes.as_slice() != std::slice::from_ref(expected_outcome)
-        || !commit.device_join_attempts.is_empty()
-        || !commit.device_join_abandonments.is_empty()
-        || !commit.device_join_cleanup_receipts.is_empty()
-        || commit.device_registrations.len() != 1
-        || !commit.provider_access_grants.is_empty()
-        || !commit.provider_access_withdrawals.is_empty()
-        || !commit.device_retirements.is_empty()
-        || !commit.circle_controls.is_empty()
-        || !commit.circle_packages.is_empty()
-        || commit.store_package.is_some()
+    if commit.device_join_outcomes() != std::slice::from_ref(expected_outcome)
+        || !commit.device_join_attempts().is_empty()
+        || !commit.device_join_abandonments().is_empty()
+        || !commit.device_join_cleanup_receipts().is_empty()
+        || commit.device_registrations().len() != 1
+        || !commit.provider_access_grants().is_empty()
+        || !commit.provider_access_withdrawals().is_empty()
+        || !commit.device_retirements().is_empty()
+        || !commit.circle_controls().is_empty()
+        || !commit.circle_packages().is_empty()
+        || commit.store_package().is_some()
         || commit.membership_authority.is_some()
-        || commit.control.is_some()
+        || commit.control().is_some()
     {
         return Err(StorePullError::Database(
             "device join activation commit carries unrelated operations".to_string(),
@@ -2308,7 +2319,7 @@ async fn load_authorized_serial_prefix(
             ) if genesis_root == root && founder_registration == &founder_ref => {
                 let recovery_author =
                     commit
-                        .serial_recovery_activation
+                        .serial_recovery_activation()
                         .as_ref()
                         .is_some_and(|activation| {
                             activation.registration.registration == commit.author_registration
@@ -2343,7 +2354,7 @@ async fn load_authorized_serial_prefix(
 
         let recovery_author =
             commit
-                .serial_recovery_activation
+                .serial_recovery_activation()
                 .as_ref()
                 .is_some_and(|activation| {
                     activation.registration.registration == commit.author_registration
@@ -2386,7 +2397,7 @@ async fn load_authorized_serial_prefix(
             RegistrationLoadError::Object(error) => StorePullError::Object(error),
             RegistrationLoadError::Invalid(error) => StorePullError::Serial(error),
         })?;
-        validate_serial_provider_admin_control(storage, root, &root_value, commit.control.as_ref())
+        validate_serial_provider_admin_control(storage, root, &root_value, commit.control())
             .await?;
         authorization = authorization
             .authorize_and_apply(&reference, &commit, &author)
@@ -2396,13 +2407,13 @@ async fn load_authorized_serial_prefix(
                     reference.coord.sequence()
                 ))
             })?;
-        for activated in &commit.device_registrations {
+        for activated in commit.device_registrations() {
             active.insert(
                 activated.registration.device_id,
                 activated.registration.clone(),
             );
         }
-        for retirement in &commit.device_retirements {
+        for retirement in commit.device_retirements() {
             active.remove(&retirement.target.device_id);
         }
         predecessor = Some(reference.clone());
@@ -2590,13 +2601,13 @@ pub(crate) async fn load_serial_snapshot_authorities_at_position(
     for accepted in authorized {
         for (activated, (registration, _)) in accepted
             .commit
-            .device_registrations
+            .device_registrations()
             .iter()
             .zip(accepted.registrations)
         {
             active.insert(activated.registration.clone(), registration);
         }
-        for retirement in accepted.commit.device_retirements {
+        for retirement in accepted.commit.device_retirements() {
             active.remove(&retirement.target);
         }
     }
@@ -3043,7 +3054,7 @@ fn membership_authorizes(
 }
 
 fn carries_circle_payload(commit: &StoreBatchCommit) -> bool {
-    !commit.circle_controls.is_empty() || !commit.circle_packages.is_empty()
+    !commit.circle_controls().is_empty() || !commit.circle_packages().is_empty()
 }
 
 enum PullCircleActivationError {
@@ -3063,7 +3074,7 @@ async fn load_pull_circle_activations(
     if !carries_circle_payload(commit) {
         return Ok(Vec::new());
     }
-    if !commit.circle_packages.is_empty() {
+    if !commit.circle_packages().is_empty() {
         return Err(PullCircleActivationError::Invalid(
             "circle row packages are not implemented".to_string(),
         ));
@@ -3096,7 +3107,7 @@ async fn load_serial_store_package(
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
 ) -> Result<Option<Vec<u8>>, StorePullError> {
-    if let Some(package) = commit.store_package.as_ref() {
+    if let Some(package) = commit.store_package() {
         if package.schema_version > db.schema_version() {
             return Err(StorePullError::Serial(format!(
                 "commit {} requires schema {}, local schema is {}",
@@ -3108,7 +3119,7 @@ async fn load_serial_store_package(
     }
     match load_store_package(storage, commit_ref, commit).await? {
         Some(package) => Ok(Some(package.value)),
-        None if commit.store_package.is_none() => Ok(None),
+        None if commit.store_package().is_none() => Ok(None),
         None => Err(StorePullError::Serial(format!(
             "commit {} Store package is absent",
             commit.seq()
@@ -3499,8 +3510,7 @@ fn held_package(
     reason: HeldStorePositionReason,
 ) -> HeldStorePosition {
     let package = commit
-        .store_package
-        .as_ref()
+        .store_package()
         .expect("held Store package is named by the commit");
     HeldStorePosition {
         coordinate: HeldStoreCoordinate::Package {

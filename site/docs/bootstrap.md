@@ -30,19 +30,19 @@ Snapshot images and signed metadata use content-addressed append-only Store
 paths:
 
 ```text
-store-v1/snapshot-images/{author}/{image_hash}/copies/{copy_id}.db
-store-v1/snapshots/{author}/{snapshot_hash}/copies/{copy_id}.json
+store-v1/snapshot-images/{author}/{image_hash}.db
+store-v1/snapshots/{author}/{snapshot_hash}.json
 ```
 
 Before storage I/O, coven commits the exact image bytes, metadata bytes, image
-hash, and snapshot hash to its durable snapshot publication record. It appends
-and reads back an image copy, then appends and reads back the metadata copy.
-Only after both verify does local completion clear that publication record and
-record the snapshot hash and coverage.
+hash, and snapshot hash to its durable snapshot publication record. It creates
+and reads back the exact image object, then creates and reads back the exact
+metadata object. Only after both verify does local completion clear that
+publication record and record the snapshot hash and coverage.
 
 A failed or lost storage response leaves the exact publication record intact.
-Retry appends another physical copy of the same semantic image and metadata;
-different valid bytes at the same semantic identity are rejected.
+Retry reuses its reserved exact image and metadata objects; different bytes at
+either occupied identity are rejected.
 
 Only a current Owner can publish snapshot metadata. The signature binds the
 metadata to the signed Store protocol root, image hash, coverage, schema version,
@@ -118,6 +118,6 @@ A snapshot does not authorize package deletion by itself. Reclamation requires:
 - complete package listing and deletion results.
 
 An incomplete listing, unreadable candidate, fork, missing predecessor,
-hash-mismatched acknowledgement, or partial physical-copy deletion refuses the
+hash-mismatched acknowledgement, or partial exact-object deletion refuses the
 reclamation and reports no package reclaimed. Packages beyond the proven
 coverage remain.

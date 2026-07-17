@@ -404,13 +404,24 @@ fn store_root_ref(label: &str) -> crate::sync::store_commit::StoreRootRef {
 
 fn serial_commit_ref(seq: u64, label: &str) -> crate::sync::store_commit::StoreBatchCommitRef {
     let stored = format!("{label} stored commit");
+    let commit_hash = crate::sync::store_commit::ObjectHash::digest(label.as_bytes());
+    let family = crate::sync::store_commit::CandidateFamilyId::from_hash(
+        crate::sync::store_commit::ObjectHash::digest(
+            format!("{label} candidate family").as_bytes(),
+        ),
+    );
     crate::sync::store_commit::StoreBatchCommitRef {
         coord: crate::sync::store_commit::StoreCommitCoord::Serial { sequence: seq },
-        commit_hash: crate::sync::store_commit::ObjectHash::digest(label.as_bytes()),
+        commit_hash,
         object: crate::sync::storage::ExactObjectRef::new(
             crate::storage::cloud::ObjectSlot::logical(format!(
-                "store-v1/commits/serial/{seq}/{}.json",
-                crate::sync::store_commit::ObjectHash::digest(label.as_bytes())
+                "{}.json",
+                crate::sync::store_commit::commit_semantic_prefix(
+                    family,
+                    crate::sync::store_commit::SERIAL_STREAM_ID,
+                    seq,
+                    commit_hash,
+                )
             ))
             .expect("valid test Store-commit slot"),
             stored.len() as u64,
@@ -1106,24 +1117,25 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
             )
             .expect("load activated recovery registration after config failure")
     };
-    let failed_device_id = failed_registration
+    let failed_device_id: crate::sync::store_commit::StoreDeviceId = failed_registration
         .0
         .parse()
         .expect("parse recovered Store device id");
-    let retirement_prefix =
-        crate::sync::store_commit::device_self_retirement_semantic_prefix(&failed_device_id);
+    let candidate_prefix = "store-v1/candidates/";
+    let retirement_path_fragment = format!("/device-self-retirements/{failed_device_id}/");
     assert!(
         cloud
-            .list(&retirement_prefix)
+            .list(candidate_prefix)
             .await
             .expect("list recovery retirement objects after config failure")
-            .is_empty(),
+            .iter()
+            .all(|object| !object.contains(&retirement_path_fragment)),
         "config failure must not retire the recovery identity reused by retry",
     );
-    let commits_after_failure = cloud
-        .list("store-v1/commits/")
+    let candidates_after_failure = cloud
+        .list(candidate_prefix)
         .await
-        .expect("list Store commits after config failure");
+        .expect("list candidate objects after config failure");
 
     // The keyring accounts and restore identity were durable before the config
     // save failed.
@@ -1251,18 +1263,19 @@ async fn late_step_failure_after_both_keyring_writes_rolls_back_both() {
     assert_eq!(retried_registration, failed_registration);
     assert_eq!(
         cloud
-            .list("store-v1/commits/")
+            .list(candidate_prefix)
             .await
-            .expect("list Store commits after retry"),
-        commits_after_failure,
+            .expect("list candidate objects after retry"),
+        candidates_after_failure,
         "retry must reuse the recovery commit without publishing a retirement commit",
     );
     assert!(
         cloud
-            .list(&retirement_prefix)
+            .list(candidate_prefix)
             .await
             .expect("list recovery retirement objects after retry")
-            .is_empty(),
+            .iter()
+            .all(|object| !object.contains(&retirement_path_fragment)),
         "retry must not publish a recovery retirement object",
     );
 }

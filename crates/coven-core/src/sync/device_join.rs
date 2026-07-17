@@ -4149,7 +4149,7 @@ pub async fn observe_device_join_abandonment(
     .await?;
     if author != owner
         || activation
-            .device_join_abandonments
+            .device_join_abandonments()
             .binary_search(&abandonment.abandonment)
             .is_err()
     {

@@ -5043,9 +5043,12 @@ impl Database {
                         WritePolicy::MergeConcurrent,
                     )?;
                     let audiences = load_prepared_audience_objects_on(conn, &write_id)?;
-                    let expected_package_count = usize::from(commit_value.store_package.is_some())
-                        .checked_add(commit_value.circle_packages.len())
-                        .ok_or_else(|| DbError::Message("package count overflow".to_string()))?;
+                    let expected_package_count =
+                        usize::from(commit_value.store_package().is_some())
+                            .checked_add(commit_value.circle_packages().len())
+                            .ok_or_else(|| {
+                                DbError::Message("package count overflow".to_string())
+                            })?;
                     if audiences.packages.len() != expected_package_count
                         || audiences.packages.len()
                             != usize::from(partitions.store.is_some()) + partitions.circles.len()
@@ -5072,7 +5075,7 @@ impl Database {
                                     .verify_store_package(package.semantic_bytes())
                                     .map_err(|error| DbError::Message(error.to_string()))?;
                                 &commit_value
-                                    .store_package
+                                    .store_package()
                                     .as_ref()
                                     .expect("verified present")
                                     .object
@@ -5085,7 +5088,7 @@ impl Database {
                                     .verify_circle_package(*circle_id, package.semantic_bytes())
                                     .map_err(|error| DbError::Message(error.to_string()))?;
                                 &commit_value
-                                    .circle_packages
+                                    .circle_packages()
                                     .iter()
                                     .find(|entry| entry.circle_id == *circle_id)
                                     .expect("verified present")
@@ -9371,7 +9374,9 @@ impl Database {
     pub(crate) async fn activate_circle_operation(
         &self,
         journal: crate::sync::circle_ops::CircleOperationJournal,
+        identity: &crate::keys::UserKeypair,
     ) -> Result<(), DbError> {
+        let identity = identity.clone();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             if !matches!(
@@ -9413,6 +9418,7 @@ impl Database {
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 if journal.commit_ref.object.slot().logical_key()
                     != commit_semantic_prefix(
+                        commit.candidate_family(),
                         &match &journal.commit_ref.coord {
                             StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
                                 stream_id.to_string()
@@ -9427,7 +9433,7 @@ impl Database {
                         "circle commit exact object occupies a different semantic slot".to_string(),
                     ));
                 }
-                let [control_ref] = commit.circle_controls.as_slice() else {
+                let [control_ref] = commit.circle_controls() else {
                     return Err(DbError::Message(
                         "circle creation Store commit is not an exact control-only batch"
                             .to_string(),
@@ -9435,10 +9441,10 @@ impl Database {
                 };
                 let expected_ref = creation.control_ref(control_ref.objects().clone());
                 if control_ref != &expected_ref
-                    || commit.store_package.is_some()
-                    || !commit.circle_packages.is_empty()
-                    || commit.control.is_some()
-                    || !commit.device_registrations.is_empty()
+                    || commit.store_package().is_some()
+                    || !commit.circle_packages().is_empty()
+                    || commit.control().is_some()
+                    || !commit.device_registrations().is_empty()
                 {
                     return Err(DbError::Message(
                         "circle creation Store commit is not an exact control-only batch"
@@ -9450,6 +9456,7 @@ impl Database {
                     &journal.commit_ref,
                     &commit,
                     &author,
+                    &identity,
                 )
                 .map_err(|error| DbError::Message(error.to_string()))?;
                 Ok((commit, activation))
@@ -9726,13 +9733,13 @@ impl Database {
             crate::sync::store_commit::StoreDeviceRegistrationActivation,
         )],
     ) -> Result<(), DbError> {
-        if registrations.len() != commit.device_registrations.len() {
+        if registrations.len() != commit.device_registrations().len() {
             return Err(DbError::Message(
                 "Store device registration activation count differs from the signed commit"
                     .to_string(),
             ));
         }
-        for signed in &commit.device_registrations {
+        for signed in commit.device_registrations() {
             let (registration, authority) = registrations
                 .iter()
                 .find(|(registration, _)| registration.device_id == signed.registration.device_id)
@@ -10388,7 +10395,7 @@ impl Database {
             )));
         }
         let mut device_state = load_declared_store_device_state_on(conn, &commit.device_state)?;
-        let recovery_author = commit.device_registrations.iter().find_map(|activation| {
+        let recovery_author = commit.device_registrations().iter().find_map(|activation| {
             if activation.registration != commit.author_registration {
                 return None;
             }
@@ -10438,7 +10445,7 @@ impl Database {
                 "materialized commit author is not active at its exact predecessor state".into(),
             ));
         }
-        for activation in &commit.device_registrations {
+        for activation in commit.device_registrations() {
             if recovery_author
                 .as_ref()
                 .is_some_and(|(registration, _)| registration == &activation.registration)
@@ -10449,7 +10456,7 @@ impl Database {
                 .activate_registration(activation.registration.clone(), None)
                 .map_err(|error| DbError::Message(error.to_string()))?;
         }
-        for retirement in &commit.device_retirements {
+        for retirement in commit.device_retirements() {
             device_state = device_state
                 .self_retire(retirement.clone())
                 .map_err(|error| DbError::Message(error.to_string()))?;
@@ -10485,7 +10492,7 @@ impl Database {
         commit_ref: &StoreBatchCommitRef,
         activations: &[crate::sync::circle_ops::VerifiedCircleReference],
     ) -> Result<(), DbError> {
-        if activations.len() != commit.circle_controls.len() {
+        if activations.len() != commit.circle_controls().len() {
             return Err(DbError::Message(
                 "verified circle activations do not cover every control reference".to_string(),
             ));
@@ -10499,7 +10506,7 @@ impl Database {
         };
         let seq = Self::sequence_to_sqlite(&stream_id, commit_ref.coord.sequence())?;
         for activation in activations {
-            if !commit.circle_controls.contains(&activation.reference)
+            if !commit.circle_controls().contains(&activation.reference)
                 || activation.reference.circle_id() != activation.circle_id
                 || activation.reference.control() != &activation.control.coord
                 || !activation.control.verify()
@@ -10829,7 +10836,7 @@ impl Database {
         commit_ref: StoreBatchCommitRef,
         authorization_after: SerialAuthorizationState,
     ) -> Result<(), DbError> {
-        if commit.control.is_none() || commit.store_package.is_some() {
+        if commit.control().is_none() || commit.store_package().is_some() {
             return Err(DbError::Message(
                 "Serial control materialization requires a control-only Store batch".to_string(),
             ));
@@ -11068,8 +11075,8 @@ impl Database {
                     },
                 );
                 if !already_represented
-                    && (prepared.commit.store_package.is_some()
-                        || !prepared.commit.circle_packages.is_empty())
+                    && (prepared.commit.store_package().is_some()
+                        || !prepared.commit.circle_packages().is_empty())
                 {
                     return Err(DbError::Message(format!(
                         "device join bootstrap cannot advance over unmaterialized row data at {stream_id}/{}",
@@ -11366,8 +11373,8 @@ impl Database {
         partitions: &PreparedStoreWritePartitions,
         audiences: &PreparedAudienceObjects,
     ) -> Result<(), DbError> {
-        let expected_package_count = usize::from(commit.store_package.is_some())
-            .checked_add(commit.circle_packages.len())
+        let expected_package_count = usize::from(commit.store_package().is_some())
+            .checked_add(commit.circle_packages().len())
             .ok_or_else(|| DbError::Message("package count overflow".to_string()))?;
         let partition_count = usize::from(partitions.store.is_some())
             .checked_add(partitions.circles.len())
@@ -11395,7 +11402,7 @@ impl Database {
                         .verify_store_package(package.semantic_bytes())
                         .map_err(|error| DbError::Message(error.to_string()))?;
                     &commit
-                        .store_package
+                        .store_package()
                         .as_ref()
                         .expect("verified present")
                         .object
@@ -11405,7 +11412,7 @@ impl Database {
                         .verify_circle_package(*circle_id, package.semantic_bytes())
                         .map_err(|error| DbError::Message(error.to_string()))?;
                     &commit
-                        .circle_packages
+                        .circle_packages()
                         .iter()
                         .find(|entry| entry.circle_id == *circle_id)
                         .expect("verified present")
@@ -14500,7 +14507,12 @@ mod tests {
         };
         let slot = crate::storage::cloud::ObjectSlot::logical(format!(
             "{}.json",
-            commit_semantic_prefix(&stream_id.to_string(), coord.sequence(), commit_hash)
+            commit_semantic_prefix(
+                test_candidate_family(),
+                &stream_id.to_string(),
+                coord.sequence(),
+                commit_hash,
+            )
         ))
         .expect("valid database test commit slot");
         StoreBatchCommitRef {
@@ -15823,25 +15835,42 @@ mod tests {
         .expect("build package");
         let semantic = package.to_bytes();
         let stored_package = b"stored package representation".to_vec();
-        let package_slot =
-            crate::storage::cloud::ObjectSlot::logical("store-v1/packages/write-1".to_string())
-                .expect("package slot");
+        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = test_commit_coord() else {
+            unreachable!("database test commit is MergeConcurrent")
+        };
+        let package_slot = crate::storage::cloud::ObjectSlot::logical(format!(
+            "{}.pkg",
+            crate::sync::store_commit::package_semantic_prefix(
+                test_candidate_family(),
+                &stream_id.to_string(),
+                1,
+                ObjectHash::digest(&semantic),
+            )
+        ))
+        .expect("package slot");
         let package_object = ExactObjectRef::new(
             package_slot,
             stored_package.len() as u64,
             ObjectHash::digest(&stored_package),
         );
+        let owner_commit_hash = ObjectHash::digest(b"owner commit semantic bytes");
         let owner_object = ExactObjectRef::new(
-            crate::storage::cloud::ObjectSlot::logical(
-                "store-v1/commits/database-test-owner".to_string(),
-            )
+            crate::storage::cloud::ObjectSlot::logical(format!(
+                "{}.json",
+                commit_semantic_prefix(
+                    test_candidate_family(),
+                    &stream_id.to_string(),
+                    1,
+                    owner_commit_hash,
+                )
+            ))
             .expect("owner commit slot"),
             1,
             ObjectHash::digest(b"owner commit"),
         );
         let owner = StoreBatchCommitRef {
             coord: test_commit_coord(),
-            commit_hash: ObjectHash::digest(b"owner commit semantic bytes"),
+            commit_hash: owner_commit_hash,
             object: owner_object,
         };
         let package_remote = crate::sync::remote_object::RemoteObjectRecord::CandidateExclusive(

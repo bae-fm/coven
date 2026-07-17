@@ -8,12 +8,7 @@ use async_trait::async_trait;
 use std::path::Path;
 
 use crate::storage::cloud::{CloudHeadVersion, ObjectSlot};
-use crate::sync::store_commit::{
-    ObjectHash, STORE_ACK_PREFIX, STORE_COMMIT_PREFIX, STORE_DEVICE_REGISTRATION_PREFIX,
-    STORE_HEAD_PREFIX, STORE_MEMBERSHIP_ENTRY_PREFIX, STORE_MEMBERSHIP_HEAD_PREFIX,
-    STORE_PACKAGE_PREFIX, STORE_PROTOCOL_ROOT_SEMANTIC_PATH, STORE_SNAPSHOT_IMAGE_PREFIX,
-    STORE_SNAPSHOT_META_PREFIX,
-};
+use crate::sync::store_commit::ObjectHash;
 
 /// Signed object kind bound into protection AAD and checked against the
 /// semantic path before storage I/O.
@@ -50,9 +45,126 @@ pub(crate) enum ProtectedObjectDomain {
 #[derive(Clone, Copy)]
 struct ProtocolObjectMetadata {
     aad_label: &'static [u8],
-    path_prefix: &'static str,
-    path_segment: Option<&'static str>,
+    path: ProtocolPathRule,
     extension: &'static str,
+}
+
+#[derive(Clone, Copy)]
+enum ProtocolPathRule {
+    Exact(&'static [ExactPathShape]),
+    StoreDeviceRegistration,
+    StoreMembershipHead,
+    StoreCandidate {
+        kind: &'static str,
+        component_count: usize,
+    },
+    CircleCandidate {
+        kind: &'static str,
+        component_count: usize,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct ExactPathShape {
+    component_count: usize,
+    fixed_components: &'static [(usize, &'static str)],
+}
+
+impl ProtocolPathRule {
+    fn accepts(self, semantic_prefix: &str) -> bool {
+        match self {
+            Self::Exact(shapes) => shapes
+                .iter()
+                .any(|shape| accepts_path_shape(semantic_prefix, *shape)),
+            Self::StoreDeviceRegistration => {
+                (accepts_path_shape(
+                    semantic_prefix,
+                    ExactPathShape {
+                        component_count: 3,
+                        fixed_components: &[(0, "store-v1"), (1, "devices")],
+                    },
+                ) && semantic_prefix.split('/').nth(2) != Some("founder"))
+                    || accepts_path_shape(
+                        semantic_prefix,
+                        ExactPathShape {
+                            component_count: 5,
+                            fixed_components: &[
+                                (0, "store-v1"),
+                                (1, "devices"),
+                                (2, "founder"),
+                                (4, "registration"),
+                            ],
+                        },
+                    )
+            }
+            Self::StoreMembershipHead => {
+                (accepts_path_shape(
+                    semantic_prefix,
+                    ExactPathShape {
+                        component_count: 7,
+                        fixed_components: &[(0, "store-v1"), (1, "membership"), (2, "heads")],
+                    },
+                ) && semantic_prefix.split('/').nth(3) != Some("founder"))
+                    || accepts_path_shape(
+                        semantic_prefix,
+                        ExactPathShape {
+                            component_count: 6,
+                            fixed_components: &[
+                                (0, "store-v1"),
+                                (1, "membership"),
+                                (2, "heads"),
+                                (3, "founder"),
+                                (5, "1"),
+                            ],
+                        },
+                    )
+            }
+            Self::StoreCandidate {
+                kind,
+                component_count,
+            } => accepts_candidate_path(
+                semantic_prefix,
+                component_count,
+                &[(0, "store-v1"), (1, "candidates"), (3, kind)],
+            ),
+            Self::CircleCandidate {
+                kind,
+                component_count,
+            } => accepts_candidate_path(
+                semantic_prefix,
+                component_count,
+                &[(0, "circles"), (2, "candidates"), (4, kind)],
+            ),
+        }
+    }
+}
+
+fn accepts_path_shape(semantic_prefix: &str, shape: ExactPathShape) -> bool {
+    let components = semantic_prefix.split('/').collect::<Vec<_>>();
+    components.len() == shape.component_count
+        && components.iter().all(|component| !component.is_empty())
+        && shape
+            .fixed_components
+            .iter()
+            .all(|(index, expected)| components[*index] == *expected)
+}
+
+fn accepts_candidate_path(
+    semantic_prefix: &str,
+    component_count: usize,
+    fixed_components: &[(usize, &str)],
+) -> bool {
+    let components = semantic_prefix.split('/').collect::<Vec<_>>();
+    components.len() == component_count
+        && components.iter().all(|component| !component.is_empty())
+        && fixed_components.iter().all(|(index, expected)| {
+            components[*index] == *expected
+                && components
+                    .iter()
+                    .filter(|component| **component == *expected)
+                    .count()
+                    == 1
+        })
 }
 
 impl ProtectedObjectDomain {
@@ -60,158 +172,230 @@ impl ProtectedObjectDomain {
         match self {
             Self::StoreProtocolRoot => ProtocolObjectMetadata {
                 aad_label: b"store-protocol-root",
-                path_prefix: STORE_PROTOCOL_ROOT_SEMANTIC_PATH,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 2,
+                    fixed_components: &[(0, "store-v1"), (1, "store-protocol-root")],
+                }]),
                 extension: ".json",
             },
             Self::StoreCommit => ProtocolObjectMetadata {
                 aad_label: b"store-commit",
-                path_prefix: STORE_COMMIT_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::StoreCandidate {
+                    kind: "commits",
+                    component_count: 7,
+                },
                 extension: ".json",
             },
             Self::StoreHead => ProtocolObjectMetadata {
                 aad_label: b"store-head",
-                path_prefix: STORE_HEAD_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "heads")],
+                }]),
                 extension: ".json",
             },
             Self::StoreAck => ProtocolObjectMetadata {
                 aad_label: b"store-ack",
-                path_prefix: STORE_ACK_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "acks")],
+                }]),
                 extension: ".json",
             },
             Self::StoreDeviceRegistration => ProtocolObjectMetadata {
                 aad_label: b"store-device-registration",
-                path_prefix: STORE_DEVICE_REGISTRATION_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::StoreDeviceRegistration,
                 extension: ".json",
             },
             Self::StoreDeviceSelfRetirement => ProtocolObjectMetadata {
                 aad_label: b"store-device-self-retirement",
-                path_prefix: crate::sync::store_commit::STORE_DEVICE_SELF_RETIREMENT_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::StoreCandidate {
+                    kind: "device-self-retirements",
+                    component_count: 6,
+                },
                 extension: ".json",
             },
             Self::DeviceJoinAttempt => ProtocolObjectMetadata {
                 aad_label: b"device-join-attempt",
-                path_prefix: crate::sync::store_commit::STORE_DEVICE_JOIN_ATTEMPT_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 3,
+                    fixed_components: &[(0, "store-v1"), (1, "device-join-attempts")],
+                }]),
                 extension: ".json",
             },
             Self::DeviceJoinOutcome => ProtocolObjectMetadata {
                 aad_label: b"device-join-outcome",
-                path_prefix: crate::sync::store_commit::STORE_DEVICE_JOIN_OUTCOME_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 3,
+                    fixed_components: &[(0, "store-v1"), (1, "device-join-outcomes")],
+                }]),
                 extension: ".json",
             },
             Self::DeviceJoinAbandonment => ProtocolObjectMetadata {
                 aad_label: b"device-join-abandonment",
-                path_prefix: crate::sync::store_commit::STORE_DEVICE_JOIN_ATTEMPT_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 3,
+                    fixed_components: &[(0, "store-v1"), (1, "device-join-attempts")],
+                }]),
                 extension: ".json",
             },
             Self::DeviceJoinCleanupReceipt => ProtocolObjectMetadata {
                 aad_label: b"device-join-cleanup-receipt",
-                path_prefix: crate::sync::store_commit::STORE_DEVICE_JOIN_CLEANUP_RECEIPT_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 3,
+                    fixed_components: &[(0, "store-v1"), (1, "device-join-cleanup-receipts")],
+                }]),
                 extension: ".json",
             },
             Self::ProviderAccessGrant => ProtocolObjectMetadata {
                 aad_label: b"provider-access-grant",
-                path_prefix: crate::sync::store_commit::STORE_PROVIDER_ACCESS_GRANT_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "provider-access"), (2, "grants")],
+                }]),
                 extension: ".json",
             },
             Self::ProviderAccessWithdrawal => ProtocolObjectMetadata {
                 aad_label: b"provider-access-withdrawal",
-                path_prefix: crate::sync::store_commit::STORE_PROVIDER_ACCESS_WITHDRAWAL_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[
+                        (0, "store-v1"),
+                        (1, "provider-access"),
+                        (2, "withdrawals"),
+                    ],
+                }]),
                 extension: ".json",
             },
             Self::OwnerRecoveryNode => ProtocolObjectMetadata {
                 aad_label: b"owner-recovery-node",
-                path_prefix: crate::sync::store_commit::STORE_OWNER_RECOVERY_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 5,
+                    fixed_components: &[(0, "store-v1"), (1, "recovery")],
+                }]),
                 extension: ".json",
             },
             Self::StoreSnapshotMeta => ProtocolObjectMetadata {
                 aad_label: b"store-snapshot-meta",
-                path_prefix: STORE_SNAPSHOT_META_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "snapshots")],
+                }]),
                 extension: ".json",
             },
             Self::StoreSnapshotImage => ProtocolObjectMetadata {
                 aad_label: b"store-snapshot-image",
-                path_prefix: STORE_SNAPSHOT_IMAGE_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "snapshot-images")],
+                }]),
                 extension: ".db",
             },
             Self::StoreMembershipEntry => ProtocolObjectMetadata {
                 aad_label: b"store-membership-entry",
-                path_prefix: STORE_MEMBERSHIP_ENTRY_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 8,
+                    fixed_components: &[(0, "store-v1"), (1, "membership"), (2, "entries")],
+                }]),
                 extension: ".json",
             },
             Self::StoreMembershipHead => ProtocolObjectMetadata {
                 aad_label: b"store-membership-head",
-                path_prefix: STORE_MEMBERSHIP_HEAD_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::StoreMembershipHead,
                 extension: ".json",
             },
             Self::StoreMembershipResolution => ProtocolObjectMetadata {
                 aad_label: b"store-membership-resolution",
-                path_prefix: "store-v1/membership/resolutions/",
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 6,
+                    fixed_components: &[(0, "store-v1"), (1, "membership"), (2, "resolutions")],
+                }]),
                 extension: ".json",
             },
             Self::StorePackage => ProtocolObjectMetadata {
                 aad_label: b"store-package",
-                path_prefix: STORE_PACKAGE_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::StoreCandidate {
+                    kind: "packages",
+                    component_count: 7,
+                },
                 extension: ".pkg",
             },
             Self::CircleControl => ProtocolObjectMetadata {
                 aad_label: b"circle-control",
-                path_prefix: crate::sync::circle::CIRCLE_CONTROL_PREFIX,
-                path_segment: None,
+                path: ProtocolPathRule::Exact(&[
+                    ExactPathShape {
+                        component_count: 10,
+                        fixed_components: &[(0, "circle-control"), (2, "merge"), (3, "entries")],
+                    },
+                    ExactPathShape {
+                        component_count: 9,
+                        fixed_components: &[(0, "circle-control"), (2, "merge"), (3, "heads")],
+                    },
+                    ExactPathShape {
+                        component_count: 6,
+                        fixed_components: &[(0, "circle-control"), (2, "serial")],
+                    },
+                ]),
                 extension: ".json",
             },
             Self::CircleRoster => ProtocolObjectMetadata {
                 aad_label: b"circle-roster",
-                path_prefix: crate::sync::circle::CIRCLE_ROSTER_PREFIX,
-                path_segment: Some("/roster/"),
+                path: ProtocolPathRule::Exact(&[
+                    ExactPathShape {
+                        component_count: 10,
+                        fixed_components: &[(0, "circles"), (2, "roster"), (3, "entries")],
+                    },
+                    ExactPathShape {
+                        component_count: 9,
+                        fixed_components: &[(0, "circles"), (2, "roster"), (3, "heads")],
+                    },
+                ]),
                 extension: ".json",
             },
             Self::CircleRosterResolution => ProtocolObjectMetadata {
                 aad_label: b"circle-roster-resolution",
-                path_prefix: crate::sync::circle::CIRCLE_ROSTER_PREFIX,
-                path_segment: Some("/roster/resolutions/"),
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 7,
+                    fixed_components: &[(0, "circles"), (2, "roster"), (3, "resolutions")],
+                }]),
                 extension: ".json",
             },
             Self::CircleMetadata => ProtocolObjectMetadata {
                 aad_label: b"circle-metadata",
-                path_prefix: crate::sync::circle::CIRCLE_METADATA_PREFIX,
-                path_segment: Some("/metadata/"),
+                path: ProtocolPathRule::Exact(&[
+                    ExactPathShape {
+                        component_count: 10,
+                        fixed_components: &[(0, "circles"), (2, "metadata"), (3, "entries")],
+                    },
+                    ExactPathShape {
+                        component_count: 9,
+                        fixed_components: &[(0, "circles"), (2, "metadata"), (3, "heads")],
+                    },
+                ]),
                 extension: ".json",
             },
             Self::CirclePackage => ProtocolObjectMetadata {
                 aad_label: b"circle-package",
-                path_prefix: "circles/",
-                path_segment: Some("/packages/"),
+                path: ProtocolPathRule::CircleCandidate {
+                    kind: "packages",
+                    component_count: 8,
+                },
                 extension: ".pkg",
             },
             Self::CircleAccessLeaf => ProtocolObjectMetadata {
                 aad_label: b"circle-access-leaf",
-                path_prefix: crate::sync::circle::CIRCLE_ACCESS_LEAF_PREFIX,
-                path_segment: Some("/access-leaves/"),
+                path: ProtocolPathRule::CircleCandidate {
+                    kind: "access-leaves",
+                    component_count: 9,
+                },
                 extension: "",
             },
             Self::CircleAccessEnvelope => ProtocolObjectMetadata {
                 aad_label: b"circle-access-envelope",
-                path_prefix: crate::sync::circle::CIRCLE_ACCESS_ENVELOPE_PREFIX,
-                path_segment: Some("/access-envelopes/"),
+                path: ProtocolPathRule::CircleCandidate {
+                    kind: "access-envelopes",
+                    component_count: 8,
+                },
                 extension: ".json",
             },
         }
@@ -374,12 +558,7 @@ impl ProtocolObjectContext {
 
     pub fn validate_path(&self, semantic_prefix: &str) -> Result<(), StorageError> {
         let metadata = self.domain.metadata();
-        if semantic_prefix.contains("/copies/")
-            || !semantic_prefix.starts_with(metadata.path_prefix)
-            || metadata
-                .path_segment
-                .is_some_and(|segment| !semantic_prefix.contains(segment))
-        {
+        if semantic_prefix.contains("/copies/") || !metadata.path.accepts(semantic_prefix) {
             return Err(StorageError::Parse(format!(
                 "object domain {:?} does not accept semantic path {semantic_prefix:?}",
                 self.domain
@@ -1185,4 +1364,281 @@ pub trait SyncStorage: Send + Sync {
         owner_pubkey: &str,
         recipient_pubkey: &str,
     ) -> Result<(), StorageError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DomainPathCase {
+        domain: ProtectedObjectDomain,
+        valid: &'static [&'static str],
+        cross_domain: &'static str,
+    }
+
+    fn validates(domain: ProtectedObjectDomain, path: &str) -> bool {
+        ProtocolObjectContext {
+            store_root_hash: ObjectHash::digest(b"protocol path grammar"),
+            domain,
+            protection: ProtocolObjectProtection::Store,
+        }
+        .validate_path(path)
+        .is_ok()
+    }
+
+    #[test]
+    fn every_protocol_domain_requires_its_exact_path_grammar() {
+        let cases = [
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreProtocolRoot,
+                valid: &["store-v1/store-protocol-root"],
+                cross_domain: "store-v1/heads/device/1",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreCommit,
+                valid: &["store-v1/candidates/family/commits/device/1/hash"],
+                cross_domain: "store-v1/candidates/family/packages/device/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreHead,
+                valid: &["store-v1/heads/device/1"],
+                cross_domain: "store-v1/acks/device/1",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreAck,
+                valid: &["store-v1/acks/device/1"],
+                cross_domain: "store-v1/heads/device/1",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreDeviceRegistration,
+                valid: &[
+                    "store-v1/devices/device",
+                    "store-v1/devices/founder/creation/registration",
+                ],
+                cross_domain: "store-v1/device-join-attempts/attempt",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreDeviceSelfRetirement,
+                valid: &["store-v1/candidates/family/device-self-retirements/device/hash"],
+                cross_domain: "store-v1/candidates/family/packages/device/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::DeviceJoinAttempt,
+                valid: &["store-v1/device-join-attempts/attempt"],
+                cross_domain: "store-v1/device-join-outcomes/attempt",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::DeviceJoinOutcome,
+                valid: &["store-v1/device-join-outcomes/attempt"],
+                cross_domain: "store-v1/device-join-attempts/attempt",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::DeviceJoinAbandonment,
+                valid: &["store-v1/device-join-attempts/attempt"],
+                cross_domain: "store-v1/device-join-outcomes/attempt",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::DeviceJoinCleanupReceipt,
+                valid: &["store-v1/device-join-cleanup-receipts/attempt"],
+                cross_domain: "store-v1/device-join-attempts/attempt",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::ProviderAccessGrant,
+                valid: &["store-v1/provider-access/grants/grant"],
+                cross_domain: "store-v1/provider-access/withdrawals/grant",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::ProviderAccessWithdrawal,
+                valid: &["store-v1/provider-access/withdrawals/grant"],
+                cross_domain: "store-v1/provider-access/grants/grant",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::OwnerRecoveryNode,
+                valid: &["store-v1/recovery/owner/grant/1"],
+                cross_domain: "store-v1/snapshots/owner/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreSnapshotMeta,
+                valid: &["store-v1/snapshots/owner/hash"],
+                cross_domain: "store-v1/snapshot-images/owner/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreSnapshotImage,
+                valid: &["store-v1/snapshot-images/owner/hash"],
+                cross_domain: "store-v1/snapshots/owner/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreMembershipEntry,
+                valid: &["store-v1/membership/entries/owner/grant/stream/1/hash"],
+                cross_domain: "store-v1/membership/heads/owner/grant/stream/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreMembershipHead,
+                valid: &[
+                    "store-v1/membership/heads/owner/grant/stream/1",
+                    "store-v1/membership/heads/founder/creation/1",
+                ],
+                cross_domain: "store-v1/membership/entries/owner/grant/stream/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreMembershipResolution,
+                valid: &["store-v1/membership/resolutions/conflict/resolver/hash"],
+                cross_domain: "store-v1/membership/entries/owner/grant/stream/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StorePackage,
+                valid: &["store-v1/candidates/family/packages/device/1/hash"],
+                cross_domain: "store-v1/candidates/family/commits/device/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::CircleControl,
+                valid: &[
+                    "circle-control/circle/merge/entries/owner/device/grant/stream/1/hash",
+                    "circle-control/circle/merge/heads/owner/device/grant/stream/1",
+                    "circle-control/circle/serial/owner/1/hash",
+                ],
+                cross_domain: "circles/circle/roster/entries/owner/device/grant/stream/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::CircleRoster,
+                valid: &[
+                    "circles/circle/roster/entries/owner/device/grant/stream/1/hash",
+                    "circles/circle/roster/heads/owner/device/grant/stream/1",
+                ],
+                cross_domain: "circles/circle/roster/resolutions/conflict/resolver/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::CircleRosterResolution,
+                valid: &["circles/circle/roster/resolutions/conflict/resolver/hash"],
+                cross_domain: "circles/circle/roster/entries/owner/device/grant/stream/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::CircleMetadata,
+                valid: &[
+                    "circles/circle/metadata/entries/owner/device/grant/stream/1/hash",
+                    "circles/circle/metadata/heads/owner/device/grant/stream/1",
+                ],
+                cross_domain: "circles/circle/roster/entries/owner/device/grant/stream/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::CirclePackage,
+                valid: &["circles/circle/candidates/family/packages/device/1/hash"],
+                cross_domain:
+                    "circles/circle/candidates/family/access-envelopes/owner/recipient/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::CircleAccessLeaf,
+                valid: &[
+                    "circles/circle/candidates/family/access-leaves/owner/epoch/recipient/leaf",
+                ],
+                cross_domain:
+                    "circles/circle/candidates/family/access-envelopes/owner/recipient/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::CircleAccessEnvelope,
+                valid: &["circles/circle/candidates/family/access-envelopes/owner/recipient/hash"],
+                cross_domain:
+                    "circles/circle/candidates/family/access-leaves/owner/epoch/recipient/leaf",
+            },
+        ];
+
+        for case in cases {
+            for valid in case.valid {
+                assert!(
+                    validates(case.domain, valid),
+                    "{:?} rejected {valid}",
+                    case.domain
+                );
+                assert!(
+                    !validates(case.domain, &format!("{valid}/extra")),
+                    "{:?} accepted an extra component after {valid}",
+                    case.domain,
+                );
+                let (missing, _) = valid
+                    .rsplit_once('/')
+                    .expect("protocol paths have more than one component");
+                assert!(
+                    !validates(case.domain, missing),
+                    "{:?} accepted a missing component in {valid}",
+                    case.domain,
+                );
+            }
+            assert!(
+                !validates(case.domain, case.cross_domain),
+                "{:?} accepted cross-domain path {}",
+                case.domain,
+                case.cross_domain,
+            );
+        }
+        assert!(!validates(
+            ProtectedObjectDomain::StoreDeviceRegistration,
+            "store-v1/devices/founder",
+        ));
+        assert!(!validates(
+            ProtectedObjectDomain::StoreMembershipHead,
+            "store-v1/membership/heads/founder/creation/1/extra",
+        ));
+    }
+
+    #[test]
+    fn candidate_protocol_domains_reject_reordered_and_nested_components() {
+        let cases = [
+            (
+                ProtectedObjectDomain::StoreCommit,
+                "store-v1/candidates/family/commits/device/1/hash",
+                1,
+                3,
+            ),
+            (
+                ProtectedObjectDomain::StoreDeviceSelfRetirement,
+                "store-v1/candidates/family/device-self-retirements/device/hash",
+                1,
+                3,
+            ),
+            (
+                ProtectedObjectDomain::StorePackage,
+                "store-v1/candidates/family/packages/device/1/hash",
+                1,
+                3,
+            ),
+            (
+                ProtectedObjectDomain::CirclePackage,
+                "circles/circle/candidates/family/packages/device/1/hash",
+                2,
+                4,
+            ),
+            (
+                ProtectedObjectDomain::CircleAccessLeaf,
+                "circles/circle/candidates/family/access-leaves/owner/epoch/recipient/leaf",
+                2,
+                4,
+            ),
+            (
+                ProtectedObjectDomain::CircleAccessEnvelope,
+                "circles/circle/candidates/family/access-envelopes/owner/recipient/hash",
+                2,
+                4,
+            ),
+        ];
+
+        for (domain, valid, candidates_index, kind_index) in cases {
+            let components = valid.split('/').collect::<Vec<_>>();
+            let mut reordered = components.clone();
+            reordered.swap(candidates_index, candidates_index + 1);
+            let mut nested = components.clone();
+            nested[kind_index] = "nested";
+            nested[kind_index + 1] = components[kind_index];
+            let mut repeated_kind = components.clone();
+            repeated_kind[kind_index + 1] = components[kind_index];
+            let mut empty_family = components.clone();
+            empty_family[candidates_index + 1] = "";
+            for malformed in [reordered, nested, repeated_kind, empty_family] {
+                let malformed = malformed.join("/");
+                assert!(
+                    !validates(domain, &malformed),
+                    "{domain:?} accepted malformed path {malformed}",
+                );
+            }
+        }
+    }
 }

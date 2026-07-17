@@ -63,7 +63,6 @@ keyring to a member without ever exposing it. Losing the Ed25519 secret key also
 access to every sealed box wrapped to its derived X25519 key, since that X25519
 key cannot be reconstructed without it.
 
-
 <svg class="flow" viewBox="0 0 500 190" role="img" aria-label="The store keyring holds key generations; scoped keys derive from the current one">
 <text class="hdr" x="130" y="22" text-anchor="middle">STORE KEYRING</text>
 <text class="hdr" x="390" y="22" text-anchor="middle">DERIVED</text>
@@ -90,16 +89,19 @@ opaque byte store. It sees:
 - Ciphertext. Every object is encrypted under the store key (or, for a wrapped
   store key, under a member's sealed box). Without the store key the bytes
   are unreadable.
+
 - Flat key paths, which describe structure, not content:
 
   ```text
-  store-v1/packages/{device}/{seq}/{hash}/copies/{copy_id}.pkg
-  store-v1/commits/{device}/{seq}/{hash}/copies/{copy_id}.json
-  store-v1/heads/{device}/{seq}/{hash}/copies/{copy_id}.json
-  store-v1/snapshot-images/{author}/{hash}/copies/{copy_id}.db
-  store-v1/snapshots/{author}/{hash}/copies/{copy_id}.json
-  store-v1/membership/entries/{author}/{grant}/{stream_id}/{seq}/{hash}/copies/{copy_id}.json
-  store-v1/membership/heads/{author}/{grant}/{stream_id}/{seq}/{hash}/copies/{copy_id}.json
+  store-v1/candidates/{family}/packages/{device}/{seq}/{hash}.pkg
+  store-v1/candidates/{family}/commits/{device}/{seq}/{hash}.json
+  circles/{circle}/candidates/{family}/access-leaves/{owner}/{epoch}/{recipient}/{leaf}
+  circles/{circle}/candidates/{family}/access-envelopes/{owner}/{recipient}/{control_hash}.json
+  store-v1/heads/{device}/{seq}.json
+  store-v1/snapshot-images/{author}/{hash}.db
+  store-v1/snapshots/{author}/{hash}.json
+  store-v1/membership/entries/{author}/{grant}/{stream_id}/{seq}/{hash}.json
+  store-v1/membership/heads/{author}/{grant}/{stream_id}/{seq}.json
   images/{ab}/{cd}/{id}                       encrypted application blobs
   keys/{owner_pubkey}/{recipient_pubkey}.enc  store keyring wrapped to a member
   ```
@@ -111,6 +113,7 @@ opaque byte store. It sees:
 - The existence and count of key files under each owner's `keys/{owner_pubkey}/`
   prefix, and the hex Ed25519 public keys in those paths. A pubkey is a
   random-looking 32-byte value, not a name or an email.
+
 - On each master- or derived-scoped object, a 12-byte cleartext prefix naming
   the key **generation** it was sealed under, so a reader picks the right key
   without trial decryption. The generation number is a counter, not content.
@@ -178,7 +181,7 @@ bucket sees the actual files instead of ciphertext.
   content-addressed shard `{namespace}/{ab}/{cd}/{id}`. Anyone with bucket access
   sees only ciphertext under opaque keys.
 - A **browsable home** (`storage: browsable`) stores every object verbatim with
-  no `.enc` suffix (bare Store package, commit, head, and snapshot-copy names
+  no `.enc` suffix (bare Store package, commit, head, and snapshot names
   under `store-v1/`) and stores each blob at the
   consumer's own readable path `{namespace}/{cloud_path}`. Anyone with bucket
   access can open the snapshot or a blob directly without any key, which is the

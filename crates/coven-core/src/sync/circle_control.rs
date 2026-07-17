@@ -511,6 +511,7 @@ pub enum CircleAccessDisposition {
 pub struct CircleAccessLeaf {
     pub version: u32,
     pub store_root_hash: ObjectHash,
+    pub candidate_family: super::store_commit::CandidateFamilyId,
     pub circle_id: CircleId,
     pub epoch_id: CircleEpochId,
     pub leaf_id: AccessLeafId,
@@ -529,6 +530,7 @@ impl CircleAccessLeaf {
             domain: &'static str,
             version: u32,
             store_root_hash: ObjectHash,
+            candidate_family: super::store_commit::CandidateFamilyId,
             circle_id: CircleId,
             epoch_id: CircleEpochId,
             leaf_id: AccessLeafId,
@@ -542,6 +544,7 @@ impl CircleAccessLeaf {
             domain: ACCESS_DOMAIN,
             version: self.version,
             store_root_hash: self.store_root_hash,
+            candidate_family: self.candidate_family,
             circle_id: self.circle_id,
             epoch_id: self.epoch_id,
             leaf_id: self.leaf_id,
@@ -946,6 +949,7 @@ impl CircleControlHead {
 pub struct AccessEnvelope {
     pub version: u32,
     pub store_root_hash: ObjectHash,
+    pub candidate_family: super::store_commit::CandidateFamilyId,
     pub circle_id: CircleId,
     pub owner_pubkey: String,
     pub recipient_slot: String,
@@ -964,6 +968,7 @@ impl AccessEnvelope {
             domain: &'static str,
             version: u32,
             store_root_hash: ObjectHash,
+            candidate_family: super::store_commit::CandidateFamilyId,
             circle_id: CircleId,
             owner_pubkey: &'a str,
             recipient_slot: &'a str,
@@ -977,6 +982,7 @@ impl AccessEnvelope {
             domain: ENVELOPE_DOMAIN,
             version: self.version,
             store_root_hash: self.store_root_hash,
+            candidate_family: self.candidate_family,
             circle_id: self.circle_id,
             owner_pubkey: &self.owner_pubkey,
             recipient_slot: &self.recipient_slot,
@@ -989,9 +995,14 @@ impl AccessEnvelope {
         .expect("access envelope serialization cannot fail")
     }
 
-    pub fn verify(&self, control: &PreparedCircleControl) -> bool {
+    pub fn verify(
+        &self,
+        control: &PreparedCircleControl,
+        candidate_family: super::store_commit::CandidateFamilyId,
+    ) -> bool {
         self.version == STORE_PROTOCOL_VERSION
             && self.store_root_hash == control.value.store_root_hash
+            && self.candidate_family == candidate_family
             && self.circle_id == control.value.circle_id
             && control
                 .value
@@ -1034,14 +1045,30 @@ pub struct PreparedAccessLeaf {
 }
 
 impl PreparedAccessLeaf {
-    pub fn verify(&self, control: &PreparedCircleControl) -> bool {
+    pub fn verify(
+        &self,
+        control: &PreparedCircleControl,
+        candidate_family: super::store_commit::CandidateFamilyId,
+    ) -> bool {
         self.value.verify_signature()
             && self.value.store_root_hash == control.value.store_root_hash
+            && self.value.candidate_family == candidate_family
             && self.value.circle_id == control.value.circle_id
             && self.value.epoch_id == control.value.epoch_id
             && self.value.store_membership == control.value.store_membership
             && match &self.value.disposition {
-                CircleAccessDisposition::Active { roster, .. } => roster == &control.value.roster,
+                CircleAccessDisposition::Active {
+                    keyring,
+                    key_fingerprint,
+                    roster,
+                } => {
+                    roster == &control.value.roster
+                        && *key_fingerprint == control.value.key_fingerprint
+                        && MasterKeyring::from_serialized(keyring).is_ok_and(|keyring| {
+                            EncryptionService::from(keyring).seal_key_fingerprint()
+                                == *key_fingerprint
+                        })
+                }
                 CircleAccessDisposition::Inactive => true,
             }
             && control
@@ -1056,9 +1083,10 @@ impl PreparedAccessLeaf {
         &self,
         control: &PreparedCircleControl,
         envelope: &AccessEnvelope,
+        candidate_family: super::store_commit::CandidateFamilyId,
     ) -> bool {
-        self.verify(control)
-            && envelope.verify(control)
+        self.verify(control, candidate_family)
+            && envelope.verify(control, candidate_family)
             && self.leaf_hash == envelope.leaf_hash
             && envelope.value_hash
                 == ObjectHash::digest(
@@ -1160,6 +1188,7 @@ impl CircleCreation {
     #[allow(clippy::too_many_arguments)]
     pub fn founder(
         store_root_hash: ObjectHash,
+        candidate_family: super::store_commit::CandidateFamilyId,
         device_id: &str,
         name: &str,
         metadata_stamp: &str,
@@ -1259,6 +1288,7 @@ impl CircleCreation {
             let mut value = CircleAccessLeaf {
                 version: STORE_PROTOCOL_VERSION,
                 store_root_hash,
+                candidate_family,
                 circle_id,
                 epoch_id,
                 leaf_id: AccessLeafId::generate(ids),
@@ -1362,6 +1392,7 @@ impl CircleCreation {
                 let mut envelope = AccessEnvelope {
                     version: STORE_PROTOCOL_VERSION,
                     store_root_hash,
+                    candidate_family,
                     circle_id,
                     owner_pubkey: author_pubkey.clone(),
                     recipient_slot: value.recipient_slot.clone(),
@@ -1428,19 +1459,6 @@ pub enum CircleSemanticSlot<'a> {
     MetadataHead {
         circle_id: CircleId,
         head: &'a CircleMetadataHeadRef,
-    },
-    AccessLeaf {
-        circle_id: CircleId,
-        owner_pubkey: &'a str,
-        epoch_id: CircleEpochId,
-        recipient_slot: &'a str,
-        leaf_id: AccessLeafId,
-    },
-    AccessEnvelope {
-        circle_id: CircleId,
-        owner_pubkey: &'a str,
-        recipient_slot: &'a str,
-        control_hash: ObjectHash,
     },
 }
 
@@ -1527,23 +1545,6 @@ pub fn circle_semantic_prefix(slot: CircleSemanticSlot<'_>) -> String {
         CircleSemanticSlot::MetadataHead { circle_id, head } => {
             circle_metadata_head_prefix(circle_id, &head.coord.stream_key(), head.coord.seq)
         }
-        CircleSemanticSlot::AccessLeaf {
-            circle_id,
-            owner_pubkey,
-            epoch_id,
-            recipient_slot,
-            leaf_id,
-        } => format!(
-            "circles/{circle_id}/access-leaves/{owner_pubkey}/{epoch_id}/{recipient_slot}/{leaf_id}"
-        ),
-        CircleSemanticSlot::AccessEnvelope {
-            circle_id,
-            owner_pubkey,
-            recipient_slot,
-            control_hash,
-        } => format!(
-            "circles/{circle_id}/access-envelopes/{owner_pubkey}/{recipient_slot}/{control_hash}"
-        ),
     }
 }
 
@@ -1731,6 +1732,9 @@ mod tests {
             .expect("test Serial authorization");
         CircleCreation::founder(
             store_root_hash,
+            super::super::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
+                id_seed.as_bytes(),
+            )),
             &author_device.to_string(),
             "Household",
             "0000000001000-0000-owner-device",
@@ -1859,6 +1863,10 @@ mod tests {
             leaf_hash: substituted_hash,
         };
 
-        assert!(!prepared.verify_envelope(&creation.control, &envelope));
+        assert!(!prepared.verify_envelope(
+            &creation.control,
+            &envelope,
+            creation.access[0].leaf.value.candidate_family,
+        ));
     }
 }

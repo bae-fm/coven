@@ -439,7 +439,11 @@ async fn prepare_self_retirement(
         &device_signer,
     )
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let retirement_prefix = device_self_retirement_semantic_prefix(&registration_ref.device_id);
+    let retirement_prefix = device_self_retirement_semantic_prefix(
+        candidate_family,
+        &registration_ref.device_id,
+        retirement.retirement_hash(),
+    );
     let retirement_context = super::storage::ProtocolObjectContext::store(
         root.store_root_hash,
         super::storage::ProtocolObjectDomain::StoreDeviceSelfRetirement,
@@ -482,7 +486,12 @@ async fn prepare_self_retirement(
         &device_signer,
     )
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let commit_prefix = commit_semantic_prefix(&stream, commit.seq(), commit.commit_hash());
+    let commit_prefix = commit_semantic_prefix(
+        commit.candidate_family(),
+        &stream,
+        commit.seq(),
+        commit.commit_hash(),
+    );
     let commit_slot = storage
         .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
         .await
@@ -619,7 +628,7 @@ async fn publish_self_retirement(
         .commit_ref
         .verify_commit(&commit)
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let [retirement_ref] = commit.device_retirements.as_slice() else {
+    let [retirement_ref] = commit.device_retirements() else {
         return Err(StoreRegistrationError::Invalid(
             "retirement commit does not carry exactly one terminal".into(),
         ));
@@ -649,7 +658,11 @@ async fn publish_self_retirement(
         .read_protocol_object(
             &retirement_context,
             &retirement_ref.object,
-            &device_self_retirement_semantic_prefix(&retirement_ref.target.device_id),
+            &device_self_retirement_semantic_prefix(
+                retirement_ref.candidate_family,
+                &retirement_ref.target.device_id,
+                retirement_ref.retirement_hash,
+            ),
         )
         .await
         .map_err(StoreObjectError::from)?;
@@ -685,6 +698,7 @@ async fn publish_self_retirement(
                     ),
                     &durable.commit_ref.object,
                     &commit_semantic_prefix(
+                        commit.candidate_family(),
                         &stream_id.to_string(),
                         commit.seq(),
                         commit.commit_hash(),
@@ -1666,7 +1680,12 @@ pub async fn recover_owner_device_merge(
         &device_signer,
     )
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let commit_prefix = commit_semantic_prefix(&stream_id.to_string(), 1, commit.commit_hash());
+    let commit_prefix = commit_semantic_prefix(
+        commit.candidate_family(),
+        &stream_id.to_string(),
+        1,
+        commit.commit_hash(),
+    );
     let commit_slot = storage
         .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
         .await
@@ -2061,8 +2080,12 @@ pub async fn recover_owner_device_serial(
         &device_signer,
     )
     .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    let commit_prefix =
-        commit_semantic_prefix(SERIAL_STREAM_ID, serial_sequence, commit.commit_hash());
+    let commit_prefix = commit_semantic_prefix(
+        commit.candidate_family(),
+        SERIAL_STREAM_ID,
+        serial_sequence,
+        commit.commit_hash(),
+    );
     let commit_slot = storage
         .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
         .await
@@ -2160,7 +2183,7 @@ pub(crate) async fn bootstrap_pending_device(
     if activation_author != *owner
         || activation_commit.author_registration != attempt.owner_registration
         || activation_commit
-            .device_join_attempts
+            .device_join_attempts()
             .binary_search(&attempt_ref)
             .is_err()
         || activation_commit

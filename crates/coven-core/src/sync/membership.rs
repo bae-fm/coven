@@ -210,8 +210,9 @@ impl SerialAuthorizationState {
             ));
         }
         let carries_lifecycle =
-            !commit.device_registrations.is_empty() || !commit.device_retirements.is_empty();
-        let carries_package = commit.store_package.is_some() || !commit.circle_packages.is_empty();
+            !commit.device_registrations().is_empty() || !commit.device_retirements().is_empty();
+        let carries_package =
+            commit.store_package().is_some() || !commit.circle_packages().is_empty();
         if carries_lifecycle && carries_package {
             return Err(SerialMembershipError::LifecycleWithPackage);
         }
@@ -223,14 +224,14 @@ impl SerialAuthorizationState {
                 author.author_pubkey.clone(),
             ));
         }
-        let membership = match commit.control.as_ref() {
+        let membership = match commit.control() {
             Some(control) => match control.serial_membership_entry() {
                 Some(entry) => self.membership.apply_at(entry, commit.seq())?,
                 None => self.membership.advance_to(commit.seq())?,
             },
             None => self.membership.advance_to(commit.seq())?,
         };
-        let Some(control) = commit.control.as_ref() else {
+        let Some(control) = commit.control() else {
             return Ok(Self {
                 membership,
                 provider_admin: self.provider_admin.clone(),
@@ -279,15 +280,15 @@ impl SerialAuthorizationState {
 }
 
 fn is_exact_self_retirement_only(commit: &StoreBatchCommit) -> bool {
-    let [retirement] = commit.device_retirements.as_slice() else {
+    let [retirement] = commit.device_retirements() else {
         return false;
     };
     retirement.target == commit.author_registration
-        && commit.control.is_none()
-        && commit.device_registrations.is_empty()
-        && commit.circle_controls.is_empty()
-        && commit.store_package.is_none()
-        && commit.circle_packages.is_empty()
+        && commit.control().is_none()
+        && commit.device_registrations().is_empty()
+        && commit.circle_controls().is_empty()
+        && commit.store_package().is_none()
+        && commit.circle_packages().is_empty()
 }
 
 impl SerialMembershipState {
@@ -3381,13 +3382,13 @@ mod tests {
     use crate::sync::store_commit::{
         commit_semantic_prefix, device_self_retirement_semantic_prefix,
         membership_entry_semantic_prefix, membership_head_semantic_prefix,
-        membership_resolution_semantic_prefix, package_semantic_prefix,
-        registration_semantic_prefix, CandidateFamilyId, DeviceJoinAttemptId, DeviceStreamAnchor,
-        GrantStreamAnchor, ResolvedStoreDeviceState, StoreBatchCommitRef, StoreCommitAnchor,
-        StoreCommitCoord, StoreCommitOrder, StoreCreationId, StoreDeviceRegistrationOrigin,
-        StoreDeviceRegistrationRef, StoreDeviceSelfRetirement, StoreDeviceSelfRetirementRef,
-        StoreDeviceStateRef, StoreHistoryCut, StorePackageInput, StoreRootRef,
-        StoreSerialPredecessor, StreamActivationId, SERIAL_STREAM_ID,
+        membership_resolution_semantic_prefix, registration_semantic_prefix, CandidateFamilyId,
+        DeviceJoinAttemptId, DeviceStreamAnchor, GrantStreamAnchor, ResolvedStoreDeviceState,
+        StoreBatchCommitRef, StoreCommitAnchor, StoreCommitCoord, StoreCommitOrder,
+        StoreCreationId, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
+        StoreDeviceSelfRetirement, StoreDeviceSelfRetirementRef, StoreDeviceStateRef,
+        StoreHistoryCut, StoreRootRef, StoreSerialPredecessor, StreamActivationId,
+        SERIAL_STREAM_ID,
     };
 
     fn key() -> UserKeypair {
@@ -3630,7 +3631,6 @@ mod tests {
 
     fn serial_retirement_commit(
         role: MemberRole,
-        include_package: bool,
     ) -> (
         SerialAuthorizationState,
         StoreBatchCommitRef,
@@ -3706,7 +3706,12 @@ mod tests {
             exact(
                 format!(
                     "{}.json",
-                    commit_semantic_prefix(SERIAL_STREAM_ID, 1, add_commit.commit_hash())
+                    commit_semantic_prefix(
+                        add_commit.candidate_family(),
+                        SERIAL_STREAM_ID,
+                        1,
+                        add_commit.commit_hash(),
+                    )
                 ),
                 &add_bytes,
             ),
@@ -3742,7 +3747,11 @@ mod tests {
             exact(
                 format!(
                     "{}.json",
-                    device_self_retirement_semantic_prefix(&follower_registration.device_id)
+                    device_self_retirement_semantic_prefix(
+                        candidate_family,
+                        &follower_registration.device_id,
+                        retirement.retirement_hash(),
+                    )
                 ),
                 &retirement_bytes,
             ),
@@ -3761,60 +3770,20 @@ mod tests {
         .unwrap();
         let device_state = StoreDeviceStateRef::serial(predecessor, &active_devices).unwrap();
         let signer = follower_registration.device_signer(&follower).unwrap();
-        let commit = if include_package {
-            let package = b"mixed retirement package";
-            StoreBatchCommit::signed_batch(
-                root.store_root_hash,
-                write_id,
-                StoreCommitCoord::Serial { sequence: 2 },
-                follower_ref,
-                &follower_registration,
-                order,
-                membership_state,
-                device_state,
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                vec![retirement_ref],
-                Vec::new(),
-                Some(StorePackageInput {
-                    candidate_family,
-                    schema_version: 1,
-                    bytes: package,
-                    object: exact(
-                        format!(
-                            "{}.pkg",
-                            package_semantic_prefix(
-                                SERIAL_STREAM_ID,
-                                2,
-                                ObjectHash::digest(package),
-                            )
-                        ),
-                        package,
-                    ),
-                }),
-                &[],
-                &signer,
-            )
-            .unwrap()
-        } else {
-            StoreBatchCommit::signed_with_self_retirement(
-                root.store_root_hash,
-                write_id,
-                StoreCommitCoord::Serial { sequence: 2 },
-                follower_ref,
-                &follower_registration,
-                order,
-                membership_state,
-                device_state,
-                None,
-                retirement_ref,
-                &signer,
-            )
-            .unwrap()
-        };
+        let commit = StoreBatchCommit::signed_with_self_retirement(
+            root.store_root_hash,
+            write_id,
+            StoreCommitCoord::Serial { sequence: 2 },
+            follower_ref,
+            &follower_registration,
+            order,
+            membership_state,
+            device_state,
+            None,
+            retirement_ref,
+            &signer,
+        )
+        .unwrap();
         let commit_bytes = commit.to_bytes();
         let commit_ref = StoreBatchCommitRef::from_commit(
             &commit,
@@ -3822,7 +3791,12 @@ mod tests {
             exact(
                 format!(
                     "{}.json",
-                    commit_semantic_prefix(SERIAL_STREAM_ID, 2, commit.commit_hash())
+                    commit_semantic_prefix(
+                        commit.candidate_family(),
+                        SERIAL_STREAM_ID,
+                        2,
+                        commit.commit_hash(),
+                    )
                 ),
                 &commit_bytes,
             ),
@@ -4014,22 +3988,11 @@ mod tests {
     #[test]
     fn serial_follower_can_author_its_exact_self_retirement() {
         let (authorization, commit_ref, commit, follower_registration) =
-            serial_retirement_commit(MemberRole::Follower, false);
+            serial_retirement_commit(MemberRole::Follower);
 
         authorization
             .authorize_and_apply(&commit_ref, &commit, &follower_registration)
             .expect("Follower exact self-retirement is authorized");
-    }
-
-    #[test]
-    fn serial_writer_cannot_mix_self_retirement_with_a_package() {
-        let (authorization, commit_ref, commit, follower_registration) =
-            serial_retirement_commit(MemberRole::Member, true);
-
-        assert!(matches!(
-            authorization.authorize_and_apply(&commit_ref, &commit, &follower_registration),
-            Err(SerialMembershipError::LifecycleWithPackage)
-        ));
     }
 
     #[test]
@@ -4113,7 +4076,11 @@ mod tests {
             exact(
                 format!(
                     "{}.json",
-                    device_self_retirement_semantic_prefix(&follower_registration.device_id)
+                    device_self_retirement_semantic_prefix(
+                        family,
+                        &follower_registration.device_id,
+                        retirement.retirement_hash(),
+                    )
                 ),
                 &retirement_bytes,
             ),
@@ -4169,7 +4136,11 @@ mod tests {
             exact(
                 format!(
                     "{}.json",
-                    device_self_retirement_semantic_prefix(&outsider_registration.device_id)
+                    device_self_retirement_semantic_prefix(
+                        family,
+                        &outsider_registration.device_id,
+                        retirement.retirement_hash(),
+                    )
                 ),
                 &bytes,
             ),

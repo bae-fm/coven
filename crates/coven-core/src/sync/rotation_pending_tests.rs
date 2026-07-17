@@ -210,7 +210,7 @@ async fn public_serial_invite_activates_one_control_only_commit() {
     .value;
     assert_eq!(commit.position(), commit_ref.position());
     assert!(matches!(
-        commit.control.as_ref(),
+        commit.control(),
         Some(crate::sync::store_commit::StoreControl::SerialMembership { .. })
     ));
     assert!(
@@ -219,7 +219,7 @@ async fn public_serial_invite_activates_one_control_only_commit() {
             .unwrap()
             .is_none()
     );
-    assert!(commit.store_package.is_none());
+    assert!(commit.store_package().is_none());
     assert!(db
         .serial_membership_state()
         .await
@@ -287,7 +287,7 @@ async fn public_serial_invite_activates_one_control_only_commit() {
     .unwrap()
     .value;
     assert!(matches!(
-        removal.control.as_ref(),
+        removal.control(),
         Some(
             crate::sync::store_commit::StoreControl::SerialMembershipAndKeyRotation {
                 generation: 2,
@@ -692,7 +692,7 @@ async fn assert_generation_two_opens_but_generation_one_does_not(
     .expect("the current cipher opens the exact Store commit")
     .value;
     assert!(
-        commit.store_package.is_some(),
+        commit.store_package().is_some(),
         "the published Store commit names the queued package",
     );
 

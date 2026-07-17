@@ -318,8 +318,8 @@ choice set when the home is created:
 
 - An **opaque** home (the default) encrypts every object under the store key
   and adds the `.enc` suffix beneath logical Store paths such as
-  `store-v1/packages/{device}/{seq}/{hash}/copies/{copy_id}.pkg` and
-  `store-v1/snapshots/{author}/{hash}/copies/{copy_id}.json`. It keys each blob
+  `store-v1/candidates/{family}/packages/{device}/{seq}/{hash}.pkg` and
+  `store-v1/snapshots/{author}/{hash}.json`. It keys each blob
   by its content-addressed shard `{namespace}/{ab}/{cd}/{id}`. The provider sees
   ciphertext under protocol coordinates and opaque blob keys.
 - A **browsable** home stores every object verbatim and drops the suffix, so the

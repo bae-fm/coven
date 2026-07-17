@@ -434,12 +434,13 @@ pub async fn load_commit_ref(
     reference: &StoreBatchCommitRef,
     author: &StoreDeviceRegistration,
 ) -> Result<VerifiedObject<StoreBatchCommit>, StoreObjectError> {
-    let stream_id = commit_stream_id(&reference.coord);
-    let semantic_prefix = commit_semantic_prefix(
-        &stream_id,
-        reference.coord.sequence(),
-        reference.commit_hash,
-    );
+    let semantic_prefix =
+        super::store_commit::semantic_prefix_from_exact_object(&reference.object, ".json")
+            .map_err(|source| StoreObjectError::InvalidObject {
+                semantic_prefix: "Store candidate commit".to_string(),
+                key: reference.object.slot().logical_key().to_string(),
+                source: Box::new(source),
+            })?;
     let context = ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
     load_exact_object(
         storage,
@@ -498,6 +499,7 @@ pub async fn load_store_package(
         .verify_commit(commit)
         .map_err(|source| StoreObjectError::InvalidObject {
             semantic_prefix: commit_semantic_prefix(
+                commit.candidate_family(),
                 &stream_id,
                 reference.coord.sequence(),
                 reference.commit_hash,
@@ -505,10 +507,15 @@ pub async fn load_store_package(
             key: reference.object.slot().logical_key().to_string(),
             source: Box::new(source),
         })?;
-    let Some(package) = commit.store_package.as_ref() else {
+    let Some(package) = commit.store_package() else {
         return Ok(None);
     };
-    let semantic_prefix = package_semantic_prefix(&stream_id, commit.seq(), package.content_hash);
+    let semantic_prefix = package_semantic_prefix(
+        commit.candidate_family(),
+        &stream_id,
+        commit.seq(),
+        package.content_hash,
+    );
     let context =
         ProtocolObjectContext::store(commit.store_root_hash, ProtocolObjectDomain::StorePackage);
     load_exact_object(

@@ -269,7 +269,7 @@ fn remove_incomplete_database(path: &Path) -> std::io::Result<()> {
 /// Uses `VACUUM INTO` to create a clean copy of the database at a temp path,
 /// then clears every non-synced table's data from that copy, reads the bytes,
 /// returns the DB image. Store publication hashes the image and appends it under
-/// `store-v1/snapshot-images/{author}/{image_hash}/copies/...`, binding the
+/// `store-v1/snapshot-images/{author}/{image_hash}.db`, binding the
 /// semantic prefix as authenticated encryption context.
 ///
 /// A snapshot is restored byte-for-byte as the joining device's `store.db`

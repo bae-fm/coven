@@ -504,7 +504,7 @@ async fn exact_package_targets(
             let (commit, _) = super::store_pull::load_commit_with_author(storage, root, &reference)
                 .await
                 .map_err(StoreReclaimError::Object)?;
-            if let Some(package) = commit.store_package.clone() {
+            if let Some(package) = commit.store_package().cloned() {
                 targets.insert(reference.clone(), package);
             }
             cursor = commit.order.predecessor().cloned();

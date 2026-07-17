@@ -61,7 +61,7 @@ pub const STORE_PROTOCOL_VERSION: u32 = 1;
 pub(crate) const STORE_PROTOCOL_PREFIX: &str = "store-v1/";
 pub const STORE_PROTOCOL_ROOT_SEMANTIC_PATH: &str = "store-v1/store-protocol-root";
 pub const STORE_PROTOCOL_ROOT_LOGICAL_KEY: &str = "store-v1/store-protocol-root.json";
-pub(crate) const STORE_COMMIT_PREFIX: &str = "store-v1/commits/";
+pub(crate) const STORE_CANDIDATE_PREFIX: &str = "store-v1/candidates/";
 pub(crate) const STORE_HEAD_PREFIX: &str = "store-v1/heads/";
 pub(crate) const STORE_ACK_PREFIX: &str = "store-v1/acks/";
 pub(crate) const STORE_DEVICE_REGISTRATION_PREFIX: &str = "store-v1/devices/";
@@ -72,13 +72,11 @@ pub(crate) const STORE_DEVICE_JOIN_CLEANUP_RECEIPT_PREFIX: &str =
 pub(crate) const STORE_PROVIDER_ACCESS_GRANT_PREFIX: &str = "store-v1/provider-access/grants/";
 pub(crate) const STORE_PROVIDER_ACCESS_WITHDRAWAL_PREFIX: &str =
     "store-v1/provider-access/withdrawals/";
-pub(crate) const STORE_DEVICE_SELF_RETIREMENT_PREFIX: &str = "store-v1/device-self-retirements/";
 pub(crate) const STORE_OWNER_RECOVERY_PREFIX: &str = "store-v1/recovery/";
 pub(crate) const STORE_SNAPSHOT_META_PREFIX: &str = "store-v1/snapshots/";
 pub(crate) const STORE_SNAPSHOT_IMAGE_PREFIX: &str = "store-v1/snapshot-images/";
 pub(crate) const STORE_MEMBERSHIP_ENTRY_PREFIX: &str = "store-v1/membership/entries/";
 pub(crate) const STORE_MEMBERSHIP_HEAD_PREFIX: &str = "store-v1/membership/heads/";
-pub(crate) const STORE_PACKAGE_PREFIX: &str = "store-v1/packages/";
 const STORE_SERIAL_HEAD_KEY: &str = "store-v1/heads/serial.json";
 
 const STORE_PROTOCOL_ROOT_DOMAIN: &[u8] = b"coven.store-protocol-root.v1\0";
@@ -304,11 +302,13 @@ impl StoreBatchCommitRef {
                 "Store commit reference coordinate differs from the signed commit".to_string(),
             ));
         }
-        Ok(Self {
+        let reference = Self {
             coord,
             commit_hash: commit.commit_hash(),
             object,
-        })
+        };
+        reference.verify_commit(commit)?;
+        Ok(reference)
     }
 
     pub fn verify_commit(&self, commit: &StoreBatchCommit) -> Result<(), StoreProtocolError> {
@@ -319,6 +319,22 @@ impl StoreBatchCommitRef {
             return Err(StoreProtocolError::Malformed(
                 "exact Store commit reference differs from the signed commit".to_string(),
             ));
+        }
+        let stream_id = commit_stream_id(&self.coord);
+        let expected = format!(
+            "{}.json",
+            commit_semantic_prefix(
+                commit.candidate_family(),
+                &stream_id,
+                self.coord.sequence(),
+                self.commit_hash,
+            )
+        );
+        if self.object.slot().logical_key() != expected {
+            return Err(StoreProtocolError::RelocatedSlot {
+                expected,
+                actual: self.object.slot().logical_key().to_string(),
+            });
         }
         Ok(())
     }
@@ -674,13 +690,15 @@ pub struct CircleHeadObjectRef {
     pub successor: SuccessorLink,
 }
 
-/// Exact recipient-visible access-envelope object named by a Store activation.
+/// Exact recipient-visible access envelope paired with its sealed leaf.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircleAccessEnvelopeObjectRef {
     pub owner_pubkey: String,
     pub recipient_slot: String,
     pub control_hash: ObjectHash,
+    pub leaf_id: AccessLeafId,
+    pub leaf_hash: ObjectHash,
     pub object: ExactObjectRef,
 }
 
@@ -694,6 +712,13 @@ pub struct CircleAccessLeafObjectRef {
     pub leaf_id: AccessLeafId,
     pub leaf_hash: ObjectHash,
     pub object: ExactObjectRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircleAccessObjectRef {
+    pub leaf: CircleAccessLeafObjectRef,
+    pub envelope: CircleAccessEnvelopeObjectRef,
 }
 
 /// Exact Circle-metadata object and the epoch key that must open it.
@@ -720,8 +745,7 @@ pub struct CircleActivationObjects {
     pub metadata_entries: BTreeMap<CircleMetadataCoord, CircleMetadataObjectRef>,
     #[serde(with = "ordered_map_entries")]
     pub metadata_heads: BTreeMap<CircleMetadataHeadRef, CircleHeadObjectRef>,
-    pub access_envelopes: Vec<CircleAccessEnvelopeObjectRef>,
-    pub access_leaves: Vec<CircleAccessLeafObjectRef>,
+    pub access: Vec<CircleAccessObjectRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -862,6 +886,85 @@ impl StoreControl {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CandidateObjectManifest {
+    pub family: CandidateFamilyId,
+    pub objects: Vec<CandidateExclusiveObjectRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CandidateExclusiveObjectRef {
+    StorePackage(StorePackageRef),
+    CirclePackage(CirclePackageRef),
+    CircleAccess {
+        circle_id: CircleId,
+        access: CircleAccessObjectRef,
+    },
+    SelfRetirement(StoreDeviceSelfRetirementRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreCommitOperations {
+    pub control: Option<StoreControl>,
+    pub device_join_attempts: Vec<DeviceJoinAttemptRef>,
+    pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
+    pub device_join_abandonments: Vec<super::device_join::DeviceJoinAbandonmentRef>,
+    pub device_join_cleanup_receipts: Vec<super::device_join::DeviceJoinCleanupReceiptRef>,
+    pub provider_access_grants: Vec<super::provider::StoreMemberProviderAccessGrantRef>,
+    pub provider_access_withdrawals:
+        Vec<super::provider::StoreMemberProviderAccessWithdrawalReceiptRef>,
+    pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
+    pub circle_controls: Vec<CircleControlRef>,
+    pub store_package: Option<StorePackageRef>,
+    pub circle_packages: Vec<CirclePackageRef>,
+}
+
+impl StoreCommitOperations {
+    fn is_empty(&self) -> bool {
+        self.control.is_none()
+            && self.device_join_attempts.is_empty()
+            && self.device_join_outcomes.is_empty()
+            && self.device_join_abandonments.is_empty()
+            && self.device_join_cleanup_receipts.is_empty()
+            && self.provider_access_grants.is_empty()
+            && self.provider_access_withdrawals.is_empty()
+            && self.device_registrations.is_empty()
+            && self.circle_controls.is_empty()
+            && self.store_package.is_none()
+            && self.circle_packages.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreCommitBody {
+    Operations(StoreCommitOperations),
+    SelfRetirement {
+        retirement: StoreDeviceSelfRetirementRef,
+    },
+    SerialRecoveryActivation {
+        activation: SerialRecoveryActivation,
+    },
+}
+
+pub struct StoreCommitOperationsInput<'a> {
+    pub control: Option<StoreControl>,
+    pub device_join_attempts: Vec<DeviceJoinAttemptRef>,
+    pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
+    pub device_join_abandonments: Vec<super::device_join::DeviceJoinAbandonmentRef>,
+    pub device_join_cleanup_receipts: Vec<super::device_join::DeviceJoinCleanupReceiptRef>,
+    pub provider_access_grants: Vec<super::provider::StoreMemberProviderAccessGrantRef>,
+    pub provider_access_withdrawals:
+        Vec<super::provider::StoreMemberProviderAccessWithdrawalReceiptRef>,
+    pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
+    pub circle_controls: Vec<CircleControlRef>,
+    pub store_package: Option<StorePackageInput<'a>>,
+    pub circle_packages: &'a [CirclePackageInput<'a>],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoreBatchCommit {
     pub version: u32,
     pub store_root_hash: ObjectHash,
@@ -871,23 +974,8 @@ pub struct StoreBatchCommit {
     pub membership_state: StoreMembershipStateRef,
     pub device_state: StoreDeviceStateRef,
     pub membership_authority: Option<MembershipGrantCreationAuthority>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub control: Option<StoreControl>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub serial_recovery_activation: Option<SerialRecoveryActivation>,
-    pub device_join_attempts: Vec<DeviceJoinAttemptRef>,
-    pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
-    pub device_join_abandonments: Vec<super::device_join::DeviceJoinAbandonmentRef>,
-    pub device_join_cleanup_receipts: Vec<super::device_join::DeviceJoinCleanupReceiptRef>,
-    pub provider_access_grants: Vec<super::provider::StoreMemberProviderAccessGrantRef>,
-    pub provider_access_withdrawals:
-        Vec<super::provider::StoreMemberProviderAccessWithdrawalReceiptRef>,
-    pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
-    pub device_retirements: Vec<StoreDeviceSelfRetirementRef>,
-    pub circle_controls: Vec<CircleControlRef>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub store_package: Option<StorePackageRef>,
-    pub circle_packages: Vec<CirclePackageRef>,
+    pub candidate_objects: CandidateObjectManifest,
+    pub body: StoreCommitBody,
     pub signature: String,
 }
 
@@ -901,23 +989,8 @@ struct CommitSignedFields<'a> {
     membership_state: &'a StoreMembershipStateRef,
     device_state: &'a StoreDeviceStateRef,
     membership_authority: Option<&'a MembershipGrantCreationAuthority>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    control: Option<&'a StoreControl>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    serial_recovery_activation: Option<&'a SerialRecoveryActivation>,
-    device_join_attempts: &'a [DeviceJoinAttemptRef],
-    device_join_outcomes: &'a [DeviceJoinOutcomeRef],
-    device_join_abandonments: &'a [super::device_join::DeviceJoinAbandonmentRef],
-    device_join_cleanup_receipts: &'a [super::device_join::DeviceJoinCleanupReceiptRef],
-    provider_access_grants: &'a [super::provider::StoreMemberProviderAccessGrantRef],
-    provider_access_withdrawals:
-        &'a [super::provider::StoreMemberProviderAccessWithdrawalReceiptRef],
-    device_registrations: &'a [ActivatedStoreDeviceRegistrationRef],
-    device_retirements: &'a [StoreDeviceSelfRetirementRef],
-    circle_controls: &'a [CircleControlRef],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    store_package: Option<&'a StorePackageRef>,
-    circle_packages: &'a [CirclePackageRef],
+    candidate_objects: &'a CandidateObjectManifest,
+    body: &'a StoreCommitBody,
 }
 
 impl StoreBatchCommit {
@@ -936,6 +1009,107 @@ impl StoreBatchCommit {
             &self.write_id,
             &self.order,
         )
+    }
+
+    pub fn operations(&self) -> Option<&StoreCommitOperations> {
+        match &self.body {
+            StoreCommitBody::Operations(operations) => Some(operations),
+            StoreCommitBody::SelfRetirement { .. }
+            | StoreCommitBody::SerialRecoveryActivation { .. } => None,
+        }
+    }
+
+    pub fn control(&self) -> Option<&StoreControl> {
+        self.operations()
+            .and_then(|operations| operations.control.as_ref())
+    }
+
+    pub fn serial_recovery_activation(&self) -> Option<&SerialRecoveryActivation> {
+        match &self.body {
+            StoreCommitBody::SerialRecoveryActivation { activation } => Some(activation),
+            StoreCommitBody::Operations(_) | StoreCommitBody::SelfRetirement { .. } => None,
+        }
+    }
+
+    pub fn self_retirement(&self) -> Option<&StoreDeviceSelfRetirementRef> {
+        match &self.body {
+            StoreCommitBody::SelfRetirement { retirement } => Some(retirement),
+            StoreCommitBody::Operations(_) | StoreCommitBody::SerialRecoveryActivation { .. } => {
+                None
+            }
+        }
+    }
+
+    pub fn device_join_attempts(&self) -> &[DeviceJoinAttemptRef] {
+        self.operations()
+            .map_or(&[], |operations| operations.device_join_attempts.as_slice())
+    }
+
+    pub fn device_join_outcomes(&self) -> &[DeviceJoinOutcomeRef] {
+        self.operations()
+            .map_or(&[], |operations| operations.device_join_outcomes.as_slice())
+    }
+
+    pub fn device_join_abandonments(&self) -> &[super::device_join::DeviceJoinAbandonmentRef] {
+        self.operations().map_or(&[], |operations| {
+            operations.device_join_abandonments.as_slice()
+        })
+    }
+
+    pub fn device_join_cleanup_receipts(
+        &self,
+    ) -> &[super::device_join::DeviceJoinCleanupReceiptRef] {
+        self.operations().map_or(&[], |operations| {
+            operations.device_join_cleanup_receipts.as_slice()
+        })
+    }
+
+    pub fn provider_access_grants(&self) -> &[super::provider::StoreMemberProviderAccessGrantRef] {
+        self.operations().map_or(&[], |operations| {
+            operations.provider_access_grants.as_slice()
+        })
+    }
+
+    pub fn provider_access_withdrawals(
+        &self,
+    ) -> &[super::provider::StoreMemberProviderAccessWithdrawalReceiptRef] {
+        self.operations().map_or(&[], |operations| {
+            operations.provider_access_withdrawals.as_slice()
+        })
+    }
+
+    pub fn device_registrations(&self) -> &[ActivatedStoreDeviceRegistrationRef] {
+        match &self.body {
+            StoreCommitBody::Operations(operations) => operations.device_registrations.as_slice(),
+            StoreCommitBody::SerialRecoveryActivation { activation } => {
+                std::slice::from_ref(&activation.registration)
+            }
+            StoreCommitBody::SelfRetirement { .. } => &[],
+        }
+    }
+
+    pub fn device_retirements(&self) -> &[StoreDeviceSelfRetirementRef] {
+        match &self.body {
+            StoreCommitBody::SelfRetirement { retirement } => std::slice::from_ref(retirement),
+            StoreCommitBody::Operations(_) | StoreCommitBody::SerialRecoveryActivation { .. } => {
+                &[]
+            }
+        }
+    }
+
+    pub fn circle_controls(&self) -> &[CircleControlRef] {
+        self.operations()
+            .map_or(&[], |operations| operations.circle_controls.as_slice())
+    }
+
+    pub fn store_package(&self) -> Option<&StorePackageRef> {
+        self.operations()
+            .and_then(|operations| operations.store_package.as_ref())
+    }
+
+    pub fn circle_packages(&self) -> &[CirclePackageRef] {
+        self.operations()
+            .map_or(&[], |operations| operations.circle_packages.as_slice())
     }
 
     pub fn merge_dependencies(
@@ -964,7 +1138,7 @@ impl StoreBatchCommit {
         package: StorePackageInput<'_>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_batch(
+        Self::signed_operations(
             store_root_hash,
             write_id,
             coord,
@@ -974,14 +1148,19 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             membership_authority,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Some(package),
-            &[],
+            StoreCommitOperationsInput {
+                control: None,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: Some(package),
+                circle_packages: &[],
+            },
             signer,
         )
     }
@@ -1001,7 +1180,7 @@ impl StoreBatchCommit {
         package: Option<StorePackageInput<'_>>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_batch(
+        Self::signed_operations(
             store_root_hash,
             write_id,
             coord,
@@ -1011,14 +1190,19 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             membership_authority,
-            control,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            package,
-            &[],
+            StoreCommitOperationsInput {
+                control,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: package,
+                circle_packages: &[],
+            },
             signer,
         )
     }
@@ -1037,7 +1221,7 @@ impl StoreBatchCommit {
         device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_batch(
+        Self::signed_operations(
             store_root_hash,
             write_id,
             coord,
@@ -1047,14 +1231,19 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             membership_authority,
-            None,
-            Vec::new(),
-            Vec::new(),
-            device_registrations,
-            Vec::new(),
-            Vec::new(),
-            None,
-            &[],
+            StoreCommitOperationsInput {
+                control: None,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations,
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
             signer,
         )
     }
@@ -1072,28 +1261,29 @@ impl StoreBatchCommit {
         activation: SerialRecoveryActivation,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        let mut commit = Self::signed_with_registrations(
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            None,
+            signer,
+        )?;
+        validate_serial_recovery_activation(&order, &activation, &author_registration)?;
+        Self::finish_signed_body(
             store_root_hash,
             write_id,
-            coord,
             author_registration,
-            author,
             order,
             membership_state,
             device_state,
             None,
-            vec![activation.registration.clone()],
+            StoreCommitBody::SerialRecoveryActivation { activation },
             signer,
-        )?;
-        validate_serial_recovery_activation(
-            &commit.order,
-            &activation,
-            &commit.author_registration,
-        )?;
-        commit.serial_recovery_activation = Some(activation);
-        let (_, signature) = keys::sign_hex(signer, &commit.canonical_signed_bytes());
-        commit.signature = signature;
-        Ok(commit)
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1110,24 +1300,32 @@ impl StoreBatchCommit {
         retirement: StoreDeviceSelfRetirementRef,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_batch(
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            membership_authority.as_ref(),
+            signer,
+        )?;
+        validate_device_retirement_refs(
+            std::slice::from_ref(&retirement),
+            CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order),
+            &author_registration,
+            &order,
+        )?;
+        Self::finish_signed_body(
             store_root_hash,
             write_id,
-            coord,
             author_registration,
-            author,
             order,
             membership_state,
             device_state,
             membership_authority,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            vec![retirement],
-            Vec::new(),
-            None,
-            &[],
+            StoreCommitBody::SelfRetirement { retirement },
             signer,
         )
     }
@@ -1146,7 +1344,7 @@ impl StoreBatchCommit {
         device_join_attempts: Vec<DeviceJoinAttemptRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_batch(
+        Self::signed_operations(
             store_root_hash,
             write_id,
             coord,
@@ -1156,14 +1354,19 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             membership_authority,
-            None,
-            device_join_attempts,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            &[],
+            StoreCommitOperationsInput {
+                control: None,
+                device_join_attempts,
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
             signer,
         )
     }
@@ -1183,7 +1386,7 @@ impl StoreBatchCommit {
         device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_batch(
+        Self::signed_operations(
             store_root_hash,
             write_id,
             coord,
@@ -1193,14 +1396,19 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             membership_authority,
-            None,
-            Vec::new(),
-            device_join_outcomes,
-            device_registrations,
-            Vec::new(),
-            Vec::new(),
-            None,
-            &[],
+            StoreCommitOperationsInput {
+                control: None,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes,
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations,
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
             signer,
         )
     }
@@ -1219,7 +1427,7 @@ impl StoreBatchCommit {
         abandonments: Vec<super::device_join::DeviceJoinAbandonmentRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_batch_with_provider_access(
+        Self::signed_operations(
             store_root_hash,
             write_id,
             coord,
@@ -1229,18 +1437,19 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             membership_authority,
-            None,
-            Vec::new(),
-            Vec::new(),
-            abandonments,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            &[],
+            StoreCommitOperationsInput {
+                control: None,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: abandonments,
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
             signer,
         )
     }
@@ -1259,7 +1468,7 @@ impl StoreBatchCommit {
         receipts: Vec<super::device_join::DeviceJoinCleanupReceiptRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_batch_with_provider_access(
+        Self::signed_operations(
             store_root_hash,
             write_id,
             coord,
@@ -1269,18 +1478,19 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             membership_authority,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            receipts,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            &[],
+            StoreCommitOperationsInput {
+                control: None,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: receipts,
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
             signer,
         )
     }
@@ -1302,7 +1512,7 @@ impl StoreBatchCommit {
         >,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_batch_with_provider_access(
+        Self::signed_operations(
             store_root_hash,
             write_id,
             coord,
@@ -1312,24 +1522,25 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             membership_authority,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            provider_access_grants,
-            provider_access_withdrawals,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            &[],
+            StoreCommitOperationsInput {
+                control: None,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants,
+                provider_access_withdrawals,
+                device_registrations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
             signer,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn signed_batch(
+    pub fn signed_operations(
         store_root_hash: ObjectHash,
         write_id: WriteId,
         coord: StoreCommitCoord,
@@ -1339,87 +1550,33 @@ impl StoreBatchCommit {
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
         membership_authority: Option<MembershipGrantCreationAuthority>,
-        control: Option<StoreControl>,
-        device_join_attempts: Vec<DeviceJoinAttemptRef>,
-        device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
-        device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
-        device_retirements: Vec<StoreDeviceSelfRetirementRef>,
-        circle_controls: Vec<CircleControlRef>,
-        store_package_input: Option<StorePackageInput<'_>>,
-        circle_package_inputs: &[CirclePackageInput<'_>],
+        input: StoreCommitOperationsInput<'_>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        Self::signed_batch_with_provider_access(
+        validate_commit_envelope(
             store_root_hash,
-            write_id,
-            coord,
-            author_registration,
+            &coord,
+            &author_registration,
             author,
-            order,
-            membership_state,
-            device_state,
-            membership_authority,
+            &order,
+            &membership_state,
+            &device_state,
+            membership_authority.as_ref(),
+            signer,
+        )?;
+        let StoreCommitOperationsInput {
             control,
             device_join_attempts,
             device_join_outcomes,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            device_join_abandonments,
+            device_join_cleanup_receipts,
+            provider_access_grants,
+            provider_access_withdrawals,
             device_registrations,
-            device_retirements,
             circle_controls,
-            store_package_input,
-            circle_package_inputs,
-            signer,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn signed_batch_with_provider_access(
-        store_root_hash: ObjectHash,
-        write_id: WriteId,
-        coord: StoreCommitCoord,
-        author_registration: StoreDeviceRegistrationRef,
-        author: &StoreDeviceRegistration,
-        order: StoreCommitOrder,
-        membership_state: StoreMembershipStateRef,
-        device_state: StoreDeviceStateRef,
-        membership_authority: Option<MembershipGrantCreationAuthority>,
-        control: Option<StoreControl>,
-        device_join_attempts: Vec<DeviceJoinAttemptRef>,
-        device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
-        device_join_abandonments: Vec<super::device_join::DeviceJoinAbandonmentRef>,
-        device_join_cleanup_receipts: Vec<super::device_join::DeviceJoinCleanupReceiptRef>,
-        provider_access_grants: Vec<super::provider::StoreMemberProviderAccessGrantRef>,
-        provider_access_withdrawals: Vec<
-            super::provider::StoreMemberProviderAccessWithdrawalReceiptRef,
-        >,
-        device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
-        device_retirements: Vec<StoreDeviceSelfRetirementRef>,
-        circle_controls: Vec<CircleControlRef>,
-        store_package_input: Option<StorePackageInput<'_>>,
-        circle_package_inputs: &[CirclePackageInput<'_>],
-        signer: &UserKeypair,
-    ) -> Result<Self, StoreProtocolError> {
-        author_registration.verify_registration(author)?;
-        if keys::public_key_hex(signer) != author.device_signing_pubkey {
-            return Err(StoreProtocolError::InvalidSignature);
-        }
-        let seq = order.seq();
-        if seq == 0 {
-            return Err(StoreProtocolError::InvalidSequence(seq));
-        }
-        validate_commit_order(&order)?;
-        validate_commit_predecessor_states(&order, &membership_state, &device_state)?;
-        if coord.sequence() != seq || coord.policy() != order.policy() {
-            return Err(StoreProtocolError::Malformed(
-                "Store commit coordinate disagrees with its order".to_string(),
-            ));
-        }
-        if let Some(authority) = membership_authority.as_ref() {
-            validate_membership_authority(authority)?;
-        }
+            store_package,
+            circle_packages,
+        } = input;
         validate_control(
             order.policy(),
             store_root_hash,
@@ -1427,17 +1584,22 @@ impl StoreBatchCommit {
             control.as_ref(),
         )?;
         let stream_id = commit_stream_id(&coord);
+        let seq = order.seq();
         let candidate_family =
             CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
-        let store_package = store_package_input
+        let store_package = store_package
             .map(|input| {
                 if input.candidate_family != candidate_family {
                     return Err(StoreProtocolError::Malformed(
                         "Store package candidate family differs from its commit".to_string(),
                     ));
                 }
-                let semantic_prefix =
-                    package_semantic_prefix(&stream_id, seq, ObjectHash::digest(input.bytes));
+                let semantic_prefix = package_semantic_prefix(
+                    candidate_family,
+                    &stream_id,
+                    seq,
+                    ObjectHash::digest(input.bytes),
+                );
                 package_ref(&semantic_prefix, &input)
             })
             .transpose()?;
@@ -1447,14 +1609,8 @@ impl StoreBatchCommit {
         validate_device_join_cleanup_receipt_refs(&device_join_cleanup_receipts)?;
         validate_provider_access_refs(&provider_access_grants, &provider_access_withdrawals)?;
         validate_device_registration_refs(&device_registrations)?;
-        validate_device_retirement_refs(
-            &device_retirements,
-            candidate_family,
-            &author_registration,
-            &order,
-        )?;
         let mut seen_circles = BTreeSet::new();
-        let circle_packages = circle_package_inputs
+        let circle_packages = circle_packages
             .iter()
             .map(|input| {
                 if !seen_circles.insert(input.circle_id) {
@@ -1468,6 +1624,7 @@ impl StoreBatchCommit {
                 }
                 let semantic_prefix = circle_package_semantic_prefix(
                     input.circle_id,
+                    candidate_family,
                     &stream_id,
                     seq,
                     ObjectHash::digest(input.package.bytes),
@@ -1490,13 +1647,54 @@ impl StoreBatchCommit {
             && provider_access_grants.is_empty()
             && provider_access_withdrawals.is_empty()
             && device_registrations.is_empty()
-            && device_retirements.is_empty()
             && circle_controls.is_empty()
             && store_package.is_none()
             && circle_packages.is_empty()
         {
             return Err(StoreProtocolError::EmptyBatch);
         }
+        let operations = StoreCommitOperations {
+            control,
+            device_join_attempts,
+            device_join_outcomes,
+            device_join_abandonments,
+            device_join_cleanup_receipts,
+            provider_access_grants,
+            provider_access_withdrawals,
+            device_registrations,
+            circle_controls,
+            store_package,
+            circle_packages,
+        };
+        Self::finish_signed_body(
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitBody::Operations(operations),
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_signed_body(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        author_registration: StoreDeviceRegistrationRef,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: Option<MembershipGrantCreationAuthority>,
+        body: StoreCommitBody,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        let family =
+            CandidateFamilyId::derive(store_root_hash, &author_registration, &write_id, &order);
+        validate_commit_body(&body, family, &author_registration, &order)?;
+        let candidate_objects = candidate_manifest(family, &body)?;
         let mut commit = Self {
             version: STORE_PROTOCOL_VERSION,
             store_root_hash,
@@ -1506,19 +1704,8 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             membership_authority,
-            control,
-            serial_recovery_activation: None,
-            device_join_attempts,
-            device_join_outcomes,
-            device_join_abandonments,
-            device_join_cleanup_receipts,
-            provider_access_grants,
-            provider_access_withdrawals,
-            device_registrations,
-            device_retirements,
-            circle_controls,
-            store_package,
-            circle_packages,
+            candidate_objects,
+            body,
             signature: String::new(),
         };
         let (_, signature) = keys::sign_hex(signer, &commit.canonical_signed_bytes());
@@ -1536,19 +1723,8 @@ impl StoreBatchCommit {
             membership_state: &self.membership_state,
             device_state: &self.device_state,
             membership_authority: self.membership_authority.as_ref(),
-            control: self.control.as_ref(),
-            serial_recovery_activation: self.serial_recovery_activation.as_ref(),
-            device_join_attempts: &self.device_join_attempts,
-            device_join_outcomes: &self.device_join_outcomes,
-            device_join_abandonments: &self.device_join_abandonments,
-            device_join_cleanup_receipts: &self.device_join_cleanup_receipts,
-            provider_access_grants: &self.provider_access_grants,
-            provider_access_withdrawals: &self.provider_access_withdrawals,
-            device_registrations: &self.device_registrations,
-            device_retirements: &self.device_retirements,
-            circle_controls: &self.circle_controls,
-            store_package: self.store_package.as_ref(),
-            circle_packages: &self.circle_packages,
+            candidate_objects: &self.candidate_objects,
+            body: &self.body,
         };
         domain_json(COMMIT_DOMAIN, &fields)
     }
@@ -1607,14 +1783,15 @@ impl StoreBatchCommit {
             });
         }
         self.author_registration.verify_registration(author)?;
-        if let Some(package) = &self.store_package {
+        let family = self.candidate_family();
+        if let Some(package) = self.store_package() {
             if package.candidate_family != self.candidate_family() {
                 return Err(StoreProtocolError::Malformed(
                     "Store package candidate family differs from its commit".to_string(),
                 ));
             }
             let expected =
-                package_semantic_prefix(&stream_id, self.order.seq(), package.content_hash);
+                package_semantic_prefix(family, &stream_id, self.order.seq(), package.content_hash);
             if package.object.slot().logical_key() != format!("{expected}.pkg") {
                 return Err(StoreProtocolError::RelocatedPackage {
                     expected,
@@ -1623,7 +1800,7 @@ impl StoreBatchCommit {
             }
         }
         let mut seen_circles = BTreeSet::new();
-        for circle_package in &self.circle_packages {
+        for circle_package in self.circle_packages() {
             if circle_package.package.candidate_family != self.candidate_family() {
                 return Err(StoreProtocolError::Malformed(
                     "Circle package candidate family differs from its commit".to_string(),
@@ -1637,6 +1814,7 @@ impl StoreBatchCommit {
             validate_circle_control_coord(self.policy(), &circle_package.control)?;
             let expected = circle_package_semantic_prefix(
                 circle_package.circle_id,
+                family,
                 &stream_id,
                 self.seq(),
                 circle_package.package.content_hash,
@@ -1654,50 +1832,11 @@ impl StoreBatchCommit {
                 });
             }
         }
-        validate_circle_control_refs(self.policy(), &self.circle_controls)?;
-        validate_device_join_attempt_refs(&self.device_join_attempts)?;
-        validate_device_join_outcome_refs(&self.device_join_outcomes)?;
-        validate_device_join_abandonment_refs(&self.device_join_abandonments)?;
-        validate_device_join_cleanup_receipt_refs(&self.device_join_cleanup_receipts)?;
-        validate_provider_access_refs(
-            &self.provider_access_grants,
-            &self.provider_access_withdrawals,
-        )?;
-        validate_device_registration_refs(&self.device_registrations)?;
-        if let Some(activation) = &self.serial_recovery_activation {
-            validate_serial_recovery_activation(
-                &self.order,
-                activation,
-                &self.author_registration,
-            )?;
-            if self.device_registrations.as_slice()
-                != std::slice::from_ref(&activation.registration)
-            {
-                return Err(StoreProtocolError::Malformed(
-                    "Serial recovery activation differs from commit registrations".to_string(),
-                ));
-            }
-        }
-        validate_device_retirement_refs(
-            &self.device_retirements,
-            self.candidate_family(),
-            &self.author_registration,
-            &self.order,
-        )?;
-        if self.control.is_none()
-            && self.device_join_attempts.is_empty()
-            && self.device_join_outcomes.is_empty()
-            && self.device_join_abandonments.is_empty()
-            && self.device_join_cleanup_receipts.is_empty()
-            && self.provider_access_grants.is_empty()
-            && self.provider_access_withdrawals.is_empty()
-            && self.device_registrations.is_empty()
-            && self.device_retirements.is_empty()
-            && self.circle_controls.is_empty()
-            && self.store_package.is_none()
-            && self.circle_packages.is_empty()
-        {
-            return Err(StoreProtocolError::EmptyBatch);
+        validate_commit_body(&self.body, family, &self.author_registration, &self.order)?;
+        if self.candidate_objects != candidate_manifest(family, &self.body)? {
+            return Err(StoreProtocolError::Malformed(
+                "candidate object manifest differs from the exact commit body graph".to_string(),
+            ));
         }
         validate_commit_order(&self.order)?;
         validate_commit_predecessor_states(
@@ -1721,8 +1860,7 @@ impl StoreBatchCommit {
 
     pub fn verify_store_package(&self, package_bytes: &[u8]) -> Result<(), StoreProtocolError> {
         let package = self
-            .store_package
-            .as_ref()
+            .store_package()
             .ok_or(StoreProtocolError::MissingStorePackage)?;
         verify_package_ref(package, package_bytes)
     }
@@ -1733,12 +1871,278 @@ impl StoreBatchCommit {
         package_bytes: &[u8],
     ) -> Result<(), StoreProtocolError> {
         let package = self
-            .circle_packages
+            .circle_packages()
             .iter()
             .find(|package| package.circle_id == circle_id)
             .ok_or(StoreProtocolError::MissingCirclePackage(circle_id))?;
         verify_package_ref(&package.package, package_bytes)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_commit_envelope(
+    store_root_hash: ObjectHash,
+    coord: &StoreCommitCoord,
+    author_registration: &StoreDeviceRegistrationRef,
+    author: &StoreDeviceRegistration,
+    order: &StoreCommitOrder,
+    membership_state: &StoreMembershipStateRef,
+    device_state: &StoreDeviceStateRef,
+    membership_authority: Option<&MembershipGrantCreationAuthority>,
+    signer: &UserKeypair,
+) -> Result<(), StoreProtocolError> {
+    author_registration.verify_registration(author)?;
+    if keys::public_key_hex(signer) != author.device_signing_pubkey {
+        return Err(StoreProtocolError::InvalidSignature);
+    }
+    if order.seq() == 0 {
+        return Err(StoreProtocolError::InvalidSequence(0));
+    }
+    validate_commit_order(order)?;
+    validate_commit_predecessor_states(order, membership_state, device_state)?;
+    if coord.sequence() != order.seq() || coord.policy() != order.policy() {
+        return Err(StoreProtocolError::Malformed(
+            "Store commit coordinate disagrees with its order".to_string(),
+        ));
+    }
+    if let Some(authority) = membership_authority {
+        validate_membership_authority(authority)?;
+    }
+    if store_root_hash != author.store_root.store_root_hash {
+        return Err(StoreProtocolError::StoreRootMismatch {
+            expected: store_root_hash,
+            actual: author.store_root.store_root_hash,
+        });
+    }
+    Ok(())
+}
+
+fn validate_commit_body(
+    body: &StoreCommitBody,
+    family: CandidateFamilyId,
+    author: &StoreDeviceRegistrationRef,
+    order: &StoreCommitOrder,
+) -> Result<(), StoreProtocolError> {
+    match body {
+        StoreCommitBody::Operations(operations) => {
+            if operations.is_empty() {
+                return Err(StoreProtocolError::EmptyBatch);
+            }
+            validate_circle_control_refs(order.policy(), &operations.circle_controls)?;
+            validate_device_join_attempt_refs(&operations.device_join_attempts)?;
+            validate_device_join_outcome_refs(&operations.device_join_outcomes)?;
+            validate_device_join_abandonment_refs(&operations.device_join_abandonments)?;
+            validate_device_join_cleanup_receipt_refs(&operations.device_join_cleanup_receipts)?;
+            validate_provider_access_refs(
+                &operations.provider_access_grants,
+                &operations.provider_access_withdrawals,
+            )?;
+            validate_device_registration_refs(&operations.device_registrations)?;
+        }
+        StoreCommitBody::SelfRetirement { retirement } => {
+            validate_device_retirement_refs(
+                std::slice::from_ref(retirement),
+                family,
+                author,
+                order,
+            )?;
+        }
+        StoreCommitBody::SerialRecoveryActivation { activation } => {
+            validate_serial_recovery_activation(order, activation, author)?;
+        }
+    }
+    Ok(())
+}
+
+fn candidate_manifest(
+    family: CandidateFamilyId,
+    body: &StoreCommitBody,
+) -> Result<CandidateObjectManifest, StoreProtocolError> {
+    let mut objects = Vec::new();
+    match body {
+        StoreCommitBody::Operations(operations) => {
+            objects.extend(
+                operations
+                    .store_package
+                    .iter()
+                    .cloned()
+                    .map(CandidateExclusiveObjectRef::StorePackage),
+            );
+            objects.extend(
+                operations
+                    .circle_packages
+                    .iter()
+                    .cloned()
+                    .map(CandidateExclusiveObjectRef::CirclePackage),
+            );
+            for control in &operations.circle_controls {
+                let circle_id = control.circle_id();
+                if control
+                    .objects()
+                    .access
+                    .iter()
+                    .any(|access| access.envelope.control_hash != control.control().control_hash())
+                {
+                    return Err(StoreProtocolError::Malformed(
+                        "Circle access envelope differs from its activating control".to_string(),
+                    ));
+                }
+                objects.extend(
+                    control.objects().access.iter().cloned().map(|access| {
+                        CandidateExclusiveObjectRef::CircleAccess { circle_id, access }
+                    }),
+                );
+            }
+        }
+        StoreCommitBody::SelfRetirement { retirement } => {
+            objects.push(CandidateExclusiveObjectRef::SelfRetirement(
+                retirement.clone(),
+            ));
+        }
+        StoreCommitBody::SerialRecoveryActivation { .. } => {}
+    }
+    objects.sort_by_cached_key(|object| {
+        serde_json::to_vec(object).expect("candidate object serialization cannot fail")
+    });
+    let mut exact_refs = BTreeSet::new();
+    let mut access_keys = BTreeSet::new();
+    for object in &objects {
+        validate_candidate_object_path(family, object)?;
+        match object {
+            CandidateExclusiveObjectRef::CircleAccess { circle_id, access } => {
+                let key = (
+                    *circle_id,
+                    access.leaf.owner_pubkey.clone(),
+                    access.leaf.recipient_slot.clone(),
+                    access.envelope.control_hash,
+                );
+                if !access_keys.insert(key) {
+                    return Err(StoreProtocolError::Malformed(
+                        "candidate object manifest repeats a Circle access semantic key"
+                            .to_string(),
+                    ));
+                }
+                insert_candidate_exact_ref(&mut exact_refs, &access.leaf.object)?;
+                insert_candidate_exact_ref(&mut exact_refs, &access.envelope.object)?;
+            }
+            CandidateExclusiveObjectRef::StorePackage(reference) => {
+                insert_candidate_exact_ref(&mut exact_refs, &reference.object)?;
+            }
+            CandidateExclusiveObjectRef::CirclePackage(reference) => {
+                insert_candidate_exact_ref(&mut exact_refs, &reference.package.object)?;
+            }
+            CandidateExclusiveObjectRef::SelfRetirement(reference) => {
+                insert_candidate_exact_ref(&mut exact_refs, &reference.object)?;
+            }
+        }
+    }
+    Ok(CandidateObjectManifest { family, objects })
+}
+
+fn insert_candidate_exact_ref<'a>(
+    exact_refs: &mut BTreeSet<&'a ExactObjectRef>,
+    object: &'a ExactObjectRef,
+) -> Result<(), StoreProtocolError> {
+    if !exact_refs.insert(object) {
+        return Err(StoreProtocolError::Malformed(
+            "candidate object manifest repeats an exact object reference".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_candidate_object_path(
+    family: CandidateFamilyId,
+    candidate: &CandidateExclusiveObjectRef,
+) -> Result<(), StoreProtocolError> {
+    let (expected, object) = match candidate {
+        CandidateExclusiveObjectRef::StorePackage(reference) => {
+            if reference.candidate_family != family {
+                return Err(StoreProtocolError::Malformed(
+                    "Store package candidate family differs from its manifest".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        CandidateExclusiveObjectRef::CirclePackage(reference) => {
+            if reference.package.candidate_family != family {
+                return Err(StoreProtocolError::Malformed(
+                    "Circle package candidate family differs from its manifest".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        CandidateExclusiveObjectRef::CircleAccess { circle_id, access } => {
+            validate_circle_access_ref(*circle_id, family, access)?;
+            return Ok(());
+        }
+        CandidateExclusiveObjectRef::SelfRetirement(reference) => (
+            format!(
+                "{}.json",
+                device_self_retirement_semantic_prefix(
+                    family,
+                    &reference.target.device_id,
+                    reference.retirement_hash,
+                )
+            ),
+            &reference.object,
+        ),
+    };
+    if object.slot().logical_key() != expected {
+        return Err(StoreProtocolError::RelocatedCandidateObject {
+            expected,
+            actual: object.slot().logical_key().to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_circle_access_ref(
+    circle_id: CircleId,
+    family: CandidateFamilyId,
+    access: &CircleAccessObjectRef,
+) -> Result<(), StoreProtocolError> {
+    if access.leaf.owner_pubkey != access.envelope.owner_pubkey
+        || access.leaf.recipient_slot != access.envelope.recipient_slot
+        || access.leaf.leaf_id != access.envelope.leaf_id
+        || access.leaf.leaf_hash != access.envelope.leaf_hash
+        || access.leaf.leaf_hash != access.leaf.object.stored_hash()
+    {
+        return Err(StoreProtocolError::Malformed(
+            "paired Circle access leaf and envelope references differ".to_string(),
+        ));
+    }
+    let leaf_expected = circle_access_leaf_semantic_prefix(
+        circle_id,
+        family,
+        &access.leaf.owner_pubkey,
+        access.leaf.epoch_id,
+        &access.leaf.recipient_slot,
+        access.leaf.leaf_id,
+    );
+    if access.leaf.object.slot().logical_key() != leaf_expected {
+        return Err(StoreProtocolError::RelocatedCandidateObject {
+            expected: leaf_expected,
+            actual: access.leaf.object.slot().logical_key().to_string(),
+        });
+    }
+    let envelope_expected = format!(
+        "{}.json",
+        circle_access_envelope_semantic_prefix(
+            circle_id,
+            family,
+            &access.envelope.owner_pubkey,
+            &access.envelope.recipient_slot,
+            access.envelope.control_hash,
+        )
+    );
+    if access.envelope.object.slot().logical_key() != envelope_expected {
+        return Err(StoreProtocolError::RelocatedCandidateObject {
+            expected: envelope_expected,
+            actual: access.envelope.object.slot().logical_key().to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn package_ref(
@@ -1845,7 +2249,7 @@ fn validate_parsed_control(
         commit.policy(),
         commit.store_root_hash,
         &author.author_pubkey,
-        commit.control.as_ref(),
+        commit.control(),
     )
 }
 
@@ -3019,7 +3423,11 @@ impl StoreDeviceSelfRetirement {
         {
             return Err(StoreProtocolError::DeviceStateMismatch);
         }
-        let prefix = device_self_retirement_semantic_prefix(&expected.target.device_id);
+        let prefix = device_self_retirement_semantic_prefix(
+            expected.candidate_family,
+            &expected.target.device_id,
+            expected.retirement_hash,
+        );
         if expected.object.slot().logical_key() != format!("{prefix}.json") {
             return Err(StoreProtocolError::RelocatedSlot {
                 expected: prefix,
@@ -4257,6 +4665,8 @@ pub enum StoreProtocolError {
     RelocatedSlot { expected: String, actual: String },
     #[error("Store package names key {actual:?}, expected {expected:?}")]
     RelocatedPackage { expected: String, actual: String },
+    #[error("candidate object names key {actual:?}, expected {expected:?}")]
+    RelocatedCandidateObject { expected: String, actual: String },
     #[error("Store protocol root hash is {actual}, expected {expected}")]
     StoreRootMismatch {
         expected: ObjectHash,
@@ -4402,8 +4812,42 @@ pub fn device_join_attempt_semantic_prefix(attempt_id: DeviceJoinAttemptId) -> S
     format!("{STORE_DEVICE_JOIN_ATTEMPT_PREFIX}{}", attempt_id.0)
 }
 
-pub fn device_self_retirement_semantic_prefix(device_id: &StoreDeviceId) -> String {
-    format!("{STORE_DEVICE_SELF_RETIREMENT_PREFIX}{device_id}")
+pub fn device_self_retirement_semantic_prefix(
+    family: CandidateFamilyId,
+    device_id: &StoreDeviceId,
+    retirement_hash: ObjectHash,
+) -> String {
+    format!(
+        "{STORE_CANDIDATE_PREFIX}{}/device-self-retirements/{device_id}/{retirement_hash}",
+        family.as_hash()
+    )
+}
+
+pub fn circle_access_leaf_semantic_prefix(
+    circle_id: CircleId,
+    family: CandidateFamilyId,
+    owner_pubkey: &str,
+    epoch_id: CircleEpochId,
+    recipient_slot: &str,
+    leaf_id: AccessLeafId,
+) -> String {
+    format!(
+        "circles/{circle_id}/candidates/{}/access-leaves/{owner_pubkey}/{epoch_id}/{recipient_slot}/{leaf_id}",
+        family.as_hash(),
+    )
+}
+
+pub fn circle_access_envelope_semantic_prefix(
+    circle_id: CircleId,
+    family: CandidateFamilyId,
+    owner_pubkey: &str,
+    recipient_slot: &str,
+    control_hash: ObjectHash,
+) -> String {
+    format!(
+        "circles/{circle_id}/candidates/{}/access-envelopes/{owner_pubkey}/{recipient_slot}/{control_hash}",
+        family.as_hash(),
+    )
 }
 
 pub fn device_join_outcome_semantic_prefix(attempt_id: DeviceJoinAttemptId) -> String {
@@ -4438,25 +4882,60 @@ pub fn owner_recovery_semantic_prefix(
     format!("{STORE_OWNER_RECOVERY_PREFIX}{owner_pubkey}/{owner_grant}/{sequence}")
 }
 
-pub fn package_semantic_prefix(device_id: &str, seq: u64, package_hash: ObjectHash) -> String {
-    format!("{STORE_PACKAGE_PREFIX}{device_id}/{seq}/{package_hash}")
-}
-
-pub fn circle_package_semantic_prefix(
-    circle_id: CircleId,
+pub fn package_semantic_prefix(
+    family: CandidateFamilyId,
     device_id: &str,
     seq: u64,
     package_hash: ObjectHash,
 ) -> String {
-    format!("circles/{circle_id}/packages/{device_id}/{seq}/{package_hash}")
+    format!(
+        "{STORE_CANDIDATE_PREFIX}{}/packages/{device_id}/{seq}/{package_hash}",
+        family.as_hash()
+    )
+}
+
+pub fn circle_package_semantic_prefix(
+    circle_id: CircleId,
+    family: CandidateFamilyId,
+    device_id: &str,
+    seq: u64,
+    package_hash: ObjectHash,
+) -> String {
+    format!(
+        "circles/{circle_id}/candidates/{}/packages/{device_id}/{seq}/{package_hash}",
+        family.as_hash()
+    )
 }
 
 pub fn commit_slot_prefix(device_id: &str, seq: u64) -> String {
-    format!("{STORE_COMMIT_PREFIX}{device_id}/{seq}")
+    format!("{STORE_CANDIDATE_PREFIX}*/commits/{device_id}/{seq}")
 }
 
-pub fn commit_semantic_prefix(device_id: &str, seq: u64, commit_hash: ObjectHash) -> String {
-    format!("{}/{commit_hash}", commit_slot_prefix(device_id, seq))
+pub fn commit_semantic_prefix(
+    family: CandidateFamilyId,
+    device_id: &str,
+    seq: u64,
+    commit_hash: ObjectHash,
+) -> String {
+    format!(
+        "{STORE_CANDIDATE_PREFIX}{}/commits/{device_id}/{seq}/{commit_hash}",
+        family.as_hash()
+    )
+}
+
+pub fn semantic_prefix_from_exact_object(
+    object: &ExactObjectRef,
+    extension: &str,
+) -> Result<String, StoreProtocolError> {
+    object
+        .slot()
+        .logical_key()
+        .strip_suffix(extension)
+        .map(str::to_string)
+        .ok_or_else(|| StoreProtocolError::RelocatedSlot {
+            expected: format!("candidate object ending in {extension}"),
+            actual: object.slot().logical_key().to_string(),
+        })
 }
 
 pub fn head_slot_prefix(device_id: &str, seq: u64) -> String {
@@ -4962,7 +5441,12 @@ mod tests {
         let package_object = exact(
             format!(
                 "{}.pkg",
-                package_semantic_prefix(SERIAL_STREAM_ID, 1, ObjectHash::digest(&package))
+                package_semantic_prefix(
+                    candidate_family,
+                    SERIAL_STREAM_ID,
+                    1,
+                    ObjectHash::digest(&package),
+                )
             ),
             &package,
         );
@@ -4993,7 +5477,12 @@ mod tests {
             exact(
                 format!(
                     "{}.json",
-                    commit_semantic_prefix(SERIAL_STREAM_ID, 1, commit.commit_hash())
+                    commit_semantic_prefix(
+                        commit.candidate_family(),
+                        SERIAL_STREAM_ID,
+                        1,
+                        commit.commit_hash(),
+                    )
                 ),
                 &commit_bytes,
             ),
@@ -5062,7 +5551,10 @@ mod tests {
         ));
 
         let mut tampered = fixture.commit.clone();
-        tampered
+        let StoreCommitBody::Operations(operations) = &mut tampered.body else {
+            panic!("fixture commit carries operations")
+        };
+        operations
             .store_package
             .as_mut()
             .expect("fixture has Store package")
@@ -5260,13 +5752,27 @@ mod tests {
             ),
         };
         let stream_id = AuthorStreamId::from_digest(ObjectHash::digest(b"other stream"));
+        let other_commit_hash = ObjectHash::digest(b"other commit");
         let other_commit = StoreBatchCommitRef {
             coord: StoreCommitCoord::MergeConcurrent {
                 stream_id,
                 sequence: 1,
             },
-            commit_hash: ObjectHash::digest(b"other commit"),
-            object: exact("store-v1/commits/other/1.json".to_string(), b"other commit"),
+            commit_hash: other_commit_hash,
+            object: exact(
+                format!(
+                    "{}.json",
+                    commit_semantic_prefix(
+                        CandidateFamilyId::from_hash(ObjectHash::digest(
+                            b"other commit candidate family",
+                        )),
+                        &stream_id.to_string(),
+                        1,
+                        other_commit_hash,
+                    )
+                ),
+                b"other commit",
+            ),
         };
         let other_cut =
             StoreHistoryCut::MergeConcurrent(BTreeMap::from([(stream_id, other_commit)]));
@@ -5391,22 +5897,236 @@ mod tests {
     }
 
     #[test]
-    fn store_only_commit_uses_the_multi_audience_batch_shape() {
+    fn operations_commit_uses_the_closed_body_and_signed_manifest_shape() {
         let fixture = fixture();
-        let value = serde_json::to_value(fixture.commit).expect("serialize Store commit");
+        let value = serde_json::to_value(&fixture.commit).expect("serialize Store commit");
 
         assert!(value.get("package").is_none());
-        assert!(value.get("store_package").is_some());
+        assert!(value.get("store_package").is_none());
+        assert!(value.get("device_registrations").is_none());
+        assert!(value.get("device_retirements").is_none());
+        assert!(value.get("circle_controls").is_none());
+        assert!(value.get("circle_packages").is_none());
+        let operations = value
+            .get("body")
+            .and_then(|body| body.get("operations"))
+            .expect("Store commit carries one closed operations body");
+        assert!(operations.get("store_package").is_some());
         assert_eq!(
-            value.get("device_registrations"),
+            operations.get("device_registrations"),
             Some(&serde_json::json!([]))
         );
         assert_eq!(
-            value.get("device_retirements"),
+            operations.get("circle_controls"),
             Some(&serde_json::json!([]))
         );
-        assert_eq!(value.get("circle_controls"), Some(&serde_json::json!([])));
-        assert_eq!(value.get("circle_packages"), Some(&serde_json::json!([])));
+        assert_eq!(
+            operations.get("circle_packages"),
+            Some(&serde_json::json!([]))
+        );
+        assert_eq!(
+            value
+                .get("candidate_objects")
+                .and_then(|manifest| manifest.get("family")),
+            Some(&serde_json::to_value(fixture.commit.candidate_family()).unwrap())
+        );
+    }
+
+    fn resign_commit(commit: &mut StoreBatchCommit, fixture: &Fixture) {
+        let signer = fixture.registration.device_signer(&fixture.signer).unwrap();
+        commit.signature = keys::sign_hex(&signer, &commit.canonical_signed_bytes()).1;
+    }
+
+    #[test]
+    fn commit_rejects_manifest_omission_invention_and_family_substitution() {
+        let fixture = fixture();
+
+        let mut omitted = fixture.commit.clone();
+        omitted.candidate_objects.objects.clear();
+        resign_commit(&mut omitted, &fixture);
+        assert!(matches!(
+            omitted.verify_at(
+                fixture.root_ref.store_root_hash,
+                &fixture.commit_ref.coord,
+                &fixture.registration,
+            ),
+            Err(StoreProtocolError::Malformed(reason))
+                if reason.contains("manifest differs")
+        ));
+
+        let mut invented = fixture.commit.clone();
+        invented
+            .candidate_objects
+            .objects
+            .push(invented.candidate_objects.objects[0].clone());
+        resign_commit(&mut invented, &fixture);
+        assert!(matches!(
+            invented.verify_at(
+                fixture.root_ref.store_root_hash,
+                &fixture.commit_ref.coord,
+                &fixture.registration,
+            ),
+            Err(StoreProtocolError::Malformed(reason))
+                if reason.contains("manifest differs")
+        ));
+
+        let mut substituted = fixture.commit.clone();
+        substituted.candidate_objects.family =
+            CandidateFamilyId::from_hash(ObjectHash::digest(b"substituted candidate family"));
+        resign_commit(&mut substituted, &fixture);
+        assert!(matches!(
+            substituted.verify_at(
+                fixture.root_ref.store_root_hash,
+                &fixture.commit_ref.coord,
+                &fixture.registration,
+            ),
+            Err(StoreProtocolError::Malformed(reason))
+                if reason.contains("manifest differs")
+        ));
+    }
+
+    #[test]
+    fn candidate_manifest_rejects_one_exact_object_reached_twice() {
+        let fixture = fixture();
+        let mut operations = fixture
+            .commit
+            .operations()
+            .expect("fixture commit carries operations")
+            .clone();
+        let package = operations
+            .store_package
+            .clone()
+            .expect("fixture commit carries a Store package");
+        operations.circle_packages.push(CirclePackageRef {
+            circle_id: CircleId::from_bytes([8; 16]),
+            control: CircleControlCoord::Serial {
+                author_pubkey: keys::public_key_hex(&fixture.signer),
+                generation: 1,
+                control_hash: ObjectHash::digest(b"duplicate exact object control"),
+            },
+            package,
+            key_fingerprint: KeyFingerprint::from_bytes([9; 8]),
+        });
+
+        assert!(matches!(
+            candidate_manifest(
+                fixture.commit.candidate_family(),
+                &StoreCommitBody::Operations(operations),
+            ),
+            Err(StoreProtocolError::Malformed(reason))
+                if reason.contains("repeats an exact object reference")
+        ));
+    }
+
+    #[test]
+    fn candidate_manifest_rejects_duplicate_circle_access_with_distinct_provider_ids() {
+        let fixture = fixture();
+        let family = fixture.commit.candidate_family();
+        let circle_id = CircleId::from_bytes([7; 16]);
+        let owner_pubkey = keys::public_key_hex(&fixture.signer);
+        let recipient_slot = "recipient-slot".to_string();
+        let ids = crate::id_provider::SequentialIdProvider::new("duplicate Circle access");
+        let epoch_id = CircleEpochId::generate(&ids);
+        let leaf_id = AccessLeafId::generate(&ids);
+        let leaf_hash = ObjectHash::digest(b"sealed access leaf");
+        let control_hash = ObjectHash::digest(b"Circle access control");
+        let leaf_key = circle_access_leaf_semantic_prefix(
+            circle_id,
+            family,
+            &owner_pubkey,
+            epoch_id,
+            &recipient_slot,
+            leaf_id,
+        );
+        let envelope_key = format!(
+            "{}.json",
+            circle_access_envelope_semantic_prefix(
+                circle_id,
+                family,
+                &owner_pubkey,
+                &recipient_slot,
+                control_hash,
+            )
+        );
+        let access = |provider_id: &str| CircleAccessObjectRef {
+            leaf: CircleAccessLeafObjectRef {
+                owner_pubkey: owner_pubkey.clone(),
+                epoch_id,
+                recipient_slot: recipient_slot.clone(),
+                leaf_id,
+                leaf_hash,
+                object: ExactObjectRef::new(
+                    ObjectSlot::opaque(leaf_key.clone(), format!("{provider_id}-leaf")).unwrap(),
+                    18,
+                    leaf_hash,
+                ),
+            },
+            envelope: CircleAccessEnvelopeObjectRef {
+                owner_pubkey: owner_pubkey.clone(),
+                recipient_slot: recipient_slot.clone(),
+                control_hash,
+                leaf_id,
+                leaf_hash,
+                object: ExactObjectRef::new(
+                    ObjectSlot::opaque(envelope_key.clone(), format!("{provider_id}-envelope"))
+                        .unwrap(),
+                    20,
+                    ObjectHash::digest(provider_id.as_bytes()),
+                ),
+            },
+        };
+        let control = CircleControlCoord::Serial {
+            author_pubkey: owner_pubkey.clone(),
+            generation: 1,
+            control_hash,
+        };
+        let mut operations = fixture
+            .commit
+            .operations()
+            .expect("fixture commit carries operations")
+            .clone();
+        operations.circle_controls.push(CircleControlRef::Serial {
+            circle_id,
+            control,
+            objects: CircleActivationObjects {
+                control: exact("circle-control.json".to_string(), b"control"),
+                control_head: None,
+                roster_entries: BTreeMap::new(),
+                roster_heads: BTreeMap::new(),
+                roster_resolutions: BTreeMap::new(),
+                metadata_entries: BTreeMap::new(),
+                metadata_heads: BTreeMap::new(),
+                access: vec![access("drive-file-a"), access("drive-file-b")],
+            },
+        });
+
+        assert!(matches!(
+            candidate_manifest(family, &StoreCommitBody::Operations(operations)),
+            Err(StoreProtocolError::Malformed(reason))
+                if reason.contains("repeats a Circle access semantic key")
+        ));
+    }
+
+    #[test]
+    fn commit_reference_constructor_rejects_relocated_exact_object() {
+        let fixture = fixture();
+        let bytes = fixture.commit.to_bytes();
+        let relocated = exact(
+            format!(
+                "store-v1/candidates/{}/packages/relocated.json",
+                fixture.commit.candidate_family().as_hash()
+            ),
+            &bytes,
+        );
+
+        assert!(matches!(
+            StoreBatchCommitRef::from_commit(
+                &fixture.commit,
+                fixture.commit_ref.coord.clone(),
+                relocated,
+            ),
+            Err(StoreProtocolError::RelocatedSlot { .. })
+        ));
     }
 
     #[test]
@@ -5441,7 +6161,11 @@ mod tests {
             exact(
                 format!(
                     "{}.json",
-                    device_self_retirement_semantic_prefix(&fixture.registration_ref.device_id)
+                    device_self_retirement_semantic_prefix(
+                        candidate_family,
+                        &fixture.registration_ref.device_id,
+                        retirement.retirement_hash(),
+                    )
                 ),
                 &retirement_bytes,
             ),
@@ -5469,7 +6193,10 @@ mod tests {
             &device_signer,
         )
         .unwrap();
-        assert_eq!(commit.device_retirements, vec![retirement_ref.clone()]);
+        assert_eq!(
+            commit.device_retirements(),
+            std::slice::from_ref(&retirement_ref)
+        );
 
         let active = ResolvedStoreDeviceState::founder(
             &fixture.root_ref,
@@ -5549,7 +6276,7 @@ mod tests {
         assert!(state
             .apply(
                 parsed
-                    .control
+                    .control()
                     .unwrap()
                     .serial_membership_entry()
                     .expect("membership control")

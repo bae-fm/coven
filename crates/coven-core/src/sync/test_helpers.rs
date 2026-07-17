@@ -855,11 +855,11 @@ pub async fn load_exact_materialized_commit(
         .read_protocol_object(
             &context,
             &reference.object,
-            &crate::sync::store_commit::commit_semantic_prefix(
-                stream_id,
-                sequence,
-                reference.commit_hash,
-            ),
+            &crate::sync::store_commit::semantic_prefix_from_exact_object(
+                &reference.object,
+                ".json",
+            )
+            .map_err(|error| error.to_string())?,
         )
         .await
         .map_err(|error| error.to_string())?;

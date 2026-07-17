@@ -1662,9 +1662,14 @@ impl SyncComponents {
                 })?)
             }
         };
-        super::circle_ops::resume_circle_operations(&self.db, &*self.storage, serial_coordination)
-            .await
-            .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))?;
+        super::circle_ops::resume_circle_operations(
+            &self.db,
+            &*self.storage,
+            serial_coordination,
+            &self.user_keypair,
+        )
+        .await
+        .map_err(|error| SyncCycleFailure::operation("resume circle operations", error))?;
         run_single_sync_cycle_with_coordination(
             &*self.storage,
             serial_coordination,

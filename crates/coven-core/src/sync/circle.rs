@@ -371,10 +371,27 @@ mod tests {
     use super::*;
     use crate::keys::{self, UserKeypair};
 
+    fn candidate_family(label: &str) -> super::super::store_commit::CandidateFamilyId {
+        super::super::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
+            label.as_bytes(),
+        ))
+    }
+
     fn exact_object(label: &str, bytes: &[u8]) -> super::super::storage::ExactObjectRef {
         super::super::storage::ExactObjectRef::new(
             crate::storage::cloud::ObjectSlot::logical(format!("store-v1/test/{label}.json"))
                 .unwrap(),
+            bytes.len() as u64,
+            ObjectHash::digest(bytes),
+        )
+    }
+
+    fn exact_logical_object(
+        logical_key: String,
+        bytes: &[u8],
+    ) -> super::super::storage::ExactObjectRef {
+        super::super::storage::ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(logical_key).unwrap(),
             bytes.len() as u64,
             ObjectHash::digest(bytes),
         )
@@ -608,8 +625,7 @@ mod tests {
             roster_resolutions: BTreeMap::new(),
             metadata_entries: BTreeMap::new(),
             metadata_heads: BTreeMap::new(),
-            access_envelopes: Vec::new(),
-            access_leaves: Vec::new(),
+            access: Vec::new(),
         }
     }
 
@@ -657,8 +673,10 @@ mod tests {
             ),
         ] {
             let ids = crate::id_provider::SequentialIdProvider::new("founder-circle");
+            let candidate_family = candidate_family("founder-circle");
             let creation = CircleCreation::founder(
                 ObjectHash::digest(b"store-root"),
+                candidate_family,
                 "device-a",
                 "Household",
                 "0000000001000-0000-device-a",
@@ -675,11 +693,13 @@ mod tests {
             assert!(creation.resolved_roster().verify());
             assert_eq!(creation.access.len(), 2);
             for access in &creation.access {
-                assert!(access.leaf.verify(&creation.control));
-                assert!(access.envelope.verify(&creation.control));
-                assert!(access
-                    .leaf
-                    .verify_envelope(&creation.control, &access.envelope));
+                assert!(access.leaf.verify(&creation.control, candidate_family));
+                assert!(access.envelope.verify(&creation.control, candidate_family));
+                assert!(access.leaf.verify_envelope(
+                    &creation.control,
+                    &access.envelope,
+                    candidate_family
+                ));
                 assert!(!access.leaf.bytes.windows(64).any(|window| {
                     window == creation.control.coord.control_hash().to_string().as_bytes()
                 }));
@@ -753,8 +773,10 @@ mod tests {
         ];
         let (membership, authority) = merge_membership_ref(&owner, &members, "access-verification");
         let ids = crate::id_provider::SequentialIdProvider::new("access-verification");
+        let candidate_family = candidate_family("access-verification");
         let creation = CircleCreation::founder(
             ObjectHash::digest(b"store-root"),
+            candidate_family,
             "device-a",
             "Household",
             "0000000001000-0000-device-a",
@@ -770,27 +792,47 @@ mod tests {
         wrong_store.store_root_hash = ObjectHash::digest(b"other-store");
 
         wrong_store.signature = keys::sign_hex(&owner, &wrong_store.canonical_bytes()).1;
-        assert!(!wrong_store.verify(&creation.control));
+        assert!(!wrong_store.verify(&creation.control, candidate_family));
+
+        let mut wrong_family_envelope = creation.access[0].envelope.clone();
+        wrong_family_envelope.candidate_family =
+            super::super::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
+                b"other access family",
+            ));
+        wrong_family_envelope.signature =
+            keys::sign_hex(&owner, &wrong_family_envelope.canonical_bytes()).1;
+        assert!(!wrong_family_envelope.verify(&creation.control, candidate_family));
+
+        let mut wrong_family_leaf = creation.access[0].leaf.clone();
+        wrong_family_leaf.value.candidate_family =
+            super::super::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
+                b"other leaf family",
+            ));
+        wrong_family_leaf.value.signature =
+            keys::sign_hex(&owner, &wrong_family_leaf.value.canonical_bytes()).1;
+        assert!(!wrong_family_leaf.verify(&creation.control, candidate_family));
 
         let mut non_owner = creation.access[0].envelope.clone();
         non_owner.owner_pubkey = peer_pubkey;
         non_owner.signature = keys::sign_hex(&peer, &non_owner.canonical_bytes()).1;
-        assert!(!non_owner.verify(&creation.control));
+        assert!(!non_owner.verify(&creation.control, candidate_family));
 
         let mut substituted_proof = creation.access[0].envelope.clone();
         substituted_proof.proof = creation.access[1].envelope.proof.clone();
         substituted_proof.signature =
             keys::sign_hex(&owner, &substituted_proof.canonical_bytes()).1;
-        assert!(!substituted_proof.verify(&creation.control));
+        assert!(!substituted_proof.verify(&creation.control, candidate_family));
 
         let mut substituted_leaf_id = creation.access[0].envelope.clone();
         substituted_leaf_id.leaf_id = creation.access[1].leaf.value.leaf_id;
         substituted_leaf_id.signature =
             keys::sign_hex(&owner, &substituted_leaf_id.canonical_bytes()).1;
-        assert!(substituted_leaf_id.verify(&creation.control));
-        assert!(!creation.access[0]
-            .leaf
-            .verify_envelope(&creation.control, &substituted_leaf_id));
+        assert!(substituted_leaf_id.verify(&creation.control, candidate_family));
+        assert!(!creation.access[0].leaf.verify_envelope(
+            &creation.control,
+            &substituted_leaf_id,
+            candidate_family,
+        ));
 
         let mut wrong_membership_leaf = creation.access[0].leaf.value.clone();
         wrong_membership_leaf.store_membership =
@@ -808,7 +850,38 @@ mod tests {
             bytes,
             value: wrong_membership_leaf,
         };
-        assert!(!wrong_membership_leaf.verify(&creation.control));
+        assert!(!wrong_membership_leaf.verify(&creation.control, candidate_family));
+
+        let mut wrong_keyring_leaf = creation
+            .access
+            .iter()
+            .find(|access| {
+                matches!(
+                    &access.leaf.value.disposition,
+                    CircleAccessDisposition::Active { .. }
+                )
+            })
+            .expect("founder access")
+            .leaf
+            .value
+            .clone();
+        let CircleAccessDisposition::Active { keyring, .. } = &mut wrong_keyring_leaf.disposition
+        else {
+            panic!("founder access must be active")
+        };
+        *keyring = crate::encryption::MasterKeyring::generate().to_serialized();
+        wrong_keyring_leaf.signature =
+            keys::sign_hex(&owner, &wrong_keyring_leaf.canonical_bytes()).1;
+        let bytes = keys::seal_box_encrypt(
+            &serde_json::to_vec(&wrong_keyring_leaf).expect("serialize wrong-keyring leaf"),
+            &recipient_key,
+        );
+        let wrong_keyring_leaf = PreparedAccessLeaf {
+            leaf_hash: ObjectHash::digest(&bytes),
+            bytes,
+            value: wrong_keyring_leaf,
+        };
+        assert!(!wrong_keyring_leaf.verify(&creation.control, candidate_family));
 
         let mut wrong_policy_control = creation.control.value.clone();
         wrong_policy_control.store_membership =
@@ -914,8 +987,21 @@ mod tests {
             merge_membership_ref(&author, &members, "multi-owner-control");
         let device = merge_device_authority(&author, store_root_hash, "multi-owner-device");
         let ids = crate::id_provider::SequentialIdProvider::new("multi-owner-control");
+        let operation_id = crate::WriteId::from_generated("multi-owner-control-commit".to_string());
+        let order = super::super::store_commit::StoreCommitOrder::MergeConcurrent {
+            seq: 1,
+            predecessor: None,
+            dependencies: BTreeMap::new(),
+        };
+        let candidate_family = super::super::store_commit::CandidateFamilyId::derive(
+            store_root_hash,
+            &device.reference,
+            &operation_id,
+            &order,
+        );
         let creation = CircleCreation::founder(
             store_root_hash,
+            candidate_family,
             &device.reference.device_id.to_string(),
             "Household",
             "0000000001000-0000-device-a",
@@ -946,17 +1032,13 @@ mod tests {
             stream_id: device.stream_id,
             sequence: 1,
         };
-        let commit = super::super::store_commit::StoreBatchCommit::signed_batch(
+        let commit = super::super::store_commit::StoreBatchCommit::signed_operations(
             store_root_hash,
-            crate::WriteId::from_generated("multi-owner-control-commit".to_string()),
+            operation_id,
             first_coord.clone(),
             device.reference.clone(),
             &device.registration,
-            super::super::store_commit::StoreCommitOrder::MergeConcurrent {
-                seq: 1,
-                predecessor: None,
-                dependencies: BTreeMap::new(),
-            },
+            order,
             membership.clone(),
             super::super::store_commit::StoreDeviceStateRef::MergeConcurrent {
                 frontier: super::super::store_commit::CommitFrontier::MergeConcurrent(
@@ -966,21 +1048,35 @@ mod tests {
                 state_hash: ObjectHash::digest(b"multi-owner initial device state"),
             },
             Some(membership_authority.clone()),
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            vec![reference.clone()],
-            None,
-            &[],
+            super::super::store_commit::StoreCommitOperationsInput {
+                control: None,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations: Vec::new(),
+                circle_controls: vec![reference.clone()],
+                store_package: None,
+                circle_packages: &[],
+            },
             &device.device_signer,
         )
         .expect("sign Store commit");
+        let first_commit_path = format!(
+            "{}.json",
+            super::super::store_commit::commit_semantic_prefix(
+                commit.candidate_family(),
+                &device.stream_id.to_string(),
+                1,
+                commit.commit_hash(),
+            )
+        );
         let commit_ref = super::super::store_commit::StoreBatchCommitRef::from_commit(
             &commit,
             first_coord,
-            exact_object("multi-owner-device/commit-1", &commit.to_bytes()),
+            exact_logical_object(first_commit_path, &commit.to_bytes()),
         )
         .expect("reference first Store commit");
         let own_access = creation
@@ -1045,7 +1141,7 @@ mod tests {
             stream_id: device.stream_id,
             sequence: 2,
         };
-        let second_commit = super::super::store_commit::StoreBatchCommit::signed_batch(
+        let second_commit = super::super::store_commit::StoreBatchCommit::signed_operations(
             store_root_hash,
             crate::WriteId::from_generated("second-founder-control-commit".to_string()),
             second_coord.clone(),
@@ -1065,21 +1161,35 @@ mod tests {
                 state_hash: ObjectHash::digest(b"multi-owner second device state"),
             },
             control.value.membership_authority.clone(),
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            vec![second_reference.clone()],
-            None,
-            &[],
+            super::super::store_commit::StoreCommitOperationsInput {
+                control: None,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations: Vec::new(),
+                circle_controls: vec![second_reference.clone()],
+                store_package: None,
+                circle_packages: &[],
+            },
             &device.device_signer,
         )
         .expect("sign second founder Store commit");
+        let second_commit_path = format!(
+            "{}.json",
+            super::super::store_commit::commit_semantic_prefix(
+                second_commit.candidate_family(),
+                &device.stream_id.to_string(),
+                2,
+                second_commit.commit_hash(),
+            )
+        );
         let second_commit_ref = super::super::store_commit::StoreBatchCommitRef::from_commit(
             &second_commit,
             second_coord,
-            exact_object("multi-owner-device/commit-2", &second_commit.to_bytes()),
+            exact_logical_object(second_commit_path, &second_commit.to_bytes()),
         )
         .expect("reference second Store commit");
         let error = db

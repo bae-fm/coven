@@ -656,7 +656,18 @@ mod tests {
             coord: super::super::store_commit::StoreCommitCoord::Serial { sequence: 1 },
             commit_hash: ObjectHash::digest(b"commit semantic bytes"),
             object: ExactObjectRef::new(
-                ObjectSlot::logical("store-v1/commits/serial/1".to_string()).expect("valid slot"),
+                ObjectSlot::logical(format!(
+                    "{}.json",
+                    super::super::store_commit::commit_semantic_prefix(
+                        super::super::store_commit::CandidateFamilyId::from_hash(
+                            ObjectHash::digest(b"remote object test candidate family"),
+                        ),
+                        super::super::store_commit::SERIAL_STREAM_ID,
+                        1,
+                        ObjectHash::digest(b"commit semantic bytes"),
+                    )
+                ))
+                .expect("valid slot"),
                 1,
                 ObjectHash::digest(b"commit"),
             ),

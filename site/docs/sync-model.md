@@ -46,8 +46,8 @@ The diagram below is the `MergeConcurrent` path.
 <text class="sub" x="330" y="212" text-anchor="middle">1 a write is captured and sealed · 2 it appends to this device's own stream · 3 peers pull, one exact position per stream</text>
 </svg>
 
-Nothing in storage is overwritten. Publication appends physical copies of a
-package, commit, and head, then reads each copy back before advancing durable
+Nothing in storage is overwritten. Publication creates exact immutable objects
+for a package, commit, and head, then reads each object back before advancing durable
 state. A puller records the exact hash at every materialized device sequence,
 not a sequence number that could disagree with the accepted commit.
 
@@ -164,19 +164,19 @@ One background loop runs one cycle at a time. Each cycle loads durable state and
 1. Resolves authorization from causal membership heads for `MergeConcurrent`,
    or from the exact signed global head chain for `Serial`, then refreshes
    encryption-key and device-registration state.
-2. Drains blob uploads and retries the oldest prepared Store write using its
+1. Drains blob uploads and retries the oldest prepared Store write using its
    persisted exact bytes.
-3. Completes ready row-gate transitions and pulls verified remote Store commits.
-4. Prepares pending writes in policy order, uploads and verifies their referenced
+1. Completes ready row-gate transitions and pulls verified remote Store commits.
+1. Prepares pending writes in policy order, uploads and verifies their referenced
    blobs, then appends and verifies their packages and commits. `MergeConcurrent`
    activates each with its device head; `Serial` activates one consecutive
    package with a conditional global-head replacement.
-5. Applies remote commits whose policy-specific predecessors are fully
+1. Applies remote commits whose policy-specific predecessors are fully
    materialized; each commit's rows, authorization state, and exact position
    advance atomically.
-6. Flushes the register clock, durable file cleanup, acknowledgements, and blob
+1. Flushes the register clock, durable file cleanup, acknowledgements, and blob
    deletion work.
-7. Evaluates snapshot publication and reclamation against exact commit coverage.
+1. Evaluates snapshot publication and reclamation against exact commit coverage.
 
 A host transaction's capture session exists only inside that transaction, so a
 host write can land during any network operation without joining another write.
@@ -184,12 +184,15 @@ Remote applies use the engine's apply path rather than the host transaction path
 and therefore never enter the local write ledger.
 
 Under `MergeConcurrent`, when Alice edits a todo title, that call already leaves
-a durable pending write. Her loop appends encrypted physical copies below
-`store-v1/packages/<alice-device>/<seq>/`,
-`store-v1/commits/<alice-device>/<seq>/`, and
-`store-v1/heads/<alice-device>/<seq>/`. Bob verifies Alice's head and commit,
+a durable pending write. Her loop creates encrypted exact objects at
+`store-v1/candidates/<family>/packages/<alice-device>/<seq>/<hash>.pkg`,
+`store-v1/candidates/<family>/commits/<alice-device>/<seq>/<hash>.json`, and
+`store-v1/heads/<alice-device>/<seq>.json`. Bob verifies Alice's head and commit,
 waits until the named dependencies are materialized, then atomically applies the
-package and records Alice's exact sequence and commit hash.
+package and records Alice's exact sequence and commit hash. The signed commit
+derives `<family>` from its Store, author registration, write identity, policy,
+sequence, and predecessor. Its candidate-object manifest must exactly equal the
+package and other candidate-exclusive objects reached by its closed body.
 
 Under `Serial`, the same package and commit use the `serial` stream. The loop
 reads the signed global head with its provider version, prepares consecutive
@@ -204,7 +207,7 @@ never change meaning, even across a crash. The durable write record owns the
 changeset and dependency frontier from the host commit onward. Preparation
 assigns each write its policy-specific sequence and predecessor, constructs the
 exact signed commit and activation bytes, and persists them before any protocol
-append. A retry appends new physical copies of those same semantic bytes.
+append. A retry creates and reads back the same journaled exact objects.
 
 Before an append, the write is `Publishing`. A storage or readback failure puts
 it back in `Pending`; the loop's reconnect and backoff policy owns the retry. A

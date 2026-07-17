@@ -13,8 +13,9 @@ use super::circle_ops::{CircleOperationError, CircleOperationJournal};
 use super::circle_roster::CircleMaterializedRoster;
 use super::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
-    CircleActivationObjects, CircleControlRef, ObjectHash, StoreBatchCommit, StoreBatchCommitRef,
-    StoreDeviceRegistration, StoreRootRef,
+    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
+    CircleAccessObjectRef, CircleActivationObjects, CircleControlRef, ObjectHash, StoreBatchCommit,
+    StoreBatchCommitRef, StoreDeviceRegistration, StoreRootRef,
 };
 use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::keys::{self, UserKeypair};
@@ -37,6 +38,96 @@ pub(crate) struct VerifiedCircleAccess {
 pub(crate) struct VerifiedCircleActive {
     pub roster: CircleMaterializedRoster,
     pub metadata: CircleMetadata,
+}
+
+struct VerifiedAccessPair {
+    reference: CircleAccessObjectRef,
+    envelope: AccessEnvelope,
+    leaf_bytes: Vec<u8>,
+}
+
+async fn load_verified_access_pairs(
+    storage: &dyn SyncStorage,
+    commit: &StoreBatchCommit,
+    circle_id: CircleId,
+    control: &PreparedCircleControl,
+    objects: &CircleActivationObjects,
+) -> Result<Vec<VerifiedAccessPair>, CircleOperationError> {
+    let family = commit.candidate_family();
+    let mut verified = Vec::with_capacity(objects.access.len());
+    for reference in &objects.access {
+        if reference.leaf.owner_pubkey != reference.envelope.owner_pubkey
+            || reference.leaf.recipient_slot != reference.envelope.recipient_slot
+            || reference.leaf.leaf_id != reference.envelope.leaf_id
+            || reference.leaf.leaf_hash != reference.envelope.leaf_hash
+            || reference.leaf.leaf_hash != reference.leaf.object.stored_hash()
+            || reference.envelope.control_hash != control.coord.control_hash()
+        {
+            return Err(CircleOperationError::InvalidState(
+                "paired Circle access references differ".to_string(),
+            ));
+        }
+        let envelope_prefix = circle_access_envelope_semantic_prefix(
+            circle_id,
+            family,
+            &reference.envelope.owner_pubkey,
+            &reference.envelope.recipient_slot,
+            reference.envelope.control_hash,
+        );
+        let envelope_bytes = read_exact_circle_object(
+            storage,
+            &ProtocolObjectContext::store(
+                commit.store_root_hash,
+                ProtocolObjectDomain::CircleAccessEnvelope,
+            ),
+            &reference.envelope.object,
+            &envelope_prefix,
+        )
+        .await?;
+        let envelope: AccessEnvelope =
+            serde_json::from_slice(&envelope_bytes).map_err(|error| {
+                CircleOperationError::InvalidState(format!("parse circle access envelope: {error}"))
+            })?;
+        if envelope.candidate_family != family
+            || envelope.circle_id != circle_id
+            || envelope.owner_pubkey != reference.envelope.owner_pubkey
+            || envelope.recipient_slot != reference.envelope.recipient_slot
+            || envelope.control_hash != reference.envelope.control_hash
+            || envelope.leaf_id != reference.envelope.leaf_id
+            || envelope.leaf_hash != reference.envelope.leaf_hash
+            || !envelope.verify(control, family)
+        {
+            return Err(CircleOperationError::InvalidState(
+                "circle access envelope failed verification".to_string(),
+            ));
+        }
+        let leaf_prefix = circle_access_leaf_semantic_prefix(
+            circle_id,
+            family,
+            &reference.leaf.owner_pubkey,
+            reference.leaf.epoch_id,
+            &reference.leaf.recipient_slot,
+            reference.leaf.leaf_id,
+        );
+        let leaf_bytes = read_exact_circle_object(
+            storage,
+            &ProtocolObjectContext::recipient_sealed(commit.store_root_hash),
+            &reference.leaf.object,
+            &leaf_prefix,
+        )
+        .await?;
+        if ObjectHash::digest(&leaf_bytes) != reference.leaf.leaf_hash {
+            return Err(CircleOperationError::InvalidState(
+                "Circle access leaf bytes differ from the paired leaf hash".to_string(),
+            ));
+        }
+        verified.push(VerifiedAccessPair {
+            reference: reference.clone(),
+            envelope,
+            leaf_bytes,
+        });
+    }
+    Ok(verified)
 }
 
 fn verify_circle_owner_authority(
@@ -109,8 +200,8 @@ pub(crate) async fn load_circle_activations(
             "Circle activation authority differs from its exact Store commit".to_string(),
         ));
     }
-    let mut activations = Vec::with_capacity(commit.circle_controls.len());
-    for reference in &commit.circle_controls {
+    let mut activations = Vec::with_capacity(commit.circle_controls().len());
+    for reference in commit.circle_controls() {
         let objects = reference.objects();
         let control_prefix = circle_semantic_prefix(CircleSemanticSlot::Control {
             circle_id: reference.circle_id(),
@@ -217,6 +308,9 @@ pub(crate) async fn load_circle_activations(
             ));
         }
         verify_control_context(reference, &control, commit_ref, commit, author)?;
+        let verified_access =
+            load_verified_access_pairs(storage, commit, reference.circle_id(), &control, objects)
+                .await?;
         let checkpoint_members =
             verify_control_membership(storage, root, &control, founder_pubkey).await?;
         let own_pubkey = keys::public_key_hex(identity);
@@ -243,91 +337,21 @@ pub(crate) async fn load_circle_activations(
                 },
             )?,
         );
-        let envelope_prefix = circle_semantic_prefix(CircleSemanticSlot::AccessEnvelope {
-            circle_id: reference.circle_id(),
-            owner_pubkey: &owner.0,
-            recipient_slot: &owner.1,
-            control_hash: reference.control().control_hash(),
-        });
-        let envelope_ref = objects
-            .access_envelopes
+        let access = verified_access
             .iter()
             .find(|candidate| {
-                candidate.owner_pubkey == owner.0
-                    && candidate.recipient_slot == owner.1
-                    && candidate.control_hash == reference.control().control_hash()
+                candidate.reference.envelope.owner_pubkey == owner.0
+                    && candidate.reference.envelope.recipient_slot == owner.1
+                    && candidate.reference.envelope.control_hash
+                        == reference.control().control_hash()
             })
             .ok_or_else(|| {
                 CircleOperationError::InvalidState(
                     "Circle activation lacks the recipient's exact access envelope".to_string(),
                 )
             })?;
-        let envelope_bytes = read_exact_circle_object(
-            storage,
-            &ProtocolObjectContext::store(
-                commit.store_root_hash,
-                ProtocolObjectDomain::CircleAccessEnvelope,
-            ),
-            &envelope_ref.object,
-            &envelope_prefix,
-        )
-        .await?;
-        let envelope: AccessEnvelope =
-            serde_json::from_slice(&envelope_bytes).map_err(|error| {
-                CircleOperationError::InvalidState(format!("parse circle access envelope: {error}"))
-            })?;
-        if verify_circle_semantic_prefix(
-            &envelope_prefix,
-            CircleSemanticSlot::AccessEnvelope {
-                circle_id: envelope.circle_id,
-                owner_pubkey: &envelope.owner_pubkey,
-                recipient_slot: &envelope.recipient_slot,
-                control_hash: envelope.control_hash,
-            },
-        )
-        .is_err()
-            || envelope.owner_pubkey != owner.0
-            || envelope.recipient_slot != owner.1
-            || !envelope.verify(&control)
-        {
-            return Err(CircleOperationError::InvalidState(
-                "circle access envelope failed verification".to_string(),
-            ));
-        }
-        let leaf_prefix = circle_semantic_prefix(CircleSemanticSlot::AccessLeaf {
-            circle_id: reference.circle_id(),
-            owner_pubkey: &owner.0,
-            epoch_id: control.value.epoch_id,
-            recipient_slot: &owner.1,
-            leaf_id: envelope.leaf_id,
-        });
-        let leaf_ref = objects
-            .access_leaves
-            .iter()
-            .find(|candidate| {
-                candidate.owner_pubkey == owner.0
-                    && candidate.epoch_id == control.value.epoch_id
-                    && candidate.recipient_slot == owner.1
-                    && candidate.leaf_id == envelope.leaf_id
-                    && candidate.leaf_hash == envelope.leaf_hash
-            })
-            .ok_or_else(|| {
-                CircleOperationError::InvalidState(
-                    "Circle activation lacks the recipient's exact access leaf".to_string(),
-                )
-            })?;
-        let leaf_bytes = read_exact_circle_object(
-            storage,
-            &ProtocolObjectContext::recipient_sealed(commit.store_root_hash),
-            &leaf_ref.object,
-            &leaf_prefix,
-        )
-        .await?;
-        if ObjectHash::digest(&leaf_bytes) != envelope.leaf_hash {
-            return Err(CircleOperationError::InvalidState(
-                "Circle access leaf bytes differ from the signed leaf hash".to_string(),
-            ));
-        }
+        let envelope = &access.envelope;
+        let leaf_bytes = access.leaf_bytes.clone();
         let plaintext = keys::seal_box_decrypt(&leaf_bytes, &identity.to_x25519_secret_key())
             .map_err(|error| {
                 CircleOperationError::InvalidState(format!("open circle access leaf: {error}"))
@@ -341,40 +365,21 @@ pub(crate) async fn load_circle_activations(
             leaf_hash: envelope.leaf_hash,
         };
         let leaf = &prepared_leaf.value;
-        if verify_circle_semantic_prefix(
-            &leaf_prefix,
-            CircleSemanticSlot::AccessLeaf {
-                circle_id: leaf.circle_id,
-                owner_pubkey: &leaf.owner_pubkey,
-                epoch_id: leaf.epoch_id,
-                recipient_slot: &leaf.recipient_slot,
-                leaf_id: leaf.leaf_id,
-            },
-        )
-        .is_err()
+        if leaf.candidate_family != commit.candidate_family()
             || leaf.owner_pubkey != owner.0
             || leaf.recipient_pubkey != own_pubkey
             || leaf.recipient_slot != owner.1
             || leaf.store_membership != control.value.store_membership
-            || !prepared_leaf.verify_envelope(&control, &envelope)
+            || leaf.epoch_id != access.reference.leaf.epoch_id
+            || leaf.leaf_id != access.reference.leaf.leaf_id
+            || !prepared_leaf.verify_envelope(&control, envelope, commit.candidate_family())
         {
             return Err(CircleOperationError::InvalidState(
                 "circle access leaf failed context verification".to_string(),
             ));
         }
         let active = match &leaf.disposition {
-            CircleAccessDisposition::Active {
-                keyring,
-                key_fingerprint,
-                roster,
-            } => {
-                if *key_fingerprint != control.value.key_fingerprint
-                    || roster != &control.value.roster
-                {
-                    return Err(CircleOperationError::InvalidState(
-                        "circle Active access names a different key or roster state".to_string(),
-                    ));
-                }
+            CircleAccessDisposition::Active { keyring, .. } => {
                 let encryption = EncryptionService::from(
                     MasterKeyring::from_serialized(keyring).map_err(|error| {
                         CircleOperationError::InvalidState(format!(
@@ -382,11 +387,6 @@ pub(crate) async fn load_circle_activations(
                         ))
                     })?,
                 );
-                if encryption.seal_key_fingerprint() != *key_fingerprint {
-                    return Err(CircleOperationError::InvalidState(
-                        "circle access keyring fingerprint differs from control".to_string(),
-                    ));
-                }
                 let authority_roster = load_circle_authority_roster(
                     storage,
                     commit,
@@ -442,6 +442,12 @@ pub(crate) async fn load_circle_activations(
                     }
                 };
                 let resolved_members = resolved.members();
+                if !resolved_members.contains_key(&leaf.recipient_pubkey) {
+                    return Err(CircleOperationError::InvalidState(
+                        "circle Active access recipient is absent from its resolved roster"
+                            .to_string(),
+                    ));
+                }
                 let roster_owners = resolved_members
                     .iter()
                     .filter_map(|(pubkey, role)| {
@@ -1071,10 +1077,12 @@ async fn load_circle_authority_roster(
             while let Some(reference) = predecessor {
                 let (preceding_commit, _) =
                     super::store_pull::load_commit_with_author(storage, root, &reference).await?;
-                if let Some(reference) = preceding_commit.circle_controls.iter().find(|reference| {
-                    reference.circle_id() == circle_id
-                        && reference.control().control_hash() == target_control_hash
-                }) {
+                if let Some(reference) =
+                    preceding_commit.circle_controls().iter().find(|reference| {
+                        reference.circle_id() == circle_id
+                            && reference.control().control_hash() == target_control_hash
+                    })
+                {
                     let preceding_control =
                         load_circle_control_at_reference(storage, root, reference).await?;
                     let CircleControlOrder::Serial { roster, .. } = preceding_control.order else {
@@ -1226,7 +1234,7 @@ async fn load_serial_circle_roster_by_state_hash(
         let (preceding_commit, _) =
             super::store_pull::load_commit_with_author(storage, root, &reference).await?;
         for reference in preceding_commit
-            .circle_controls
+            .circle_controls()
             .iter()
             .filter(|reference| reference.circle_id() == circle_id)
         {
@@ -1674,10 +1682,11 @@ pub(crate) fn verify_local_circle_activation(
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
     author: &StoreDeviceRegistration,
+    identity: &UserKeypair,
 ) -> Result<VerifiedCircleReference, CircleOperationError> {
     let creation = &journal.creation;
     let control = &creation.control;
-    let [reference] = commit.circle_controls.as_slice() else {
+    let [reference] = commit.circle_controls() else {
         return Err(CircleOperationError::InvalidState(
             "local Circle commit must activate one control".to_string(),
         ));
@@ -1692,13 +1701,30 @@ pub(crate) fn verify_local_circle_activation(
                 "circle creator has no access disposition".to_string(),
             )
         })?;
+    let plaintext = keys::seal_box_decrypt(
+        &own_access.leaf.bytes,
+        &identity.to_x25519_secret_key(),
+    )
+    .map_err(|error| {
+        CircleOperationError::InvalidState(format!("open local circle access leaf: {error}"))
+    })?;
+    let sealed_leaf: CircleAccessLeaf = serde_json::from_slice(&plaintext).map_err(|error| {
+        CircleOperationError::InvalidState(format!("parse local circle access leaf: {error}"))
+    })?;
+    if sealed_leaf != own_access.leaf.value {
+        return Err(CircleOperationError::InvalidState(
+            "local circle access sealed leaf differs from its journaled value".to_string(),
+        ));
+    }
     let leaf = &own_access.leaf.value;
     let envelope = &own_access.envelope;
     if leaf.recipient_pubkey != author.author_pubkey
         || leaf.owner_pubkey != control.value.author_pubkey
         || leaf.store_membership != control.value.store_membership
         || envelope.owner_pubkey != control.value.author_pubkey
-        || !own_access.leaf.verify_envelope(control, envelope)
+        || !own_access
+            .leaf
+            .verify_envelope(control, envelope, commit.candidate_family())
     {
         return Err(CircleOperationError::InvalidState(
             "local circle access failed leaf and envelope verification".to_string(),
@@ -1827,8 +1853,7 @@ mod authority_tests {
             roster_resolutions: BTreeMap::new(),
             metadata_entries: BTreeMap::new(),
             metadata_heads: BTreeMap::new(),
-            access_envelopes: Vec::new(),
-            access_leaves: Vec::new(),
+            access: Vec::new(),
         }
     }
 

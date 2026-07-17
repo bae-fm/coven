@@ -15,12 +15,13 @@ use super::storage::{
     PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage, VersionToken,
 };
 use super::store_commit::{
-    commit_semantic_prefix, head_slot_prefix, CircleAccessEnvelopeObjectRef,
-    CircleAccessLeafObjectRef, CircleActivationObjects, CircleHeadObjectRef,
+    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
+    commit_semantic_prefix, head_slot_prefix, CandidateFamilyId, CircleAccessEnvelopeObjectRef,
+    CircleAccessLeafObjectRef, CircleAccessObjectRef, CircleActivationObjects, CircleHeadObjectRef,
     CircleMetadataObjectRef, ObjectHash, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
-    StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreRootRef, StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor,
-    StreamActivationId, SuccessorLink, SERIAL_STREAM_ID,
+    StoreCommitOperationsInput, StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreRootRef, StoreSerialHead, StoreSerialHeadState,
+    StoreSerialPredecessor, StreamActivationId, SuccessorLink, SERIAL_STREAM_ID,
 };
 use crate::database::Database;
 use crate::encryption::{EncryptionService, MasterKeyring};
@@ -89,7 +90,7 @@ fn signed_circle_commit(
     objects: CircleActivationObjects,
     device_signer: &UserKeypair,
 ) -> Result<StoreBatchCommit, CircleOperationError> {
-    StoreBatchCommit::signed_batch(
+    StoreBatchCommit::signed_operations(
         store_root_hash,
         operation_id,
         coord,
@@ -99,14 +100,19 @@ fn signed_circle_commit(
         membership_state,
         device_state,
         membership_authority,
-        None,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        vec![creation.control_ref(objects)],
-        None,
-        &[],
+        StoreCommitOperationsInput {
+            control: None,
+            device_join_attempts: Vec::new(),
+            device_join_outcomes: Vec::new(),
+            device_join_abandonments: Vec::new(),
+            device_join_cleanup_receipts: Vec::new(),
+            provider_access_grants: Vec::new(),
+            provider_access_withdrawals: Vec::new(),
+            device_registrations: Vec::new(),
+            circle_controls: vec![creation.control_ref(objects)],
+            store_package: None,
+            circle_packages: &[],
+        },
         device_signer,
     )
     .map_err(|error| CircleOperationError::InvalidState(error.to_string()))
@@ -157,6 +163,7 @@ async fn prepare_circle_activation_objects(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
     creation: &CircleCreation,
+    candidate_family: CandidateFamilyId,
 ) -> Result<
     (
         CircleActivationObjects,
@@ -330,16 +337,16 @@ async fn prepare_circle_activation_objects(
         control_head = Some(control_head_object);
     }
 
-    let mut access_envelopes = Vec::with_capacity(creation.access.len());
-    let mut access_leaves = Vec::with_capacity(creation.access.len());
+    let mut access_objects = Vec::with_capacity(creation.access.len());
     for (index, access) in creation.access.iter().enumerate() {
-        let leaf_prefix = circle_semantic_prefix(CircleSemanticSlot::AccessLeaf {
-            circle_id: access.leaf.value.circle_id,
-            owner_pubkey: &access.leaf.value.owner_pubkey,
-            epoch_id: access.leaf.value.epoch_id,
-            recipient_slot: &access.leaf.value.recipient_slot,
-            leaf_id: access.leaf.value.leaf_id,
-        });
+        let leaf_prefix = circle_access_leaf_semantic_prefix(
+            access.leaf.value.circle_id,
+            candidate_family,
+            &access.leaf.value.owner_pubkey,
+            access.leaf.value.epoch_id,
+            &access.leaf.value.recipient_slot,
+            access.leaf.value.leaf_id,
+        );
         let leaf = prepare_circle_object(
             storage,
             &ProtocolObjectContext::recipient_sealed(store_root_hash),
@@ -349,21 +356,22 @@ async fn prepare_circle_activation_objects(
         )
         .await?;
         prepared.insert(format!("access-leaf-{index}"), leaf.clone());
-        access_leaves.push(CircleAccessLeafObjectRef {
+        let leaf_reference = CircleAccessLeafObjectRef {
             owner_pubkey: access.leaf.value.owner_pubkey.clone(),
             epoch_id: access.leaf.value.epoch_id,
             recipient_slot: access.leaf.value.recipient_slot.clone(),
             leaf_id: access.leaf.value.leaf_id,
             leaf_hash: access.leaf.leaf_hash,
             object: leaf.reference().clone(),
-        });
+        };
 
-        let envelope_prefix = circle_semantic_prefix(CircleSemanticSlot::AccessEnvelope {
-            circle_id: access.envelope.circle_id,
-            owner_pubkey: &access.envelope.owner_pubkey,
-            recipient_slot: &access.envelope.recipient_slot,
-            control_hash: access.envelope.control_hash,
-        });
+        let envelope_prefix = circle_access_envelope_semantic_prefix(
+            access.envelope.circle_id,
+            candidate_family,
+            &access.envelope.owner_pubkey,
+            &access.envelope.recipient_slot,
+            access.envelope.control_hash,
+        );
         let envelope = prepare_circle_object(
             storage,
             &ProtocolObjectContext::store(
@@ -377,11 +385,17 @@ async fn prepare_circle_activation_objects(
         )
         .await?;
         prepared.insert(format!("access-envelope-{index}"), envelope.clone());
-        access_envelopes.push(CircleAccessEnvelopeObjectRef {
+        let envelope_reference = CircleAccessEnvelopeObjectRef {
             owner_pubkey: access.envelope.owner_pubkey.clone(),
             recipient_slot: access.envelope.recipient_slot.clone(),
             control_hash: access.envelope.control_hash,
+            leaf_id: access.envelope.leaf_id,
+            leaf_hash: access.envelope.leaf_hash,
             object: envelope.reference().clone(),
+        };
+        access_objects.push(CircleAccessObjectRef {
+            leaf: leaf_reference,
+            envelope: envelope_reference,
         });
     }
 
@@ -400,8 +414,7 @@ async fn prepare_circle_activation_objects(
                 },
             )]),
             metadata_heads,
-            access_envelopes,
-            access_leaves,
+            access: access_objects,
         },
         prepared,
     ))
@@ -471,7 +484,7 @@ pub(crate) async fn create_circle(
     .await?;
     let circle_id = journal.circle_id();
     db.insert_circle_operation(journal).await?;
-    publish_circle_operation(db, storage, coordination, circle_id).await?;
+    publish_circle_operation(db, storage, coordination, circle_id, signer).await?;
     Ok(circle_id)
 }
 
@@ -479,6 +492,7 @@ pub(crate) async fn resume_circle_operations(
     db: &Database,
     storage: &dyn SyncStorage,
     coordination: Option<&dyn super::storage::CoordinationStorage>,
+    identity: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
     while let Some(journal) = db.oldest_pending_circle_operation().await? {
         if !matches!(journal.status, CircleOperationState::Pending) {
@@ -487,7 +501,9 @@ pub(crate) async fn resume_circle_operations(
                 journal.circle_id()
             )));
         }
-        match publish_circle_operation(db, storage, coordination, journal.circle_id()).await {
+        match publish_circle_operation(db, storage, coordination, journal.circle_id(), identity)
+            .await
+        {
             Ok(()) | Err(CircleOperationError::Blocked { .. }) => {}
             Err(error) => return Err(error),
         }
@@ -577,8 +593,15 @@ async fn prepare_circle_operation(
                 state_hash,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            let candidate_family = CandidateFamilyId::derive(
+                store_root_hash,
+                &author_registration,
+                &operation_id,
+                &order,
+            );
             let creation = CircleCreation::founder(
                 store_root_hash,
+                candidate_family,
                 &circle_device_id,
                 name,
                 metadata_stamp,
@@ -589,7 +612,8 @@ async fn prepare_circle_operation(
                 signer,
             )?;
             let (objects, mut prepared_objects) =
-                prepare_circle_activation_objects(storage, &root, &creation).await?;
+                prepare_circle_activation_objects(storage, &root, &creation, candidate_family)
+                    .await?;
             let commit = signed_circle_commit(
                 store_root_hash,
                 operation_id.clone(),
@@ -606,8 +630,12 @@ async fn prepare_circle_operation(
             )?;
             let commit_context =
                 ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
-            let commit_prefix =
-                commit_semantic_prefix(&stream_id.to_string(), seq, commit.commit_hash());
+            let commit_prefix = commit_semantic_prefix(
+                commit.candidate_family(),
+                &stream_id.to_string(),
+                seq,
+                commit.commit_hash(),
+            );
             let commit_prepared = prepare_circle_object(
                 storage,
                 &commit_context,
@@ -712,8 +740,15 @@ async fn prepare_circle_operation(
                 &snapshot.authorization,
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
+            let candidate_family = CandidateFamilyId::derive(
+                store_root_hash,
+                &author_registration,
+                &operation_id,
+                &order,
+            );
             let creation = CircleCreation::founder(
                 store_root_hash,
+                candidate_family,
                 &circle_device_id,
                 name,
                 metadata_stamp,
@@ -724,7 +759,8 @@ async fn prepare_circle_operation(
                 signer,
             )?;
             let (objects, mut prepared_objects) =
-                prepare_circle_activation_objects(storage, &root, &creation).await?;
+                prepare_circle_activation_objects(storage, &root, &creation, candidate_family)
+                    .await?;
             let commit = signed_circle_commit(
                 store_root_hash,
                 operation_id.clone(),
@@ -741,7 +777,12 @@ async fn prepare_circle_operation(
             )?;
             let commit_context =
                 ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
-            let commit_prefix = commit_semantic_prefix(SERIAL_STREAM_ID, seq, commit.commit_hash());
+            let commit_prefix = commit_semantic_prefix(
+                commit.candidate_family(),
+                SERIAL_STREAM_ID,
+                seq,
+                commit.commit_hash(),
+            );
             let commit_prepared = prepare_circle_object(
                 storage,
                 &commit_context,
@@ -798,6 +839,7 @@ async fn publish_circle_operation(
     storage: &dyn SyncStorage,
     coordination: Option<&dyn super::storage::CoordinationStorage>,
     circle_id: CircleId,
+    identity: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
     let mut journal = db
         .circle_operation(circle_id)
@@ -819,7 +861,7 @@ async fn publish_circle_operation(
     let author = db
         .activated_store_device_registration(commit.author_registration.clone())
         .await?;
-    let reference = commit.circle_controls.as_slice();
+    let reference = commit.circle_controls();
     let [reference] = reference else {
         return Err(CircleOperationError::InvalidState(
             "Circle operation commit must activate one control".to_string(),
@@ -833,9 +875,11 @@ async fn publish_circle_operation(
         &author,
     )?;
     if creation.access.iter().any(|access| {
-        !access
-            .leaf
-            .verify_envelope(&creation.control, &access.envelope)
+        !access.leaf.verify_envelope(
+            &creation.control,
+            &access.envelope,
+            commit.candidate_family(),
+        )
     }) {
         return Err(CircleOperationError::InvalidState(
             "prepared Circle access bytes, plaintext hash, ciphertext hash, or envelope differ"
@@ -940,13 +984,14 @@ async fn publish_circle_operation(
             &mut journal,
             &format!("access-leaf-{index}"),
             &ProtocolObjectContext::recipient_sealed(store_root_hash),
-            &circle_semantic_prefix(CircleSemanticSlot::AccessLeaf {
-                circle_id: access.leaf.value.circle_id,
-                owner_pubkey: &access.leaf.value.owner_pubkey,
-                epoch_id: access.leaf.value.epoch_id,
-                recipient_slot: &access.leaf.value.recipient_slot,
-                leaf_id: access.leaf.value.leaf_id,
-            }),
+            &circle_access_leaf_semantic_prefix(
+                access.leaf.value.circle_id,
+                commit.candidate_family(),
+                &access.leaf.value.owner_pubkey,
+                access.leaf.value.epoch_id,
+                &access.leaf.value.recipient_slot,
+                access.leaf.value.leaf_id,
+            ),
             &access.leaf.bytes,
         )
         .await?;
@@ -993,12 +1038,13 @@ async fn publish_circle_operation(
                 store_root_hash,
                 ProtocolObjectDomain::CircleAccessEnvelope,
             ),
-            &circle_semantic_prefix(CircleSemanticSlot::AccessEnvelope {
-                circle_id: access.envelope.circle_id,
-                owner_pubkey: &access.envelope.owner_pubkey,
-                recipient_slot: &access.envelope.recipient_slot,
-                control_hash: access.envelope.control_hash,
-            }),
+            &circle_access_envelope_semantic_prefix(
+                access.envelope.circle_id,
+                commit.candidate_family(),
+                &access.envelope.owner_pubkey,
+                &access.envelope.recipient_slot,
+                access.envelope.control_hash,
+            ),
             &serde_json::to_vec(&access.envelope)
                 .expect("access envelope serialization cannot fail"),
         )
@@ -1021,7 +1067,12 @@ async fn publish_circle_operation(
                 &mut journal,
                 "store-commit",
                 &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
-                &commit_semantic_prefix(&stream_id.to_string(), commit.seq(), commit_hash),
+                &commit_semantic_prefix(
+                    commit.candidate_family(),
+                    &stream_id.to_string(),
+                    commit.seq(),
+                    commit_hash,
+                ),
                 &commit_bytes,
             )
             .await?;
@@ -1084,7 +1135,7 @@ async fn publish_circle_operation(
             }
         }
     }
-    db.activate_circle_operation(journal).await?;
+    db.activate_circle_operation(journal, identity).await?;
     Ok(())
 }
 
@@ -1285,6 +1336,62 @@ mod tests {
         (store, signer, journal)
     }
 
+    fn promote_store_member_access_without_adding_to_circle_roster(
+        creation: &mut CircleCreation,
+        owner: &UserKeypair,
+        recipient: &UserKeypair,
+    ) {
+        let recipient_pubkey = keys::public_key_hex(recipient);
+        let access = creation
+            .access
+            .iter_mut()
+            .find(|access| access.leaf.value.recipient_pubkey == recipient_pubkey)
+            .expect("Store member has a prepared inactive access leaf");
+        access.leaf.value.disposition = CircleAccessDisposition::Active {
+            keyring: creation.keyring.clone(),
+            key_fingerprint: creation.control.value.key_fingerprint,
+            roster: creation.control.value.roster.clone(),
+        };
+        access.leaf.value.signature = keys::sign_hex(owner, &access.leaf.value.canonical_bytes()).1;
+        let recipient_key = keys::ed25519_to_x25519_public_key(&recipient.public_key())
+            .expect("convert recipient key");
+        access.leaf.bytes = keys::seal_box_encrypt(
+            &serde_json::to_vec(&access.leaf.value).expect("serialize promoted access leaf"),
+            &recipient_key,
+        );
+        access.leaf.leaf_hash = ObjectHash::digest(&access.leaf.bytes);
+
+        let leaf_hashes = creation
+            .access
+            .iter()
+            .map(|access| access.leaf.leaf_hash)
+            .collect::<Vec<_>>();
+        let (access_root, proofs) =
+            super::super::circle_control::merkle_root_and_proofs(&leaf_hashes);
+        creation.control.value.access_root = access_root;
+        creation.control.value.signature =
+            keys::sign_hex(owner, &creation.control.value.canonical_bytes()).1;
+        creation.control.coord = creation.control.value.coord();
+        creation.control.bytes =
+            serde_json::to_vec(&creation.control.value).expect("serialize promoted control");
+        for (access, proof) in creation.access.iter_mut().zip(proofs) {
+            access.envelope.control_hash = creation.control.coord.control_hash();
+            access.envelope.leaf_hash = access.leaf.leaf_hash;
+            access.envelope.value_hash = ObjectHash::digest(
+                &serde_json::to_vec(&access.leaf.value).expect("serialize access leaf value"),
+            );
+            access.envelope.proof = proof;
+            access.envelope.signature = keys::sign_hex(owner, &access.envelope.canonical_bytes()).1;
+        }
+        let CircleCreationPolicyObjects::MergeConcurrent { control_head, .. } =
+            &mut creation.policy_objects
+        else {
+            panic!("promoted access fixture requires MergeConcurrent policy")
+        };
+        *control_head =
+            super::super::circle::CircleControlHead::signed(&creation.control.value, owner);
+    }
+
     async fn activation_count(db: &Database, circle_id: CircleId) -> i64 {
         let circle_id = circle_id.to_string();
         db.call(move |conn| {
@@ -1347,7 +1454,7 @@ mod tests {
                         store.home.fail_exact_create_before_call(call);
                     }
 
-                    let first = resume_circle_operations(&db, &store.storage, None).await;
+                    let first = resume_circle_operations(&db, &store.storage, None, &signer).await;
                     if after_visible_write {
                         first.expect("lost exact-create response is settled by exact readback");
                     } else {
@@ -1363,7 +1470,7 @@ mod tests {
                         assert_eq!(persisted.status, CircleOperationState::Pending);
                         assert_eq!(activation_count(&db, expected.circle_id()).await, 0);
 
-                        resume_circle_operations(&db, &store.storage, None)
+                        resume_circle_operations(&db, &store.storage, None, &signer)
                             .await
                             .expect("resume exact circle operation");
                     }
@@ -1410,7 +1517,7 @@ mod tests {
             &test_migrations(),
         )
         .expect("open circle database");
-        let (store, _signer, expected) = persist_merge_operation(&db, "circle-restart").await;
+        let (store, signer, expected) = persist_merge_operation(&db, "circle-restart").await;
         assert_eq!(activation_count(&db, expected.circle_id()).await, 0);
         std::thread::spawn(move || drop(db))
             .join()
@@ -1434,7 +1541,7 @@ mod tests {
         assert_exact_operation(&expected, &persisted);
         assert_eq!(persisted.status, CircleOperationState::Pending);
 
-        resume_circle_operations(&reopened, &store.storage, None)
+        resume_circle_operations(&reopened, &store.storage, None, &signer)
             .await
             .expect("resume reopened circle operation");
         assert_eq!(activation_count(&reopened, expected.circle_id()).await, 1);
@@ -1501,7 +1608,7 @@ mod tests {
             .expect("Serial Circle operation survives restart");
         assert_exact_operation(&expected, &persisted);
 
-        resume_circle_operations(&reopened, &storage, Some(coordination))
+        resume_circle_operations(&reopened, &storage, Some(coordination), &founder)
             .await
             .expect("resume reopened Serial Circle operation");
         assert_eq!(activation_count(&reopened, expected.circle_id()).await, 1);
@@ -1561,10 +1668,10 @@ mod tests {
                 &test_migrations(),
             )
             .expect("open circle database");
-            let (store, _signer, expected) =
+            let (store, signer, expected) =
                 persist_merge_operation(&db, if corrupt { "corrupt" } else { "missing" }).await;
             store.home.fail_exact_create_before_call(2);
-            resume_circle_operations(&db, &store.storage, None)
+            resume_circle_operations(&db, &store.storage, None, &signer)
                 .await
                 .expect_err("second exact create failure interrupts publication");
             let persisted = db
@@ -1600,7 +1707,7 @@ mod tests {
                 &test_migrations(),
             )
             .expect("reopen circle database");
-            resume_circle_operations(&reopened, &store.storage, None)
+            resume_circle_operations(&reopened, &store.storage, None, &signer)
                 .await
                 .expect_err("durable upload marker must not bypass readback");
             assert_eq!(activation_count(&reopened, expected.circle_id()).await, 0);
@@ -1633,7 +1740,7 @@ mod tests {
             .await
             .expect("persist tampered journal");
 
-        resume_circle_operations(&db, &store.storage, None)
+        resume_circle_operations(&db, &store.storage, None, &signer)
             .await
             .expect_err("local activation must verify journal access context");
 
@@ -1643,6 +1750,390 @@ mod tests {
             .await
             .expect("read rejected operation")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn local_activation_rejects_sealed_leaf_plaintext_substitution() {
+        let db = open_test_db();
+        let (_store, signer, mut journal) =
+            persist_merge_operation(&db, "circle-mismatched-local-keyring").await;
+        let author = keys::public_key_hex(&signer);
+        let own_access = journal
+            .creation
+            .access
+            .iter_mut()
+            .find(|access| access.leaf.value.recipient_pubkey == author)
+            .expect("founder access");
+        let CircleAccessDisposition::Active { keyring, .. } =
+            &mut own_access.leaf.value.disposition
+        else {
+            panic!("founder access must be active")
+        };
+        *keyring = MasterKeyring::generate().to_serialized();
+        own_access.leaf.value.signature =
+            keys::sign_hex(&signer, &own_access.leaf.value.canonical_bytes()).1;
+        own_access.envelope.value_hash = ObjectHash::digest(
+            &serde_json::to_vec(&own_access.leaf.value).expect("serialize mismatched access leaf"),
+        );
+        own_access.envelope.signature =
+            keys::sign_hex(&signer, &own_access.envelope.canonical_bytes()).1;
+        let commit = journal.commit().expect("parse prepared Store commit");
+        let author = db
+            .activated_store_device_registration(commit.author_registration.clone())
+            .await
+            .expect("load exact Circle commit author");
+        let error = verify_local_circle_activation(
+            &journal,
+            &journal.commit_ref,
+            &commit,
+            &author,
+            &signer,
+        )
+        .expect_err("local activation must reject substituted journal plaintext");
+        assert!(error
+            .to_string()
+            .contains("sealed leaf differs from its journaled value"));
+        assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+    }
+
+    #[tokio::test]
+    async fn remote_activation_rejects_invented_access_refs_in_a_resigned_commit() {
+        let db = open_test_db();
+        let (store, signer, journal) =
+            persist_merge_operation(&db, "circle-invented-access-refs").await;
+        let old_commit = journal.commit().expect("parse prepared Store commit");
+        for object in journal.prepared_objects.values() {
+            super::super::store_objects::create_exact_object(&store.storage, object)
+                .await
+                .expect("publish original exact Circle activation object");
+        }
+        let mut objects = old_commit
+            .operations()
+            .expect("Circle commit carries operations")
+            .circle_controls[0]
+            .objects()
+            .clone();
+        let original_ref = objects.access[0].clone();
+        let original_access = &journal.creation.access[0];
+        let invented_recipient_slot = format!("{}-invented", original_ref.leaf.recipient_slot);
+        let candidate_family = old_commit.candidate_family();
+        let leaf_prefix = circle_access_leaf_semantic_prefix(
+            journal.creation.circle_id,
+            candidate_family,
+            &original_ref.leaf.owner_pubkey,
+            original_ref.leaf.epoch_id,
+            &invented_recipient_slot,
+            original_ref.leaf.leaf_id,
+        );
+        let leaf = prepare_circle_object(
+            &store.storage,
+            &ProtocolObjectContext::recipient_sealed(old_commit.store_root_hash),
+            &leaf_prefix,
+            "",
+            original_access.leaf.bytes.clone(),
+        )
+        .await
+        .expect("prepare invented access leaf path");
+        let envelope_prefix = circle_access_envelope_semantic_prefix(
+            journal.creation.circle_id,
+            candidate_family,
+            &original_ref.envelope.owner_pubkey,
+            &invented_recipient_slot,
+            original_ref.envelope.control_hash,
+        );
+        let envelope = prepare_circle_object(
+            &store.storage,
+            &ProtocolObjectContext::store(
+                old_commit.store_root_hash,
+                ProtocolObjectDomain::CircleAccessEnvelope,
+            ),
+            &envelope_prefix,
+            ".json",
+            serde_json::to_vec(&original_access.envelope)
+                .expect("serialize original access envelope"),
+        )
+        .await
+        .expect("prepare invented access envelope path");
+        super::super::store_objects::create_exact_object(&store.storage, &leaf)
+            .await
+            .expect("publish invented access leaf path");
+        super::super::store_objects::create_exact_object(&store.storage, &envelope)
+            .await
+            .expect("publish invented access envelope path");
+        objects.access.push(CircleAccessObjectRef {
+            leaf: CircleAccessLeafObjectRef {
+                recipient_slot: invented_recipient_slot.clone(),
+                object: leaf.reference().clone(),
+                ..original_ref.leaf
+            },
+            envelope: CircleAccessEnvelopeObjectRef {
+                recipient_slot: invented_recipient_slot,
+                object: envelope.reference().clone(),
+                ..original_ref.envelope
+            },
+        });
+        let author = db
+            .activated_store_device_registration(old_commit.author_registration.clone())
+            .await
+            .expect("load exact Circle commit author");
+        let device_signer = author
+            .device_signer(&signer)
+            .expect("derive Circle commit device signer");
+        let commit_coord = journal.commit_ref.coord.clone();
+        let commit = signed_circle_commit(
+            old_commit.store_root_hash,
+            old_commit.write_id,
+            commit_coord.clone(),
+            old_commit.author_registration,
+            &author,
+            old_commit.order,
+            old_commit.membership_state,
+            old_commit.device_state,
+            old_commit.membership_authority,
+            &journal.creation,
+            objects,
+            &device_signer,
+        )
+        .expect("sign commit naming invented access refs");
+        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = commit_coord.clone() else {
+            panic!("invented access test requires a MergeConcurrent commit")
+        };
+        let commit_prepared = prepare_circle_object(
+            &store.storage,
+            &ProtocolObjectContext::store(
+                commit.store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            ),
+            &commit_semantic_prefix(
+                commit.candidate_family(),
+                &stream_id.to_string(),
+                commit.seq(),
+                commit.commit_hash(),
+            ),
+            ".json",
+            commit.to_bytes(),
+        )
+        .await
+        .expect("prepare re-signed Store commit");
+        super::super::store_objects::create_exact_object(&store.storage, &commit_prepared)
+            .await
+            .expect("publish re-signed Store commit");
+        let commit_ref = StoreBatchCommitRef::from_commit(
+            &commit,
+            commit_coord,
+            commit_prepared.reference().clone(),
+        )
+        .expect("bind re-signed Store commit reference");
+
+        let error = load_circle_activations(
+            &store.storage,
+            &store.root,
+            &commit_ref,
+            &commit,
+            &author,
+            &signer,
+            &keys::public_key_hex(&signer),
+        )
+        .await
+        .expect_err("invented access references must fail activation");
+        assert!(
+            error
+                .to_string()
+                .contains("circle access envelope failed verification"),
+            "{error}"
+        );
+
+        let CircleOperationPolicy::MergeConcurrent {
+            head: original_head,
+        } = &journal.policy
+        else {
+            panic!("invented access test requires a MergeConcurrent head")
+        };
+        let forged_head = StoreDeviceHead::signed(
+            commit.store_root_hash,
+            commit.author_registration.clone(),
+            commit_ref.clone(),
+            original_head.successor.clone(),
+            &device_signer,
+        )
+        .expect("sign Store head naming the re-signed commit");
+        let original_head_object = journal
+            .prepared_objects
+            .get("store-head")
+            .expect("Circle operation carries its Store head");
+        let head_context =
+            ProtocolObjectContext::store(commit.store_root_hash, ProtocolObjectDomain::StoreHead);
+        let forged_head_object = store
+            .storage
+            .prepare_protocol_object(
+                &head_context,
+                original_head_object.reference().slot().clone(),
+                &head_slot_prefix(
+                    &commit.author_registration.device_id.to_string(),
+                    commit.seq(),
+                ),
+                forged_head.to_bytes(),
+            )
+            .expect("prepare Store head naming the re-signed commit");
+        store.home.replace_exact_object(
+            original_head_object.reference().slot(),
+            forged_head_object.stored_bytes().to_vec(),
+        );
+
+        let (_store_temp, store_dir) = temp_store_dir();
+        let pull = super::super::store_pull::pull_store_commits_with_identity(
+            &db,
+            &test_synced_tables(),
+            &store.storage,
+            None,
+            store.root.store_root_hash,
+            &store_dir,
+            None,
+            Some(&signer),
+        )
+        .await
+        .expect("pull reports the invented access commit as held");
+        assert!(pull.held_positions.iter().any(|held| {
+            matches!(
+                &held.reason,
+                super::super::store_pull::HeldStorePositionReason::InvalidObject(reason)
+                    if reason.contains("circle access envelope failed verification")
+            )
+        }));
+        assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
+        assert!(db
+            .exact_materialized_ref(&stream_id.to_string(), commit.seq())
+            .await
+            .expect("read invented access commit position")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_activation_rejects_active_access_for_a_nonmember() {
+        let db = open_test_db();
+        let founder = UserKeypair::generate();
+        let store = TestStore::create(&db, "circle-active-access-nonmember", founder.clone())
+            .await
+            .expect("create exact Circle test Store");
+        let peer = UserKeypair::generate();
+        let peer_pubkey = keys::public_key_hex(&peer);
+        super::super::membership_ops::invite_member(
+            &store.storage,
+            store.home.as_ref(),
+            &founder,
+            &super::super::hlc::Hlc::new("founder-device".to_string()),
+            &peer_pubkey,
+            None,
+            MemberRole::Member,
+            &EncryptionService::from_key([42; 32]),
+            "circle-active-access-nonmember",
+            "Active access test Store",
+            &db,
+        )
+        .await
+        .expect("invite Store member outside the Circle roster");
+        let device_id = local_device_id(&db).await;
+        let mut journal = prepare_circle_operation(
+            &db,
+            &store.storage,
+            None,
+            &device_id,
+            "0000000001000-0000-founder",
+            "Household",
+            &founder,
+        )
+        .await
+        .expect("prepare Circle with inactive Store-member access");
+        promote_store_member_access_without_adding_to_circle_roster(
+            &mut journal.creation,
+            &founder,
+            &peer,
+        );
+        let old_commit = journal.commit().expect("parse prepared Store commit");
+        let candidate_family = old_commit.candidate_family();
+        let (objects, prepared) = prepare_circle_activation_objects(
+            &store.storage,
+            &store.root,
+            &journal.creation,
+            candidate_family,
+        )
+        .await
+        .expect("prepare exact promoted access objects");
+        for object in prepared.values() {
+            super::super::store_objects::create_exact_object(&store.storage, object)
+                .await
+                .expect("publish exact promoted access object");
+        }
+        let author = db
+            .activated_store_device_registration(old_commit.author_registration.clone())
+            .await
+            .expect("load exact Circle commit author");
+        let device_signer = author
+            .device_signer(&founder)
+            .expect("derive Circle commit device signer");
+        let commit_coord = journal.commit_ref.coord.clone();
+        let commit = signed_circle_commit(
+            old_commit.store_root_hash,
+            old_commit.write_id,
+            commit_coord.clone(),
+            old_commit.author_registration,
+            &author,
+            old_commit.order,
+            old_commit.membership_state,
+            old_commit.device_state,
+            old_commit.membership_authority,
+            &journal.creation,
+            objects,
+            &device_signer,
+        )
+        .expect("sign promoted access commit");
+        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = commit_coord.clone() else {
+            panic!("promoted access test requires a MergeConcurrent commit")
+        };
+        let commit_prepared = prepare_circle_object(
+            &store.storage,
+            &ProtocolObjectContext::store(
+                commit.store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            ),
+            &commit_semantic_prefix(
+                commit.candidate_family(),
+                &stream_id.to_string(),
+                commit.seq(),
+                commit.commit_hash(),
+            ),
+            ".json",
+            commit.to_bytes(),
+        )
+        .await
+        .expect("prepare promoted access Store commit");
+        super::super::store_objects::create_exact_object(&store.storage, &commit_prepared)
+            .await
+            .expect("publish promoted access Store commit");
+        let commit_ref = StoreBatchCommitRef::from_commit(
+            &commit,
+            commit_coord,
+            commit_prepared.reference().clone(),
+        )
+        .expect("bind promoted access Store commit");
+
+        let error = load_circle_activations(
+            &store.storage,
+            &store.root,
+            &commit_ref,
+            &commit,
+            &author,
+            &peer,
+            &keys::public_key_hex(&founder),
+        )
+        .await
+        .expect_err("Active access must name a resolved Circle member");
+        assert!(
+            error
+                .to_string()
+                .contains("Active access recipient is absent"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -1720,10 +2211,15 @@ mod tests {
             *control_head =
                 super::super::circle::CircleControlHead::signed(&creation.control.value, &signer);
         }
-        let (objects, prepared) =
-            prepare_circle_activation_objects(&store.storage, &store.root, creation)
-                .await
-                .expect("prepare forged exact Circle activation objects");
+        let candidate_family = old_commit.candidate_family();
+        let (objects, prepared) = prepare_circle_activation_objects(
+            &store.storage,
+            &store.root,
+            creation,
+            candidate_family,
+        )
+        .await
+        .expect("prepare forged exact Circle activation objects");
         for object in prepared.values() {
             super::super::store_objects::create_exact_object(&store.storage, object)
                 .await
@@ -1757,7 +2253,12 @@ mod tests {
         let commit_prepared = prepare_circle_object(
             &store.storage,
             &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
-            &commit_semantic_prefix(&stream_id.to_string(), commit.seq(), commit.commit_hash()),
+            &commit_semantic_prefix(
+                commit.candidate_family(),
+                &stream_id.to_string(),
+                commit.seq(),
+                commit.commit_hash(),
+            ),
             ".json",
             commit.to_bytes(),
         )
@@ -1900,7 +2401,7 @@ mod tests {
             .await
             .expect("persist still-authorized operation");
 
-        resume_circle_operations(&successor_db, &store.storage, None)
+        resume_circle_operations(&successor_db, &store.storage, None, &successor)
             .await
             .expect("revoked journal is blocked without interrupting the resume loop");
 
@@ -2041,10 +2542,15 @@ mod tests {
             .await
             .expect("persist raced operation");
 
-        let error =
-            publish_circle_operation(&db, &storage, Some(coordination), journal.circle_id())
-                .await
-                .expect_err("a removed writer must not activate a Circle commit");
+        let error = publish_circle_operation(
+            &db,
+            &storage,
+            Some(coordination),
+            journal.circle_id(),
+            &founder,
+        )
+        .await
+        .expect_err("a removed writer must not activate a Circle commit");
 
         assert!(matches!(error, CircleOperationError::Blocked { .. }));
         assert!(db
@@ -2148,10 +2654,15 @@ mod tests {
             .await
             .expect("persist Circle operation");
 
-        let error =
-            publish_circle_operation(&db, &storage, Some(coordination), journal.circle_id())
-                .await
-                .expect_err("same-position head substitution must block activation");
+        let error = publish_circle_operation(
+            &db,
+            &storage,
+            Some(coordination),
+            journal.circle_id(),
+            &founder,
+        )
+        .await
+        .expect_err("same-position head substitution must block activation");
 
         assert!(matches!(error, CircleOperationError::Blocked { .. }));
         assert!(home
@@ -2196,9 +2707,15 @@ mod tests {
             .await
             .expect("persist Circle operation");
 
-        publish_circle_operation(&db, &storage, Some(coordination), journal.circle_id())
-            .await
-            .expect_err("an activated head cannot repair or trust an absent commit");
+        publish_circle_operation(
+            &db,
+            &storage,
+            Some(coordination),
+            journal.circle_id(),
+            &founder,
+        )
+        .await
+        .expect_err("an activated head cannot repair or trust an absent commit");
 
         assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
         assert!(db
@@ -2272,10 +2789,15 @@ mod tests {
             .expect("read competing Serial position")
             .expect("competing Serial write is materialized");
 
-        let error =
-            publish_circle_operation(&db, &storage, Some(coordination), expected.circle_id())
-                .await
-                .expect_err("stale Serial base must lose head activation");
+        let error = publish_circle_operation(
+            &db,
+            &storage,
+            Some(coordination),
+            expected.circle_id(),
+            &signer,
+        )
+        .await
+        .expect_err("stale Serial base must lose head activation");
         assert!(
             matches!(error, CircleOperationError::Blocked { .. }),
             "{error}"
@@ -2310,7 +2832,7 @@ mod tests {
             BTreeMap::from([(SERIAL_STREAM_ID.to_string(), competing)])
         );
 
-        resume_circle_operations(&db, &storage, Some(coordination))
+        resume_circle_operations(&db, &storage, Some(coordination), &signer)
             .await
             .expect("blocked circle operation remains inert during resume");
         db.discard_blocked_circle_operation(expected.circle_id())

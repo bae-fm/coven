@@ -2546,7 +2546,11 @@ mod tests {
         let root = crate::sync::store_commit::ObjectHash::digest(b"root-a");
         let other_root = crate::sync::store_commit::ObjectHash::digest(b"root-b");
         let commit_hash = crate::sync::store_commit::ObjectHash::digest(b"commit");
-        let semantic = crate::sync::store_commit::commit_semantic_prefix("device", 1, commit_hash);
+        let family = crate::sync::store_commit::CandidateFamilyId::from_hash(
+            crate::sync::store_commit::ObjectHash::digest(b"cloud test family"),
+        );
+        let semantic =
+            crate::sync::store_commit::commit_semantic_prefix(family, "device", 1, commit_hash);
         let context = crate::sync::storage::ProtocolObjectContext::store(
             root,
             crate::sync::storage::ProtocolObjectDomain::StoreCommit,
@@ -2583,7 +2587,7 @@ mod tests {
         ));
 
         let other_semantic =
-            crate::sync::store_commit::commit_semantic_prefix("device", 2, commit_hash);
+            crate::sync::store_commit::commit_semantic_prefix(family, "device", 2, commit_hash);
         assert!(matches!(
             storage
                 .read_protocol_object(&context, &object, &other_semantic)

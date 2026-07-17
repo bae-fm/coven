@@ -2218,7 +2218,7 @@ pub async fn publish_cross_principal_challenge(
     .map_err(|error| ProviderProbeError::Storage(StorageError::Storage(error.to_string())))?;
     if activation
         .value
-        .device_join_attempts
+        .device_join_attempts()
         .binary_search(&authorization.attempt)
         .is_err()
     {

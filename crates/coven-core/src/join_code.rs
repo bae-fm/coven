@@ -271,13 +271,23 @@ mod tests {
 
     fn test_serial_commit_ref() -> crate::sync::store_commit::StoreBatchCommitRef {
         let stored = b"invite Serial floor commit";
+        let commit_hash = ObjectHash::digest(b"invite Serial floor semantic bytes");
+        let family = crate::sync::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
+            b"invite Serial floor candidate family",
+        ));
         crate::sync::store_commit::StoreBatchCommitRef {
             coord: crate::sync::store_commit::StoreCommitCoord::Serial { sequence: 7 },
-            commit_hash: ObjectHash::digest(b"invite Serial floor semantic bytes"),
+            commit_hash,
             object: crate::sync::storage::ExactObjectRef::new(
-                crate::storage::cloud::ObjectSlot::logical(
-                    "store-v1/commits/serial/7/invite-floor.json".to_string(),
-                )
+                crate::storage::cloud::ObjectSlot::logical(format!(
+                    "{}.json",
+                    crate::sync::store_commit::commit_semantic_prefix(
+                        family,
+                        crate::sync::store_commit::SERIAL_STREAM_ID,
+                        7,
+                        commit_hash,
+                    )
+                ))
                 .expect("valid test Store-commit slot"),
                 stored.len() as u64,
                 ObjectHash::digest(stored),

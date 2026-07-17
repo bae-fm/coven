@@ -771,16 +771,15 @@ async fn load_exact_published_commit(
         storage.root.store_root_hash,
         ProtocolObjectDomain::StoreCommit,
     );
-    let stream_id = commit_stream_id(&reference);
     let bytes = storage
         .read_protocol_object(
             &context,
             &reference.object,
-            &crate::sync::store_commit::commit_semantic_prefix(
-                &stream_id,
-                reference.coord.sequence(),
-                reference.commit_hash,
-            ),
+            &crate::sync::store_commit::semantic_prefix_from_exact_object(
+                &reference.object,
+                ".json",
+            )
+            .expect("derive exact Store commit semantic prefix"),
         )
         .await
         .expect("read exact published Store commit");
@@ -868,6 +867,7 @@ async fn replace_exact_commit_bytes(
         ProtocolObjectDomain::StoreCommit,
     );
     let semantic_prefix = crate::sync::store_commit::commit_semantic_prefix(
+        graph.commit.candidate_family(),
         &stream_id,
         graph.reference.coord.sequence(),
         commit_hash,
@@ -973,8 +973,7 @@ async fn resign_exact_commit(
 ) -> crate::sync::store_commit::StoreBatchCommit {
     let package = graph
         .commit
-        .store_package
-        .as_ref()
+        .store_package()
         .expect("test Store commit carries a Store package");
     let package_bytes = crate::sync::store_objects::load_store_package(
         &storage.storage,
@@ -1001,7 +1000,7 @@ fn sign_exact_commit_with_package(
     package_bytes: &[u8],
     package_object: crate::sync::storage::ExactObjectRef,
 ) -> crate::sync::store_commit::StoreBatchCommit {
-    crate::sync::store_commit::StoreBatchCommit::signed_batch(
+    crate::sync::store_commit::StoreBatchCommit::signed_operations(
         graph.commit.store_root_hash,
         graph.commit.write_id.clone(),
         graph.reference.coord.clone(),
@@ -1011,19 +1010,24 @@ fn sign_exact_commit_with_package(
         graph.commit.membership_state.clone(),
         graph.commit.device_state.clone(),
         membership_authority,
-        graph.commit.control.clone(),
-        graph.commit.device_join_attempts.clone(),
-        graph.commit.device_join_outcomes.clone(),
-        graph.commit.device_registrations.clone(),
-        graph.commit.device_retirements.clone(),
-        graph.commit.circle_controls.clone(),
-        Some(crate::sync::store_commit::StorePackageInput {
-            candidate_family: graph.commit.candidate_family(),
-            schema_version,
-            bytes: package_bytes,
-            object: package_object,
-        }),
-        &[],
+        crate::sync::store_commit::StoreCommitOperationsInput {
+            control: graph.commit.control().cloned(),
+            device_join_attempts: graph.commit.device_join_attempts().to_vec(),
+            device_join_outcomes: graph.commit.device_join_outcomes().to_vec(),
+            device_join_abandonments: graph.commit.device_join_abandonments().to_vec(),
+            device_join_cleanup_receipts: graph.commit.device_join_cleanup_receipts().to_vec(),
+            provider_access_grants: graph.commit.provider_access_grants().to_vec(),
+            provider_access_withdrawals: graph.commit.provider_access_withdrawals().to_vec(),
+            device_registrations: graph.commit.device_registrations().to_vec(),
+            circle_controls: graph.commit.circle_controls().to_vec(),
+            store_package: Some(crate::sync::store_commit::StorePackageInput {
+                candidate_family: graph.commit.candidate_family(),
+                schema_version,
+                bytes: package_bytes,
+                object: package_object,
+            }),
+            circle_packages: &[],
+        },
         &graph.device_signer,
     )
     .expect("re-sign exact Store commit")
@@ -1038,11 +1042,11 @@ async fn replace_exact_package_bytes(
 
     let package = graph
         .commit
-        .store_package
-        .as_ref()
+        .store_package()
         .expect("test Store commit carries a Store package");
     let stream_id = commit_stream_id(&graph.reference);
     let prefix = crate::sync::store_commit::package_semantic_prefix(
+        graph.commit.candidate_family(),
         &stream_id,
         graph.reference.coord.sequence(),
         package.content_hash,
@@ -1077,6 +1081,7 @@ async fn replace_store_package_with_malformed_bytes(
             crate::sync::storage::ProtocolObjectDomain::StorePackage,
         ),
         &crate::sync::store_commit::package_semantic_prefix(
+            graph.commit.candidate_family(),
             &stream_id,
             graph.reference.coord.sequence(),
             crate::sync::store_commit::ObjectHash::digest(malformed),
@@ -1859,8 +1864,7 @@ async fn pull_holds_and_names_a_reclaimed_changeset_gap() {
     let graph = load_exact_published_commit(&storage, commit).await;
     let package = graph
         .commit
-        .store_package
-        .as_ref()
+        .store_package()
         .expect("Store commit carries a Store package");
     storage
         .storage
@@ -2419,8 +2423,7 @@ async fn push_stamps_the_dbs_schema_version() {
     assert_eq!(
         commit
             .value
-            .store_package
-            .as_ref()
+            .store_package()
             .expect("outgoing Store commit carries a Store package")
             .schema_version,
         db1.schema_version(),
@@ -2579,8 +2582,7 @@ async fn pull_rejects_changeset_whose_declared_size_mismatches_actual_bytes() {
     let graph = load_exact_published_commit(&storage, reference).await;
     let package = graph
         .commit
-        .store_package
-        .as_ref()
+        .store_package()
         .expect("Store commit carries a Store package");
     let expected_package_hash = package.content_hash;
     let expected_stream_id = commit_stream_id(&graph.reference);
@@ -2656,6 +2658,7 @@ async fn a_store_commit_replayed_at_another_sequence_is_rejected() {
             crate::sync::storage::ProtocolObjectDomain::StoreCommit,
         ),
         &crate::sync::store_commit::commit_semantic_prefix(
+            graph.commit.candidate_family(),
             &stream_id.to_string(),
             2,
             graph.commit.commit_hash(),
@@ -2731,6 +2734,7 @@ async fn a_store_commit_relocated_to_another_device_is_rejected() {
             crate::sync::storage::ProtocolObjectDomain::StoreCommit,
         ),
         &crate::sync::store_commit::commit_semantic_prefix(
+            graph.commit.candidate_family(),
             &relocated_stream.to_string(),
             1,
             graph.commit.commit_hash(),

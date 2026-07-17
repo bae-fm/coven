@@ -11,10 +11,10 @@ use super::store_commit::{
     circle_package_semantic_prefix, commit_semantic_prefix, head_slot_prefix,
     package_semantic_prefix, serial_head_key, ActivatedStoreDeviceRegistrationRef,
     CandidateFamilyId, CirclePackageInput, DeviceJoinAttemptRef, DeviceJoinOutcomeRef, ObjectHash,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder, StoreControl,
-    StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreHistoryCut, StorePackageInput, StoreRootRef, StoreSerialHead, StoreSerialHeadState,
-    StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
+    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput,
+    StoreCommitOrder, StoreControl, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreHistoryCut, StorePackageInput, StoreRootRef, StoreSerialHead,
+    StoreSerialHeadState, StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
 };
 use super::store_objects::StoreObjectError;
 
@@ -412,7 +412,7 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
                 })
             })
             .collect::<Vec<_>>();
-        let commit = StoreBatchCommit::signed_batch(
+        let commit = StoreBatchCommit::signed_operations(
             store_root_hash,
             write_id.clone(),
             coord.clone(),
@@ -422,19 +422,28 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
             membership_state,
             device_state,
             payload.membership_authority,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            store_package,
-            &circle_packages,
+            StoreCommitOperationsInput {
+                control: None,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package,
+                circle_packages: &circle_packages,
+            },
             &device_signer,
         )
         .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-        let commit_prefix =
-            commit_semantic_prefix(&stream_id.to_string(), seq, commit.commit_hash());
+        let commit_prefix = commit_semantic_prefix(
+            commit.candidate_family(),
+            &stream_id.to_string(),
+            seq,
+            commit.commit_hash(),
+        );
         let commit_slot = storage
             .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
             .await
@@ -635,7 +644,12 @@ async fn prepare_partition_package(
             )
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
             let bytes = package.to_bytes();
-            let prefix = package_semantic_prefix(&stream_id, seq, ObjectHash::digest(&bytes));
+            let prefix = package_semantic_prefix(
+                candidate_family,
+                &stream_id,
+                seq,
+                ObjectHash::digest(&bytes),
+            );
             (
                 package,
                 ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StorePackage),
@@ -668,6 +682,7 @@ async fn prepare_partition_package(
             let bytes = package.to_bytes();
             let prefix = circle_package_semantic_prefix(
                 circle_id,
+                candidate_family,
                 &stream_id,
                 seq,
                 ObjectHash::digest(&bytes),
@@ -1243,8 +1258,12 @@ pub(crate) async fn drain_store_writes_with_coordination(
             };
             let commit_context =
                 ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
-            let commit_prefix =
-                commit_semantic_prefix(&stream_id, commit.seq(), commit.commit_hash());
+            let commit_prefix = commit_semantic_prefix(
+                commit.candidate_family(),
+                &stream_id,
+                commit.seq(),
+                commit.commit_hash(),
+            );
             storage
                 .create_protocol_object(&batch.commit.prepared)
                 .await
@@ -1440,7 +1459,12 @@ pub(crate) async fn prepare_serial_control(
         &device_signer,
     )
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let prefix = commit_semantic_prefix(SERIAL_STREAM_ID, seq, commit.commit_hash());
+    let prefix = commit_semantic_prefix(
+        commit.candidate_family(),
+        SERIAL_STREAM_ID,
+        seq,
+        commit.commit_hash(),
+    );
     let slot = storage
         .allocate_protocol_slot(&context, &prefix, ".json")
         .await
@@ -1458,7 +1482,7 @@ pub(crate) async fn prepare_serial_control(
         storage,
         &root,
         &root_value,
-        commit.control.as_ref(),
+        commit.control(),
     )
     .await
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
@@ -1532,7 +1556,12 @@ pub(crate) async fn activate_serial_commit_head(
     if observed.bytes() == Some(head_bytes.as_slice()) {
         let context =
             ProtocolObjectContext::store(commit.store_root_hash, ProtocolObjectDomain::StoreCommit);
-        let prefix = commit_semantic_prefix(SERIAL_STREAM_ID, commit.seq(), commit.commit_hash());
+        let prefix = commit_semantic_prefix(
+            commit.candidate_family(),
+            SERIAL_STREAM_ID,
+            commit.seq(),
+            commit.commit_hash(),
+        );
         let persisted = storage
             .read_protocol_object(&context, &commit_ref.object, &prefix)
             .await
@@ -1556,8 +1585,12 @@ pub(crate) async fn activate_serial_commit_head(
         .map_err(StoreObjectError::from)?;
     let commit_context =
         ProtocolObjectContext::store(commit.store_root_hash, ProtocolObjectDomain::StoreCommit);
-    let commit_prefix =
-        commit_semantic_prefix(SERIAL_STREAM_ID, commit.seq(), commit.commit_hash());
+    let commit_prefix = commit_semantic_prefix(
+        commit.candidate_family(),
+        SERIAL_STREAM_ID,
+        commit.seq(),
+        commit.commit_hash(),
+    );
     let opened = storage
         .read_protocol_object(&commit_context, &commit_ref.object, &commit_prefix)
         .await
@@ -1879,7 +1912,7 @@ async fn prepare_serial_store_branch(
                     })
                 })
                 .collect::<Vec<_>>();
-            let commit = StoreBatchCommit::signed_batch(
+            let commit = StoreBatchCommit::signed_operations(
                 store_root_hash,
                 write.write_id.clone(),
                 coord.clone(),
@@ -1889,18 +1922,28 @@ async fn prepare_serial_store_branch(
                 membership_state,
                 device_state,
                 payload.membership_authority,
-                None,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                store_package,
-                &circle_packages,
+                StoreCommitOperationsInput {
+                    control: None,
+                    device_join_attempts: Vec::new(),
+                    device_join_outcomes: Vec::new(),
+                    device_join_abandonments: Vec::new(),
+                    device_join_cleanup_receipts: Vec::new(),
+                    provider_access_grants: Vec::new(),
+                    provider_access_withdrawals: Vec::new(),
+                    device_registrations: Vec::new(),
+                    circle_controls: Vec::new(),
+                    store_package,
+                    circle_packages: &circle_packages,
+                },
                 &device_signer,
             )
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-            let prefix = commit_semantic_prefix(SERIAL_STREAM_ID, seq, commit.commit_hash());
+            let prefix = commit_semantic_prefix(
+                commit.candidate_family(),
+                SERIAL_STREAM_ID,
+                seq,
+                commit.commit_hash(),
+            );
             let slot = storage
                 .allocate_protocol_slot(&context, &prefix, ".json")
                 .await
@@ -2030,6 +2073,7 @@ async fn drain_serial_store_branch(
         let context =
             ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
         let prefix = commit_semantic_prefix(
+            write.commit.value.candidate_family(),
             SERIAL_STREAM_ID,
             write.commit.value.seq(),
             write.commit.value.commit_hash(),
@@ -2227,6 +2271,7 @@ async fn publish_prepared_remote_objects(
                             ProtocolObjectDomain::StorePackage,
                         ),
                         package_semantic_prefix(
+                            package.candidate_family(),
                             &stream_id,
                             sequence,
                             ObjectHash::digest(remote.bytes().canonical_semantic_bytes()),
@@ -2246,6 +2291,7 @@ async fn publish_prepared_remote_objects(
                             ),
                             circle_package_semantic_prefix(
                                 *circle_id,
+                                package.candidate_family(),
                                 &stream_id,
                                 sequence,
                                 ObjectHash::digest(remote.bytes().canonical_semantic_bytes()),
@@ -2579,7 +2625,12 @@ pub(crate) async fn activate_device_join_commit(
         StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
         StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
     };
-    let prefix = commit_semantic_prefix(&stream_id, commit.seq(), commit.commit_hash());
+    let prefix = commit_semantic_prefix(
+        commit.candidate_family(),
+        &stream_id,
+        commit.seq(),
+        commit.commit_hash(),
+    );
     let slot = storage
         .allocate_protocol_slot(&context, &prefix, ".json")
         .await
@@ -3544,7 +3595,7 @@ mod tests {
         let package_object = batch
             .commit
             .value
-            .store_package
+            .store_package()
             .as_ref()
             .expect("Store package")
             .object

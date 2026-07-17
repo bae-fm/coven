@@ -3950,7 +3950,9 @@ impl SyncStorage for CycleStorageInterceptor {
         object: &crate::sync::storage::ExactObjectRef,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError> {
-        if semantic_prefix.starts_with("store-v1/packages/") {
+        if semantic_prefix.starts_with("store-v1/candidates/")
+            && semantic_prefix.contains("/packages/")
+        {
             if let CycleStorageInterception::InjectHostWrite {
                 db,
                 write_sql,
@@ -5326,7 +5328,7 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
     assert_eq!(published_ref, published);
     assert_eq!(published_commit.value.write_id, write_id);
     assert!(
-        published_commit.value.store_package.is_some(),
+        published_commit.value.store_package().is_some(),
         "the blob Store write carries an exact Store package reference",
     );
     let activated_blob = stored_blob_for_row(&db, "note_photos", "lazyblob")
