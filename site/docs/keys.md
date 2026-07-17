@@ -56,22 +56,8 @@ device through an encrypted local (Finder/iTunes) backup, because the item is
 bound to this device's Secure Enclave. This is the default, not an opt-in — a
 host does not choose it and cannot opt out of it.
 
-The access policy an item is created under is fixed for its lifetime; an item
-a build wrote before this policy existed keeps its old accessibility class
-until something deletes and recreates it.
-[`StoreKeys::reprotect_apple_keys`](rustdoc:method:coven::StoreKeys::reprotect_apple_keys)
-is the explicit upgrade path — a host calls it once per store, after
-upgrading to a coven build that writes device-only, to bring items an older
-build wrote forward. coven never does this on its own, on a read or a write.
-
-```rust
-// Per store: the master key, the store's signing identity, cloud-home
-// credentials, and any host secret names the host passes (coven doesn't
-// track which names a host used).
-key_service.reprotect_apple_keys(&["discogs_api_key"])?;
-```
-
-Cfg'd to Apple targets only.
+The access policy is fixed when the item is created, and every Coven-created
+Apple keyring item receives this policy on its first write.
 
 ## Custody is a choice, with working presets
 
@@ -166,9 +152,9 @@ of these three acts brought the store into existence on this device:
   [`coven::generate_join_request`](rustdoc:fn:coven::generate_join_request)
   mints the keypair before the joiner even knows which store the invite
   names (a *pending* identity, held under a slot keyed by the request), and
-  [`coven::join_from_invite_code`](rustdoc:fn:coven::join_from_invite_code)
-  promotes it into that store's own identity custody once the join
-  completes. A join never finished can discard its pending identity with
+  [`coven::DeviceJoinClient`](rustdoc:struct:coven::DeviceJoinClient) drives
+  the signed admission exchange and promotes it into that store's own identity
+  custody only after the activation is installed. A join never finished can discard its pending identity with
   [`coven::abandon_join_request`](rustdoc:fn:coven::abandon_join_request).
 - **Restoring a store** —
   [`coven::restore_from_code`](rustdoc:fn:coven::restore_from_code) imports
@@ -228,19 +214,15 @@ a host secret even under the same name. coven validates it: empty,
 containing `:` (the account scheme's own separator — allowing it would let a
 host secret's name forge another store's account), or matching one of
 coven's own reserved slot names, is refused with
-[`KeyError::InvalidSecretName`](rustdoc:enum:coven::KeyError). On Apple, a
-host secret is not automatically reprotected when coven ships a build that
-changes the default policy — coven doesn't track which names a host used —
-so `StoreKeys::reprotect_apple_keys` takes the host's own secret names as an
-argument (see [above](#correct-access-policy-by-default)).
+[`KeyError::InvalidSecretName`](rustdoc:enum:coven::KeyError).
 
 ## Per-platform host requirements
 
 ### Android
 
 The bundled Android store needs Android's JNI application context — nothing
-a `cargo build` receives on its own. A host supplies it via a small Kotlin
-shim: a class exposing `external fun initializeNdkContext(Context)`, backed
+a `cargo build` receives on its own. A host supplies it via a Kotlin bridge: a
+class exposing `external fun initializeNdkContext(Context)`, backed
 by whichever shared library the host's Rust build produces (the crate's own
 if built standalone, or the host's own combined native library if coven is
 linked into one — bae calls its `bae_bridge`). The host calls
@@ -297,9 +279,8 @@ A plain `cargo test` binary can never carry a provisioning profile (Apple
 doesn't code-sign `cargo test` harnesses), so it can never reach the real
 data-protection keychain — this is a platform limitation, not a coven gap.
 coven's own tests mock the keyring for this reason
-(`keyring_core::mock::Store`); a real key operation — reading, writing, or
-reprotecting an Apple keyring item — needs the entitlement and profile above,
-in CI as much as on a device.
+(`keyring_core::mock::Store`); a real key operation needs the entitlement and
+profile above, in CI as much as on a device.
 
 ### Linux
 
