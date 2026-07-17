@@ -55,8 +55,8 @@ pub(crate) mod join_code {
     /// [`crate::keys::mint_pending_identity`]) — the joiner sends its public
     /// key before it learns which store the invite names, so the keypair is
     /// generated now and held under a pending slot keyed by that public key.
-    /// Completing the join with [`crate::join_from_invite_code`] (passing
-    /// this same code back) promotes it into the joined store's own identity;
+    /// Completing the join with [`crate::DeviceJoinClient`] (constructed with
+    /// this same code) promotes it into the joined store's own identity;
     /// [`crate::abandon_join_request`] discards it if the request is
     /// abandoned instead.
     pub fn generate_join_request(email: Option<String>) -> Result<String, crate::keys::KeyError> {
@@ -228,7 +228,7 @@ pub(crate) mod storage {
                         access_key,
                         secret_key,
                         config.cloud_home.s3_key_prefix.clone(),
-                        config.cloud_home.s3_immutable_copies,
+                        config.cloud_home.s3_exact_slots,
                     )
                     .await?;
                     Ok(Box::new(s3))
@@ -339,8 +339,8 @@ pub(crate) mod storage {
             use crate::config::{CloudProvider, Config, HomeStorage};
             use crate::keys::StoreKeys;
             use crate::storage::cloud::cloudkit::{
-                CloudKitAtomicCreateBatch, CloudKitChangeToken, CloudKitOps,
-                CloudKitRecordChangesPage, CloudKitRecordCreate, CloudKitRecordVersion,
+                CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps,
+                CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion,
                 CloudKitScope, CloudKitShare,
             };
             use crate::store_dir::StoreDir;
@@ -363,6 +363,35 @@ pub(crate) mod storage {
             }
 
             impl CloudKitOps for ScopeRecordingOps {
+                fn provider_identity(
+                    &self,
+                    scope: &CloudKitScope,
+                ) -> Result<CloudKitProviderIdentity, CloudHomeError> {
+                    let (owner_name, zone_name) = match scope {
+                        CloudKitScope::Private => ("test-owner", "test-zone"),
+                        CloudKitScope::Shared {
+                            owner_name,
+                            zone_name,
+                        } => (owner_name.as_str(), zone_name.as_str()),
+                    };
+                    Ok(CloudKitProviderIdentity {
+                        container_id: "iCloud.test.coven".to_string(),
+                        environment: crate::CloudKitEnvironment::Development,
+                        owner_name: owner_name.to_string(),
+                        zone_name: zone_name.to_string(),
+                        current_user_record_name: "test-user".to_string(),
+                    })
+                }
+
+                fn accepted_read_write_share(
+                    &self,
+                    _scope: &CloudKitScope,
+                ) -> Result<CloudKitAcceptedShareRecord, CloudHomeError> {
+                    Err(CloudHomeError::NotFound(
+                        "accepted CloudKit share".to_string(),
+                    ))
+                }
+
                 fn write_record(
                     &self,
                     _scope: &CloudKitScope,
@@ -457,13 +486,6 @@ pub(crate) mod storage {
                     _scope: &CloudKitScope,
                     _batch: &CloudKitAtomicCreateBatch,
                 ) -> Result<(), CloudHomeError> {
-                    unimplemented!("not exercised by these tests")
-                }
-                fn record_changes(
-                    &self,
-                    _scope: &CloudKitScope,
-                    _after: Option<&CloudKitChangeToken>,
-                ) -> Result<CloudKitRecordChangesPage, CloudHomeError> {
                     unimplemented!("not exercised by these tests")
                 }
                 fn delete_record_versions(
@@ -633,15 +655,16 @@ pub use coven_core::rusqlite;
 pub use coven_core::{BlobDecl, Migration, MigrationStep, RowIdentity, SyncedTable};
 
 // Config.
+pub use coven_core::sync::storage::CloudKitEnvironment;
 pub use coven_core::{
-    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ImmutableCopies, CustomS3Serial,
+    CloudHomeConfig, CloudProvider, Config, ConfigError, CustomS3ExactSlots, CustomS3Serial,
     HomeStorage, WritePolicy,
 };
 
 // Blob descriptors, cache error, the host-implemented transition observer.
 pub use coven_core::{
     BlobCacheError, BlobRef, BlobReplacement, BlobScope, BlobTransitionObserver, CacheFill,
-    Provenance,
+    Provenance, RowBlobAuthority, RowBlobRef,
 };
 
 // Applied-sync change notification.
@@ -671,7 +694,19 @@ pub use coven_core::{Hlc, Timestamp, UpdatedAtStamper};
 // exposed only because `generate_restore_code` takes a caller-supplied
 // membership floor made of them; a host driving that free function directly
 // (bypassing `CovenHandle`) must be able to name the type.
+pub use coven_core::sync::device_join::{
+    DeviceJoinAbandonment, DeviceJoinAction, DeviceJoinActivation, DeviceJoinAuthorization,
+    DeviceJoinCancellation, DeviceJoinCleanupActivation, DeviceJoinCleanupProgress,
+    DeviceJoinCleanupReceipt, DeviceJoinError, DeviceJoinJournalDatabase, DeviceJoinJournalRecord,
+    DeviceJoinOffer, DeviceJoinProducer, DeviceJoinProducerWriteRevocation, DeviceJoinReadiness,
+    DeviceJoinRole, DeviceJoinStatus, DeviceProviderAccessAdministrator,
+    DeviceProviderAccessRequest, DeviceProviderAdmission, DeviceProviderAdmissionApproval,
+    DeviceProviderAdmissionCompletion, DeviceProviderReadiness, DeviceRegistrationRequest,
+    JoinedStore, JoinerJoinClosure, JoinerJoinTerminal, ProviderAdminJoinClosure,
+    ProviderAdminJoinTerminal, ProviderReadyDeviceBootstrap, ProvisionalDeviceBootstrap,
+};
 pub use coven_core::sync::membership::MembershipCoord;
+pub use coven_core::sync::store_commit::{DeviceJoinAttemptId, DeviceJoinAttemptRef};
 pub use coven_core::{
     Audience, CircleId, CircleInfo, CircleOperationInfo, CircleOperationState, CircleRole,
 };
@@ -696,8 +731,17 @@ pub use coven_core::CloudCipher;
 // Cloud provider trait surface a provider implementor needs and its
 // thread-safety floor.
 pub use coven_core::storage::cloud::{
-    write_cloud_object_stream, AppendedListing, AppendedObject, CloudFileReadError,
-    CloudObjectStream, ImmutableCopyStorage, ListingCoverage,
+    write_cloud_object_stream, CloudFileReadError, CloudObjectStream, ExactSlotStorage, ObjectSlot,
+    PhysicalObjectLocator,
+};
+pub use coven_core::sync::provider::{
+    CloudKitAcceptedShare, CrossPrincipalProbeReceipt, ExactSlotProbeReceipt, ProviderAdminChange,
+    ProviderAdminGrantId, ProviderAdminGrantRecord, ProviderAdminMembershipChange,
+    ProviderAdminState, ProviderCapabilityProof, ProviderProbeId, SerialCoordinationProbeReceipt,
+};
+pub use coven_core::sync::storage::{
+    AwsPrincipal, GoogleDriveCorpus, ProviderDeviceBinding, ProviderPrincipalId,
+    ResolvedProviderBinding, S3EndpointBinding, StoreProviderBinding,
 };
 pub use coven_core::{
     BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHeadCreateError,
@@ -718,7 +762,7 @@ pub use sync::sync_loop::SyncLoopStatus;
 
 // In-memory cloud home and durable upload-queue rows for host integration tests.
 #[cfg(any(test, feature = "test-utils"))]
-pub use coven_core::{InMemoryCloudHome, OutboxEntry, OutboxOperation};
+pub use coven_core::InMemoryCloudHome;
 
 pub use blob::transition::{MakeLocalError, MakeRemoteError};
 pub use custody::{rewrap_passphrase_custody, KeyCustody, Passphrase};
@@ -740,16 +784,19 @@ pub use oauth::{set_oauth_client_creds, OAuthClientCreds, OAuthClientCredsConfli
 pub use storage::cloud::setup::generate_restore_code;
 pub use storage::cloud::{
     cloudkit::{
-        CloudKitAtomicCreateBatch, CloudKitChangeToken, CloudKitOps, CloudKitRecordChange,
-        CloudKitRecordChangesContinuation, CloudKitRecordChangesPage, CloudKitRecordCreate,
-        CloudKitRecordVersion, CloudKitScope, CloudKitShare,
+        CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps,
+        CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope,
+        CloudKitShare, CloudKitShareAcceptance, CloudKitSharePermission,
     },
     create_cloud_home,
     s3::S3CloudHome,
 };
 pub use storage::local::BlobStore;
-pub use sync::join::{join_from_invite_code, BootstrapError};
+pub use sync::join::{BootstrapError, DeviceJoinClient};
 pub use sync::restore::{restore_from_cloud, restore_from_code, RestoreSource};
+pub use sync::restore_code::{
+    ActivatedContinuation, OwnerRecoveryAuthority, RestoreAuthority, RestoreCode,
+};
 pub use sync::sync_manager::SyncError;
 
 #[cfg(feature = "oauth-providers")]

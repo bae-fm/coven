@@ -49,17 +49,22 @@ pub async fn sign_in_google_drive(
     let folder_name = format!("your-app - {store_name}");
 
     let search_query = super::google_drive::folder_search_query(&folder_name);
-    let search_resp = client
-        .get("https://www.googleapis.com/drive/v3/files")
-        .bearer_auth(&tokens.access_token)
-        .query(&[("q", &search_query), ("fields", &"files(id)".to_string())])
-        .send()
-        .await
-        .map_err(|e| {
-            SetupError(format!(
-                "Failed to search for existing Google Drive folder: {e}"
-            ))
-        })?;
+    let search_resp = super::google_drive::supports_all_drives(
+        client.get("https://www.googleapis.com/drive/v3/files"),
+    )
+    .bearer_auth(&tokens.access_token)
+    .query(&[
+        ("q", search_query.as_str()),
+        ("fields", "files(id)"),
+        ("includeItemsFromAllDrives", "true"),
+    ])
+    .send()
+    .await
+    .map_err(|e| {
+        SetupError(format!(
+            "Failed to search for existing Google Drive folder: {e}"
+        ))
+    })?;
 
     if !search_resp.status().is_success() {
         let body = super::http::body_text(search_resp).await;
@@ -84,13 +89,14 @@ pub async fn sign_in_google_drive(
             "name": folder_name,
             "mimeType": "application/vnd.google-apps.folder",
         });
-        let resp = client
-            .post("https://www.googleapis.com/drive/v3/files")
-            .bearer_auth(&tokens.access_token)
-            .json(&create_body)
-            .send()
-            .await
-            .map_err(|e| SetupError(format!("Failed to create Google Drive folder: {e}")))?;
+        let resp = super::google_drive::supports_all_drives(
+            client.post("https://www.googleapis.com/drive/v3/files"),
+        )
+        .bearer_auth(&tokens.access_token)
+        .json(&create_body)
+        .send()
+        .await
+        .map_err(|e| SetupError(format!("Failed to create Google Drive folder: {e}")))?;
 
         if !resp.status().is_success() {
             let body = super::http::body_text(resp).await;
@@ -255,10 +261,10 @@ pub fn generate_restore_code(
     config: &Config,
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
-    identity_custody: &dyn DeviceIdentityCustody,
-    store_root_hash: crate::sync::store_commit::ObjectHash,
+    store_root: crate::sync::store_commit::StoreRootRef,
     founder_pubkey: String,
     membership_floor: crate::join_code::MembershipFloor,
+    authority: crate::sync::restore_code::RestoreAuthority,
 ) -> Result<String, SetupError> {
     use crate::storage::cloud::CloudHomeJoinInfo;
     use crate::sync::restore_code::{encode_restore_code, RestoreCode, RESTORE_CODE_VERSION};
@@ -282,13 +288,6 @@ pub fn generate_restore_code(
     } else {
         None
     };
-
-    // A restore code embeds this store's signing identity so a second device
-    // can re-establish it; the store already has one — established when it
-    // was created, joined, or restored — so this reads it rather than
-    // minting: a connect-shaped precondition, not a query.
-    let keypair = crate::keys::require_identity(identity_custody)
-        .map_err(|e| SetupError(format!("Failed to get signing key: {e}")))?;
 
     let provider = match cloud_provider {
         CloudProvider::S3 => {
@@ -380,10 +379,10 @@ pub fn generate_restore_code(
         ek,
         name: config.store_name.clone(),
         provider,
-        sk: hex::encode(keypair.to_keypair_bytes()),
-        store_root_hash,
+        store_root,
         founder_pubkey,
         membership_floor,
+        authority,
     };
 
     Ok(encode_restore_code(&code))
@@ -403,34 +402,32 @@ pub enum StorageSetupError {
     NoEncryptionKey,
     #[error("{provider:?} cannot coordinate a Serial Store with this configuration")]
     SerialCoordinationUnavailable { provider: CloudProvider },
-    #[error(
-        "{provider:?} cannot store immutable protocol and blob copies with this configuration"
-    )]
-    ImmutableCopiesUnavailable { provider: CloudProvider },
+    #[error("{provider:?} cannot provide exact protocol and blob slots with this configuration")]
+    ExactSlotsUnavailable { provider: CloudProvider },
 }
 
-pub(crate) fn require_immutable_copy_capabilities_config(
+pub(crate) fn require_exact_slot_capabilities_config(
     config: &Config,
 ) -> Result<(), StorageSetupError> {
     let provider = config.cloud_home.provider.clone().ok_or_else(|| {
         super::CloudHomeError::Configuration(
-            "sync requires a cloud provider with immutable-copy storage".to_string(),
+            "sync requires a cloud provider with exact-slot storage".to_string(),
         )
     })?;
-    if immutable_copy_capabilities_supported(
+    if exact_slot_capabilities_supported(
         &provider,
         config.cloud_home.s3_endpoint.is_some(),
-        config.cloud_home.s3_immutable_copies,
+        config.cloud_home.s3_exact_slots,
     ) {
         Ok(())
     } else {
-        Err(StorageSetupError::ImmutableCopiesUnavailable { provider })
+        Err(StorageSetupError::ExactSlotsUnavailable { provider })
     }
 }
 
-pub(crate) fn require_immutable_copy_capabilities_join_info(
+pub(crate) fn require_exact_slot_capabilities_join_info(
     join_info: &crate::storage::cloud::CloudHomeJoinInfo,
-    custom_s3_immutable_copies: Option<crate::config::CustomS3ImmutableCopies>,
+    custom_s3_exact_slots: Option<crate::config::CustomS3ExactSlots>,
 ) -> Result<(), CloudProvider> {
     let provider = join_info.cloud_provider();
     let custom_endpoint = matches!(
@@ -440,41 +437,40 @@ pub(crate) fn require_immutable_copy_capabilities_join_info(
             ..
         }
     );
-    if immutable_copy_capabilities_supported(&provider, custom_endpoint, custom_s3_immutable_copies)
-    {
+    if exact_slot_capabilities_supported(&provider, custom_endpoint, custom_s3_exact_slots) {
         Ok(())
     } else {
         Err(provider)
     }
 }
 
-pub(crate) fn require_immutable_copy_capabilities_home(
+pub(crate) fn require_exact_slot_capabilities_home(
     home: std::sync::Arc<dyn super::CloudHome>,
     provider: Option<CloudProvider>,
 ) -> Result<(), StorageSetupError> {
-    if home.immutable_copy_storage().is_some() {
+    if home.exact_slot_storage().is_some() {
         Ok(())
     } else if let Some(provider) = provider {
-        Err(StorageSetupError::ImmutableCopiesUnavailable { provider })
+        Err(StorageSetupError::ExactSlotsUnavailable { provider })
     } else {
         Err(super::CloudHomeError::Configuration(
-            "sync requires a cloud provider with immutable-copy storage".to_string(),
+            "sync requires a cloud provider with exact-slot storage".to_string(),
         )
         .into())
     }
 }
 
-fn immutable_copy_capabilities_supported(
+fn exact_slot_capabilities_supported(
     provider: &CloudProvider,
     custom_s3_endpoint: bool,
-    custom_s3_immutable_copies: Option<crate::config::CustomS3ImmutableCopies>,
+    custom_s3_exact_slots: Option<crate::config::CustomS3ExactSlots>,
 ) -> bool {
     match provider {
         CloudProvider::S3 if !custom_s3_endpoint => true,
-        CloudProvider::S3 => custom_s3_immutable_copies
-            == Some(
-                crate::config::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing,
-            ),
+        CloudProvider::S3 => {
+            custom_s3_exact_slots
+                == Some(crate::config::CustomS3ExactSlots::StandardConditionalRequests)
+        }
         CloudProvider::GoogleDrive
         | CloudProvider::Dropbox
         | CloudProvider::OneDrive
@@ -519,7 +515,7 @@ pub(crate) async fn create_sync_storage_with_cloudkit(
     clock: crate::clock::ClockRef,
     cloudkit_ops: Option<std::sync::Arc<dyn super::cloudkit::CloudKitOps>>,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
-    require_immutable_copy_capabilities_config(config)?;
+    require_exact_slot_capabilities_config(config)?;
     let cloud_home =
         super::create_cloud_home_with_cloudkit(config, key_service, clock, cloudkit_ops.clone())
             .await?;
@@ -625,7 +621,7 @@ async fn s3_coordination(
         access_key,
         secret_key,
         config.cloud_home.s3_key_prefix.clone(),
-        config.cloud_home.s3_immutable_copies,
+        config.cloud_home.s3_exact_slots,
     )
     .await?;
     Ok(Some((Arc::new(primary), Arc::new(peer))))
@@ -709,7 +705,7 @@ pub(crate) fn create_sync_storage_with_home(
     home: Arc<dyn super::CloudHome>,
     cipher: Option<CloudCipher>,
 ) -> Result<crate::sync::cloud_storage::CloudSyncStorage, StorageSetupError> {
-    require_immutable_copy_capabilities_home(home.clone(), config.cloud_home.provider.clone())?;
+    require_exact_slot_capabilities_home(home.clone(), config.cloud_home.provider.clone())?;
     let cipher = match cipher {
         Some(c) => c,
         None => build_cloud_cipher(config, custody)?,
@@ -728,7 +724,6 @@ pub(crate) fn create_sync_storage_with_home(
         BlobPathScheme::for_storage(config.cloud_home.storage),
         config.store_id.clone(),
         keypair,
-        std::sync::Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
     )?)
 }
 
@@ -745,20 +740,89 @@ mod tests {
     use crate::store_dir::StoreDir;
     use crate::sync::restore_code::decode_restore_code;
 
-    fn membership_floor(author_pubkey: String) -> Vec<crate::sync::membership::MembershipCoord> {
-        vec![crate::sync::membership::MembershipCoord {
+    fn membership_floor(author_pubkey: String) -> Vec<crate::sync::membership::MembershipHeadRef> {
+        let coord = crate::sync::membership::MembershipCoord {
             author_pubkey,
             author_owner_grant: crate::sync::membership::MembershipGrantId(
                 crate::sync::store_commit::ObjectHash::digest(b"restore test owner grant"),
             ),
-            stream_id: "00000000000000000000000000000001"
+            stream_id: "0000000000000000000000000000000000000000000000000000000000000001"
                 .parse()
                 .expect("canonical test author stream id"),
             seq: 1,
             entry_hash: crate::sync::store_commit::ObjectHash::digest(
                 b"restore test founder entry",
             ),
+        };
+        let stored = b"restore setup membership head";
+        vec![crate::sync::membership::MembershipHeadRef {
+            coord,
+            head_hash: crate::sync::store_commit::ObjectHash::digest(
+                b"restore setup membership head semantic bytes",
+            ),
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/membership/heads/restore-setup/1.json".to_string(),
+                )
+                .expect("valid test membership-head slot"),
+                stored.len() as u64,
+                crate::sync::store_commit::ObjectHash::digest(stored),
+            ),
         }]
+    }
+
+    fn store_root() -> crate::sync::store_commit::StoreRootRef {
+        let stored = b"restore setup Store root";
+        crate::sync::store_commit::StoreRootRef {
+            store_root_id: crate::sync::store_commit::ObjectHash::digest(
+                b"restore setup Store root identity",
+            ),
+            store_root_hash: crate::sync::store_commit::ObjectHash::digest(stored),
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/protocol/root/restore-setup.json".to_string(),
+                )
+                .expect("valid test Store-root slot"),
+                stored.len() as u64,
+                crate::sync::store_commit::ObjectHash::digest(stored),
+            ),
+        }
+    }
+
+    fn restore_authority() -> crate::sync::restore_code::RestoreAuthority {
+        let owner_grant = crate::sync::membership::MembershipGrantId(
+            crate::sync::store_commit::ObjectHash::digest(b"restore test owner grant"),
+        );
+        let root = store_root();
+        let owner_pubkey = hex::encode([7u8; 32]);
+        let anchor = crate::sync::store_commit::GrantStreamAnchor::OwnerRecovery {
+            first_slot: crate::storage::cloud::ObjectSlot::logical(
+                "store-v1/recovery/restore-setup/first.json".to_string(),
+            )
+            .expect("valid recovery slot"),
+        };
+        let activation = crate::sync::store_commit::OwnerRecoveryActivationId::derive(
+            &root,
+            &owner_pubkey,
+            &owner_grant,
+            &anchor,
+        )
+        .expect("valid recovery activation");
+        crate::sync::restore_code::RestoreAuthority::OwnerRecovery(
+            crate::sync::restore_code::OwnerRecoveryAuthority {
+                owner_identity_secret: hex::encode(
+                    crate::keys::UserKeypair::generate().to_keypair_bytes(),
+                ),
+                owner_grant: owner_grant.clone(),
+                recovery: crate::sync::store_commit::OwnerRecoveryCursor {
+                    owner_grant,
+                    position: crate::sync::store_commit::OwnerRecoveryPosition::BeforeFirst {
+                        activation,
+                    },
+                },
+                published_at: "2026-07-17T00:00:00Z".to_string(),
+            },
+        )
     }
 
     /// A CloudKit config with `storage: Browsable` so the test exercises only
@@ -814,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn immutable_copy_admission_is_universal_and_uses_local_s3_assertions() {
+    fn exact_slot_admission_is_universal_and_uses_local_s3_assertions() {
         let mut config = Config::with_defaults(
             "store-1".to_string(),
             "device-1".to_string(),
@@ -824,18 +888,18 @@ mod tests {
 
         config.cloud_home.provider = Some(CloudProvider::S3);
         config.cloud_home.s3_endpoint = None;
-        assert!(require_immutable_copy_capabilities_config(&config).is_ok());
+        assert!(require_exact_slot_capabilities_config(&config).is_ok());
 
         config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
         assert!(matches!(
-            require_immutable_copy_capabilities_config(&config),
-            Err(StorageSetupError::ImmutableCopiesUnavailable {
+            require_exact_slot_capabilities_config(&config),
+            Err(StorageSetupError::ExactSlotsUnavailable {
                 provider: CloudProvider::S3
             })
         ));
-        config.cloud_home.s3_immutable_copies =
-            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing);
-        assert!(require_immutable_copy_capabilities_config(&config).is_ok());
+        config.cloud_home.s3_exact_slots =
+            Some(crate::CustomS3ExactSlots::StandardConditionalRequests);
+        assert!(require_exact_slot_capabilities_config(&config).is_ok());
 
         for provider in [
             CloudProvider::GoogleDrive,
@@ -844,12 +908,12 @@ mod tests {
             CloudProvider::CloudKit,
         ] {
             config.cloud_home.provider = Some(provider.clone());
-            assert!(require_immutable_copy_capabilities_config(&config).is_ok());
+            assert!(require_exact_slot_capabilities_config(&config).is_ok());
         }
     }
 
     #[test]
-    fn custom_s3_join_requires_the_local_immutable_copy_assertion() {
+    fn custom_s3_join_requires_the_local_exact_slot_assertion() {
         let join_info = CloudHomeJoinInfo::S3 {
             bucket: "bucket".to_string(),
             region: "region".to_string(),
@@ -860,18 +924,18 @@ mod tests {
         };
 
         assert_eq!(
-            require_immutable_copy_capabilities_join_info(&join_info, None),
+            require_exact_slot_capabilities_join_info(&join_info, None),
             Err(CloudProvider::S3),
         );
-        assert!(require_immutable_copy_capabilities_join_info(
+        assert!(require_exact_slot_capabilities_join_info(
             &join_info,
-            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
+            Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         )
         .is_ok());
     }
 
     #[test]
-    fn custom_s3_immutable_assertion_stays_out_of_restore_wire() {
+    fn custom_s3_exact_slot_assertion_stays_out_of_restore_wire() {
         crate::keys::test_keyring::install();
         let dir = tempfile::tempdir().expect("store directory");
         let mut config = Config::with_defaults(
@@ -885,8 +949,8 @@ mod tests {
         config.cloud_home.s3_bucket = Some("bucket".to_string());
         config.cloud_home.s3_region = Some("region".to_string());
         config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
-        config.cloud_home.s3_immutable_copies =
-            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing);
+        config.cloud_home.s3_exact_slots =
+            Some(crate::CustomS3ExactSlots::StandardConditionalRequests);
         let key_service = StoreKeys::new(config.store_id.clone());
         key_service
             .set_cloud_home_credentials(&crate::keys::CloudHomeCredentials::S3 {
@@ -897,31 +961,26 @@ mod tests {
         let custody =
             crate::custody::KeyCustody::InMemory(crate::encryption::MasterKeyring::generate())
                 .resolve(&config.store_id, &config.store_dir);
-        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(
-            crate::keys::UserKeypair::generate(),
-        )
-        .resolve(&config.store_id, &config.store_dir);
-
         let encoded = generate_restore_code(
             &config,
             &key_service,
             custody.as_ref(),
-            identity_custody.as_ref(),
-            crate::sync::store_commit::ObjectHash::digest(b"wire test root"),
+            store_root(),
             hex::encode([7u8; 32]),
             crate::join_code::MembershipFloor::MergeConcurrent(membership_floor(hex::encode(
                 [7u8; 32],
             ))),
+            restore_authority(),
         )
         .expect("generate restore code");
         let decoded = decode_restore_code(&encoded).expect("decode restore code");
         let provider_wire = serde_json::to_string(&decoded.provider).expect("serialize provider");
 
-        assert!(!provider_wire.contains("s3_immutable_copies"));
+        assert!(!provider_wire.contains("s3_exact_slots"));
         assert!(!provider_wire.contains("strong_reads"));
         assert_eq!(
-            config.cloud_home.s3_immutable_copies,
-            Some(crate::CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing),
+            config.cloud_home.s3_exact_slots,
+            Some(crate::CustomS3ExactSlots::StandardConditionalRequests),
         );
     }
 
@@ -970,21 +1029,16 @@ mod tests {
         let key_service = StoreKeys::new(config.store_id.clone());
         let custody =
             crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
-        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(
-            crate::keys::UserKeypair::generate(),
-        )
-        .resolve(&config.store_id, &config.store_dir);
-
         let err = generate_restore_code(
             &config,
             &key_service,
             custody.as_ref(),
-            identity_custody.as_ref(),
-            crate::sync::store_commit::ObjectHash::digest(b"restore test store protocol root"),
+            store_root(),
             hex::encode([7u8; 32]),
             crate::join_code::MembershipFloor::MergeConcurrent(membership_floor(hex::encode(
                 [7u8; 32],
             ))),
+            restore_authority(),
         )
         .expect_err("a share-joined CloudKit config must not generate a restore code");
         let message = err.to_string();
@@ -1004,21 +1058,16 @@ mod tests {
         let key_service = StoreKeys::new(config.store_id.clone());
         let custody =
             crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
-        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(
-            crate::keys::UserKeypair::generate(),
-        )
-        .resolve(&config.store_id, &config.store_dir);
-
         let code = generate_restore_code(
             &config,
             &key_service,
             custody.as_ref(),
-            identity_custody.as_ref(),
-            crate::sync::store_commit::ObjectHash::digest(b"restore test store protocol root"),
+            store_root(),
             hex::encode([7u8; 32]),
             crate::join_code::MembershipFloor::MergeConcurrent(membership_floor(hex::encode(
                 [7u8; 32],
             ))),
+            restore_authority(),
         )
         .expect("a private CloudKit config generates a restore code");
         let decoded = decode_restore_code(&code).expect("generated code decodes");
@@ -1037,19 +1086,14 @@ mod tests {
         let key_service = StoreKeys::new(config.store_id.clone());
         let custody =
             crate::custody::KeyCustody::Keyring.resolve(&config.store_id, &config.store_dir);
-        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(
-            crate::keys::UserKeypair::generate(),
-        )
-        .resolve(&config.store_id, &config.store_dir);
-
         let code = generate_restore_code(
             &config,
             &key_service,
             custody.as_ref(),
-            identity_custody.as_ref(),
-            crate::sync::store_commit::ObjectHash::digest(b"empty Serial restore root"),
+            store_root(),
             hex::encode([7u8; 32]),
             crate::join_code::MembershipFloor::Serial(None),
+            restore_authority(),
         )
         .expect("mint empty Serial restore code");
         let decoded = decode_restore_code(&code).expect("decode empty Serial restore code");

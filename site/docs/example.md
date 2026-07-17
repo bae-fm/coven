@@ -308,10 +308,10 @@ let invite_code = handle
 ```
 
 On the teammate's device,
-[`join_from_invite_code`](rustdoc:fn:coven::sync::join::join_from_invite_code)
-decodes the code, runs the provider's auth flow, unwraps the store keyring sealed to
-the teammate's key, downloads the snapshot, and pulls the changesets written
-since. It returns a `Config` for the now-local store; from there the teammate
-opens a `CovenHandle` exactly as above. `handle.remove_member(...)` appends a fresh
-key generation the removed member never receives. The signed membership
+[`DeviceJoinClient`](rustdoc:struct:coven::DeviceJoinClient) persists the join
+journal and turns the transferred offer, approval, provider-ready bootstrap,
+and activation into the corresponding access request, registration request,
+readiness proof, and installed `Config`. The owner handles the other side with
+the device-join methods on `CovenHandle`. `handle.remove_member(...)` appends a
+fresh key generation the removed member never receives. The signed membership
 chain, key wrapping, and the join flow are covered in [Sharing](/docs/sharing).

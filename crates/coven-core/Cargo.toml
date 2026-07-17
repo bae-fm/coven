@@ -11,6 +11,21 @@ readme = "../../README.md"
 name = "coven_core"
 path = "src/lib.rs"
 
+[[test]]
+name = "exact_outbound_blob"
+path = "tests/exact_outbound_blob.rs"
+required-features = ["invariant-tests"]
+
+[[test]]
+name = "exact_founder_graph"
+path = "tests/exact_founder_graph.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "serial_control_author"
+path = "tests/serial_control_author.rs"
+required-features = ["test-utils"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -30,6 +45,7 @@ x25519-dalek = "3.0.0"
 rand = "0.9"
 uuid = { version = "1.0", features = ["v4"] }
 urlencoding = "2.1"
+url = "2.5.8"
 fallible-streaming-iterator = "0.1.9"
 bytes = "1.11"
 futures-util = "0.3"
@@ -45,6 +61,7 @@ tempfile = "3.27.0"
 
 [features]
 test-utils = ["dep:tempfile"]
+invariant-tests = []
 
 [lints]
 workspace = true

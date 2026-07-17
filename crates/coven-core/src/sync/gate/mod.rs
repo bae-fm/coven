@@ -70,8 +70,8 @@ mod model;
 mod outbound;
 
 pub(crate) use audience::{
-    capture_routing_changes, is_routing_table, partition_outbound, AudiencePartition,
-    CirclePartitionControl, RoutingChanges,
+    active_circle_control, capture_routing_changes, is_routing_table, live_row_audience,
+    partition_outbound, AudiencePartition, CirclePartitionControl, RoutingChanges,
 };
 pub(crate) use model::write_gate;
 pub use model::Gates;

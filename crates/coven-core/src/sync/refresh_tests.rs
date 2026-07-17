@@ -21,55 +21,88 @@ use crate::sync::cloud_storage::{CloudCipher, PendingRotation, PENDING_ROTATION_
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::invite::{
-    revoke_member, revoke_member_durable, signed_wrapped_key_for_test,
-    signed_wrapped_keyring_for_test, unwrap_store_keyring_for_owners_with_activation,
+    revoke_member_durable, signed_wrapped_key_for_test, signed_wrapped_keyring_for_test,
+    unwrap_store_keyring_for_owners_with_activation,
 };
 use crate::sync::membership::{MemberRole, MembershipChain, MembershipCoord};
-use crate::sync::membership_ops::{
-    load_anchored_chain, remove_member, MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
-};
+use crate::sync::membership_ops::{invite_member, remove_member, MembershipOpsError};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
-    bind_mock_store_protocol, bootstrap_chain, capture_bytes, open_test_db, pubkey_hex,
-    temp_store_dir, MockSyncStorage, TestCustody,
+    capture_bytes, open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore,
 };
 use crate::sync::wrapped_store_key::WrappedKeyActivation;
 
 const LIB_ID: &str = "lib-refresh-test";
 
-/// Upload `chain`'s entries to the mock storage exactly as the membership ops do
-/// (one object per entry under `membership/{author}/{seq}`), so the device under
-/// test reloads the same chain a real cloud holds.
-async fn upload_chain(storage: &MockSyncStorage, chain: &MembershipChain, signer: &UserKeypair) {
-    use std::collections::HashMap;
-    let mut next: HashMap<String, u64> = HashMap::new();
-    for entry in chain.entries() {
-        let seq = next.entry(entry.author_pubkey.clone()).or_insert(0);
-        *seq += 1;
-        storage
-            .append_membership_entry_bytes(
-                &entry.author_pubkey,
-                *seq,
-                serde_json::to_vec(entry).expect("serialize entry"),
-            )
-            .await
-            .expect("upload membership entry");
-    }
-    crate::sync::membership_ops::publish_membership_head(
-        storage,
-        storage.store_root_hash(),
-        chain,
-        signer,
-    )
-    .await
-    .expect("publish membership head");
+async fn exact_store(owner: &UserKeypair) -> (TestStore, crate::database::Database) {
+    let owner_db = open_test_db();
+    let storage = TestStore::create(&owner_db, LIB_ID, owner.clone())
+        .await
+        .expect("create exact refresh Store");
+    storage
+        .open_into(&owner_db)
+        .await
+        .expect("open exact refresh Store on owner device");
+    (storage, owner_db)
 }
 
-/// Run one real sync cycle for `device_id` over an encrypted home, with the mock
-/// as both the SyncStorage and the CloudHome (so the refresh's wrapped-key reads
-/// hit the same store).
+async fn invite_exact_member(
+    storage: &TestStore,
+    owner_db: &crate::database::Database,
+    owner: &UserKeypair,
+    member: &UserKeypair,
+    role: MemberRole,
+    encryption: &EncryptionService,
+) -> MembershipChain {
+    invite_member(
+        &storage.storage,
+        storage.home.as_ref(),
+        owner,
+        &Hlc::new("refresh-owner".to_string()),
+        &pubkey_hex(member),
+        None,
+        role,
+        encryption,
+        LIB_ID,
+        "Refresh Test Store",
+        owner_db,
+    )
+    .await
+    .expect("publish exact membership invitation");
+    storage
+        .open_into(owner_db)
+        .await
+        .expect("reload exact membership after invitation")
+}
+
+async fn activate_joined_device(
+    storage: &TestStore,
+    owner_db: &crate::database::Database,
+    joining_db: &crate::database::Database,
+    joining_identity: &UserKeypair,
+) {
+    crate::sync::test_helpers::install_active_device_fixture(
+        storage,
+        owner_db,
+        joining_db,
+        joining_identity,
+        "0000000001000-0000-refresh",
+    )
+    .await
+    .expect("install active exact device fixture");
+}
+
+async fn load_exact_chain(storage: &TestStore, db: &crate::database::Database) -> MembershipChain {
+    storage
+        .open_into(db)
+        .await
+        .expect("load exact refresh membership chain")
+}
+
+/// Run one real sync cycle for `device_id` over the test Store's encrypted home,
+/// using the same backing storage for protocol objects and wrapped-key reads.
 async fn run_cycle(
-    storage: &MockSyncStorage,
+    storage: &TestStore,
     db: &crate::database::Database,
     cipher: &RwLock<CloudCipher>,
     pending_rotation: &PendingRotation,
@@ -78,12 +111,42 @@ async fn run_cycle(
     ld: &StoreDir,
     custody: Option<&dyn MasterKeyCustody>,
 ) -> Result<super::cycle::SyncCycleResult, String> {
-    bind_mock_store_protocol(db, storage, device_id).await;
+    run_cycle_with_storage(
+        &storage.storage,
+        storage,
+        db,
+        cipher,
+        pending_rotation,
+        keypair,
+        device_id,
+        ld,
+        custody,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_cycle_with_storage(
+    sync_storage: &dyn SyncStorage,
+    storage: &TestStore,
+    db: &crate::database::Database,
+    cipher: &RwLock<CloudCipher>,
+    pending_rotation: &PendingRotation,
+    keypair: &UserKeypair,
+    device_id: &str,
+    ld: &StoreDir,
+    custody: Option<&dyn MasterKeyCustody>,
+) -> Result<super::cycle::SyncCycleResult, String> {
+    let exact_device_id = db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "refresh device has no exact Store registration".to_string())?;
     let hlc = Hlc::new(device_id.to_string());
     run_single_sync_cycle(
-        storage,
+        sync_storage,
         LIB_ID,
-        device_id,
+        &exact_device_id,
         &hlc,
         &SystemClock,
         db,
@@ -92,11 +155,233 @@ async fn run_cycle(
         keypair,
         custody,
         ld,
-        Some(storage as &dyn crate::storage::cloud::CloudHome),
+        Some(storage.home.as_ref()),
         None,
     )
     .await
     .map_err(|error| error.to_string())
+}
+
+struct MembershipReadCounter<'a> {
+    inner: &'a crate::sync::cloud_storage::CloudSyncStorage,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl<'a> MembershipReadCounter<'a> {
+    fn new(inner: &'a crate::sync::cloud_storage::CloudSyncStorage) -> Self {
+        Self {
+            inner,
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl SyncStorage for MembershipReadCounter<'_> {
+    fn store_blob_protection(
+        &self,
+    ) -> Result<crate::sync::storage::BlobSpoolProtection, crate::sync::storage::StorageError> {
+        self.inner.store_blob_protection()
+    }
+
+    async fn provider_binding(
+        &self,
+    ) -> Result<crate::sync::storage::ResolvedProviderBinding, crate::sync::storage::StorageError>
+    {
+        self.inner.provider_binding().await
+    }
+
+    async fn allocate_protocol_slot(
+        &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
+        semantic_prefix: &str,
+        extension: &str,
+    ) -> Result<crate::storage::cloud::ObjectSlot, crate::sync::storage::StorageError> {
+        self.inner
+            .allocate_protocol_slot(context, semantic_prefix, extension)
+            .await
+    }
+
+    fn prepare_protocol_object(
+        &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
+        slot: crate::storage::cloud::ObjectSlot,
+        semantic_prefix: &str,
+        data: Vec<u8>,
+    ) -> Result<crate::sync::storage::PreparedExactObject, crate::sync::storage::StorageError> {
+        self.inner
+            .prepare_protocol_object(context, slot, semantic_prefix, data)
+    }
+
+    async fn create_protocol_object(
+        &self,
+        prepared: &crate::sync::storage::PreparedExactObject,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner.create_protocol_object(prepared).await
+    }
+
+    async fn read_protocol_object(
+        &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
+        object: &crate::sync::storage::ExactObjectRef,
+        semantic_prefix: &str,
+    ) -> Result<Vec<u8>, crate::sync::storage::StorageError> {
+        self.inner
+            .read_protocol_object(context, object, semantic_prefix)
+            .await
+    }
+
+    async fn read_protocol_slot(
+        &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
+        slot: &crate::storage::cloud::ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, crate::sync::storage::ExactObjectRef), crate::sync::storage::StorageError>
+    {
+        if semantic_prefix.starts_with("store-v1/membership/heads/") {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner
+            .read_protocol_slot(context, slot, semantic_prefix)
+            .await
+    }
+
+    async fn read_prepared_protocol_slot(
+        &self,
+        context: &crate::sync::storage::ProtocolObjectContext,
+        slot: &crate::storage::cloud::ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<
+        (Vec<u8>, crate::sync::storage::PreparedExactObject),
+        crate::sync::storage::StorageError,
+    > {
+        if semantic_prefix.starts_with("store-v1/membership/heads/") {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner
+            .read_prepared_protocol_slot(context, slot, semantic_prefix)
+            .await
+    }
+
+    async fn delete_protocol_object(
+        &self,
+        object: &crate::sync::storage::ExactObjectRef,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner.delete_protocol_object(object).await
+    }
+
+    async fn allocate_blob_slot(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+    ) -> Result<crate::storage::cloud::ObjectSlot, crate::sync::storage::StorageError> {
+        self.inner.allocate_blob_slot(locator, authority).await
+    }
+
+    async fn seal_blob_to_spool(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+        protection: crate::sync::storage::BlobSpoolProtection,
+        plaintext_file: &std::path::Path,
+        spool_file: &std::path::Path,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner
+            .seal_blob_to_spool(locator, authority, protection, plaintext_file, spool_file)
+            .await
+    }
+
+    async fn prepare_blob_object(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+        slot: crate::storage::cloud::ObjectSlot,
+        stored_file: &std::path::Path,
+    ) -> Result<crate::blob::locator::StoredBlobRef, crate::sync::storage::StorageError> {
+        self.inner
+            .prepare_blob_object(locator, authority, slot, stored_file)
+            .await
+    }
+
+    async fn create_blob_object_from_file(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+        stored_file: &std::path::Path,
+        progress: &crate::storage::cloud::UploadProgress<'_>,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner
+            .create_blob_object_from_file(blob, authority, stored_file, progress)
+            .await
+    }
+
+    async fn verify_blob_object(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner.verify_blob_object(blob).await
+    }
+
+    async fn stage_exact_blob_download(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        dest: &std::path::Path,
+    ) -> Result<crate::local_blob::AtomicStagedFile, crate::sync::storage::StorageError> {
+        self.inner.stage_exact_blob_download(blob, dest).await
+    }
+
+    async fn stage_verified_blob_plaintext(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: crate::sync::storage::BlobSpoolProtection,
+        dest: &std::path::Path,
+    ) -> Result<crate::local_blob::AtomicStagedFile, crate::sync::storage::StorageError> {
+        self.inner
+            .stage_verified_blob_plaintext(blob, protection, dest)
+            .await
+    }
+
+    async fn delete_blob_object(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner.delete_blob_object(blob).await
+    }
+
+    async fn put_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+        data: Vec<u8>,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner
+            .put_wrapped_key(owner_pubkey, recipient_pubkey, data)
+            .await
+    }
+
+    async fn get_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<Vec<u8>, crate::sync::storage::StorageError> {
+        self.inner
+            .get_wrapped_key(owner_pubkey, recipient_pubkey)
+            .await
+    }
+
+    async fn delete_wrapped_key(
+        &self,
+        owner_pubkey: &str,
+        recipient_pubkey: &str,
+    ) -> Result<(), crate::sync::storage::StorageError> {
+        self.inner
+            .delete_wrapped_key(owner_pubkey, recipient_pubkey)
+            .await
+    }
 }
 
 /// A non-rotating running device B adopts a rotated store key on its next cycle,
@@ -106,7 +391,7 @@ async fn run_cycle(
 /// its live cipher — so it can now decrypt content sealed under the new key, and
 /// its keyring holds the new key for the next restart.
 ///
-/// Mutation proof: drop the wrapped-key re-fetch (step 3 of the refresh) and B
+/// Mutation proof: drop the wrapped-key re-fetch from the refresh and B
 /// keeps its old cipher — the post-rotation key never reaches it and the final
 /// fingerprint assertion fails. (Asserted here by checking B's live cipher and
 /// keyring both hold the rotated key, which only the adoption can produce.)
@@ -118,59 +403,37 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let owner_pk = pubkey_hex(&owner);
     let old_key: [u8; 32] = [11u8; 32];
 
-    let storage = MockSyncStorage::with_keypair(owner.clone());
-
-    // Chain: owner founds, adds B and the victim as members.
-    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&device_b),
-                None,
-                MemberRole::Member,
-                "0000000002000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&victim),
-                None,
-                MemberRole::Member,
-                "0000000003000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    upload_chain(&storage, &chain, &owner).await;
-    let db = open_test_db();
-    db.set_protocol_state(
-        crate::database::STORE_ROOT_HASH_STATE_KEY,
-        &storage.store_root_hash().to_string(),
-    )
-    .await
-    .expect("bind refresh fixture to its Store protocol root");
-    let listed = storage.discover_membership_entries().await;
-    crate::sync::membership_ops::load_and_persist_owner_anchor(
+    let encryption = EncryptionService::from_key(old_key);
+    let (storage, owner_db) = exact_store(&owner).await;
+    invite_exact_member(
         &storage,
-        storage.store_root_hash(),
-        &listed,
-        &owner_pk,
-        &db,
+        &owner_db,
+        &owner,
+        &device_b,
+        MemberRole::Member,
+        &encryption,
     )
-    .await
-    .unwrap()
-    .unwrap();
+    .await;
+    let mut chain = invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &victim,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
 
     // The owner wraps the OLD key for B (what B adopted at join), signed by the
     // owner B pins, so B's refresh can authenticate it.
     let b_x = device_b.to_x25519_public_key();
-    let wrapped_old =
-        signed_wrapped_key_for_test(LIB_ID, &pubkey_hex(&device_b), &b_x, &old_key, &owner);
+    let wrapped_old = signed_wrapped_key_for_test(
+        &storage.root.store_root_id.to_string(),
+        &pubkey_hex(&device_b),
+        &b_x,
+        &old_key,
+        &owner,
+    );
     storage
         .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&device_b), wrapped_old)
         .await
@@ -179,13 +442,11 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     // B's local state: pinned owner + its keyring holds the OLD key + its live
     // cipher is the OLD key. This is the just-joined steady state.
     let db_b = open_test_db();
-    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-        .await
-        .unwrap();
+    let (_tmp_b, ld_b) = temp_store_dir();
+    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
-    let (_tmp_b, ld_b) = temp_store_dir();
 
     // Sanity: before the rotation, B's refresh is a no-op — it already holds the
     // current key, so the cycle leaves the cipher unchanged.
@@ -208,16 +469,17 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     );
 
     // --- Device A removes the victim: rotates the key, re-wraps B's keys/{A}/{B}. ---
-    let new_key = revoke_member(
-        &storage,
-        &storage,
-        storage.store_root_hash(),
+    let new_key = revoke_member_durable(
+        &storage.storage,
+        storage.home.as_ref(),
+        storage.root.store_root_hash,
         &mut chain,
         &owner,
         &pubkey_hex(&victim),
-        LIB_ID,
+        &storage.root.store_root_id.to_string(),
         "0000000004000-0000-A",
-        &EncryptionService::from_key(old_key),
+        &encryption,
+        &owner_db,
     )
     .await
     .expect("revoke rotates the key");
@@ -226,10 +488,6 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         old_key,
         "removal rotates to a fresh key"
     );
-
-    // A seals a control object under the NEW key (a changeset) so we can prove B
-    // can decrypt post-rotation content only if it adopted the new key. We assert
-    // adoption directly via B's cipher + keyring below, which is what gates that.
 
     // --- B's NEXT cycle, no restart: it must adopt the rotated key. ---
     run_cycle(
@@ -261,16 +519,15 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
 
     // And the rotated key B now holds is exactly the one the owner re-wrapped for
     // it — i.e. B can independently unwrap keys/{A}/{B} to the same bytes.
-    let visible_entries =
-        membership_coords(&storage, &storage.discover_membership_entries().await).await;
-    let visible_activations: Vec<_> = visible_entries
+    let visible_activations: Vec<_> = chain
+        .author_heads()
         .into_iter()
         .map(WrappedKeyActivation::MergeConcurrent)
         .collect();
     let reunwrapped = unwrap_store_keyring_for_owners_with_activation(
-        &storage,
+        storage.home.as_ref(),
         &device_b,
-        LIB_ID,
+        &storage.root.store_root_id.to_string(),
         std::iter::once(owner_pk.as_str()),
         Some(&visible_activations),
     )
@@ -300,33 +557,26 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
 
     // The cloud is the owner's, so a changeset it serves is authored by a member
     // the pull will authorize against the chain.
-    let storage = MockSyncStorage::with_keypair(owner.clone());
-    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&device_b),
-                None,
-                MemberRole::Member,
-                "0000000002000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&victim),
-                None,
-                MemberRole::Member,
-                "0000000003000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    upload_chain(&storage, &chain, &owner).await;
+    let encryption = EncryptionService::from_key(old_key);
+    let (storage, owner_db) = exact_store(&owner).await;
+    invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &device_b,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
+    let chain = invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &victim,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
 
     let activation = MembershipCoord {
         author_pubkey: owner_pk.clone(),
@@ -349,7 +599,7 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         .unwrap();
     let b_x = device_b.to_x25519_public_key();
     let pending_wrapped = signed_wrapped_keyring_for_test(
-        LIB_ID,
+        &storage.root.store_root_id.to_string(),
         &pubkey_hex(&device_b),
         &b_x,
         &pending_keyring,
@@ -362,9 +612,8 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         .unwrap();
 
     let db_b = open_test_db();
-    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-        .await
-        .unwrap();
+    let (_tmp_b, ld_b) = temp_store_dir();
+    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
 
     // A peer changeset waiting to be pulled, so the cycle proving it "completes"
     // also proves the pull ran and applied it while sealing was paused.
@@ -377,18 +626,23 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         ],
     )
     .await;
-    storage.store_changeset_with_grant(
-        "owner-device",
-        1,
-        &peer_cs,
-        db_b.schema_version(),
-        chain.write_grant_coord(&owner_pk),
-    );
+    let peer_sequence = u64::try_from(chain.entries().len())
+        .expect("membership entry count fits Store sequence")
+        .checked_add(1)
+        .expect("Store sequence does not overflow");
+    storage
+        .publish_changeset(
+            "owner-device",
+            peer_sequence,
+            &peer_cs,
+            db_b.schema_version(),
+        )
+        .await
+        .expect("publish exact owner changeset");
 
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
-    let (_tmp_b, ld_b) = temp_store_dir();
 
     let result = run_cycle(
         &storage,
@@ -431,40 +685,37 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     let owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
     let victim = UserKeypair::generate();
-    let owner_pk = pubkey_hex(&owner);
     let old_key: [u8; 32] = [12u8; 32];
 
-    let storage = MockSyncStorage::with_keypair(owner.clone());
-    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&device_b),
-                None,
-                MemberRole::Member,
-                "0000000002000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&victim),
-                None,
-                MemberRole::Member,
-                "0000000003000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    upload_chain(&storage, &chain, &owner).await;
+    let encryption = EncryptionService::from_key(old_key);
+    let (storage, owner_db) = exact_store(&owner).await;
+    invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &device_b,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
+    let mut chain = invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &victim,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
 
     let b_x = device_b.to_x25519_public_key();
-    let wrapped_old =
-        signed_wrapped_key_for_test(LIB_ID, &pubkey_hex(&device_b), &b_x, &old_key, &owner);
+    let wrapped_old = signed_wrapped_key_for_test(
+        &storage.root.store_root_id.to_string(),
+        &pubkey_hex(&device_b),
+        &b_x,
+        &old_key,
+        &owner,
+    );
     storage
         .put_wrapped_key(
             &pubkey_hex(&owner),
@@ -475,24 +726,23 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         .unwrap();
 
     let db_b = open_test_db();
-    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-        .await
-        .unwrap();
+    let (_tmp_b, ld_b) = temp_store_dir();
+    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
-    let (_tmp_b, ld_b) = temp_store_dir();
 
-    let new_key = revoke_member(
-        &storage,
-        &storage,
-        storage.store_root_hash(),
+    let new_key = revoke_member_durable(
+        &storage.storage,
+        storage.home.as_ref(),
+        storage.root.store_root_hash,
         &mut chain,
         &owner,
         &pubkey_hex(&victim),
-        LIB_ID,
+        &storage.root.store_root_id.to_string(),
         "0000000004000-0000-A",
-        &EncryptionService::from_key(old_key),
+        &encryption,
+        &owner_db,
     )
     .await
     .expect("revoke rotates key");
@@ -542,32 +792,29 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
 }
 
 #[tokio::test]
-async fn same_generation_wrapped_key_is_not_adopted() {
+async fn same_generation_wrapped_key_is_merged_and_converges_deterministically() {
     let owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
-    let owner_pk = pubkey_hex(&owner);
     let current_key: [u8; 32] = [13u8; 32];
     let replacement_key: [u8; 32] = [14u8; 32];
 
-    let storage = MockSyncStorage::with_keypair(owner.clone());
-    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&device_b),
-                None,
-                MemberRole::Member,
-                "0000000002000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    upload_chain(&storage, &chain, &owner).await;
+    let current = EncryptionService::from_key(current_key);
+    let replacement = EncryptionService::from_key(replacement_key);
+    let expected = current.merged_with(&replacement);
+    let (storage, owner_db) = exact_store(&owner).await;
+    invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &device_b,
+        MemberRole::Member,
+        &current,
+    )
+    .await;
 
     let b_x = device_b.to_x25519_public_key();
     let same_generation_replacement = signed_wrapped_key_for_test(
-        LIB_ID,
+        &storage.root.store_root_id.to_string(),
         &pubkey_hex(&device_b),
         &b_x,
         &replacement_key,
@@ -583,15 +830,13 @@ async fn same_generation_wrapped_key_is_not_adopted() {
         .unwrap();
 
     let db_b = open_test_db();
-    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-        .await
-        .unwrap();
+    let (_tmp_b, ld_b) = temp_store_dir();
+    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(current_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         current_key,
     )));
-    let (_tmp_b, ld_b) = temp_store_dir();
 
     run_cycle(
         &storage,
@@ -604,12 +849,23 @@ async fn same_generation_wrapped_key_is_not_adopted() {
         Some(&ks_b),
     )
     .await
-    .expect("same-generation wrapped key is ignored");
+    .expect("same-generation wrapped key is merged");
 
     assert_eq!(
         cipher_key(&cipher_b),
-        current_key,
-        "same-generation wrapped keys are not adopted even when signed by an owner",
+        expected.key_bytes(),
+        "same-generation forks select the greatest fingerprint independent of arrival order",
+    );
+    let persisted = ks_b
+        .stored_key()
+        .expect("merged same-generation keyring persisted");
+    let persisted = crate::encryption::MasterKeyring::from_serialized(&persisted)
+        .expect("parse persisted merged keyring");
+    let persisted: EncryptionService = persisted.into();
+    assert_eq!(
+        persisted.key_count(),
+        2,
+        "both same-generation keys are retained"
     );
 }
 
@@ -619,74 +875,63 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
     let second_owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
     let victim = UserKeypair::generate();
-    let founder_pk = pubkey_hex(&founder);
     let old_key: [u8; 32] = [15u8; 32];
 
-    let storage = MockSyncStorage::with_store_and_keypair(LIB_ID, founder.clone());
-    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
-    {
-        let entry = chain
-            .signed_set_member(
-                &founder,
-                pubkey_hex(&second_owner),
-                None,
-                MemberRole::Owner,
-                "0000000002000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    {
-        let entry = chain
-            .signed_set_member(
-                &founder,
-                pubkey_hex(&device_b),
-                None,
-                MemberRole::Member,
-                "0000000003000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    {
-        let entry = chain
-            .signed_set_member(
-                &founder,
-                pubkey_hex(&victim),
-                None,
-                MemberRole::Member,
-                "0000000004000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    upload_chain(&storage, &chain, &founder).await;
+    let encryption = EncryptionService::from_key(old_key);
+    let (storage, owner_db) = exact_store(&founder).await;
+    invite_exact_member(
+        &storage,
+        &owner_db,
+        &founder,
+        &second_owner,
+        MemberRole::Owner,
+        &encryption,
+    )
+    .await;
+    invite_exact_member(
+        &storage,
+        &owner_db,
+        &founder,
+        &device_b,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
+    let mut chain = invite_exact_member(
+        &storage,
+        &owner_db,
+        &founder,
+        &victim,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
 
+    let second_owner_db = open_test_db();
     let db_b = open_test_db();
-    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
-        .await
-        .unwrap();
+    let (_tmp_b, ld_b) = temp_store_dir();
+    activate_joined_device(&storage, &owner_db, &second_owner_db, &second_owner).await;
+    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(old_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
-    let (_tmp_b, ld_b) = temp_store_dir();
 
-    let new_key = revoke_member_durable(
-        &storage,
-        &storage,
-        storage.store_root_hash(),
+    let new_key = Box::pin(revoke_member_durable(
+        &storage.storage,
+        storage.home.as_ref(),
+        storage.root.store_root_hash,
         &mut chain,
         &second_owner,
         &pubkey_hex(&victim),
-        LIB_ID,
+        &storage.root.store_root_id.to_string(),
         "0000000005000-0000-B",
-        &EncryptionService::from_key(old_key),
-        &db_b,
-    )
+        &encryption,
+        &second_owner_db,
+    ))
     .await
     .expect("second owner can revoke");
 
-    run_cycle(
+    Box::pin(run_cycle(
         &storage,
         &db_b,
         &cipher_b,
@@ -695,7 +940,7 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
         "B",
         &ld_b,
         Some(&ks_b),
-    )
+    ))
     .await
     .expect("existing member adopts a current owner's rotation");
 
@@ -711,48 +956,49 @@ async fn removed_owner_key_is_not_adopted() {
     let current_key: [u8; 32] = [16u8; 32];
     let removed_owner_key: [u8; 32] = [17u8; 32];
 
-    let storage = MockSyncStorage::with_keypair(founder.clone());
-    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
-    {
-        let entry = chain
-            .signed_set_member(
-                &founder,
-                pubkey_hex(&second_owner),
-                None,
-                MemberRole::Owner,
-                "0000000002000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    {
-        let entry = chain
-            .signed_set_member(
-                &founder,
-                pubkey_hex(&device_b),
-                None,
-                MemberRole::Member,
-                "0000000003000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    {
-        let entry = chain
-            .signed_remove_member_in_stream(
-                &second_owner,
-                crate::sync::membership::AuthorStreamId::from_bytes([44; 16]),
-                pubkey_hex(&founder),
-                "0000000004000-0000-B".to_string(),
-            )
-            .expect("active Owner removes membership grant");
-        chain.add_entry(entry).expect("valid membership removal");
-    }
-    upload_chain(&storage, &chain, &second_owner).await;
+    let encryption = EncryptionService::from_key(current_key);
+    let (storage, owner_db) = exact_store(&founder).await;
+    invite_exact_member(
+        &storage,
+        &owner_db,
+        &founder,
+        &second_owner,
+        MemberRole::Owner,
+        &encryption,
+    )
+    .await;
+    let mut chain = invite_exact_member(
+        &storage,
+        &owner_db,
+        &founder,
+        &device_b,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
+    let second_owner_db = open_test_db();
+    let db_b = open_test_db();
+    let (_tmp_b, ld_b) = temp_store_dir();
+    activate_joined_device(&storage, &owner_db, &second_owner_db, &second_owner).await;
+    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    let rotated = revoke_member_durable(
+        &storage.storage,
+        storage.home.as_ref(),
+        storage.root.store_root_hash,
+        &mut chain,
+        &second_owner,
+        &founder_pk,
+        &storage.root.store_root_id.to_string(),
+        "0000000004000-0000-B",
+        &encryption,
+        &second_owner_db,
+    )
+    .await
+    .expect("second owner removes founder through exact membership graph");
 
     let b_x = device_b.to_x25519_public_key();
     let removed_owner_wrapped = signed_wrapped_key_for_test(
-        LIB_ID,
+        &storage.root.store_root_id.to_string(),
         &pubkey_hex(&device_b),
         &b_x,
         &removed_owner_key,
@@ -771,16 +1017,9 @@ async fn removed_owner_key_is_not_adopted() {
         .await
         .unwrap();
 
-    let db_b = open_test_db();
-    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &founder_pk)
-        .await
-        .unwrap();
     let ks_b = TestCustody::default();
-    ks_b.set_initial_key(current_key);
-    let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        current_key,
-    )));
-    let (_tmp_b, ld_b) = temp_store_dir();
+    ks_b.set_initial_key(rotated.key_bytes());
+    let cipher_b = RwLock::new(CloudCipher::Encrypted(rotated.clone()));
 
     let result = run_cycle(
         &storage,
@@ -800,7 +1039,7 @@ async fn removed_owner_key_is_not_adopted() {
     );
     assert_eq!(
         cipher_key(&cipher_b),
-        current_key,
+        rotated.key_bytes(),
         "the removed owner's key must not replace the current key",
     );
 }
@@ -816,34 +1055,32 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     let owner = UserKeypair::generate();
     let attacker = UserKeypair::generate();
     let device_b = UserKeypair::generate();
-    let owner_pk = pubkey_hex(&owner);
     let real_key: [u8; 32] = [22u8; 32];
 
-    let storage = MockSyncStorage::with_keypair(owner.clone());
-
-    // Chain: owner founds + adds B.
-    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&device_b),
-                None,
-                MemberRole::Member,
-                "0000000002000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    upload_chain(&storage, &chain, &owner).await;
+    let encryption = EncryptionService::from_key(real_key);
+    let (storage, owner_db) = exact_store(&owner).await;
+    invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &device_b,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
 
     // The attacker forges B's wrapped key: a key THEY chose, sealed to B's real
     // public key, signed by the attacker (not the owner), dropped into the current
     // owner's prefix where B's scan will read it.
     let forged_key: [u8; 32] = [0xCDu8; 32];
     let b_x = device_b.to_x25519_public_key();
-    let forged =
-        signed_wrapped_key_for_test(LIB_ID, &pubkey_hex(&device_b), &b_x, &forged_key, &attacker);
+    let forged = signed_wrapped_key_for_test(
+        &storage.root.store_root_id.to_string(),
+        &pubkey_hex(&device_b),
+        &b_x,
+        &forged_key,
+        &attacker,
+    );
     storage
         .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&device_b), forged)
         .await
@@ -851,15 +1088,13 @@ async fn refresh_rejects_a_forged_wrapped_key() {
 
     // B holds its real key (live + keyring) and pins the owner.
     let db_b = open_test_db();
-    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-        .await
-        .unwrap();
+    let (_tmp_b, ld_b) = temp_store_dir();
+    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(real_key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
         real_key,
     )));
-    let (_tmp_b, ld_b) = temp_store_dir();
 
     // B's cycle aborts (refuses the forged key) rather than adopting it.
     let result = run_cycle(
@@ -892,42 +1127,47 @@ async fn refresh_rejects_a_forged_wrapped_key() {
 }
 
 /// For an owner-pinned store, a chain the refresh can't load must abort the
-/// cycle, never fall open to "no chain, act anyway". A membership list that fails
-/// aborts B's cycle rather than letting it push or judge under no authorization.
+/// cycle, never fall open to "no chain, act anyway". A required exact membership
+/// object that cannot be read aborts B's cycle rather than letting it push or
+/// judge under no authorization.
 #[tokio::test]
 async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     let owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
-    let owner_pk = pubkey_hex(&owner);
     let key: [u8; 32] = [44u8; 32];
 
-    let storage = MockSyncStorage::with_keypair(owner.clone());
-
-    // A real owner-anchored chain exists, but listing it is made to fail this cycle.
-    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&device_b),
-                None,
-                MemberRole::Member,
-                "0000000002000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    upload_chain(&storage, &chain, &owner).await;
-    storage.fail_membership_listing();
+    let encryption = EncryptionService::from_key(key);
+    let (storage, owner_db) = exact_store(&owner).await;
+    let chain = invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &device_b,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
 
     let db_b = open_test_db();
-    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
+    let (_tmp_b, ld_b) = temp_store_dir();
+    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
+    let head = crate::sync::membership_ops::load_exact_membership_head(
+        &storage.storage,
+        &storage.root,
+        chain
+            .head_refs()
+            .first()
+            .expect("exact membership chain has an active head"),
+    )
+    .await
+    .expect("load exact active membership head");
+    storage
+        .delete_protocol_object(&head.entry.object)
         .await
-        .unwrap();
+        .expect("remove exact membership entry before refresh");
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(key)));
-    let (_tmp_b, ld_b) = temp_store_dir();
 
     let result = run_cycle(
         &storage,
@@ -942,68 +1182,62 @@ async fn refresh_fails_closed_when_the_chain_cannot_be_loaded() {
     .await;
     assert!(
         result.is_err(),
-        "a membership-list failure under a pinned owner must abort the cycle, not fall open: {result:?}",
+        "an exact membership-object failure under a pinned owner must abort the cycle, not fall open: {result:?}",
     );
 }
 
-/// The raw 32-byte key inside an `Encrypted` cipher (panics on a plaintext cipher —
-/// these tests only ever build encrypted ones).
-async fn membership_coords(
-    _storage: &MockSyncStorage,
-    entry_keys: &[MembershipCoord],
-) -> Vec<MembershipCoord> {
-    entry_keys.to_vec()
-}
-
-/// One sync cycle lists the membership chain exactly once. The chain is loaded and
-/// anchored a single time at the top of the cycle and threaded to every
+/// One sync cycle traverses each exact membership stream once. The chain is loaded
+/// and anchored a single time at the top of the cycle and threaded to every
 /// authorization site — the refresh, the pull, the outgoing write-grant, the
 /// snapshot-author check, and the tombstone GC — so the whole cycle judges one
-/// chain state and pays a single listing round-trip. `MockSyncStorage` counts the
-/// `list_membership_entries` calls.
+/// chain state. The storage wrapper counts exact membership-head slot reads.
 ///
 /// Mutation proof: route any of those sites through its own membership load and
-/// the delta rises above one.
+/// the count rises above the exact traversal count.
 #[tokio::test]
-async fn one_cycle_lists_membership_once() {
+async fn one_cycle_loads_exact_membership_once() {
     let owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
-    let owner_pk = pubkey_hex(&owner);
     let key: [u8; 32] = [7u8; 32];
 
-    let storage = MockSyncStorage::with_keypair(owner.clone());
-
-    // Chain: owner founds and adds B as a Member.
-    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&device_b),
-                None,
-                MemberRole::Member,
-                "0000000002000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    upload_chain(&storage, &chain, &owner).await;
+    let encryption = EncryptionService::from_key(key);
+    let (storage, owner_db) = exact_store(&owner).await;
+    let chain = invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &device_b,
+        MemberRole::Member,
+        &encryption,
+    )
+    .await;
 
     // B's steady state: owner pinned + an encrypted cipher on the shared key, so the
     // cycle's refresh and pull both run against the anchored chain rather than
     // short-circuiting as a plaintext no-op. B is a Member, so it authors no
     // snapshot — whose reclaim would be a separate, out-of-scope membership read.
     let db_b = open_test_db();
-    db_b.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-        .await
-        .unwrap();
+    let (_tmp_b, ld_b) = temp_store_dir();
+    activate_joined_device(&storage, &owner_db, &db_b, &device_b).await;
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(key);
     let cipher_b = RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(key)));
-    let (_tmp_b, ld_b) = temp_store_dir();
 
-    let before = storage.membership_list_count();
-    run_cycle(
+    let stream_count = chain
+        .entries()
+        .iter()
+        .map(|entry| {
+            (
+                entry.author_pubkey.clone(),
+                entry.author_owner_grant.clone(),
+                entry.stream_id,
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let counter = MembershipReadCounter::new(&storage.storage);
+    run_cycle_with_storage(
+        &counter,
         &storage,
         &db_b,
         &cipher_b,
@@ -1016,9 +1250,9 @@ async fn one_cycle_lists_membership_once() {
     .await
     .expect("B's cycle");
     assert_eq!(
-        storage.membership_list_count() - before,
-        1,
-        "one cycle loads and anchors the membership chain exactly once",
+        counter.reads(),
+        chain.entries().len() + stream_count,
+        "one cycle reads every exact membership head and each stream's terminal empty slot once",
     );
 }
 
@@ -1049,45 +1283,19 @@ fn cipher_generation(cipher: &RwLock<CloudCipher>) -> u64 {
 async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remedies_converge() {
     let owner = UserKeypair::generate(); // this device — performs the removal
     let member = UserKeypair::generate(); // the member being removed
-    let owner_pk = pubkey_hex(&owner);
     let old_key: [u8; 32] = [11u8; 32];
 
-    let storage = MockSyncStorage::with_store_and_keypair(LIB_ID, owner.clone());
-
-    // Chain: owner founds and adds the member.
-    let mut chain = bootstrap_chain(storage.store_protocol_root().founder.clone());
-    {
-        let entry = chain
-            .signed_set_member(
-                &owner,
-                pubkey_hex(&member),
-                None,
-                MemberRole::Member,
-                "0000000002000-0000-A".to_string(),
-            )
-            .expect("active Owner signs membership grant");
-        chain.add_entry(entry).expect("valid membership grant");
-    }
-    upload_chain(&storage, &chain, &owner).await;
-
-    let db = open_test_db();
-    db.set_protocol_state(
-        crate::database::STORE_ROOT_HASH_STATE_KEY,
-        &storage.store_root_hash().to_string(),
-    )
-    .await
-    .expect("bind removal fixture to its Store protocol root");
-    let listed = storage.discover_membership_entries().await;
-    crate::sync::membership_ops::load_and_persist_owner_anchor(
+    let encryption = EncryptionService::from_key(old_key);
+    let (storage, db) = exact_store(&owner).await;
+    invite_exact_member(
         &storage,
-        storage.store_root_hash(),
-        &listed,
-        &owner_pk,
         &db,
+        &owner,
+        &member,
+        MemberRole::Member,
+        &encryption,
     )
-    .await
-    .unwrap()
-    .unwrap();
+    .await;
 
     // This device's steady state: keyring and live cipher hold the pre-rotation key.
     let ks = TestCustody::default();
@@ -1099,19 +1307,19 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     // The keyring is momentarily unwritable, so local adoption fails after the
     // cloud rotation commits.
     ks.fail_writes();
-    let err = remove_member(
-        &storage,
-        &storage,
+    let err = Box::pin(remove_member(
+        &storage.storage,
+        storage.home.as_ref(),
         &owner,
         &hlc,
         &pubkey_hex(&member),
         LIB_ID,
-        &EncryptionService::from_key(old_key),
+        &encryption,
         &ks,
         &cipher,
         &pending_rotation,
         &db,
-    )
+    ))
     .await
     .expect_err("local adoption fails while the keyring is unwritable");
     assert!(
@@ -1124,16 +1332,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
 
     // The cloud rotation committed: the member is durably removed from the
     // committed chain even though this device could not adopt the new key.
-    let entries = storage.discover_membership_entries().await;
-    let committed = load_anchored_chain(
-        &storage,
-        storage.store_root_hash(),
-        &entries,
-        Some(&owner_pk),
-        None,
-    )
-    .await
-    .expect("committed chain loads");
+    let committed = load_exact_chain(&storage, &db).await;
     assert!(
         !committed
             .current_members()
@@ -1172,17 +1371,13 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     // Remedy 1 — the next sync cycle: a still-stale device (generation 1) adopts
     // the rotated key from its own `keys/{owner}/{owner}` wrap, no retry needed.
     {
-        let db = open_test_db();
-        db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
-            .await
-            .unwrap();
         let ks_refresh = TestCustody::default();
         ks_refresh.set_initial_key(old_key);
         let cipher_refresh =
             RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(old_key)));
         let pending_rotation_refresh = PendingRotation::none();
         let (_tmp, ld) = temp_store_dir();
-        run_cycle(
+        Box::pin(run_cycle(
             &storage,
             &db,
             &cipher_refresh,
@@ -1191,7 +1386,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
             "A",
             &ld,
             Some(&ks_refresh),
-        )
+        ))
         .await
         .expect("refresh cycle");
         assert_eq!(
@@ -1205,19 +1400,19 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     // re-derives the rotated keyring from the current owner set and adopts it now
     // that the keyring is writable again.
     ks.allow_writes();
-    let fingerprint = remove_member(
-        &storage,
-        &storage,
+    let fingerprint = Box::pin(remove_member(
+        &storage.storage,
+        storage.home.as_ref(),
         &owner,
         &hlc,
         &pubkey_hex(&member),
         LIB_ID,
-        &EncryptionService::from_key(old_key),
+        &encryption,
         &ks,
         &cipher,
         &pending_rotation,
         &db,
-    )
+    ))
     .await
     .expect("retrying the removal converges");
     assert!(

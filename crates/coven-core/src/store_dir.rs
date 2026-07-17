@@ -276,6 +276,18 @@ impl StoreDir {
         self.path.join("storage")
     }
 
+    /// Immutable stored bytes prepared for one blob locator. The locator hash is
+    /// the file name, so retries reopen the same exact spool rather than sealing
+    /// the plaintext again with fresh randomness.
+    pub(crate) fn outbound_blob_spool_path(
+        &self,
+        locator_hash: crate::sync::store_commit::ObjectHash,
+    ) -> PathBuf {
+        self.storage_dir()
+            .join("outbound-blobs")
+            .join(locator_hash.to_string())
+    }
+
     /// A kept (budget-exempt) cache copy of a **Remote** blob:
     /// `storage/pinned/<namespace>/{ab}/{cd}/<id>`. The kept sibling of
     /// [`Self::cache_blob_path`] — same per-namespace shard layout, in the `pinned`
@@ -296,6 +308,24 @@ impl StoreDir {
     /// `namespace`/`id` is unsafe or `id` is not indexable (see [`Self::id_shard`]).
     pub fn cache_blob_path(&self, namespace: &str, id: &str) -> Result<PathBuf, PathTokenError> {
         self.cache_folder_blob_path("cache", namespace, id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pinned_locator_path(
+        &self,
+        namespace: &str,
+        locator_hash: crate::sync::store_commit::ObjectHash,
+    ) -> Result<PathBuf, PathTokenError> {
+        self.cache_folder_blob_path("pinned", namespace, &locator_hash.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_locator_path(
+        &self,
+        namespace: &str,
+        locator_hash: crate::sync::store_commit::ObjectHash,
+    ) -> Result<PathBuf, PathTokenError> {
+        self.cache_folder_blob_path("cache", namespace, &locator_hash.to_string())
     }
 
     /// `storage/<folder>/<namespace>/{ab}/{cd}/<id>` — the single blob-path builder
@@ -531,5 +561,39 @@ mod tests {
         assert_eq!(validate_cloud_path("C:/b"), Err(PathTokenError::Colon));
         assert_eq!(validate_cloud_path("a/C:b"), Err(PathTokenError::Colon));
         assert_eq!(validate_cloud_path("a/b\0c"), Err(PathTokenError::NulByte));
+    }
+
+    #[test]
+    fn outbound_blob_spool_is_keyed_by_locator_hash() {
+        let store = StoreDir::new("/stores/example");
+        let locator_hash = crate::sync::store_commit::ObjectHash::digest(b"locator");
+
+        assert_eq!(
+            store.outbound_blob_spool_path(locator_hash),
+            store
+                .storage_dir()
+                .join("outbound-blobs")
+                .join(locator_hash.to_string())
+        );
+    }
+
+    #[test]
+    fn remote_cache_paths_are_keyed_by_locator_hash() {
+        let store = StoreDir::new("/stores/example");
+        let locator_hash = crate::sync::store_commit::ObjectHash::digest(b"locator");
+        let shard = StoreDir::id_shard(&locator_hash.to_string()).expect("hash shard");
+
+        assert_eq!(
+            store
+                .cache_locator_path("images", locator_hash)
+                .expect("cache path"),
+            store.storage_dir().join("cache/images").join(&shard)
+        );
+        assert_eq!(
+            store
+                .pinned_locator_path("images", locator_hash)
+                .expect("pinned path"),
+            store.storage_dir().join("pinned/images").join(shard)
+        );
     }
 }

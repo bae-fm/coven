@@ -155,6 +155,19 @@ impl UserKeypair {
         self.signing_key.to_keypair_bytes()
     }
 
+    pub(crate) fn derive_signing_key(&self, domain: &[u8], context: &[u8]) -> Self {
+        use sha2::{Digest, Sha256};
+
+        let mut derivation = Sha256::new();
+        derivation.update(domain);
+        derivation.update(self.signing_key.to_bytes());
+        derivation.update(context);
+        let seed: [u8; 32] = derivation.finalize().into();
+        Self {
+            signing_key: SigningKey::from_bytes(&seed),
+        }
+    }
+
     /// Sign a message, returning a 64-byte detached signature.
     pub fn sign(&self, message: &[u8]) -> [u8; SIGN_BYTES] {
         self.signing_key.sign(message).to_bytes()

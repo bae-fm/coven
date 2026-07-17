@@ -11,11 +11,13 @@ use super::circle_roster::{
     CircleRosterError, CircleRosterHead, CircleRosterHeadRef, CircleRosterStateRef,
     ResolvedCircleRoster, SerialCircleRoster,
 };
-use super::membership::{
-    MemberRole, MembershipGrantCreationAuthority, MembershipGrantId, SerialMembershipState,
-};
+#[cfg(test)]
+use super::membership::SerialMembershipState;
+use super::membership::{MemberRole, MembershipGrantCreationAuthority, MembershipGrantId};
 use super::membership::{MembershipHeadRef, StoreMembershipConflictResolutionRef};
-use super::store_commit::{CommitPosition, ObjectHash, STORE_PROTOCOL_VERSION};
+use super::store_commit::{
+    ObjectHash, OwnerRecoveryCursor, SerialStorePosition, STORE_PROTOCOL_VERSION,
+};
 use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::keys::{self, UserKeypair};
 
@@ -105,10 +107,12 @@ pub enum StoreMembershipStateRef {
     MergeConcurrent {
         heads: Vec<MembershipHeadRef>,
         resolutions: Vec<StoreMembershipConflictResolutionRef>,
+        recovery: Vec<OwnerRecoveryCursor>,
         state_hash: ObjectHash,
     },
     Serial {
-        position: Option<CommitPosition>,
+        position: SerialStorePosition,
+        recovery: Vec<OwnerRecoveryCursor>,
         state_hash: ObjectHash,
     },
 }
@@ -117,22 +121,39 @@ impl StoreMembershipStateRef {
     pub fn merge_concurrent(
         mut heads: Vec<MembershipHeadRef>,
         mut resolutions: Vec<StoreMembershipConflictResolutionRef>,
-        state_hash: ObjectHash,
-    ) -> Self {
+        recovery: Vec<OwnerRecoveryCursor>,
+        membership_state_hash: ObjectHash,
+    ) -> Result<Self, super::store_commit::StoreProtocolError> {
         heads.sort();
         resolutions.sort();
-        Self::MergeConcurrent {
+        let recovery = super::store_commit::canonical_recovery_cursors(recovery)?;
+        Ok(Self::MergeConcurrent {
             heads,
             resolutions,
-            state_hash,
-        }
+            state_hash: membership_state_ref_hash(
+                crate::WritePolicy::MergeConcurrent,
+                membership_state_hash,
+                &recovery,
+            ),
+            recovery,
+        })
     }
 
-    pub fn serial(position: Option<CommitPosition>, membership: &SerialMembershipState) -> Self {
-        Self::Serial {
+    pub fn serial(
+        position: SerialStorePosition,
+        recovery: Vec<OwnerRecoveryCursor>,
+        authorization: &super::membership::SerialAuthorizationState,
+    ) -> Result<Self, super::store_commit::StoreProtocolError> {
+        let recovery = super::store_commit::canonical_recovery_cursors(recovery)?;
+        Ok(Self::Serial {
             position,
-            state_hash: membership.state_hash(),
-        }
+            state_hash: membership_state_ref_hash(
+                crate::WritePolicy::Serial,
+                authorization.membership_state_hash(),
+                &recovery,
+            ),
+            recovery,
+        })
     }
 
     pub fn state_hash(&self) -> ObjectHash {
@@ -149,6 +170,45 @@ impl StoreMembershipStateRef {
             Self::Serial { .. } => crate::WritePolicy::Serial,
         }
     }
+
+    pub fn recovery(&self) -> &[OwnerRecoveryCursor] {
+        match self {
+            Self::MergeConcurrent { recovery, .. } | Self::Serial { recovery, .. } => recovery,
+        }
+    }
+
+    pub(crate) fn validate_shape(&self) -> Result<(), super::store_commit::StoreProtocolError> {
+        super::store_commit::validate_recovery_cursors(self.recovery())?;
+        if let Self::MergeConcurrent {
+            heads, resolutions, ..
+        } = self
+        {
+            if heads.windows(2).any(|pair| pair[0] >= pair[1])
+                || resolutions.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(super::store_commit::StoreProtocolError::Malformed(
+                    "Store membership state reference is not canonical".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn membership_state_ref_hash(
+    policy: crate::WritePolicy,
+    membership_state_hash: ObjectHash,
+    recovery: &[OwnerRecoveryCursor],
+) -> ObjectHash {
+    ObjectHash::digest(
+        &serde_json::to_vec(&(
+            "coven.store-membership-state-ref.v1",
+            policy,
+            membership_state_hash,
+            recovery,
+        ))
+        .expect("Store membership state hash serialization cannot fail"),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1072,19 +1132,24 @@ impl CircleCreation {
         }
     }
 
-    pub fn control_ref(&self) -> super::store_commit::CircleControlRef {
+    pub fn control_ref(
+        &self,
+        objects: super::store_commit::CircleActivationObjects,
+    ) -> super::store_commit::CircleControlRef {
         match &self.policy_objects {
             CircleCreationPolicyObjects::MergeConcurrent { control_head, .. } => {
                 super::store_commit::CircleControlRef::MergeConcurrent {
                     circle_id: self.circle_id,
                     control: self.control.coord.clone(),
                     head_hash: control_head.head_hash(),
+                    objects,
                 }
             }
             CircleCreationPolicyObjects::Serial { .. } => {
                 super::store_commit::CircleControlRef::Serial {
                     circle_id: self.circle_id,
                     control: self.control.coord.clone(),
+                    objects,
                 }
             }
         }
@@ -1405,7 +1470,7 @@ pub fn circle_semantic_prefix(slot: CircleSemanticSlot<'_>) -> String {
         CircleSemanticSlot::ControlHead {
             circle_id,
             control,
-            head_hash,
+            head_hash: _,
         } => {
             let CircleControlCoord::MergeConcurrent {
                 author_pubkey,
@@ -1418,8 +1483,15 @@ pub fn circle_semantic_prefix(slot: CircleSemanticSlot<'_>) -> String {
             else {
                 unreachable!("Serial controls have no independent head")
             };
-            format!(
-                "circle-control/{circle_id}/merge/heads/{author_pubkey}/{device_id}/{author_owner_grant}/{stream_id}/{seq}/{head_hash}"
+            circle_control_head_prefix(
+                circle_id,
+                &CircleAuthorStreamKey {
+                    author_pubkey: author_pubkey.clone(),
+                    device_id: device_id.clone(),
+                    stream_id: *stream_id,
+                    author_owner_grant: author_owner_grant.clone(),
+                },
+                *seq,
             )
         }
         CircleSemanticSlot::RosterEntry { circle_id, coord } => format!(
@@ -1431,15 +1503,9 @@ pub fn circle_semantic_prefix(slot: CircleSemanticSlot<'_>) -> String {
             coord.seq,
             coord.entry_hash
         ),
-        CircleSemanticSlot::RosterHead { circle_id, head } => format!(
-            "circles/{circle_id}/roster/heads/{}/{}/{}/{}/{}/{}",
-            head.coord.author_pubkey,
-            head.coord.device_id,
-            head.coord.author_owner_grant,
-            head.coord.stream_id,
-            head.coord.seq,
-            head.head_hash
-        ),
+        CircleSemanticSlot::RosterHead { circle_id, head } => {
+            circle_roster_head_prefix(circle_id, &head.coord.stream_key(), head.coord.seq)
+        }
         CircleSemanticSlot::RosterResolution {
             circle_id,
             resolution,
@@ -1458,15 +1524,9 @@ pub fn circle_semantic_prefix(slot: CircleSemanticSlot<'_>) -> String {
             coord.seq,
             coord.metadata_hash
         ),
-        CircleSemanticSlot::MetadataHead { circle_id, head } => format!(
-            "circles/{circle_id}/metadata/heads/{}/{}/{}/{}/{}/{}",
-            head.coord.author_pubkey,
-            head.coord.device_id,
-            head.coord.author_owner_grant,
-            head.coord.stream_id,
-            head.coord.seq,
-            head.head_hash
-        ),
+        CircleSemanticSlot::MetadataHead { circle_id, head } => {
+            circle_metadata_head_prefix(circle_id, &head.coord.stream_key(), head.coord.seq)
+        }
         CircleSemanticSlot::AccessLeaf {
             circle_id,
             owner_pubkey,
@@ -1485,6 +1545,39 @@ pub fn circle_semantic_prefix(slot: CircleSemanticSlot<'_>) -> String {
             "circles/{circle_id}/access-envelopes/{owner_pubkey}/{recipient_slot}/{control_hash}"
         ),
     }
+}
+
+pub fn circle_control_head_prefix(
+    circle_id: CircleId,
+    stream: &CircleAuthorStreamKey,
+    seq: u64,
+) -> String {
+    format!(
+        "circle-control/{circle_id}/merge/heads/{}/{}/{}/{}/{seq}",
+        stream.author_pubkey, stream.device_id, stream.author_owner_grant, stream.stream_id
+    )
+}
+
+pub fn circle_roster_head_prefix(
+    circle_id: CircleId,
+    stream: &CircleAuthorStreamKey,
+    seq: u64,
+) -> String {
+    format!(
+        "circles/{circle_id}/roster/heads/{}/{}/{}/{}/{seq}",
+        stream.author_pubkey, stream.device_id, stream.author_owner_grant, stream.stream_id
+    )
+}
+
+pub fn circle_metadata_head_prefix(
+    circle_id: CircleId,
+    stream: &CircleAuthorStreamKey,
+    seq: u64,
+) -> String {
+    format!(
+        "circles/{circle_id}/metadata/heads/{}/{}/{}/{}/{seq}",
+        stream.author_pubkey, stream.device_id, stream.author_owner_grant, stream.stream_id
+    )
 }
 
 pub fn verify_circle_semantic_prefix(
@@ -1567,14 +1660,58 @@ mod tests {
                 .iter()
                 .map(|peer| (keys::public_key_hex(peer), MemberRole::Member)),
         );
-        let root = ObjectHash::digest(b"Circle control test membership root");
+        let store_root_hash = ObjectHash::digest(b"Circle control test Store");
+        let store_root = super::super::store_commit::StoreRootRef {
+            store_root_id: ObjectHash::digest(b"Circle control test Store identity"),
+            store_root_hash,
+            object: super::super::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/protocol/root/circle-control-test.json".to_string(),
+                )
+                .expect("valid Circle-control Store-root slot"),
+                1,
+                ObjectHash::digest(b"Circle control test stored root"),
+            ),
+        };
+        let registration_origin =
+            super::super::store_commit::StoreDeviceRegistrationOrigin::Founder {
+                creation_id: super::super::store_commit::StoreCreationId::from_nonce(
+                    "circle-control-test-founder",
+                ),
+            };
+        let author_device =
+            super::super::store_commit::StoreDeviceId::derive(&store_root, &registration_origin);
+        let founder_registration = super::super::store_commit::StoreDeviceRegistrationRef {
+            device_id: author_device,
+            registration_hash: ObjectHash::digest(b"Circle control test founder registration"),
+            object: super::super::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/registrations/circle-control-test-founder.json".to_string(),
+                )
+                .expect("valid Circle-control registration slot"),
+                1,
+                ObjectHash::digest(b"Circle control test stored registration"),
+            ),
+        };
+        let membership_slot = crate::storage::cloud::ObjectSlot::logical(
+            "store-v1/membership/heads/circle-control-test-founder.json".to_string(),
+        )
+        .expect("valid Circle-control membership slot");
         let founder = super::super::membership::founder_entry(
             "circle-control-test-membership",
             owner,
+            crate::sync::test_helpers::test_membership_grant_id("circle-control-test-membership"),
             "founder",
+            super::super::store_commit::GrantStreamAnchor::StoreMembership {
+                first_slot: membership_slot,
+            },
+            crate::sync::test_helpers::test_founder_provider_admin(
+                "circle-control-test-membership",
+            ),
         );
         let mut membership =
-            SerialMembershipState::from_founder(root, &founder).expect("found Serial membership");
+            SerialMembershipState::from_founder(store_root.store_root_id, &founder)
+                .expect("found Serial membership");
         for (index, peer) in peers.iter().enumerate() {
             let entry = membership
                 .signed_set_member(
@@ -1587,12 +1724,25 @@ mod tests {
                 .expect("sign Serial member");
             membership = membership.apply(&entry).expect("apply Serial member");
         }
+        let authorization =
+            super::super::membership::SerialAuthorizationState::from_test_membership(
+                &founder, membership,
+            )
+            .expect("test Serial authorization");
         CircleCreation::founder(
-            ObjectHash::digest(b"Circle control test Store"),
-            "owner-device",
+            store_root_hash,
+            &author_device.to_string(),
             "Household",
             "0000000001000-0000-owner-device",
-            StoreMembershipStateRef::serial(None, &membership),
+            StoreMembershipStateRef::serial(
+                super::super::store_commit::SerialStorePosition::Genesis {
+                    root: store_root,
+                    founder_registration,
+                },
+                Vec::new(),
+                &authorization,
+            )
+            .expect("valid Serial membership reference"),
             None,
             members,
             &crate::id_provider::SequentialIdProvider::new(id_seed),
@@ -1640,13 +1790,13 @@ mod tests {
         let first = super::super::circle_roster::CircleRosterCoord {
             author_pubkey: "owner".to_string(),
             device_id: "device".to_string(),
-            stream_id: AuthorStreamId::from_bytes([1; 16]),
+            stream_id: AuthorStreamId::from_bytes([1; 32]),
             author_owner_grant: grant.clone(),
             seq: 1,
             entry_hash: ObjectHash::digest(b"entry"),
         };
         let mut substituted = first.clone();
-        substituted.stream_id = AuthorStreamId::from_bytes([2; 16]);
+        substituted.stream_id = AuthorStreamId::from_bytes([2; 32]);
         let circle_id = CircleId::from_bytes([7; 16]);
         let first_path = circle_semantic_prefix(CircleSemanticSlot::RosterEntry {
             circle_id,

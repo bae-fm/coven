@@ -9,17 +9,17 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use reqwest::StatusCode;
-use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 
 use super::http::{self, ensure_ok, exists_from_response, NotFound};
 use super::oauth_rest::{
-    rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome, PageTokenTracker,
+    rest_delete, rest_list, rest_read, rest_read_range, ListPage, OAuthRestHome,
 };
 use super::oauth_session::OAuthSession;
 use super::{
-    AppendedListing, AppendedObject, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-    CloudHome, CloudHomeError, CloudHomeJoinInfo, ImmutableCopyStorage, ListingCoverage,
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+    CloudHomeJoinInfo, ExactSlotStorage, ObjectSlot, PartSink, PhysicalObjectLocator,
     RevokeOutcome, UploadProgress,
 };
 use crate::clock::ClockRef;
@@ -37,6 +37,7 @@ pub(crate) struct DropboxCloudHome {
     api_base: String,
     content_base: String,
     session: OAuthSession,
+    namespace_id: OnceLock<String>,
 }
 
 impl DropboxCloudHome {
@@ -53,6 +54,7 @@ impl DropboxCloudHome {
             api_base: API_BASE.to_string(),
             content_base: CONTENT_BASE.to_string(),
             session: OAuthSession::new(tokens, key_service, clock, config, "Dropbox"),
+            namespace_id: OnceLock::new(),
         })
     }
 
@@ -96,22 +98,64 @@ impl DropboxCloudHome {
         self.session.client()
     }
 
-    /// Build the full Dropbox path for a key.
-    /// `objects/dev1/42.enc` -> `/Apps/your-app/my-store/objects/dev1/42.enc`
-    fn full_path(&self, key: &str) -> String {
-        format!("{}/{}", self.folder_path, key)
+    fn namespace_path(key: &str) -> String {
+        format!("/{key}")
+    }
+
+    fn path_root_header(namespace_id: &str) -> String {
+        serde_json::json!({
+            ".tag": "namespace_id",
+            "namespace_id": namespace_id,
+        })
+        .to_string()
+    }
+
+    fn scoped_request(
+        request: reqwest::RequestBuilder,
+        path_root: &str,
+    ) -> reqwest::RequestBuilder {
+        request.header("Dropbox-API-Path-Root", path_root)
+    }
+
+    fn remember_namespace(&self, namespace_id: String) -> Result<String, CloudHomeError> {
+        if namespace_id.is_empty() {
+            return Err(CloudHomeError::Transport(
+                "Dropbox shared namespace id is empty".to_string(),
+            ));
+        }
+        if let Some(current) = self.namespace_id.get() {
+            if current != &namespace_id {
+                return Err(CloudHomeError::Transport(
+                    "Dropbox shared namespace changed during one adapter session".to_string(),
+                ));
+            }
+            return Ok(current.clone());
+        }
+        self.namespace_id
+            .set(namespace_id.clone())
+            .map_err(|actual| {
+                CloudHomeError::Transport(format!(
+                    "Dropbox shared namespace changed while being resolved: {actual}"
+                ))
+            })?;
+        Ok(namespace_id)
     }
 
     async fn start_upload_session(&self, key: &str) -> Result<String, CloudHomeError> {
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
         let response = self
             .session
             .api_call(|token| {
-                self.client()
-                    .post(format!("{}/files/upload_session/start", self.content_base))
-                    .bearer_auth(token)
-                    .header("Dropbox-API-Arg", r#"{"close":false}"#)
-                    .header("Content-Type", "application/octet-stream")
-                    .body(Vec::new())
+                Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/files/upload_session/start", self.content_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .header("Dropbox-API-Arg", r#"{"close":false}"#)
+                .header("Content-Type", "application/octet-stream")
+                .body(Vec::new())
             })
             .await?;
         let status = response.status();
@@ -131,14 +175,12 @@ impl DropboxCloudHome {
             })
     }
 
-    async fn append_small(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-    ) -> Result<AppendedObject, CloudHomeError> {
+    async fn append_small(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
         let body = Bytes::from(data);
         let api_arg = dropbox_api_arg(&serde_json::json!({
-            "path": self.full_path(key),
+            "path": Self::namespace_path(key),
                     "mode": { ".tag": "add" },
                     "autorename": false,
                     "strict_conflict": true,
@@ -147,22 +189,25 @@ impl DropboxCloudHome {
         let response = self
             .session
             .api_call_no_transient_retry(|token| {
-                self.client()
-                    .post(format!("{}/files/upload", self.content_base))
-                    .bearer_auth(token)
-                    .header("Dropbox-API-Arg", &api_arg)
-                    .header("Content-Type", "application/octet-stream")
-                    .body(body.clone())
+                Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/files/upload", self.content_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .header("Dropbox-API-Arg", &api_arg)
+                .header("Content-Type", "application/octet-stream")
+                .body(body.clone())
             })
             .await?;
-        self.appended_object_from_response(key, response).await
+        self.validate_create_response(key, response).await
     }
 
-    async fn appended_object_from_response(
+    async fn validate_create_response(
         &self,
         key: &str,
         response: reqwest::Response,
-    ) -> Result<AppendedObject, CloudHomeError> {
+    ) -> Result<(), CloudHomeError> {
         let status = response.status();
         let body = http::body_text(response).await;
         if !status.is_success() {
@@ -171,28 +216,50 @@ impl DropboxCloudHome {
         let json: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
             CloudHomeError::Transport(format!("append {key}: parse response: {error}"))
         })?;
-        let id = json["id"]
+        json["id"]
             .as_str()
             .filter(|id| !id.is_empty())
             .ok_or_else(|| {
                 CloudHomeError::Transport(format!("append {key}: response missing file id"))
             })?;
-        AppendedObject::from_provider(key.to_string(), id.to_string())
+        if json["path_display"].as_str() != Some(Self::namespace_path(key).as_str()) {
+            return Err(CloudHomeError::Transport(format!(
+                "append {key}: response identifies another Dropbox path"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        slot.validate()?;
+        if slot.physical() != &PhysicalObjectLocator::LogicalKey {
+            return Err(CloudHomeError::Configuration(format!(
+                "Dropbox slot for {} must use its logical path",
+                slot.logical_key()
+            )));
+        }
+        Ok(())
     }
 
     async fn send_exact_read(
         &self,
-        object: &AppendedObject,
+        slot: &ObjectSlot,
     ) -> Result<reqwest::Response, CloudHomeError> {
-        let provider_id = object.opaque_provider_id();
-        let api_arg = dropbox_api_arg(&serde_json::json!({"path": provider_id}));
+        self.validate_slot(slot)?;
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
+        let path = Self::namespace_path(slot.logical_key());
+        let api_arg = dropbox_api_arg(&serde_json::json!({"path": path}));
         let response = self
             .session
             .api_call(|token| {
-                self.client()
-                    .post(format!("{}/files/download", self.content_base))
-                    .bearer_auth(token)
-                    .header("Dropbox-API-Arg", &api_arg)
+                Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/files/download", self.content_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .header("Dropbox-API-Arg", &api_arg)
             })
             .await?;
         let response = ensure_ok(response, "read exact Dropbox file", self.not_found()).await?;
@@ -202,65 +269,74 @@ impl DropboxCloudHome {
             .ok_or_else(|| {
                 CloudHomeError::Transport(format!(
                     "exact Dropbox read for {} omitted Dropbox-API-Result",
-                    object.logical_key()
+                    slot.logical_key()
                 ))
             })?
             .to_str()
             .map_err(|error| {
                 CloudHomeError::Transport(format!(
                     "exact Dropbox read for {} returned invalid metadata: {error}",
-                    object.logical_key()
+                    slot.logical_key()
                 ))
             })?;
         let metadata: serde_json::Value = serde_json::from_str(metadata).map_err(|error| {
             CloudHomeError::Transport(format!(
                 "exact Dropbox read for {} returned malformed metadata: {error}",
-                object.logical_key()
+                slot.logical_key()
             ))
         })?;
-        self.validate_appended_metadata(object, &metadata)?;
+        self.validate_exact_metadata(slot, &metadata)?;
         Ok(response)
     }
 
-    fn validate_appended_metadata(
+    fn validate_exact_metadata(
         &self,
-        object: &AppendedObject,
+        slot: &ObjectSlot,
         metadata: &serde_json::Value,
     ) -> Result<(), CloudHomeError> {
-        let expected_path = self.full_path(object.logical_key());
+        self.validate_slot(slot)?;
+        let expected_path = Self::namespace_path(slot.logical_key());
         let matches = metadata[".tag"].as_str() == Some("file")
-            && metadata["id"].as_str() == Some(object.opaque_provider_id())
+            && metadata["id"].as_str().is_some_and(|id| !id.is_empty())
             && metadata["path_display"].as_str() == Some(expected_path.as_str());
         if !matches {
             return Err(CloudHomeError::Transport(format!(
-                "exact Dropbox locator for {} does not identify {} at {expected_path}",
-                object.logical_key(),
-                object.opaque_provider_id()
+                "exact Dropbox slot for {} does not identify {expected_path}",
+                slot.logical_key(),
             )));
         }
         Ok(())
     }
 
-    async fn verify_appended_object(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
-        let body = serde_json::json!({"path": object.opaque_provider_id()});
+    async fn verify_slot(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        self.validate_slot(slot)?;
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
+        let body = serde_json::json!({"path": Self::namespace_path(slot.logical_key())});
         let response = self
             .session
             .api_call(|token| {
-                self.client()
-                    .post(format!("{}/files/get_metadata", self.api_base))
-                    .bearer_auth(token)
-                    .json(&body)
+                Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/files/get_metadata", self.api_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .json(&body)
             })
             .await?;
         let response = ensure_ok(response, "verify exact Dropbox file", self.not_found()).await?;
         let metadata: serde_json::Value =
             http::ok_json(response, "parse exact Dropbox metadata").await?;
-        self.validate_appended_metadata(object, &metadata)
+        self.validate_exact_metadata(slot, &metadata)
     }
 
     /// Call `share_folder` and resolve the shared_folder_id, handling both
     /// immediate and async_job_id responses.
     async fn get_or_create_shared_folder_id(&self) -> Result<String, CloudHomeError> {
+        if let Some(namespace_id) = self.namespace_id.get() {
+            return Ok(namespace_id.clone());
+        }
         let share_body = serde_json::json!({ "path": self.folder_path });
         let resp = self
             .session
@@ -282,15 +358,16 @@ impl DropboxCloudHome {
 
         // Immediate: {".tag": "complete", "shared_folder_id": "..."}
         if let Some(id) = json["shared_folder_id"].as_str() {
-            return Ok(id.to_string());
+            return self.remember_namespace(id.to_string());
         }
         // Already shared: error payload contains the shared_folder_metadata
         if let Some(id) = json["error"]["shared_folder_metadata"]["shared_folder_id"].as_str() {
-            return Ok(id.to_string());
+            return self.remember_namespace(id.to_string());
         }
         // Async: {".tag": "async_job_id", "async_job_id": "..."}
         if let Some(job_id) = json["async_job_id"].as_str() {
-            return self.poll_share_job(job_id).await;
+            let namespace_id = self.poll_share_job(job_id).await?;
+            return self.remember_namespace(namespace_id);
         }
         if !status.is_success() {
             return Err(CloudHomeError::Transport(format!(
@@ -308,6 +385,7 @@ impl DropboxCloudHome {
             job_id,
             "sharing/check_share_job_status",
             "share folder",
+            None,
             |json| {
                 json["shared_folder_id"]
                     .as_str()
@@ -322,11 +400,17 @@ impl DropboxCloudHome {
         .await
     }
 
-    async fn poll_remove_member_job(&self, job_id: &str) -> Result<(), CloudHomeError> {
+    async fn poll_remove_member_job(
+        &self,
+        job_id: &str,
+        shared_folder_id: &str,
+    ) -> Result<(), CloudHomeError> {
+        let path_root = Self::path_root_header(shared_folder_id);
         self.poll_dropbox_job(
             job_id,
             "sharing/check_remove_member_job_status",
             "remove folder member",
+            Some(&path_root),
             |_| Ok(()),
         )
         .await
@@ -337,6 +421,7 @@ impl DropboxCloudHome {
         job_id: &str,
         endpoint: &str,
         operation: &str,
+        path_root: Option<&str>,
         complete: impl Fn(&serde_json::Value) -> Result<T, CloudHomeError>,
     ) -> Result<T, CloudHomeError> {
         let request_body = serde_json::json!({ "async_job_id": job_id });
@@ -345,10 +430,15 @@ impl DropboxCloudHome {
             let resp = self
                 .session
                 .api_call(|token| {
-                    self.client()
+                    let request = self
+                        .client()
                         .post(format!("{}/{endpoint}", self.api_base))
                         .bearer_auth(token)
-                        .json(&request_body)
+                        .json(&request_body);
+                    match path_root {
+                        Some(path_root) => Self::scoped_request(request, path_root),
+                        None => request,
+                    }
                 })
                 .await?;
             let status = resp.status();
@@ -388,6 +478,7 @@ impl DropboxCloudHome {
         shared_folder_id: &str,
         email: &str,
     ) -> Result<Option<String>, CloudHomeError> {
+        let path_root = Self::path_root_header(shared_folder_id);
         let mut endpoint = "sharing/list_folder_members";
         let mut request = serde_json::json!({
             "shared_folder_id": shared_folder_id,
@@ -398,10 +489,13 @@ impl DropboxCloudHome {
             let resp = self
                 .session
                 .api_call(|token| {
-                    self.client()
-                        .post(format!("{}/{endpoint}", self.api_base))
-                        .bearer_auth(token)
-                        .json(&request)
+                    Self::scoped_request(
+                        self.client()
+                            .post(format!("{}/{endpoint}", self.api_base))
+                            .bearer_auth(token),
+                        &path_root,
+                    )
+                    .json(&request)
                 })
                 .await?;
             let resp = ensure_ok(resp, "list folder members", self.not_found()).await?;
@@ -431,6 +525,7 @@ impl DropboxCloudHome {
         shared_folder_id: &str,
         email: &str,
     ) -> Result<(), CloudHomeError> {
+        let path_root = Self::path_root_header(shared_folder_id);
         let remove_body = serde_json::json!({
             "shared_folder_id": shared_folder_id,
             "member": { ".tag": "email", "email": email },
@@ -439,10 +534,13 @@ impl DropboxCloudHome {
         let resp = self
             .session
             .api_call(|token| {
-                self.client()
-                    .post(format!("{}/sharing/remove_folder_member", self.api_base))
-                    .bearer_auth(token)
-                    .json(&remove_body)
+                Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/sharing/remove_folder_member", self.api_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .json(&remove_body)
             })
             .await?;
         let status = resp.status();
@@ -457,7 +555,9 @@ impl DropboxCloudHome {
         }
         match parse_dropbox_revoke_launch(&body)? {
             DropboxRevokeLaunch::Complete => Ok(()),
-            DropboxRevokeLaunch::AsyncJob(job_id) => self.poll_remove_member_job(&job_id).await,
+            DropboxRevokeLaunch::AsyncJob(job_id) => {
+                self.poll_remove_member_job(&job_id, shared_folder_id).await
+            }
         }
     }
 }
@@ -503,105 +603,6 @@ fn dropbox_api_arg(value: &serde_json::Value) -> String {
     arg
 }
 
-fn strip_dropbox_folder_prefix<'a>(path_display: &'a str, folder_path: &str) -> Option<&'a str> {
-    let folder_prefix = path_display.get(..folder_path.len())?;
-    if !folder_prefix.eq_ignore_ascii_case(folder_path) {
-        return None;
-    }
-    path_display.get(folder_path.len()..)?.strip_prefix('/')
-}
-
-#[derive(Default)]
-struct DropboxAppendedState {
-    objects_by_id: HashMap<String, AppendedObject>,
-    id_paths: HashMap<String, String>,
-    path_ids: HashMap<String, String>,
-}
-
-fn apply_dropbox_appended_page(
-    page: &serde_json::Value,
-    folder_path: &str,
-    prefix: &str,
-    state: &mut DropboxAppendedState,
-) -> Result<(), CloudHomeError> {
-    let entries = page["entries"].as_array().ok_or_else(|| {
-        CloudHomeError::Transport("Dropbox appended listing omitted entries".to_string())
-    })?;
-    for entry in entries {
-        match entry[".tag"].as_str() {
-            Some("file") => {
-                let id = entry["id"]
-                    .as_str()
-                    .filter(|id| !id.is_empty())
-                    .ok_or_else(|| {
-                        CloudHomeError::Transport(
-                            "Dropbox appended file entry omitted id".to_string(),
-                        )
-                    })?;
-                let path_display = entry["path_display"].as_str().ok_or_else(|| {
-                    CloudHomeError::Transport(
-                        "Dropbox appended file entry omitted path_display".to_string(),
-                    )
-                })?;
-                let path_lower = entry["path_lower"].as_str().ok_or_else(|| {
-                    CloudHomeError::Transport(
-                        "Dropbox appended file entry omitted path_lower".to_string(),
-                    )
-                })?;
-                let logical_key = strip_dropbox_folder_prefix(path_display, folder_path)
-                    .ok_or_else(|| {
-                        CloudHomeError::Transport(format!(
-                            "Dropbox appended file {path_display:?} is outside configured folder {folder_path:?}"
-                        ))
-                    })?;
-                if let Some(old_path) = state.id_paths.remove(id) {
-                    state.path_ids.remove(&old_path);
-                }
-                state.objects_by_id.remove(id);
-                if logical_key.starts_with(prefix) {
-                    if let Some(displaced_id) = state
-                        .path_ids
-                        .insert(path_lower.to_string(), id.to_string())
-                    {
-                        state.id_paths.remove(&displaced_id);
-                        state.objects_by_id.remove(&displaced_id);
-                    }
-                    state
-                        .id_paths
-                        .insert(id.to_string(), path_lower.to_string());
-                    state.objects_by_id.insert(
-                        id.to_string(),
-                        AppendedObject::from_provider(logical_key.to_string(), id.to_string())?,
-                    );
-                }
-            }
-            Some("deleted") => {
-                let path_lower = entry["path_lower"].as_str().ok_or_else(|| {
-                    CloudHomeError::Transport(
-                        "Dropbox appended deleted entry omitted path_lower".to_string(),
-                    )
-                })?;
-                if let Some(id) = state.path_ids.remove(path_lower) {
-                    state.id_paths.remove(&id);
-                    state.objects_by_id.remove(&id);
-                }
-            }
-            Some("folder") => {}
-            Some(tag) => {
-                return Err(CloudHomeError::Transport(format!(
-                    "Dropbox appended listing returned unknown entry tag {tag:?}"
-                )))
-            }
-            None => {
-                return Err(CloudHomeError::Transport(
-                    "Dropbox appended listing entry omitted its tag".to_string(),
-                ))
-            }
-        }
-    }
-    Ok(())
-}
-
 fn dropbox_revoke_error_is_already_absent(body: &str) -> bool {
     parse_dropbox_error_summary(body)
         .as_deref()
@@ -621,6 +622,28 @@ struct DropboxSessionSink<'a> {
     home: &'a DropboxCloudHome,
     session_id: String,
     key: String,
+    completion: DropboxSessionCompletion,
+    confirmed_offset: u64,
+    settled: bool,
+}
+
+#[derive(Clone, Copy)]
+enum DropboxSessionCompletion {
+    Overwrite,
+    CreateOnly,
+}
+
+fn combine_dropbox_cleanup_failure(
+    operation: CloudHomeError,
+    cleanup: Result<(), CloudHomeError>,
+) -> CloudHomeError {
+    match cleanup {
+        Ok(()) => operation,
+        Err(cleanup) => CloudHomeError::CleanupFailed {
+            operation: Box::new(operation),
+            cleanup: Box::new(cleanup),
+        },
+    }
 }
 
 #[async_trait]
@@ -635,31 +658,42 @@ impl super::PartSink for DropboxSessionSink<'_> {
         offset: u64,
         is_last: bool,
     ) -> Result<(), CloudHomeError> {
+        let length = part.len() as u64;
+        let namespace_id = self.home.get_or_create_shared_folder_id().await?;
+        let path_root = DropboxCloudHome::path_root_header(&namespace_id);
         let resp = if is_last {
             // The final part commits the file at the destination path.
-            let path = self.home.full_path(&self.key);
+            let path = DropboxCloudHome::namespace_path(&self.key);
+            let mode = match self.completion {
+                DropboxSessionCompletion::Overwrite => serde_json::json!({ ".tag": "overwrite" }),
+                DropboxSessionCompletion::CreateOnly => serde_json::json!({ ".tag": "add" }),
+            };
             let arg = dropbox_api_arg(&serde_json::json!({
                 "cursor": { "session_id": self.session_id, "offset": offset },
                 "commit": {
                     "path": path,
-                    "mode": { ".tag": "overwrite" },
+                    "mode": mode,
                     "autorename": false,
+                    "strict_conflict": matches!(self.completion, DropboxSessionCompletion::CreateOnly),
                     "mute": true,
                 },
             }));
             self.home
                 .session
                 .api_call_no_transient_retry(|token| {
-                    self.home
-                        .client()
-                        .post(format!(
-                            "{}/files/upload_session/finish",
-                            self.home.content_base
-                        ))
-                        .bearer_auth(token)
-                        .header("Dropbox-API-Arg", &arg)
-                        .header("Content-Type", "application/octet-stream")
-                        .body(part.clone())
+                    DropboxCloudHome::scoped_request(
+                        self.home
+                            .client()
+                            .post(format!(
+                                "{}/files/upload_session/finish",
+                                self.home.content_base
+                            ))
+                            .bearer_auth(token),
+                        &path_root,
+                    )
+                    .header("Dropbox-API-Arg", &arg)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(part.clone())
                 })
                 .await?
         } else {
@@ -670,16 +704,19 @@ impl super::PartSink for DropboxSessionSink<'_> {
             self.home
                 .session
                 .api_call_no_transient_retry(|token| {
-                    self.home
-                        .client()
-                        .post(format!(
-                            "{}/files/upload_session/append_v2",
-                            self.home.content_base
-                        ))
-                        .bearer_auth(token)
-                        .header("Dropbox-API-Arg", &arg)
-                        .header("Content-Type", "application/octet-stream")
-                        .body(part.clone())
+                    DropboxCloudHome::scoped_request(
+                        self.home
+                            .client()
+                            .post(format!(
+                                "{}/files/upload_session/append_v2",
+                                self.home.content_base
+                            ))
+                            .bearer_auth(token),
+                        &path_root,
+                    )
+                    .header("Dropbox-API-Arg", &arg)
+                    .header("Content-Type", "application/octet-stream")
+                    .body(part.clone())
                 })
                 .await?
         };
@@ -691,15 +728,72 @@ impl super::PartSink for DropboxSessionSink<'_> {
                 &self.key,
             ));
         }
+        self.confirmed_offset = offset.checked_add(length).ok_or_else(|| {
+            CloudHomeError::Transport(format!("Dropbox upload offset overflow for {}", self.key))
+        })?;
+        if is_last {
+            self.settled = true;
+            if matches!(self.completion, DropboxSessionCompletion::CreateOnly) {
+                self.home.validate_create_response(&self.key, resp).await?;
+            }
+        }
         Ok(())
     }
 
     async fn abort(&mut self) -> Result<(), CloudHomeError> {
+        if self.settled {
+            return Ok(());
+        }
+        let arg = dropbox_api_arg(&serde_json::json!({
+            "cursor": {
+                "session_id": self.session_id,
+                "offset": self.confirmed_offset,
+            },
+            "close": true,
+        }));
+        let namespace_id = self.home.get_or_create_shared_folder_id().await?;
+        let path_root = DropboxCloudHome::path_root_header(&namespace_id);
+        let response = self
+            .home
+            .session
+            .api_call_no_transient_retry(|token| {
+                DropboxCloudHome::scoped_request(
+                    self.home
+                        .client()
+                        .post(format!(
+                            "{}/files/upload_session/append_v2",
+                            self.home.content_base
+                        ))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .header("Dropbox-API-Arg", &arg)
+                .header("Content-Type", "application/octet-stream")
+                .body(Vec::new())
+            })
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_write_error(
+                status,
+                &http::body_text(response).await,
+                &self.key,
+            ));
+        }
+        self.settled = true;
         Ok(())
     }
 
-    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
-        Ok(())
+    async fn finish(mut self: Box<Self>) -> Result<(), CloudHomeError> {
+        if self.settled {
+            return Ok(());
+        }
+        let operation = CloudHomeError::Transport(format!(
+            "Dropbox upload session for {} reached finish without committing its final part",
+            self.key
+        ));
+        let cleanup = self.abort().await;
+        Err(combine_dropbox_cleanup_failure(operation, cleanup))
     }
 }
 
@@ -751,15 +845,19 @@ impl OAuthRestHome for DropboxCloudHome {
         key: &str,
         range: Option<(u64, u64)>,
     ) -> Result<reqwest::Response, CloudHomeError> {
-        let arg = dropbox_api_arg(&serde_json::json!({ "path": self.full_path(key) }));
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
+        let arg = dropbox_api_arg(&serde_json::json!({ "path": Self::namespace_path(key) }));
         let range = range.map(|(start, end)| super::range_header(start, end));
         self.session
             .api_call(|token| {
-                let mut req = self
-                    .client()
-                    .post(format!("{}/files/download", self.content_base))
-                    .bearer_auth(token)
-                    .header("Dropbox-API-Arg", &arg);
+                let mut req = Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/files/download", self.content_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .header("Dropbox-API-Arg", &arg);
                 if let Some(ref range) = range {
                     req = req.header("Range", range);
                 }
@@ -769,13 +867,18 @@ impl OAuthRestHome for DropboxCloudHome {
     }
 
     async fn send_delete(&self, key: &str) -> Result<reqwest::Response, CloudHomeError> {
-        let body = serde_json::json!({ "path": self.full_path(key) });
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
+        let body = serde_json::json!({ "path": Self::namespace_path(key) });
         self.session
             .api_call(|token| {
-                self.client()
-                    .post(format!("{}/files/delete_v2", self.api_base))
-                    .bearer_auth(token)
-                    .json(&body)
+                Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/files/delete_v2", self.api_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .json(&body)
             })
             .await
     }
@@ -785,6 +888,8 @@ impl OAuthRestHome for DropboxCloudHome {
         _prefix: &str,
         cursor: Option<&str>,
     ) -> Result<reqwest::Response, CloudHomeError> {
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
         // list_folder needs a folder path, not a prefix, so always list the root
         // recursively and filter client-side; `continue` follows pagination.
         match cursor {
@@ -792,25 +897,31 @@ impl OAuthRestHome for DropboxCloudHome {
                 let body = serde_json::json!({ "cursor": cur });
                 self.session
                     .api_call(|token| {
-                        self.client()
-                            .post(format!("{}/files/list_folder/continue", self.api_base))
-                            .bearer_auth(token)
-                            .json(&body)
+                        Self::scoped_request(
+                            self.client()
+                                .post(format!("{}/files/list_folder/continue", self.api_base))
+                                .bearer_auth(token),
+                            &path_root,
+                        )
+                        .json(&body)
                     })
                     .await
             }
             None => {
                 let body = serde_json::json!({
-                    "path": self.folder_path,
+                    "path": "",
                     "recursive": true,
                     "limit": 2000,
                 });
                 self.session
                     .api_call(|token| {
-                        self.client()
-                            .post(format!("{}/files/list_folder", self.api_base))
-                            .bearer_auth(token)
-                            .json(&body)
+                        Self::scoped_request(
+                            self.client()
+                                .post(format!("{}/files/list_folder", self.api_base))
+                                .bearer_auth(token),
+                            &path_root,
+                        )
+                        .json(&body)
                     })
                     .await
             }
@@ -830,11 +941,10 @@ impl OAuthRestHome for DropboxCloudHome {
                     warn!("skipping Dropbox file entry without path_display: {entry}");
                     continue;
                 };
-                let Some(key) = strip_dropbox_folder_prefix(path_display, &self.folder_path) else {
+                let Some(key) = path_display.strip_prefix('/') else {
                     warn!(
-                        folder_path = %self.folder_path,
                         path_display,
-                        "skipping Dropbox file entry outside the configured folder"
+                        "skipping Dropbox file entry outside the shared namespace"
                     );
                     continue;
                 };
@@ -863,9 +973,11 @@ impl OAuthRestHome for DropboxCloudHome {
 
 impl DropboxCloudHome {
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
         let body = Bytes::from(data);
         let api_arg = dropbox_api_arg(&serde_json::json!({
-            "path": self.full_path(key),
+            "path": Self::namespace_path(key),
             "mode": { ".tag": "overwrite" },
             "autorename": false,
             "mute": true,
@@ -873,12 +985,15 @@ impl DropboxCloudHome {
         let resp = self
             .session
             .api_call(|token| {
-                self.client()
-                    .post(format!("{}/files/upload", self.content_base))
-                    .bearer_auth(token)
-                    .header("Dropbox-API-Arg", &api_arg)
-                    .header("Content-Type", "application/octet-stream")
-                    .body(body.clone())
+                Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/files/upload", self.content_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .header("Dropbox-API-Arg", &api_arg)
+                .header("Content-Type", "application/octet-stream")
+                .body(body.clone())
             })
             .await?;
         let status = resp.status();
@@ -902,6 +1017,9 @@ impl DropboxCloudHome {
             home: self,
             session_id,
             key: key.to_string(),
+            completion: DropboxSessionCompletion::Overwrite,
+            confirmed_offset: 0,
+            settled: false,
         }))
     }
 
@@ -909,194 +1027,8 @@ impl DropboxCloudHome {
         DROPBOX_SIMPLE_UPLOAD_MAX as u64
     }
 
-    async fn append_object(
-        &self,
-        full_logical_key: &str,
-        mut body: BlobBody,
-        progress: &UploadProgress<'_>,
-    ) -> Result<AppendedObject, CloudHomeError> {
-        if body.len() <= self.multipart_threshold() {
-            let data = body.collect().await?;
-            let length = data.len() as u64;
-            let object = self.append_small(full_logical_key, data).await?;
-            progress(length);
-            return Ok(object);
-        }
-
-        let session_id = self.start_upload_session(full_logical_key).await?;
-        let total = body.len();
-        let mut offset = 0;
-        while let Some(part) = body.next_part(DROPBOX_CHUNK_SIZE).await? {
-            let length = part.len() as u64;
-            let is_last = offset + length >= total;
-            let response = if is_last {
-                let api_arg = dropbox_api_arg(&serde_json::json!({
-                    "cursor": { "session_id": session_id, "offset": offset },
-                    "commit": {
-                        "path": self.full_path(full_logical_key),
-                        "mode": { ".tag": "add" },
-                        "autorename": false,
-                        "strict_conflict": true,
-                        "mute": true,
-                    },
-                }));
-                self.session
-                    .api_call_no_transient_retry(|token| {
-                        self.client()
-                            .post(format!("{}/files/upload_session/finish", self.content_base))
-                            .bearer_auth(token)
-                            .header("Dropbox-API-Arg", &api_arg)
-                            .header("Content-Type", "application/octet-stream")
-                            .body(part.clone())
-                    })
-                    .await?
-            } else {
-                let api_arg = dropbox_api_arg(&serde_json::json!({
-                    "cursor": { "session_id": session_id, "offset": offset },
-                    "close": false,
-                }));
-                let response = self
-                    .session
-                    .api_call_no_transient_retry(|token| {
-                        self.client()
-                            .post(format!(
-                                "{}/files/upload_session/append_v2",
-                                self.content_base
-                            ))
-                            .bearer_auth(token)
-                            .header("Dropbox-API-Arg", &api_arg)
-                            .header("Content-Type", "application/octet-stream")
-                            .body(part.clone())
-                    })
-                    .await?;
-                let status = response.status();
-                if !status.is_success() {
-                    return Err(classify_write_error(
-                        status,
-                        &http::body_text(response).await,
-                        full_logical_key,
-                    ));
-                }
-                offset += length;
-                progress(offset);
-                continue;
-            };
-            let object = self
-                .appended_object_from_response(full_logical_key, response)
-                .await?;
-            offset += length;
-            progress(offset);
-            return Ok(object);
-        }
-        Err(CloudHomeError::Transport(format!(
-            "append {full_logical_key}: upload body ended before the final part"
-        )))
-    }
-
-    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
-        let mut cursor: Option<String> = None;
-        let mut page_tokens = PageTokenTracker::new("Dropbox appended listing");
-        let mut state = DropboxAppendedState::default();
-        loop {
-            let response = match cursor.as_deref() {
-                Some(cursor) => {
-                    let body = serde_json::json!({"cursor": cursor});
-                    self.session
-                        .api_call(|token| {
-                            self.client()
-                                .post(format!("{}/files/list_folder/continue", self.api_base))
-                                .bearer_auth(token)
-                                .json(&body)
-                        })
-                        .await?
-                }
-                None => {
-                    let body = serde_json::json!({
-                        "path": self.folder_path,
-                        "recursive": true,
-                        "include_deleted": true,
-                        "limit": 2000,
-                    });
-                    self.session
-                        .api_call(|token| {
-                            self.client()
-                                .post(format!("{}/files/list_folder", self.api_base))
-                                .bearer_auth(token)
-                                .json(&body)
-                        })
-                        .await?
-                }
-            };
-            let response =
-                ensure_ok(response, "list appended Dropbox files", self.not_found()).await?;
-            let page: serde_json::Value =
-                http::ok_json(response, "parse appended Dropbox list").await?;
-            apply_dropbox_appended_page(&page, &self.folder_path, prefix, &mut state)?;
-            let next_cursor = page["cursor"]
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    CloudHomeError::Transport(
-                        "Dropbox appended listing omitted its cursor".to_string(),
-                    )
-                })?
-                .to_string();
-            match page["has_more"].as_bool() {
-                Some(true) => cursor = Some(page_tokens.record(&next_cursor)?),
-                Some(false) => break,
-                None => {
-                    return Err(CloudHomeError::Transport(
-                        "Dropbox appended listing omitted has_more".to_string(),
-                    ))
-                }
-            }
-        }
-        let mut objects: Vec<_> = state.objects_by_id.into_values().collect();
-        objects.sort_by(|left, right| {
-            left.logical_key()
-                .cmp(right.logical_key())
-                .then_with(|| left.opaque_provider_id().cmp(right.opaque_provider_id()))
-        });
-        Ok(AppendedListing {
-            objects,
-            coverage: ListingCoverage::CompleteAtScan,
-        })
-    }
-
-    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-        let response = self.send_exact_read(object).await?;
-        http::ok_bytes(response, "read exact Dropbox body").await
-    }
-
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
         rest_read(self, key).await
-    }
-
-    async fn read_appended_to_file(
-        &self,
-        object: &super::AppendedObject,
-        destination: &std::path::Path,
-    ) -> Result<(), super::CloudFileReadError> {
-        let response = self.send_exact_read(object).await?;
-        super::oauth_rest::response_to_file(response, destination, "read exact Dropbox body").await
-    }
-
-    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
-        self.verify_appended_object(object).await?;
-        let body = serde_json::json!({"path": object.opaque_provider_id()});
-        let response = self
-            .session
-            .api_call(|token| {
-                self.client()
-                    .post(format!("{}/files/delete_v2", self.api_base))
-                    .bearer_auth(token)
-                    .json(&body)
-            })
-            .await?;
-        match ensure_ok(response, "delete exact Dropbox file", self.not_found()).await {
-            Ok(_) | Err(CloudHomeError::NotFound(_)) => Ok(()),
-            Err(error) => Err(error),
-        }
     }
 
     async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
@@ -1112,14 +1044,19 @@ impl DropboxCloudHome {
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        let body = serde_json::json!({ "path": self.full_path(key) });
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
+        let body = serde_json::json!({ "path": Self::namespace_path(key) });
         let resp = self
             .session
             .api_call(|token| {
-                self.client()
-                    .post(format!("{}/files/get_metadata", self.api_base))
-                    .bearer_auth(token)
-                    .json(&body)
+                Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/files/get_metadata", self.api_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .json(&body)
             })
             .await?;
         exists_from_response(resp, &format!("exists {key}"), self.not_found()).await
@@ -1131,6 +1068,7 @@ impl DropboxCloudHome {
     ) -> Result<CloudAccessOutcome, CloudHomeError> {
         let email = desired.require_provider_email("Dropbox")?.to_string();
         let shared_folder_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&shared_folder_id);
         match desired {
             CloudAccessState::Present { .. } => {
                 let current = self.folder_member_access(&shared_folder_id, &email).await?;
@@ -1149,10 +1087,13 @@ impl DropboxCloudHome {
                     let resp = self
                         .session
                         .api_call(|token| {
-                            self.client()
-                                .post(format!("{}/sharing/add_folder_member", self.api_base))
-                                .bearer_auth(token)
-                                .json(&add_body)
+                            Self::scoped_request(
+                                self.client()
+                                    .post(format!("{}/sharing/add_folder_member", self.api_base))
+                                    .bearer_auth(token),
+                                &path_root,
+                            )
+                            .json(&add_body)
                         })
                         .await?;
                     ensure_ok(resp, &format!("grant access to {email}"), self.not_found()).await?;
@@ -1194,9 +1135,9 @@ impl DropboxCloudHome {
 
 #[async_trait]
 impl CloudHome for DropboxCloudHome {
-    fn immutable_copy_storage(
+    fn exact_slot_storage(
         self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn ImmutableCopyStorage>> {
+    ) -> Option<std::sync::Arc<dyn ExactSlotStorage>> {
         Some(self)
     }
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
@@ -1236,30 +1177,235 @@ impl CloudHome for DropboxCloudHome {
 }
 
 #[async_trait]
-impl ImmutableCopyStorage for DropboxCloudHome {
-    async fn append_object(
+impl ExactSlotStorage for DropboxCloudHome {
+    async fn provider_binding(
         &self,
-        key: &str,
-        body: BlobBody,
+    ) -> Result<coven_core::sync::storage::ResolvedProviderBinding, CloudHomeError> {
+        use coven_core::sync::storage::{
+            ProviderDeviceBinding, ProviderPrincipalId, ResolvedProviderBinding,
+            StoreProviderBinding,
+        };
+
+        if self.folder_path.is_empty() {
+            return Err(CloudHomeError::Configuration(
+                "Dropbox provider binding has an empty folder path".to_string(),
+            ));
+        }
+        let metadata_body = serde_json::json!({
+            "path": self.folder_path,
+            "include_deleted": false,
+        });
+        let metadata_response = self
+            .session
+            .api_call(|token| {
+                self.client()
+                    .post(format!("{}/files/get_metadata", self.api_base))
+                    .bearer_auth(token)
+                    .json(&metadata_body)
+            })
+            .await?;
+        let metadata_response = ensure_ok(
+            metadata_response,
+            "resolve Dropbox folder binding",
+            self.not_found(),
+        )
+        .await?;
+        let metadata: serde_json::Value =
+            http::ok_json(metadata_response, "parse Dropbox folder binding").await?;
+        let folder_id = metadata["id"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                CloudHomeError::Transport(
+                    "Dropbox folder metadata omitted the stable folder id".to_string(),
+                )
+            })?
+            .to_string();
+        let path_lower = metadata["path_lower"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                CloudHomeError::Transport("Dropbox folder metadata omitted path_lower".to_string())
+            })?
+            .to_string();
+        if metadata[".tag"].as_str() != Some("folder")
+            || !path_lower.eq_ignore_ascii_case(&self.folder_path)
+        {
+            return Err(CloudHomeError::Transport(
+                "Dropbox folder lookup returned a different folder binding".to_string(),
+            ));
+        }
+
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
+        let account_response = self
+            .session
+            .api_call(|token| {
+                Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/users/get_current_account", self.api_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .header("Content-Type", "application/json")
+                .body("null")
+            })
+            .await?;
+        let account_response = ensure_ok(
+            account_response,
+            "resolve Dropbox principal",
+            NotFound::Status,
+        )
+        .await?;
+        let account: serde_json::Value =
+            http::ok_json(account_response, "parse Dropbox principal").await?;
+        let account_id = account["account_id"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                CloudHomeError::Transport(
+                    "Dropbox current-account response omitted account_id".to_string(),
+                )
+            })?
+            .to_string();
+
+        if namespace_id.is_empty() || folder_id.is_empty() || path_lower.is_empty() {
+            return Err(CloudHomeError::Transport(
+                "Dropbox shared namespace resolution returned an empty identifier".to_string(),
+            ));
+        }
+        Ok(ResolvedProviderBinding {
+            store: StoreProviderBinding::Dropbox { namespace_id },
+            device: ProviderDeviceBinding {
+                principal: ProviderPrincipalId::Dropbox { account_id },
+            },
+        })
+    }
+
+    async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
+        ObjectSlot::logical(logical_key.to_string())
+    }
+
+    async fn create_at(
+        &self,
+        slot: &ObjectSlot,
+        mut body: BlobBody,
         progress: &UploadProgress<'_>,
-    ) -> Result<AppendedObject, CloudHomeError> {
-        DropboxCloudHome::append_object(self, key, body, progress).await
+    ) -> Result<(), CloudHomeError> {
+        self.validate_slot(slot)?;
+        let key = slot.logical_key();
+        if body.len() <= self.multipart_threshold() {
+            let data = body.collect().await?;
+            let length = data.len() as u64;
+            self.append_small(key, data).await?;
+            progress(length);
+            return Ok(());
+        }
+
+        let session_id = self.start_upload_session(key).await?;
+        let mut sink = DropboxSessionSink {
+            home: self,
+            session_id,
+            key: key.to_string(),
+            completion: DropboxSessionCompletion::CreateOnly,
+            confirmed_offset: 0,
+            settled: false,
+        };
+        let total = body.len();
+        let mut offset = 0;
+        loop {
+            let part = match body.next_part(DROPBOX_CHUNK_SIZE).await {
+                Ok(Some(part)) => part,
+                Ok(None) if offset == total => break,
+                Ok(None) => {
+                    let operation = CloudHomeError::Transport(format!(
+                        "create {key}: upload body ended after {offset} of {total} bytes"
+                    ));
+                    let cleanup = sink.abort().await;
+                    return Err(combine_dropbox_cleanup_failure(operation, cleanup));
+                }
+                Err(operation) => {
+                    let cleanup = sink.abort().await;
+                    return Err(combine_dropbox_cleanup_failure(operation, cleanup));
+                }
+            };
+            let length = part.len() as u64;
+            let is_last = offset + length >= total;
+            if let Err(operation) = sink.send_part(part, offset, is_last).await {
+                let cleanup = sink.abort().await;
+                return Err(combine_dropbox_cleanup_failure(operation, cleanup));
+            }
+            offset += length;
+            progress(offset);
+            if is_last {
+                return Ok(());
+            }
+        }
+        let operation = CloudHomeError::Transport(format!(
+            "create {key}: upload session ended without committing its final part"
+        ));
+        let cleanup = sink.abort().await;
+        Err(combine_dropbox_cleanup_failure(operation, cleanup))
     }
-    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
-        DropboxCloudHome::list_appended(self, prefix).await
+
+    async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
+        let response = self.send_exact_read(slot).await?;
+        http::ok_bytes(response, "read exact Dropbox body").await
     }
-    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-        DropboxCloudHome::read_appended(self, object).await
-    }
-    async fn read_appended_to_file(
+
+    async fn read_range_at(
         &self,
-        object: &AppendedObject,
+        slot: &ObjectSlot,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, CloudHomeError> {
+        let bytes = self.read_at(slot).await?;
+        let start = usize::try_from(start)
+            .map_err(|_| CloudHomeError::Configuration("range start is too large".to_string()))?;
+        let end = usize::try_from(end)
+            .map_err(|_| CloudHomeError::Configuration("range end is too large".to_string()))?;
+        bytes.get(start..end).map(<[u8]>::to_vec).ok_or_else(|| {
+            CloudHomeError::Configuration(format!(
+                "invalid range {start}..{end} for {} bytes",
+                bytes.len()
+            ))
+        })
+    }
+
+    async fn read_at_to_file(
+        &self,
+        slot: &ObjectSlot,
         destination: &std::path::Path,
     ) -> Result<(), super::CloudFileReadError> {
-        DropboxCloudHome::read_appended_to_file(self, object, destination).await
+        let response = self.send_exact_read(slot).await?;
+        super::oauth_rest::response_to_file(response, destination, "read exact Dropbox body").await
     }
-    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
-        DropboxCloudHome::delete_appended(self, object).await
+
+    async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        match self.verify_slot(slot).await {
+            Ok(()) => {}
+            Err(CloudHomeError::NotFound(_)) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        let namespace_id = self.get_or_create_shared_folder_id().await?;
+        let path_root = Self::path_root_header(&namespace_id);
+        let body = serde_json::json!({"path": Self::namespace_path(slot.logical_key())});
+        let response = self
+            .session
+            .api_call(|token| {
+                Self::scoped_request(
+                    self.client()
+                        .post(format!("{}/files/delete_v2", self.api_base))
+                        .bearer_auth(token),
+                    &path_root,
+                )
+                .json(&body)
+            })
+            .await?;
+        match ensure_ok(response, "delete exact Dropbox file", self.not_found()).await {
+            Ok(_) | Err(CloudHomeError::NotFound(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -1323,10 +1469,19 @@ mod tests {
             });
 
         match path.as_str() {
+            "/sharing/share_folder" => Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{".tag":"complete","shared_folder_id":"namespace:copy"}"#,
+                ))
+                .expect("build share response"),
             "/files/upload" => Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"id":"id:copy"}"#))
+                .body(Body::from(
+                    r#"{"id":"id:copy","path_display":"/protocol/copy"}"#,
+                ))
                 .expect("build upload response"),
             "/files/download" => Response::builder()
                 .status(StatusCode::OK)
@@ -1335,7 +1490,7 @@ mod tests {
                     serde_json::json!({
                         ".tag": "file",
                         "id": "id:copy",
-                        "path_display": "/Apps/your-app/my-store/protocol/copy",
+                        "path_display": "/protocol/copy",
                     })
                     .to_string(),
                 )
@@ -1348,7 +1503,7 @@ mod tests {
                     serde_json::json!({
                         ".tag": "file",
                         "id": "id:copy",
-                        "path_display": "/Apps/your-app/my-store/protocol/copy",
+                        "path_display": "/protocol/copy",
                     })
                     .to_string(),
                 ))
@@ -1397,97 +1552,256 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn immutable_copy_requests_use_create_only_and_exact_provider_ids() {
+    async fn exact_slot_requests_use_create_only_and_the_logical_path() {
         let (home, requests, shutdown) = immutable_copy_test_home().await;
-        let object = home
-            .append_object(
-                "protocol/copy",
-                BlobBody::from_bytes(b"copy-bytes".to_vec()),
-                &super::super::no_progress(),
-            )
+        let slot = ExactSlotStorage::allocate_slot(&home, "protocol/copy")
             .await
-            .expect("append Dropbox copy");
-        assert_eq!(object.opaque_provider_id(), "id:copy");
+            .expect("allocate Dropbox slot");
+        ExactSlotStorage::create_at(
+            &home,
+            &slot,
+            BlobBody::from_bytes(b"copy-bytes".to_vec()),
+            &super::super::no_progress(),
+        )
+        .await
+        .expect("create Dropbox slot");
         assert_eq!(
-            home.read_appended(&object).await.expect("read exact copy"),
+            ExactSlotStorage::read_at(&home, &slot)
+                .await
+                .expect("read exact slot"),
             b"copy-bytes"
         );
-        home.delete_appended(&object)
+        ExactSlotStorage::delete_at(&home, &slot)
             .await
-            .expect("delete exact copy");
+            .expect("delete exact slot");
 
         let requests = requests.lock().expect("lock requests");
-        assert_eq!(requests.len(), 4, "{requests:?}");
+        assert_eq!(requests.len(), 5, "{requests:?}");
         let upload_arg: serde_json::Value = serde_json::from_str(
-            requests[0]
+            requests[1]
                 .api_arg
                 .as_deref()
                 .expect("upload carries Dropbox-API-Arg"),
         )
         .expect("parse upload arg");
-        assert_eq!(requests[0].path, "/files/upload");
+        assert_eq!(requests[0].path, "/sharing/share_folder");
+        assert_eq!(requests[1].path, "/files/upload");
         assert_eq!(upload_arg["mode"][".tag"], "add");
         assert_eq!(upload_arg["autorename"], false);
         assert_eq!(upload_arg["strict_conflict"], true);
-        assert_eq!(requests[0].body, b"copy-bytes");
+        assert_eq!(requests[1].body, b"copy-bytes");
         let read_arg: serde_json::Value = serde_json::from_str(
-            requests[1]
+            requests[2]
                 .api_arg
                 .as_deref()
                 .expect("read carries Dropbox-API-Arg"),
         )
         .expect("parse read arg");
-        assert_eq!(read_arg["path"], "id:copy");
+        assert_eq!(read_arg["path"], "/protocol/copy");
         let metadata_body: serde_json::Value =
-            serde_json::from_slice(&requests[2].body).expect("parse metadata body");
-        assert_eq!(requests[2].path, "/files/get_metadata");
-        assert_eq!(metadata_body["path"], "id:copy");
+            serde_json::from_slice(&requests[3].body).expect("parse metadata body");
+        assert_eq!(requests[3].path, "/files/get_metadata");
+        assert_eq!(metadata_body["path"], "/protocol/copy");
         let delete_body: serde_json::Value =
-            serde_json::from_slice(&requests[3].body).expect("parse delete body");
-        assert_eq!(delete_body["path"], "id:copy");
+            serde_json::from_slice(&requests[4].body).expect("parse delete body");
+        assert_eq!(delete_body["path"], "/protocol/copy");
         drop(requests);
         shutdown.send(()).expect("shut down Dropbox endpoint");
     }
 
     #[tokio::test]
-    async fn exact_operations_reject_a_dropbox_id_bound_to_another_logical_key() {
+    async fn exact_operations_reject_an_opaque_dropbox_locator() {
         let (home, requests, shutdown) = immutable_copy_test_home().await;
-        let object =
-            AppendedObject::from_provider("protocol/other".to_string(), "id:copy".to_string())
-                .expect("build mismatched Dropbox locator");
+        let slot = ObjectSlot::opaque("protocol/other".to_string(), "id:copy".to_string())
+            .expect("build opaque Dropbox locator");
 
-        let read_error = home
-            .read_appended(&object)
+        let read_error = ExactSlotStorage::read_at(&home, &slot)
             .await
-            .expect_err("mismatched Dropbox read must fail");
+            .expect_err("opaque Dropbox read must fail");
         assert!(
-            read_error.to_string().contains("does not identify"),
+            read_error.to_string().contains("must use its logical path"),
             "{read_error}"
         );
-        let delete_error = home
-            .delete_appended(&object)
+        let delete_error = ExactSlotStorage::delete_at(&home, &slot)
             .await
-            .expect_err("mismatched Dropbox delete must fail");
+            .expect_err("opaque Dropbox delete must fail");
         assert!(
-            delete_error.to_string().contains("does not identify"),
+            delete_error
+                .to_string()
+                .contains("must use its logical path"),
             "{delete_error}"
         );
 
         let requests = requests.lock().expect("lock requests");
-        assert_eq!(requests.len(), 2, "{requests:?}");
-        assert_eq!(requests[0].path, "/files/download");
-        assert_eq!(requests[1].path, "/files/get_metadata");
+        assert!(requests.is_empty(), "{requests:?}");
         drop(requests);
         shutdown.send(()).expect("shut down Dropbox endpoint");
     }
 
-    async fn repeated_cursor_endpoint() -> Response<Body> {
+    async fn binding_and_close_endpoint(
+        State(requests): State<Arc<Mutex<Vec<RecordedRequest>>>>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        let path = request.uri().path().to_string();
+        let api_arg = request.headers().get("Dropbox-API-Arg").map(|value| {
+            value
+                .to_str()
+                .expect("Dropbox-API-Arg is UTF-8")
+                .to_string()
+        });
+        let body = to_bytes(request.into_body(), usize::MAX)
+            .await
+            .expect("read request body")
+            .to_vec();
+        requests.lock().unwrap().push(RecordedRequest {
+            path: path.clone(),
+            api_arg,
+            body,
+        });
+        let body = match path.as_str() {
+            "/files/get_metadata" => serde_json::json!({
+                ".tag": "folder",
+                "id": "id:store-folder",
+                "path_lower": "/apps/your-app/my-store",
+            })
+            .to_string(),
+            "/users/get_current_account" => serde_json::json!({
+                "account_id": "dbid:account-a",
+            })
+            .to_string(),
+            "/sharing/share_folder" => serde_json::json!({
+                ".tag": "complete",
+                "shared_folder_id": "namespace:store-folder",
+            })
+            .to_string(),
+            "/files/upload_session/append_v2" => "{}".to_string(),
+            _ => {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Body::from(format!("unexpected path: {path}")))
+                    .unwrap()
+            }
+        };
         Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"entries":[],"cursor":"same","has_more":true}"#,
-            ))
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    async fn binding_and_close_test_home() -> (
+        DropboxCloudHome,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Dropbox endpoint");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let app = Router::new()
+            .fallback(binding_and_close_endpoint)
+            .with_state(requests.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    shutdown_rx.await.expect("receive endpoint shutdown");
+                })
+                .await
+                .expect("Dropbox endpoint failed");
+        });
+        (
+            home().with_endpoints(endpoint.clone(), endpoint),
+            requests,
+            shutdown_tx,
+        )
+    }
+
+    #[tokio::test]
+    async fn provider_binding_uses_the_folder_identity_and_current_account() {
+        use coven_core::sync::storage::{ProviderPrincipalId, StoreProviderBinding};
+        let (home, requests, shutdown) = binding_and_close_test_home().await;
+
+        let binding = ExactSlotStorage::provider_binding(&home)
+            .await
+            .expect("resolve Dropbox binding");
+
+        assert_eq!(
+            binding.store,
+            StoreProviderBinding::Dropbox {
+                namespace_id: "namespace:store-folder".to_string(),
+            }
+        );
+        assert_eq!(
+            binding.device.principal,
+            ProviderPrincipalId::Dropbox {
+                account_id: "dbid:account-a".to_string(),
+            }
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| request.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "/files/get_metadata",
+                "/sharing/share_folder",
+                "/users/get_current_account"
+            ]
+        );
+        shutdown.send(()).expect("shut down Dropbox endpoint");
+    }
+
+    #[tokio::test]
+    async fn abort_closes_the_upload_session_at_the_confirmed_offset() {
+        let (home, requests, shutdown) = binding_and_close_test_home().await;
+        let mut sink = DropboxSessionSink {
+            home: &home,
+            session_id: "session-a".to_string(),
+            key: "blob-a".to_string(),
+            completion: DropboxSessionCompletion::Overwrite,
+            confirmed_offset: 17,
+            settled: false,
+        };
+
+        PartSink::abort(&mut sink)
+            .await
+            .expect("close Dropbox session");
+
+        let requests = requests.lock().unwrap();
+        let close = requests.last().expect("close request");
+        assert_eq!(close.path, "/files/upload_session/append_v2");
+        assert!(close.body.is_empty());
+        let arg: serde_json::Value =
+            serde_json::from_str(close.api_arg.as_deref().unwrap()).unwrap();
+        assert_eq!(arg["cursor"]["session_id"], "session-a");
+        assert_eq!(arg["cursor"]["offset"], 17);
+        assert_eq!(arg["close"], true);
+        assert!(sink.settled);
+        drop(requests);
+        shutdown.send(()).expect("shut down Dropbox endpoint");
+    }
+
+    async fn repeated_cursor_endpoint(request: Request<Body>) -> Response<Body> {
+        let body = match request.uri().path() {
+            "/sharing/share_folder" => r#"{".tag":"complete","shared_folder_id":"namespace:list"}"#,
+            "/files/list_folder" | "/files/list_folder/continue" => {
+                r#"{"entries":[],"cursor":"same","has_more":true}"#
+            }
+            path => {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Body::from(format!("unexpected path: {path}")))
+                    .expect("build unexpected response")
+            }
+        };
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
             .expect("build repeated cursor response")
     }
 
@@ -1506,7 +1820,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(200),
-            home.list_appended("protocol/"),
+            home.list("protocol/"),
         )
         .await
         .expect("listing must terminate on a repeated cursor")
@@ -1530,14 +1844,6 @@ mod tests {
             }
             other => panic!("expected Dropbox join info, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn full_path_joins_correctly() {
-        assert_eq!(
-            home().full_path("objects/dev1/42.enc"),
-            "/Apps/your-app/my-store/objects/dev1/42.enc"
-        );
     }
 
     #[test]
@@ -1644,124 +1950,32 @@ mod tests {
     }
 
     #[test]
-    fn appended_page_preserves_ids_and_applies_deleted_entries() {
-        let mut state = DropboxAppendedState::default();
-        let first = serde_json::json!({
-            "entries": [
-                {".tag":"file", "id":"id:first", "path_display":"/Apps/your-app/my-store/protocol/first", "path_lower":"/apps/your-app/my-store/protocol/first"},
-                {".tag":"file", "id":"id:removed", "path_display":"/Apps/your-app/my-store/protocol/removed", "path_lower":"/apps/your-app/my-store/protocol/removed"}
-            ]
-        });
-        apply_dropbox_appended_page(&first, "/Apps/your-app/my-store", "protocol/", &mut state)
-            .expect("apply first page");
-        let second = serde_json::json!({
-            "entries": [
-                {".tag":"deleted", "path_lower":"/apps/your-app/my-store/protocol/removed"},
-                {".tag":"file", "id":"id:second", "path_display":"/Apps/your-app/my-store/protocol/second", "path_lower":"/apps/your-app/my-store/protocol/second"}
-            ]
-        });
-        apply_dropbox_appended_page(&second, "/Apps/your-app/my-store", "protocol/", &mut state)
-            .expect("apply continuation page");
-
-        let mut ids: Vec<_> = state
-            .objects_by_id
-            .values()
-            .map(|object| object.opaque_provider_id())
-            .collect();
-        ids.sort();
-        assert_eq!(ids, vec!["id:first", "id:second"]);
-    }
-
-    #[test]
-    fn appended_page_refuses_file_without_exact_id() {
-        let page = serde_json::json!({
-            "entries": [{".tag":"file", "path_display":"/Apps/your-app/my-store/protocol/first", "path_lower":"/apps/your-app/my-store/protocol/first"}]
-        });
-        let error = apply_dropbox_appended_page(
-            &page,
-            "/Apps/your-app/my-store",
-            "protocol/",
-            &mut DropboxAppendedState::default(),
-        )
-        .expect_err("missing id must refuse authoritative coverage");
-        assert!(error.to_string().contains("omitted id"), "{error}");
-    }
-
-    #[test]
-    fn appended_page_replaces_an_ids_old_path_and_removes_moves_out_of_prefix() {
-        let mut state = DropboxAppendedState::default();
-        for page in [
-            serde_json::json!({"entries":[
-                {".tag":"file", "id":"id:stable", "path_display":"/Apps/your-app/my-store/protocol/old", "path_lower":"/apps/your-app/my-store/protocol/old"}
-            ]}),
-            serde_json::json!({"entries":[
-                {".tag":"file", "id":"id:stable", "path_display":"/Apps/your-app/my-store/protocol/new", "path_lower":"/apps/your-app/my-store/protocol/new"}
-            ]}),
-        ] {
-            apply_dropbox_appended_page(&page, "/Apps/your-app/my-store", "protocol/", &mut state)
-                .expect("apply rename event");
-        }
-        assert_eq!(
-            state.objects_by_id["id:stable"].logical_key(),
-            "protocol/new"
-        );
-        assert!(!state
-            .path_ids
-            .contains_key("/apps/your-app/my-store/protocol/old"));
-
-        let moved_out = serde_json::json!({"entries":[
-            {".tag":"file", "id":"id:stable", "path_display":"/Apps/your-app/my-store/other/new", "path_lower":"/apps/your-app/my-store/other/new"}
-        ]});
-        apply_dropbox_appended_page(
-            &moved_out,
-            "/Apps/your-app/my-store",
-            "protocol/",
-            &mut state,
-        )
-        .expect("apply move out");
-        assert!(state.objects_by_id.is_empty());
-    }
-
-    #[test]
-    fn appended_page_keeps_distinct_ids_with_distinct_paths() {
-        let mut state = DropboxAppendedState::default();
-        let page = serde_json::json!({"entries":[
-            {".tag":"file", "id":"id:a", "path_display":"/Apps/your-app/my-store/protocol/a", "path_lower":"/apps/your-app/my-store/protocol/a"},
-            {".tag":"file", "id":"id:b", "path_display":"/Apps/your-app/my-store/protocol/b", "path_lower":"/apps/your-app/my-store/protocol/b"}
-        ]});
-        apply_dropbox_appended_page(&page, "/Apps/your-app/my-store", "protocol/", &mut state)
-            .expect("apply distinct files");
-        assert_eq!(state.objects_by_id.len(), 2);
-    }
-
-    #[test]
-    fn parse_list_page_strips_non_ascii_folder_prefix() {
-        assert_list_page_strips_folder_prefix(
+    fn parse_list_page_preserves_non_ascii_namespace_relative_key() {
+        assert_list_page_preserves_namespace_relative_key(
             "/Apps/your-app/Folderé",
-            "/apps/your-app/folderé/objects/dev1/1.enc",
-            "/Apps/your-app/Folderé/objects/dev1/1.enc",
+            "/objects/dev1/Foldéré.enc",
+            "objects/dev1/Foldéré.enc",
         );
     }
 
     #[test]
-    fn parse_list_page_strips_prefix_without_lowercase_length_drift() {
-        assert_list_page_strips_folder_prefix(
+    fn parse_list_page_does_not_case_fold_namespace_relative_keys() {
+        assert_list_page_preserves_namespace_relative_key(
             "/Apps/your-app/İlib",
-            "/apps/your-app/i̇lib/objects/dev1/1.enc",
-            "/Apps/your-app/İlib/objects/dev1/1.enc",
+            "/objects/dev1/İlib.enc",
+            "objects/dev1/İlib.enc",
         );
     }
 
-    fn assert_list_page_strips_folder_prefix(
+    fn assert_list_page_preserves_namespace_relative_key(
         folder_path: &str,
-        path_lower: &str,
         path_display: &str,
+        expected_key: &str,
     ) {
         let home = home_with_folder(folder_path);
         let body = serde_json::json!({
             "entries": [{
                 ".tag": "file",
-                "path_lower": path_lower,
                 "path_display": path_display,
             }],
             "has_more": false,
@@ -1771,6 +1985,6 @@ mod tests {
             .parse_list_page(&body, "objects/")
             .expect("parse list page");
 
-        assert_eq!(page.keys, vec!["objects/dev1/1.enc"]);
+        assert_eq!(page.keys, vec![expected_key]);
     }
 }

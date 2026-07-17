@@ -35,8 +35,8 @@ not of whichever binary happens to open it. That is what the ladder over
 
 The host passes an ordered ladder of
 [`Migration`](rustdoc:struct:coven::migration::Migration)s to the builder;
-coven applies it over `PRAGMA user_version` at every open, after reconciling
-its own bookkeeping tables:
+Coven applies it over `PRAGMA user_version` at every open, after installing or
+verifying its one current internal schema:
 
 ```rust
 let handle = Coven::builder(config)
@@ -88,8 +88,10 @@ is the wire `schema_version` every changeset is stamped with. Bumping the
 schema *is* adding a migration; a device cannot stamp a version it has not
 migrated to.
 
-The ladder covers the host's *synced* schema only. coven's own bookkeeping
-tables are reconciled declaratively at every open, outside the ladder.
+The ladder covers the host's *synced* schema only. Coven's internal tables are
+installed atomically for a new database and must match the current declarative
+schema on every later open; Coven never alters or adopts another internal
+shape.
 
 ## Additive vs. structural changes
 

@@ -1,15 +1,13 @@
 /// Snapshot image creation, Store snapshot bootstrap, and blob installation.
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
 use super::session::SyncedTable;
 use super::storage::{StorageError, SyncStorage};
-use crate::blob::{BlobRef, Provenance};
 use crate::database::Database;
 use crate::migration::Migration;
 
@@ -21,8 +19,23 @@ const SNAPSHOT_HOURS_THRESHOLD: u64 = 24;
 
 pub(crate) struct CreatedSnapshot {
     pub db_image: Vec<u8>,
-    pub host_blobs: Vec<BlobRef>,
-    pub publish_blobs: Vec<BlobRef>,
+    pub blobs: Vec<SnapshotBlobFact>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SnapshotBlobFact {
+    pub fact: crate::database::StoreWriteBlobFact,
+    pub audience: SnapshotBlobAudience,
+    pub store_dir: crate::store_dir::StoreDir,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SnapshotBlobAudience {
+    Store,
+    Circle {
+        circle_id: super::circle::CircleId,
+        control: super::gate::CirclePartitionControl,
+    },
 }
 
 /// Error type for snapshot operations.
@@ -153,253 +166,11 @@ pub struct BootstrapResult {
     store_id: String,
     target_path: PathBuf,
     db_hash: String,
-    store_root_hash: super::store_commit::ObjectHash,
-    snapshot_hash: super::store_commit::ObjectHash,
+    store_root: super::store_objects::VerifiedObject<super::store_commit::StoreProtocolRoot>,
+    founder_registration:
+        super::store_objects::VerifiedObject<super::store_commit::StoreDeviceRegistration>,
+    snapshot: crate::database::PublishedStoreSnapshot,
     coverage: super::store_commit::CommitFrontier,
-}
-
-#[cfg(test)]
-mod bootstrap_capability_tests {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-
-    use super::*;
-    use crate::keys::UserKeypair;
-    use crate::storage::cloud::test_utils::InMemoryCloudHome;
-    use crate::storage::cloud::SequentialCopyIdGenerator;
-    use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-    use crate::sync::store_commit::{CommitPosition, ObjectHash};
-    use crate::sync::test_helpers::{
-        open_test_db, publish_test_founder_membership, publish_test_store_protocol_root,
-        test_migrations, test_synced_tables,
-    };
-
-    const STORE_ID: &str = "bootstrap-capability-store";
-
-    struct PublishedSnapshot {
-        _temp: tempfile::TempDir,
-        storage: CloudSyncStorage,
-        owner: UserKeypair,
-        store_root_hash: ObjectHash,
-        membership_floor: crate::join_code::MembershipFloor,
-        coverage: BTreeMap<String, CommitPosition>,
-    }
-
-    async fn published_snapshot() -> PublishedSnapshot {
-        let temp = tempfile::tempdir().expect("snapshot fixture directory");
-        let owner = UserKeypair::generate();
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            STORE_ID,
-            owner.clone(),
-            Arc::new(SequentialCopyIdGenerator::new("bootstrap-capability")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let source = open_test_db();
-        let store_root_hash =
-            publish_test_store_protocol_root(&source, &storage, STORE_ID, "source", &owner).await;
-        let membership = publish_test_founder_membership(&storage, STORE_ID, &owner).await;
-        let snapshot_dir = temp.path().to_path_buf();
-        let tables = source.synced_tables().to_vec();
-        let image = source
-            .call(move |connection| {
-                create_snapshot(connection, &snapshot_dir, &tables)
-                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
-            })
-            .await
-            .expect("create snapshot image");
-        let coverage = BTreeMap::from([(
-            "source".to_string(),
-            CommitPosition {
-                seq: 3,
-                commit_hash: ObjectHash::digest(b"source-commit-three"),
-            },
-        )]);
-        super::super::store_snapshot::push_store_snapshot(
-            &storage,
-            store_root_hash,
-            CreatedSnapshot {
-                db_image: image,
-                host_blobs: Vec::new(),
-                publish_blobs: Vec::new(),
-            },
-            crate::CommitFrontier::MergeConcurrent(coverage.clone()),
-            source.schema_version(),
-            &owner,
-            "2026-07-14T00:00:00Z".to_string(),
-            Some(&membership),
-            &source,
-        )
-        .await
-        .expect("publish Store snapshot");
-        PublishedSnapshot {
-            _temp: temp,
-            storage,
-            owner,
-            store_root_hash,
-            membership_floor: crate::join_code::MembershipFloor::MergeConcurrent(
-                membership.author_heads(),
-            ),
-            coverage,
-        }
-    }
-
-    async fn capability(fixture: &PublishedSnapshot, target: &Path) -> BootstrapResult {
-        bootstrap_from_snapshot(
-            &fixture.storage,
-            STORE_ID,
-            fixture.store_root_hash,
-            &crate::keys::public_key_hex(&fixture.owner),
-            &fixture.membership_floor,
-            1,
-            target,
-        )
-        .await
-        .expect("verify snapshot into destination")
-    }
-
-    #[tokio::test]
-    async fn snapshot_preserves_commit_activated_device_registrations() {
-        let temp = tempfile::tempdir().expect("snapshot fixture directory");
-        let owner = UserKeypair::generate();
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "snapshot-registration-store",
-            owner.clone(),
-            Arc::new(SequentialCopyIdGenerator::new("snapshot-registration")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let source = open_test_db();
-        publish_test_store_protocol_root(
-            &source,
-            &storage,
-            "snapshot-registration-store",
-            "source",
-            &owner,
-        )
-        .await;
-        super::super::store_registration::ensure_active_registration(&source, &storage, &owner)
-            .await
-            .expect("activate source registration through a Store commit");
-        assert_eq!(
-            source
-                .activated_store_device_registrations()
-                .await
-                .expect("source activations")
-                .len(),
-            1,
-        );
-        let snapshot_dir = temp.path().to_path_buf();
-        let tables = source.synced_tables().to_vec();
-        let image = source
-            .call(move |connection| {
-                create_snapshot(connection, &snapshot_dir, &tables)
-                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
-            })
-            .await
-            .expect("create snapshot image");
-        let snapshot_path = temp.path().join("installed.sqlite");
-        write_snapshot_db(&snapshot_path, &image).expect("install snapshot image");
-        let snapshot = Connection::open(snapshot_path).expect("open snapshot image");
-
-        let activation_count: i64 = snapshot
-            .query_row(
-                "SELECT COUNT(*) FROM store_device_registration_activations",
-                [],
-                |row| row.get(0),
-            )
-            .expect("snapshot activation count");
-        assert_eq!(activation_count, 1);
-    }
-
-    async fn consume(
-        result: BootstrapResult,
-        store_id: &str,
-        target: &Path,
-    ) -> Result<Database, SnapshotError> {
-        result
-            .open_database(
-                store_id,
-                target,
-                test_synced_tables(),
-                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-                crate::blob::TransferLimits::serial(),
-                "reader".to_string(),
-                &test_migrations(),
-            )
-            .await
-    }
-
-    #[tokio::test]
-    async fn verified_coverage_cannot_cross_store_or_destination() {
-        let fixture = published_snapshot().await;
-
-        let wrong_store_path = fixture._temp.path().join("wrong-store.db");
-        let wrong_store = capability(&fixture, &wrong_store_path).await;
-        assert!(matches!(
-            consume(wrong_store, "another-store", &wrong_store_path).await,
-            Err(SnapshotError::BootstrapStoreMismatch { .. })
-        ));
-        assert!(!wrong_store_path.exists());
-
-        let bound_path = fixture._temp.path().join("bound.db");
-        let wrong_destination = capability(&fixture, &bound_path).await;
-        let other_path = fixture._temp.path().join("other.db");
-        std::fs::copy(&bound_path, &other_path).expect("copy verified image");
-        assert!(matches!(
-            consume(wrong_destination, STORE_ID, &other_path).await,
-            Err(SnapshotError::BootstrapDestinationMismatch { .. })
-        ));
-        assert!(!bound_path.exists());
-    }
-
-    #[tokio::test]
-    async fn verified_database_hash_is_rechecked_when_capability_is_consumed() {
-        let fixture = published_snapshot().await;
-        let target = fixture._temp.path().join("changed.db");
-        let result = capability(&fixture, &target).await;
-        std::fs::write(&target, b"substituted database").expect("replace verified image");
-
-        assert!(matches!(
-            consume(result, STORE_ID, &target).await,
-            Err(SnapshotError::BootstrapDatabaseChanged)
-        ));
-        assert!(!target.exists());
-    }
-
-    #[tokio::test]
-    async fn consuming_capability_installs_exact_store_protocol_root_snapshot_and_coverage() {
-        let fixture = published_snapshot().await;
-        let target = fixture._temp.path().join("installed.db");
-        let result = capability(&fixture, &target).await;
-        let db = consume(result, STORE_ID, &target)
-            .await
-            .expect("consume verified snapshot capability");
-
-        assert_eq!(
-            db.required_store_root_hash()
-                .await
-                .expect("read installed Store protocol root"),
-            fixture.store_root_hash
-        );
-        assert_eq!(
-            db.snapshot_coverage_frontier()
-                .await
-                .expect("read installed coverage"),
-            fixture.coverage
-        );
-        assert!(db
-            .get_protocol_state(crate::database::LAST_SNAPSHOT_HASH_STATE_KEY)
-            .await
-            .expect("read installed snapshot hash")
-            .is_some());
-    }
 }
 
 impl BootstrapResult {
@@ -454,9 +225,14 @@ impl BootstrapResult {
                 migrations,
             )
             .map_err(|error| SnapshotError::BootstrapDatabase(error.to_string()))?;
-            db.install_bootstrap_state(&self.coverage, self.snapshot_hash, self.store_root_hash)
-                .await
-                .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
+            db.install_bootstrap_state(
+                &self.coverage,
+                self.snapshot,
+                self.store_root,
+                self.founder_registration,
+            )
+            .await
+            .map_err(|error| SnapshotError::BootstrapState(error.to_string()))?;
             Ok(db)
         }
         .await;
@@ -541,18 +317,7 @@ pub(crate) fn create_snapshot_with_host_blobs(
         return Err(e);
     }
 
-    let publish_blobs = match snapshot_publish_blobs(&snapshot_path, tables) {
-        Ok(blobs) => blobs,
-        Err(e) => {
-            cleanup_snapshot_path(&snapshot_path);
-            return Err(e);
-        }
-    };
-    let host_blobs = publish_blobs
-        .iter()
-        .filter(|blob| blob.provenance == Provenance::HostProvided)
-        .cloned()
-        .collect();
+    let blobs = snapshot_blob_facts(conn, &snapshot_path, temp_dir, tables)?;
 
     // Read the cleared snapshot file. The storage implementation seals it at the
     // final cloud key so the AEAD context can bind that key.
@@ -563,28 +328,229 @@ pub(crate) fn create_snapshot_with_host_blobs(
 
     Ok(CreatedSnapshot {
         db_image: plaintext,
-        host_blobs,
-        publish_blobs,
+        blobs,
     })
 }
 
-fn snapshot_publish_blobs(
-    path: &Path,
+fn snapshot_blob_facts(
+    live: &Connection,
+    snapshot_path: &Path,
+    store_path: &Path,
     tables: &[SyncedTable],
-) -> Result<Vec<BlobRef>, SnapshotError> {
-    let conn = Connection::open(path)
-        .map_err(|e| SnapshotError::ClearFailed(format!("failed to open snapshot copy: {e}")))?;
-    let decls = crate::blob::decl::BlobDecls::from_tables(&conn, tables)
-        .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
-    let mut seen = HashSet::new();
-    decls
-        .refs_in_db(&conn)
-        .map_err(|e| SnapshotError::ClearFailed(e.to_string()))
-        .map(|refs| {
-            refs.into_iter()
-                .filter(|blob| seen.insert((blob.namespace.clone(), blob.id.clone())))
-                .collect()
-        })
+) -> Result<Vec<SnapshotBlobFact>, SnapshotError> {
+    let snapshot = Connection::open(snapshot_path)
+        .map_err(|error| SnapshotError::ClearFailed(format!("open scoped snapshot: {error}")))?;
+    let declarations = crate::blob::decl::BlobDecls::from_tables(&snapshot, tables)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    let publications = declarations
+        .publication_blobs_in_db(&snapshot)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    let gates = crate::sync::gate::Gates::from_tables(live, tables)
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+    let write_policy: crate::WritePolicy = live
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [crate::database::WRITE_POLICY_STATE_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))
+        .and_then(|encoded| {
+            serde_json::from_str(&encoded)
+                .map_err(|error| SnapshotError::ClearFailed(error.to_string()))
+        })?;
+    let mut facts = Vec::with_capacity(publications.len());
+    for publication in publications {
+        let plaintext_hash = publication.plaintext_hash.parse().map_err(|error| {
+            SnapshotError::ClearFailed(format!(
+                "snapshot blob {}/{} plaintext hash: {error}",
+                publication.blob.namespace, publication.blob.id
+            ))
+        })?;
+        let external_path = if publication.blob.provenance == crate::blob::Provenance::UserProvided
+        {
+            live.query_row(
+                "SELECT path FROM local_blob_refs
+                 WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
+                   AND row_stamp = ?4 AND namespace = ?5 AND blob_id = ?6",
+                rusqlite::params![
+                    publication.table,
+                    publication.row_id,
+                    publication.column,
+                    publication.row_stamp,
+                    publication.blob.namespace,
+                    publication.blob.id,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?
+            .map(PathBuf::from)
+        } else {
+            None
+        };
+        let previous = crate::database::previous_row_blob_for_write_on(
+            &snapshot,
+            &publication.table,
+            &publication.row_id,
+            &publication.row_stamp,
+            &publication.column,
+            &publication.blob,
+            publication.plaintext_size,
+            plaintext_hash,
+        )
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+        let audience = match crate::sync::gate::live_row_audience(
+            live,
+            &gates,
+            &publication.table,
+            &publication.row_id,
+        )
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?
+        {
+            super::circle::Audience::Store => SnapshotBlobAudience::Store,
+            super::circle::Audience::Circle(circle_id) => SnapshotBlobAudience::Circle {
+                circle_id,
+                control: super::gate::active_circle_control(live, circle_id, write_policy)
+                    .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?,
+            },
+            super::circle::Audience::Local => {
+                return Err(SnapshotError::ClearFailed(format!(
+                    "scoped snapshot retains local blob row {:?}/{:?}",
+                    publication.table, publication.row_id
+                )))
+            }
+        };
+        facts.push(SnapshotBlobFact {
+            fact: crate::database::StoreWriteBlobFact {
+                table: publication.table,
+                row_id: publication.row_id,
+                row_stamp: publication.row_stamp,
+                column: publication.column,
+                blob: publication.blob,
+                plaintext_size: publication.plaintext_size,
+                plaintext_hash,
+                external_path,
+                previous,
+            },
+            audience,
+            store_dir: crate::store_dir::StoreDir::new(store_path),
+        });
+    }
+    Ok(facts)
+}
+
+pub(crate) fn install_snapshot_blob_graph(
+    image: Vec<u8>,
+    blobs: &[crate::database::PreparedSnapshotBlob],
+    store_dir: &crate::store_dir::StoreDir,
+) -> Result<Vec<u8>, SnapshotError> {
+    if blobs.is_empty() {
+        return Ok(image);
+    }
+    let path = store_dir.as_ref().join("snapshot-closure.db");
+    cleanup_snapshot_path(&path);
+    write_snapshot_db(&path, &image)?;
+    let result = (|| {
+        let mut conn = Connection::open(&path).map_err(|error| {
+            SnapshotError::ClearFailed(format!("open snapshot closure image: {error}"))
+        })?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+        for blob in blobs {
+            blob.remote
+                .validate()
+                .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+            if blob.bindings.is_empty()
+                || blob
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.blob().object() != blob.remote.object())
+            {
+                return Err(SnapshotError::ClearFailed(
+                    "snapshot blob binding differs from its remote object".to_string(),
+                ));
+            }
+            let object_id = blob.remote.object_id();
+            let existing = tx
+                .query_row(
+                    "SELECT state FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+            let remote = if let Some(existing) = existing {
+                let mut existing: crate::sync::remote_object::RemoteObjectRecord =
+                    serde_json::from_str(&existing)
+                        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+                for owner in blob.remote.snapshot_owners() {
+                    existing
+                        .merge_snapshot_owner(blob.bindings[0].blob(), owner.clone())
+                        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+                }
+                existing
+            } else {
+                blob.remote.clone()
+            };
+            tx.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
+                 ON CONFLICT(object_id) DO UPDATE SET state = excluded.state",
+                rusqlite::params![
+                    object_id.to_string(),
+                    serde_json::to_string(&remote)
+                        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?,
+                ],
+            )
+            .map_err(|error| {
+                SnapshotError::ClearFailed(format!("install snapshot blob: {error}"))
+            })?;
+            tx.execute(
+                "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)
+                 ON CONFLICT(remote_object_id) DO NOTHING",
+                rusqlite::params![
+                    object_id.to_string(),
+                    blob.bindings[0].blob().locator().locator_hash().to_string(),
+                ],
+            )
+            .map_err(|error| {
+                SnapshotError::ClearFailed(format!("install snapshot locator: {error}"))
+            })?;
+            for binding in &blob.bindings {
+                tx.execute(
+                    "INSERT INTO row_blob_locators
+                 (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(table_name, row_id, column_name, row_stamp) DO NOTHING",
+                    rusqlite::params![
+                        binding.table(),
+                        binding.row_id(),
+                        binding.column(),
+                        binding.row_stamp(),
+                        serde_json::to_string(&blob.authority)
+                            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?,
+                        object_id.to_string(),
+                    ],
+                )
+                .map_err(|error| {
+                    SnapshotError::ClearFailed(format!("install snapshot row blob: {error}"))
+                })?;
+            }
+        }
+        tx.commit()
+            .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
+        conn.execute_batch("VACUUM").map_err(|error| {
+            SnapshotError::ClearFailed(format!("vacuum snapshot closure: {error}"))
+        })?;
+        conn.close().map_err(|(_, error)| {
+            SnapshotError::ClearFailed(format!("close snapshot closure image: {error}"))
+        })?;
+        std::fs::read(&path).map_err(SnapshotError::Io)
+    })();
+    cleanup_snapshot_path(&path);
+    result
 }
 
 /// Delete every non-synced table's rows from the snapshot copy at `path`,
@@ -602,9 +568,17 @@ fn clear_local_only_tables(path: &Path, synced: &[SyncedTable]) -> Result<(), Sn
 }
 
 /// Non-synced authenticated indexes whose source Store commits are covered by the
-/// snapshot and therefore will not replay after bootstrap.
-const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] =
-    &["blob_uploaders", "store_device_registration_activations"];
+/// snapshot and therefore will not replay after bootstrap. The three blob tables
+/// are one foreign-key-closed ownership graph and are scoped to the surviving app
+/// rows together below. Device-state snapshots retain the exact predecessor state
+/// needed to extend any stream at the signed snapshot coverage frontier.
+const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] = &[
+    "remote_objects",
+    "blob_locators",
+    "row_blob_locators",
+    "store_device_registration_activations",
+    "store_device_state_snapshots",
+];
 
 /// On the snapshot-copy connection, scope it down to exactly what is eligible to
 /// cross devices, then VACUUM to reclaim the freed pages:
@@ -617,6 +591,11 @@ const SNAPSHOT_PRESERVED_NON_SYNCED_TABLES: &[&str] =
 ///    not ride the snapshot to a restoring peer. This is the same exclusion the
 ///    outbound changeset gate applies; both reuse [`crate::sync::gate::Gates`].
 fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), SnapshotError> {
+    let gates = crate::sync::gate::Gates::from_tables(conn, synced)
+        .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
     for table in list_user_tables(conn)? {
         if synced.iter().any(|t| t.name() == table) {
             continue;
@@ -624,7 +603,7 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
         if SNAPSHOT_PRESERVED_NON_SYNCED_TABLES.contains(&table.as_str()) {
             continue;
         }
-        conn.execute_batch(&format!(
+        tx.execute_batch(&format!(
             "DELETE FROM {}",
             crate::sync::session::quote_ident(&table)
         ))
@@ -635,15 +614,78 @@ fn clear_non_synced(conn: &Connection, synced: &[SyncedTable]) -> Result<(), Sna
     // gated-false rows on the wire, so the snapshot must drop them too or a
     // private subtree leaks to a restoring device. Reuse the changeset gate's
     // model rather than re-deriving the FK walk.
-    let gates = crate::sync::gate::Gates::from_tables(conn, synced)
-        .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
     gates
-        .delete_gated_false(conn)
+        .delete_gated_false(&tx)
         .map_err(|e| SnapshotError::ClearFailed(e.to_string()))?;
+
+    scope_authenticated_blob_graph(&tx, synced)?;
+    tx.commit()
+        .map_err(|error| SnapshotError::ClearFailed(error.to_string()))?;
 
     // Reclaim the pages freed by the DELETEs so the blob shrinks.
     conn.execute_batch("VACUUM")
         .map_err(|e| SnapshotError::ClearFailed(format!("vacuum: {e}")))?;
+    Ok(())
+}
+
+fn scope_authenticated_blob_graph(
+    conn: &Connection,
+    synced: &[SyncedTable],
+) -> Result<(), SnapshotError> {
+    conn.execute_batch(
+        "CREATE TEMP TABLE snapshot_live_blob_bindings (
+             table_name TEXT NOT NULL,
+             row_id TEXT NOT NULL,
+             column_name TEXT NOT NULL,
+             row_stamp TEXT NOT NULL,
+             PRIMARY KEY (table_name, row_id, column_name, row_stamp)
+         ) STRICT;",
+    )
+    .map_err(|error| SnapshotError::ClearFailed(format!("create blob scope: {error}")))?;
+    for table in synced {
+        let Some(declaration) = table.blob() else {
+            continue;
+        };
+        conn.execute(
+            &format!(
+                "INSERT INTO snapshot_live_blob_bindings
+                 (table_name, row_id, column_name, row_stamp)
+                 SELECT ?1, id, ?2, _updated_at FROM {}
+                 WHERE {} IS NOT NULL",
+                crate::sync::session::quote_ident(table.name()),
+                crate::sync::session::quote_ident(&declaration.id_column),
+            ),
+            rusqlite::params![table.name(), &declaration.id_column],
+        )
+        .map_err(|error| {
+            SnapshotError::ClearFailed(format!(
+                "collect live blob bindings for {:?}: {error}",
+                table.name()
+            ))
+        })?;
+    }
+    conn.execute_batch(
+        "DELETE FROM row_blob_locators
+         WHERE NOT EXISTS (
+             SELECT 1 FROM snapshot_live_blob_bindings AS live
+             WHERE live.table_name = row_blob_locators.table_name
+               AND live.row_id = row_blob_locators.row_id
+               AND live.column_name = row_blob_locators.column_name
+               AND live.row_stamp = row_blob_locators.row_stamp
+         );
+         DELETE FROM blob_locators
+         WHERE NOT EXISTS (
+             SELECT 1 FROM row_blob_locators AS binding
+             WHERE binding.remote_object_id = blob_locators.remote_object_id
+         );
+         DELETE FROM remote_objects
+         WHERE NOT EXISTS (
+             SELECT 1 FROM blob_locators AS locator
+             WHERE locator.remote_object_id = remote_objects.object_id
+         );
+         DROP TABLE snapshot_live_blob_bindings;",
+    )
+    .map_err(|error| SnapshotError::ClearFailed(format!("scope blob ownership graph: {error}")))?;
     Ok(())
 }
 
@@ -705,26 +747,22 @@ pub fn should_create_snapshot(
 pub async fn bootstrap_from_snapshot(
     storage: &dyn SyncStorage,
     store_id: &str,
-    expected_store_root_hash: super::store_commit::ObjectHash,
-    owner_pubkey: &str,
+    expected_store_root: super::store_commit::StoreRootRef,
     membership_floor: &crate::join_code::MembershipFloor,
     binary_schema_version: u32,
     target_path: &Path,
 ) -> Result<BootstrapResult, SnapshotError> {
     // Authenticate Store protocol root, membership, snapshot metadata, and the exact image
     // before returning installation authority.
-    let (store_root_hash, write_policy, meta, plaintext) =
+    let (store_root, write_policy, snapshot, plaintext) =
         super::store_snapshot::select_store_snapshot(
             storage,
-            store_id,
-            expected_store_root_hash,
-            owner_pubkey,
+            &expected_store_root,
             membership_floor,
             binary_schema_version,
         )
         .await?;
-    let snapshot_hash = meta.snapshot_hash();
-    let coverage = meta.coverage;
+    let coverage = snapshot.meta.coverage.clone();
     if coverage.policy() != write_policy {
         return Err(SnapshotError::Parse(format!(
             "snapshot coverage uses {:?}, Store protocol root uses {write_policy:?}",
@@ -732,6 +770,10 @@ pub async fn bootstrap_from_snapshot(
         )));
     }
     write_snapshot_db(target_path, &plaintext)?;
+    let founder_registration =
+        super::store_objects::load_founder_registration(storage, &expected_store_root)
+            .await
+            .map_err(|error| SnapshotError::Parse(error.to_string()))?;
     let target_path = std::fs::canonicalize(target_path)?;
     info!(
         num_positions = coverage.position_count(),
@@ -744,8 +786,9 @@ pub async fn bootstrap_from_snapshot(
         store_id: store_id.to_string(),
         target_path,
         db_hash: snapshot_db_hash(&plaintext),
-        store_root_hash,
-        snapshot_hash,
+        store_root,
+        founder_registration,
+        snapshot,
         coverage,
     })
 }
@@ -785,18 +828,40 @@ pub async fn reconcile_snapshot_blobs(
     tables: &[SyncedTable],
     cancel: &watch::Receiver<bool>,
 ) -> Result<SnapshotBlobReconcile, crate::database::DbError> {
-    let blobs: Vec<crate::sync::pull::BlobDownload> = {
+    let row_ids: Vec<(String, String)> = {
         let conn = Connection::open(db_path).map_err(crate::database::DbError::from)?;
-        let decls = crate::blob::decl::BlobDecls::from_tables(&conn, tables)
-            .map_err(|e| crate::database::DbError::Message(format!("blob decls: {e}")))?;
-        decls
-            .refs_in_db(&conn)
-            .map_err(|e| crate::database::DbError::Message(format!("blob decls: {e}")))?
-            .into_iter()
-            .filter(|blob| blob.fill == crate::blob::CacheFill::CacheEager)
-            .map(crate::sync::pull::BlobDownload::from_installed_db)
-            .collect()
+        let mut row_ids = Vec::new();
+        for table in tables {
+            let Some(declaration) = table.blob() else {
+                continue;
+            };
+            if declaration.fill != crate::blob::CacheFill::CacheEager {
+                continue;
+            }
+            let sql = format!(
+                "SELECT id FROM {} WHERE {} IS NOT NULL ORDER BY id",
+                crate::sync::session::quote_ident(table.name()),
+                crate::sync::session::quote_ident(&declaration.id_column),
+            );
+            let mut statement = conn.prepare(&sql).map_err(crate::database::DbError::from)?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(crate::database::DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(crate::database::DbError::from)?;
+            row_ids.extend(ids.into_iter().map(|id| (table.name().to_string(), id)));
+        }
+        row_ids
     };
+
+    let mut blobs = Vec::with_capacity(row_ids.len());
+    for (table, row_id) in row_ids {
+        let reference = db.row_blob_ref(&table, &row_id).await?;
+        blobs.push(
+            crate::sync::pull::BlobDownload::from_row(reference)
+                .map_err(crate::database::DbError::Message)?,
+        );
+    }
 
     if blobs.is_empty() {
         return Ok(SnapshotBlobReconcile::Complete);
@@ -818,7 +883,7 @@ pub async fn reconcile_snapshot_blobs(
             info!(total, "snapshot blob reconciliation cancelled");
             return Ok(SnapshotBlobReconcile::Cancelled);
         }
-        if crate::sync::pull::download_blobs(db, vec![blob], storage, store_dir, None)
+        if crate::sync::pull::download_blobs(db, vec![blob], storage, store_dir)
             .await
             .is_err()
         {
@@ -844,4 +909,220 @@ pub enum SnapshotBlobReconcile {
     Complete,
     Incomplete,
     Cancelled,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::keys::UserKeypair;
+    use crate::sync::store_commit::CommitFrontier;
+
+    #[tokio::test]
+    async fn bootstrap_installs_the_verified_exact_store_root() {
+        Box::pin(run_bootstrap_installs_the_verified_exact_store_root()).await;
+    }
+
+    async fn run_bootstrap_installs_the_verified_exact_store_root() {
+        let source = crate::sync::test_helpers::open_test_db();
+        let signer = UserKeypair::generate();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &source,
+            "snapshot-bootstrap-exact-root",
+            signer.clone(),
+        )
+        .await
+        .expect("create exact bootstrap Store");
+        let membership = store
+            .open_into(&source)
+            .await
+            .expect("open bootstrap Store membership");
+        let image_dir = tempfile::tempdir().expect("snapshot image directory");
+        let image_path = image_dir.path().to_path_buf();
+        let tables = crate::sync::test_helpers::test_synced_tables();
+        let image_tables = tables.clone();
+        let image = source
+            .call(move |connection| {
+                create_snapshot(connection, &image_path, &image_tables)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create bootstrap database image");
+        crate::sync::test_helpers::publish_snapshot_fixture(
+            &store.storage,
+            &store.root,
+            image,
+            CommitFrontier::MergeConcurrent(BTreeMap::new()),
+            &signer,
+            Some(&membership),
+            &source,
+        )
+        .await
+        .expect("publish bootstrap database image");
+
+        let destination = tempfile::tempdir().expect("bootstrap destination");
+        let database_path = destination.path().join("store.db");
+        let bootstrap = bootstrap_from_snapshot(
+            &store.storage,
+            "snapshot-bootstrap-exact-root",
+            store.root.clone(),
+            &crate::join_code::MembershipFloor::MergeConcurrent(membership.head_refs().to_vec()),
+            1,
+            &database_path,
+        )
+        .await
+        .expect("verify bootstrap authority");
+        let installed = bootstrap
+            .open_database(
+                "snapshot-bootstrap-exact-root",
+                &database_path,
+                tables,
+                crate::blob::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                "joining-device".to_string(),
+                &crate::sync::test_helpers::test_migrations(),
+            )
+            .await
+            .expect("install bootstrap authority");
+
+        assert_eq!(
+            installed
+                .local_store_root_ref()
+                .await
+                .expect("read installed Store root"),
+            Some(store.root),
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_keeps_the_authenticated_blob_graph_closed() {
+        Box::pin(run_snapshot_keeps_the_authenticated_blob_graph_closed()).await;
+    }
+
+    async fn run_snapshot_keeps_the_authenticated_blob_graph_closed() {
+        let declaration = crate::sync::session::BlobDecl::new(
+            "photos",
+            crate::blob::Provenance::HostProvided,
+            crate::blob::CacheFill::CacheEager,
+        );
+        let tables = crate::sync::test_helpers::test_synced_tables_with_blob(declaration.clone());
+        let source = crate::sync::test_helpers::open_test_db_with_blob(declaration);
+        let signer = UserKeypair::generate();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &source,
+            "snapshot-blob-ownership-graph",
+            signer.clone(),
+        )
+        .await
+        .expect("create exact blob Store");
+        crate::sync::test_helpers::host_exec(
+            &source,
+            "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+             VALUES ('n1', 'Album', 1, '0000000001000-0000-owner', '2026-01-01')",
+        )
+        .await;
+        crate::sync::test_helpers::host_exec(
+            &source,
+            &format!(
+                "INSERT INTO note_photos
+                 (id, note_id, kind, size, hash, _updated_at, created_at)
+                 VALUES ('photo1', 'n1', 'cover', 11, '{}',
+                         '0000000001000-0000-owner', '2026-01-01')",
+                crate::blob::content_hash(b"cover-bytes"),
+            ),
+        )
+        .await;
+        let (_source_temp, source_dir) = crate::sync::test_helpers::temp_store_dir();
+        crate::blob::local_files::store(&source_dir, "photos", "photo1", b"cover-bytes")
+            .await
+            .expect("stage source blob");
+        let writer = crate::sync::cloud_storage::CloudSyncStorage::new(
+            store.home.clone(),
+            crate::sync::cloud_storage::CloudCipher::Encrypted(
+                crate::encryption::EncryptionService::from_key([42; 32]),
+            ),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+            "snapshot-blob-ownership-graph",
+            signer,
+        )
+        .expect("construct blob writer");
+        crate::sync::test_helpers::run_cycle_fixture(&source, writer, &source_dir)
+            .await
+            .expect("publish source blob");
+
+        let image_dir = tempfile::tempdir().expect("snapshot image directory");
+        let image_path = image_dir.path().to_path_buf();
+        let image_tables = tables.clone();
+        let image = source
+            .call(move |connection| {
+                create_snapshot(connection, &image_path, &image_tables)
+                    .map_err(|error| crate::database::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("create blob snapshot");
+        let snapshot_dir = tempfile::tempdir().expect("snapshot inspection directory");
+        let snapshot_path = snapshot_dir.path().join("snapshot.db");
+        std::fs::write(&snapshot_path, image).expect("write inspected snapshot");
+        let snapshot = Connection::open(snapshot_path).expect("open inspected snapshot");
+        let graph: (String, String, String, String, String, String) = snapshot
+            .query_row(
+                "SELECT binding.table_name, binding.row_id, binding.column_name,
+                        binding.row_stamp, locator.locator_hash, remote.object_id
+                 FROM row_blob_locators AS binding
+                 JOIN blob_locators AS locator
+                   ON locator.remote_object_id = binding.remote_object_id
+                 JOIN remote_objects AS remote
+                   ON remote.object_id = locator.remote_object_id",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("read closed snapshot blob graph");
+        assert_eq!(graph.0, "note_photos");
+        assert_eq!(graph.1, "photo1");
+        assert_eq!(graph.2, "id");
+        assert_eq!(graph.3, "0000000001000-0000-owner");
+        assert_eq!(graph.4.len(), 64);
+        assert_eq!(graph.5.len(), 64);
+        let remote_state: String = snapshot
+            .query_row(
+                "SELECT state FROM remote_objects WHERE object_id = ?1",
+                [&graph.5],
+                |row| row.get(0),
+            )
+            .expect("read snapshot remote blob state");
+        assert!(
+            !remote_state.contains(source_dir.storage_dir().to_string_lossy().as_ref()),
+            "snapshot remote blob state must not carry its source StoreDir",
+        );
+        let remote: crate::sync::remote_object::RemoteObjectRecord =
+            serde_json::from_str(&remote_state).expect("parse snapshot remote blob state");
+        assert!(matches!(
+            remote.bytes().stored(),
+            crate::sync::remote_object::RemoteStoredRepresentation::Blob { .. }
+        ));
+        for table in ["row_blob_locators", "blob_locators", "remote_objects"] {
+            let count: i64 = snapshot
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count snapshot blob ownership table");
+            assert_eq!(count, 1, "snapshot carries one {table} row");
+        }
+        let foreign_key_violations: i64 = snapshot
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .expect("check snapshot blob foreign keys");
+        assert_eq!(foreign_key_violations, 0);
+    }
 }

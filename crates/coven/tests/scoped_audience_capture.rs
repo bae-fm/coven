@@ -4,39 +4,16 @@ use coven::{
 };
 
 const CIRCLE_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
-const STORE_ACCOUNT_ROUTE: &str =
-    "be5c8ac272e36dd2427439c7a63010f5ca71e44ab35231f81645e150e8de2ace";
-const CIRCLE_ACCOUNT_ROUTE: &str =
-    "56163029bd37372a5bc08a2b6170a3db28acd412f49046bc00305c92b9fc3749";
-const LOCAL_ACCOUNT_ROUTE: &str =
-    "efeaad310c9239967251a9552be25c7cf9ad7c15717559e7b6b32141ead862ee";
-const STORE_TRANSACTION_ROUTE: &str =
-    "a953ac0a8a207ef79295b2c55d4681ca2c62e2b42bcfce648a3be37b3739127c";
-const LOCAL_MOVE_ACCOUNT_ROUTE: &str =
-    "1ecfca618a3bbe5a756dda7d0add09bac4dd58ca1818e5875b7923d0aaf82060";
-const LOCAL_MOVE_TRANSACTION_ROUTE: &str =
-    "7433b9419027492b717246bcd5f47d3d8573488ea90f008860220e0f9cd3ef9f";
-const STORE_MOVE_ACCOUNT_ROUTE: &str =
-    "65c04acbf4869d3975c2b7e208dff6b8fb442eab3f7819e86170b5bb523e52f9";
-const STORE_MOVE_TRANSACTION_ROUTE: &str =
-    "53718f88cd05d7d0fc28e5bbc9320bc722f31201938ff9075b0e1dc0d649b3af";
-const DELETED_ACCOUNT_ROUTE: &str =
-    "792998009887b7ee0399d3bbc094a3bcd85a186cf77d99d368f822159cd337fe";
-const DELETED_TRANSACTION_ROUTE: &str =
-    "2757753305d0f66bc5d2a55a5d230477596d6d045ede5cb8a5e7e81dd06932e7";
-
 fn routing_keyring() -> MasterKeyring {
     coven_core::encryption::EncryptionService::from_key([7; 32]).into()
 }
 
+fn routing_id(conn: &rusqlite::Connection, table: &str, row_id: &str) -> String {
+    coven_core::sync::test_helpers::test_row_routing_id(conn, [7; 32], table, row_id).to_string()
+}
+
 fn seed_store_root(conn: &rusqlite::Connection) {
-    let store_root = coven_core::sync::store_commit::ObjectHash::digest(b"scoped-routing-root");
-    conn.execute(
-        "INSERT INTO protocol_state (key, value) VALUES ('store_root_hash', ?1)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [store_root.to_string()],
-    )
-    .expect("seed Store protocol root");
+    coven_core::sync::test_helpers::install_test_store_root_authority(conn, "scoped-routing-root");
 }
 
 fn circle_control_coord(policy: WritePolicy) -> String {
@@ -44,7 +21,7 @@ fn circle_control_coord(policy: WritePolicy) -> String {
         WritePolicy::MergeConcurrent => serde_json::json!({
             "merge_concurrent": {
                 "device_id": "control-device",
-                "stream_id": "00".repeat(16),
+                "stream_id": "00".repeat(32),
                 "author_pubkey": "owner-pubkey",
                 "author_owner_grant": "11".repeat(32),
                 "seq": 1,
@@ -290,6 +267,9 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
 
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
     let control_coord = seed_active_circle(&authority, CIRCLE_ID, WritePolicy::MergeConcurrent);
+    let store_account_route = routing_id(&authority, "accounts", "store-account");
+    let circle_account_route = routing_id(&authority, "accounts", "circle-account");
+    let local_account_route = routing_id(&authority, "accounts", "local-account");
     drop(authority);
 
     let receipt = handle
@@ -366,7 +346,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     assert!(!contains_bytes(&store.2, b"circle-account"));
     assert!(!contains_bytes(&store.2, b"local-account"));
     let store_changes = coven_core::changeset::walk(&store.2).expect("walk Store partition");
-    for routing_id in [STORE_ACCOUNT_ROUTE, CIRCLE_ACCOUNT_ROUTE] {
+    for routing_id in [&store_account_route, &circle_account_route] {
         assert!(store_changes.iter().any(|change| {
             change.table == "_coven_audience"
                 && change.op == coven_core::changeset::ChangeOp::Insert
@@ -383,7 +363,7 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
     assert!(circle_changes.iter().any(|change| {
         change.table == "_coven_row_routes"
             && change.op == coven_core::changeset::ChangeOp::Insert
-            && change.pk() == Some(CIRCLE_ACCOUNT_ROUTE)
+            && change.pk() == Some(&circle_account_route)
     }));
 
     let routes = handle
@@ -416,28 +396,27 @@ async fn scoped_insert_captures_store_and_circle_while_local_stays_on_device() {
         routes.0,
         vec![
             (
-                CIRCLE_ACCOUNT_ROUTE.to_string(),
+                circle_account_route.clone(),
                 "accounts".to_string(),
                 "circle-account".to_string(),
             ),
             (
-                LOCAL_ACCOUNT_ROUTE.to_string(),
+                local_account_route,
                 "accounts".to_string(),
                 "local-account".to_string(),
             ),
             (
-                STORE_ACCOUNT_ROUTE.to_string(),
+                store_account_route.clone(),
                 "accounts".to_string(),
                 "store-account".to_string(),
             ),
         ]
     );
     assert_eq!(routes.1.len(), 2, "Local rows have no Store mirror");
-    assert!(routes.1.contains(&(STORE_ACCOUNT_ROUTE.to_string(), None)));
-    assert!(routes.1.contains(&(
-        CIRCLE_ACCOUNT_ROUTE.to_string(),
-        Some(CIRCLE_ID.to_string())
-    )));
+    assert!(routes.1.contains(&(store_account_route, None)));
+    assert!(routes
+        .1
+        .contains(&(circle_account_route, Some(CIRCLE_ID.to_string()))));
 }
 
 #[tokio::test]
@@ -478,6 +457,8 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
 
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
     seed_active_circle(&authority, CIRCLE_ID, WritePolicy::MergeConcurrent);
+    let store_account_route = routing_id(&authority, "accounts", "store-account");
+    let store_transaction_route = routing_id(&authority, "transactions", "store-transaction");
     drop(authority);
 
     handle
@@ -646,26 +627,24 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
         routes,
         vec![
             (
-                STORE_ACCOUNT_ROUTE.to_string(),
+                store_account_route.clone(),
                 "accounts".to_string(),
                 "store-account".to_string(),
             ),
             (
-                STORE_TRANSACTION_ROUTE.to_string(),
+                store_transaction_route.clone(),
                 "transactions".to_string(),
                 "store-transaction".to_string(),
             ),
         ]
     );
+    let mut expected_mirror = vec![
+        (store_transaction_route.clone(), Some(CIRCLE_ID.to_string())),
+        (store_account_route.clone(), Some(CIRCLE_ID.to_string())),
+    ];
+    expected_mirror.sort();
     assert_eq!(
-        mirror,
-        vec![
-            (
-                STORE_TRANSACTION_ROUTE.to_string(),
-                Some(CIRCLE_ID.to_string()),
-            ),
-            (STORE_ACCOUNT_ROUTE.to_string(), Some(CIRCLE_ID.to_string()),),
-        ],
+        mirror, expected_mirror,
         "the root and inherited child mirrors must change with the host move"
     );
     assert_eq!(
@@ -688,7 +667,7 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
             && change.op == coven_core::changeset::ChangeOp::Insert
             && change.pk() == Some("store-transaction")
     }));
-    for routing_id in [STORE_ACCOUNT_ROUTE, STORE_TRANSACTION_ROUTE] {
+    for routing_id in [&store_account_route, &store_transaction_route] {
         assert!(circle_changes.iter().any(|change| {
             change.table == "_coven_row_routes"
                 && change.op == coven_core::changeset::ChangeOp::Update
@@ -710,7 +689,7 @@ async fn store_to_circle_move_materializes_the_root_and_inherited_child_atomical
             && change.op == coven_core::changeset::ChangeOp::Delete
             && change.pk() == Some("store-transaction")
     }));
-    for routing_id in [STORE_ACCOUNT_ROUTE, STORE_TRANSACTION_ROUTE] {
+    for routing_id in [&store_account_route, &store_transaction_route] {
         assert!(store_changes.iter().any(|change| {
             change.table == "_coven_audience"
                 && change.op == coven_core::changeset::ChangeOp::Update
@@ -902,6 +881,14 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
 
     let authority = rusqlite::Connection::open(store_dir.db_path()).expect("open authority db");
     seed_active_circle(&authority, CIRCLE_ID, WritePolicy::MergeConcurrent);
+    let local_move_account_route = routing_id(&authority, "accounts", "local-move-account");
+    let local_move_transaction_route =
+        routing_id(&authority, "transactions", "local-move-transaction");
+    let store_move_account_route = routing_id(&authority, "accounts", "store-move-account");
+    let store_move_transaction_route =
+        routing_id(&authority, "transactions", "store-move-transaction");
+    let deleted_account_route = routing_id(&authority, "accounts", "deleted-account");
+    let deleted_transaction_route = routing_id(&authority, "transactions", "deleted-transaction");
     drop(authority);
 
     handle
@@ -1082,9 +1069,10 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mirror_count = conn.query_row(
-                "SELECT count(*) FROM _coven_audience
-                 WHERE routing_id IN (?1, ?2)",
-                [LOCAL_MOVE_ACCOUNT_ROUTE, LOCAL_MOVE_TRANSACTION_ROUTE],
+                "SELECT count(*) FROM _coven_audience audience
+                 JOIN _coven_row_routes route USING (routing_id)
+                 WHERE route.row_id IN ('local-move-account', 'local-move-transaction')",
+                [],
                 |row| row.get::<_, i64>(0),
             )?;
             Ok((partitions, store_bytes, routes, mirror_count))
@@ -1117,7 +1105,7 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
     ));
     let store_mirror_retract =
         coven_core::changeset::walk(&local_partition("store").1).expect("walk Store mirror");
-    for route in [LOCAL_MOVE_ACCOUNT_ROUTE, LOCAL_MOVE_TRANSACTION_ROUTE] {
+    for route in [&local_move_account_route, &local_move_transaction_route] {
         assert!(has_change(
             &store_mirror_retract,
             "_coven_audience",
@@ -1135,11 +1123,11 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
         local_routes,
         vec![
             (
-                LOCAL_MOVE_ACCOUNT_ROUTE.to_string(),
+                local_move_account_route.clone(),
                 "local-move-account".to_string(),
             ),
             (
-                LOCAL_MOVE_TRANSACTION_ROUTE.to_string(),
+                local_move_transaction_route.clone(),
                 "local-move-transaction".to_string(),
             ),
         ]
@@ -1181,13 +1169,15 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mirror = conn
                 .prepare(
-                    "SELECT routing_id, circle_id FROM _coven_audience
-                     WHERE routing_id IN (?1, ?2) ORDER BY routing_id",
+                    "SELECT audience.routing_id, audience.circle_id
+                     FROM _coven_audience audience
+                     JOIN _coven_row_routes route USING (routing_id)
+                     WHERE route.row_id IN ('store-move-account', 'store-move-transaction')
+                     ORDER BY audience.routing_id",
                 )?
-                .query_map(
-                    [STORE_MOVE_ACCOUNT_ROUTE, STORE_MOVE_TRANSACTION_ROUTE],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-                )?
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok((partitions, routes, mirror))
         })
@@ -1232,22 +1222,21 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
         store_routes,
         vec![
             (
-                STORE_MOVE_ACCOUNT_ROUTE.to_string(),
+                store_move_account_route.clone(),
                 "store-move-account".to_string(),
             ),
             (
-                STORE_MOVE_TRANSACTION_ROUTE.to_string(),
+                store_move_transaction_route.clone(),
                 "store-move-transaction".to_string(),
             ),
         ]
     );
-    assert_eq!(
-        store_mirror,
-        vec![
-            (STORE_MOVE_TRANSACTION_ROUTE.to_string(), None),
-            (STORE_MOVE_ACCOUNT_ROUTE.to_string(), None),
-        ]
-    );
+    let mut expected_store_mirror = vec![
+        (store_move_transaction_route.clone(), None),
+        (store_move_account_route.clone(), None),
+    ];
+    expected_store_mirror.sort();
+    assert_eq!(store_mirror, expected_store_mirror);
 
     let deleted = handle
         .sql(|sql| {
@@ -1257,6 +1246,10 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
         .await
         .expect("delete Circle subtree");
     let delete_write_id = deleted.write_id.to_string();
+    let deleted_routes_for_query = [
+        deleted_account_route.clone(),
+        deleted_transaction_route.clone(),
+    ];
     let (delete_partitions, host_count, route_count, mirror_count) = handle
         .sql_read(move |conn| {
             let partitions = conn
@@ -1277,12 +1270,12 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
             )?;
             let route_count = conn.query_row(
                 "SELECT count(*) FROM _coven_row_routes WHERE routing_id IN (?1, ?2)",
-                [DELETED_ACCOUNT_ROUTE, DELETED_TRANSACTION_ROUTE],
+                [&deleted_routes_for_query[0], &deleted_routes_for_query[1]],
                 |row| row.get::<_, i64>(0),
             )?;
             let mirror_count = conn.query_row(
                 "SELECT count(*) FROM _coven_audience WHERE routing_id IN (?1, ?2)",
-                [DELETED_ACCOUNT_ROUTE, DELETED_TRANSACTION_ROUTE],
+                [&deleted_routes_for_query[0], &deleted_routes_for_query[1]],
                 |row| row.get::<_, i64>(0),
             )?;
             Ok((partitions, host_count, route_count, mirror_count))
@@ -1299,11 +1292,15 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
     let circle_delete =
         coven_core::changeset::walk(&delete_partition(CIRCLE_ID).1).expect("walk Circle delete");
     for (table, row_id, route_id) in [
-        ("accounts", "deleted-account", DELETED_ACCOUNT_ROUTE),
+        (
+            "accounts",
+            "deleted-account",
+            deleted_account_route.as_str(),
+        ),
         (
             "transactions",
             "deleted-transaction",
-            DELETED_TRANSACTION_ROUTE,
+            deleted_transaction_route.as_str(),
         ),
     ] {
         assert!(has_change(
@@ -1321,7 +1318,7 @@ async fn circle_moves_and_delete_materialize_destinations_retract_sources_and_pr
     }
     let store_delete =
         coven_core::changeset::walk(&delete_partition("store").1).expect("walk Store delete");
-    for route in [DELETED_ACCOUNT_ROUTE, DELETED_TRANSACTION_ROUTE] {
+    for route in [&deleted_account_route, &deleted_transaction_route] {
         assert!(has_change(
             &store_delete,
             "_coven_audience",

@@ -9,7 +9,7 @@
 //! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -17,22 +17,37 @@ use tracing::error;
 use tracing::warn;
 
 use crate::blob::decl::BlobDecls;
-use crate::blob::{BlobRef, Provenance};
+use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
+use crate::blob::{BlobRef, Provenance, RowBlobAuthority, RowBlobRef};
 use crate::db::{
     apply_coven_schema, expected_coven_schema_manifest, is_reserved_table_name,
     live_coven_schema_manifest, CovenSchemaManifest, ExternalBlob, OutboxEntry, OutboxOperation,
+    OutboxUploadState,
 };
 use crate::encryption::EncryptionService;
 use crate::migration::{run_migrations_in_transaction, Migration, MigrationError};
+use crate::sync::audience_package::{AudiencePackage, RowBlobLocatorBinding};
+use crate::sync::circle::Audience;
 use crate::sync::gate::{self, Gates};
 use crate::sync::hlc::{Hlc, Timestamp, UpdatedAtStamper, HIGHWATER_STATE_KEY, MAX_FUTURE_SKEW_MS};
-use crate::sync::membership::{SerialAuthorizationState, SerialMembershipState};
+use crate::sync::membership::{
+    AuthorHead, AuthorStreamId, MembershipEntry, MembershipEntryRef, MembershipHeadRef,
+    SerialAuthorizationState, SerialMembershipState,
+};
+use crate::sync::provider::ProviderAdminState;
+use crate::sync::remote_object::{
+    remote_object_id, CandidateExclusiveObjectDomain, RemoteObjectRecord, SharedLiveSetObjectDomain,
+};
 use crate::sync::routing_contract::SyncRoutingContract;
-use crate::sync::session::SyncedTable;
+use crate::sync::session::{quote_ident, SyncedTable};
+use crate::sync::storage::{ExactObjectRef, PreparedExactObject, VersionToken, VersionedObject};
 use crate::sync::store_commit::{
-    CommitFrontier, CommitPosition, ObjectHash, SnapshotMeta, StoreAck, StoreBatchCommit,
-    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationRef,
-    StoreDeviceRegistrationState, StoreProtocolRoot, StoreSerialHead, SERIAL_STREAM_ID,
+    ack_slot_prefix, commit_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
+    CommitFrontier, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef, SnapshotMeta, StoreAck,
+    StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreProtocolRoot,
+    StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, StoreSnapshotRef,
+    StreamActivationId, SERIAL_STREAM_ID,
 };
 use crate::write::{
     AffectedRow, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition, WriteId,
@@ -41,19 +56,85 @@ use crate::write::{
 use crate::WritePolicy;
 
 pub const LOCAL_DEVICE_ID_STATE_KEY: &str = "local_device_id";
+const HOST_DEVICE_ID_STATE_KEY: &str = "host_device_id";
 pub const WRITE_POLICY_STATE_KEY: &str = "write_policy";
 const SYNC_ROUTING_CONTRACT_STATE_KEY: &str = "sync_routing_contract";
 pub const SYNC_ROUTING_HASH_STATE_KEY: &str = "sync_routing_hash";
 const COVEN_SCHEMA_MANIFEST_STATE_KEY: &str = "coven_schema_manifest";
 const COVEN_INITIALIZED_STATE_KEY: &str = "coven_initialized";
 const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
-pub const STORE_ROOT_HASH_STATE_KEY: &str = "store_root_hash";
-pub const LAST_SNAPSHOT_HASH_STATE_KEY: &str = "last_snapshot_hash";
-pub const LAST_SNAPSHOT_FRONTIER_STATE_KEY: &str = "last_snapshot_frontier";
-pub const LAST_SNAPSHOT_POSITION_STATE_KEY: &str = "last_snapshot_position";
 pub const SERIAL_MEMBERSHIP_STATE_KEY: &str = "serial_membership_state";
 pub const SERIAL_KEY_GENERATION_STATE_KEY: &str = "serial_key_generation";
+pub const SERIAL_PROVIDER_ADMIN_STATE_KEY: &str = "serial_provider_admin_state";
+const STORE_DEVICE_GENESIS_STATE_KEY: &str = "store_device_genesis_state";
 const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
+
+fn load_store_device_genesis_state_on(
+    conn: &Connection,
+) -> Result<ResolvedStoreDeviceState, DbError> {
+    let raw: String = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [STORE_DEVICE_GENESIS_STATE_KEY],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    serde_json::from_str(&raw)
+        .map_err(|error| DbError::Message(format!("parse Store device genesis state: {error}")))
+}
+
+fn load_store_device_snapshot_on(
+    conn: &Connection,
+    reference: &StoreBatchCommitRef,
+) -> Result<ResolvedStoreDeviceState, DbError> {
+    let exact = serde_json::to_string(reference)
+        .map_err(|error| DbError::Message(format!("serialize Store commit ref: {error}")))?;
+    let raw: String = conn
+        .query_row(
+            "SELECT state FROM store_device_state_snapshots WHERE commit_ref = ?1",
+            [exact],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    serde_json::from_str(&raw)
+        .map_err(|error| DbError::Message(format!("parse Store device state snapshot: {error}")))
+}
+
+fn load_declared_store_device_state_on(
+    conn: &Connection,
+    reference: &StoreDeviceStateRef,
+) -> Result<ResolvedStoreDeviceState, DbError> {
+    let state = match reference {
+        StoreDeviceStateRef::MergeConcurrent { frontier, .. } => {
+            let CommitFrontier::MergeConcurrent(frontier) = frontier else {
+                return Err(DbError::Message(
+                    "Merge device state carries a Serial frontier".into(),
+                ));
+            };
+            if frontier.is_empty() {
+                load_store_device_genesis_state_on(conn)?
+            } else {
+                ResolvedStoreDeviceState::merge(
+                    frontier
+                        .values()
+                        .map(|commit| load_store_device_snapshot_on(conn, commit))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?
+            }
+        }
+        StoreDeviceStateRef::Serial { position, .. } => match position {
+            StoreSerialPredecessor::Genesis { .. } => load_store_device_genesis_state_on(conn)?,
+            StoreSerialPredecessor::Commit(commit) => load_store_device_snapshot_on(conn, commit)?,
+        },
+    };
+    if state.state_hash != reference.state_hash() || state.recovery != reference.recovery() {
+        return Err(DbError::Message(
+            "declared Store device state differs from its exact predecessor snapshots".into(),
+        ));
+    }
+    Ok(state)
+}
 
 fn authorize_host_sql(context: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization {
     use rusqlite::hooks::{AuthAction, Authorization};
@@ -85,8 +166,6 @@ pub enum DbError {
     Message(String),
     #[error("database error: Store protocol root hash is absent")]
     StoreRootHashMissing,
-    #[error("database error: Store protocol root hash is invalid: {reason}")]
-    StoreRootHashInvalid { reason: String },
 }
 
 impl DbError {
@@ -94,18 +173,11 @@ impl DbError {
         match self {
             Self::Message(message) => message,
             Self::StoreRootHashMissing => "Store protocol root hash is absent".to_string(),
-            Self::StoreRootHashInvalid { reason } => {
-                format!("Store protocol root hash is invalid: {reason}")
-            }
         }
     }
 
     fn missing_store_root_hash() -> Self {
         Self::StoreRootHashMissing
-    }
-
-    fn invalid_store_root_hash(reason: String) -> Self {
-        Self::StoreRootHashInvalid { reason }
     }
 }
 
@@ -531,7 +603,21 @@ impl DatabaseCore {
 
         let initialized = match metadata_open {
             CovenMetadataOpen::InitializeVerifiedSnapshot => false,
-            CovenMetadataOpen::Detect => has_coven_initialization_marker(&conn)?,
+            CovenMetadataOpen::Detect => {
+                let initialized = has_coven_initialization_marker(&conn)?;
+                if !initialized
+                    && !live_coven_schema_manifest(&conn)
+                        .map_err(DbError::from)?
+                        .is_empty()
+                {
+                    return Err(DbError::Message(
+                        "Store database contains Coven schema objects without the required initialization marker"
+                            .to_string(),
+                    )
+                    .into());
+                }
+                initialized
+            }
         };
         let pinned_routing_contract = initialized
             .then(|| load_coven_metadata(&conn, write_policy))
@@ -567,6 +653,7 @@ impl DatabaseCore {
                         write_policy == WritePolicy::MergeConcurrent && resolved.has_scoped_graph(),
                     )?;
                 }
+                pin_host_device_id_on(&tx, hlc.device_id(), initialized)?;
                 let gates = Gates::from_tables(&tx, &synced_tables)
                     .map_err(|error| DbError::Message(error.to_string()))?;
                 let blob_decls = BlobDecls::from_tables(&tx, &synced_tables)
@@ -582,13 +669,6 @@ impl DatabaseCore {
             }
         };
         let sync_routing_hash = sync_routing_contract.hash();
-        conn.execute(
-            "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (LOCAL_DEVICE_ID_STATE_KEY, hlc.device_id()),
-        )
-        .map_err(DbError::from)?;
-
         // Seed the register clock so a restart cannot mint a stamp behind a value
         // already on disk. Floor = max(persisted high-water, max synced-row
         // `_updated_at`).
@@ -669,6 +749,7 @@ impl DatabaseCore {
             write_policy == WritePolicy::MergeConcurrent
                 && pinned_routing_contract.has_scoped_graph(),
         )?;
+        validate_host_device_id_on(&conn, hlc.device_id())?;
         let sync_routing_contract = SyncRoutingContract::from_connection(&conn, &synced_tables)
             .map_err(|error| DbError::Message(error.to_string()))?;
         validate_sync_routing_contract(&pinned_routing_contract, &sync_routing_contract)?;
@@ -838,7 +919,7 @@ impl PreparedStoreWritePartitions {
 
 pub(crate) struct SerialStoreBranchPreparationWork {
     pub branch_id: PendingBranchId,
-    pub base: Option<CommitPosition>,
+    pub base: Option<StoreBatchCommitRef>,
     pub writes: Vec<PreparedStoreWrite>,
 }
 
@@ -846,11 +927,11 @@ pub(crate) struct SerialStoreBranchPreparationWork {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum StoreWriteBase {
     MergeConcurrent {
-        dependencies: BTreeMap<String, CommitPosition>,
+        dependencies: BTreeMap<String, StoreBatchCommitRef>,
     },
     Serial {
         branch_id: PendingBranchId,
-        base: Option<CommitPosition>,
+        base: Option<StoreBatchCommitRef>,
     },
 }
 
@@ -861,116 +942,1316 @@ pub(crate) struct StoreWriteBlobFacts {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "provenance", rename_all = "snake_case")]
-pub(crate) enum StoreWriteBlobFact {
-    UserProvided {
-        blob: BlobRef,
-        state: StoreWriteUserBlobState,
-    },
-    HostProvided {
-        blob: BlobRef,
-        size: u64,
-        state: StoreWriteHostBlobState,
-    },
-}
-
-impl StoreWriteBlobFact {
-    pub(crate) fn blob(&self) -> &BlobRef {
-        match self {
-            Self::UserProvided { blob, .. } | Self::HostProvided { blob, .. } => blob,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum StoreWriteUserBlobState {
-    Local,
-    Remote,
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreWriteBlobFact {
+    pub table: String,
+    pub row_id: String,
+    pub row_stamp: String,
+    pub column: String,
+    pub blob: BlobRef,
+    pub plaintext_size: u64,
+    pub plaintext_hash: ObjectHash,
+    pub external_path: Option<PathBuf>,
+    pub previous: Option<StoreWriteRemoteBlob>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum StoreWriteHostBlobState {
-    Ordinary,
-    MakeRemote {
-        root_table: String,
-        root_id: String,
-        retain_pinned: bool,
-    },
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreWriteRemoteBlob {
+    pub authority: crate::sync::audience_package::PackageAudience,
+    pub stored: StoredBlobRef,
+}
+
+impl StoreWriteBlobFact {
+    fn identity_key(&self) -> (String, String, String, String) {
+        (
+            self.table.clone(),
+            self.row_id.clone(),
+            self.column.clone(),
+            self.row_stamp.clone(),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExactProtocolObject<T> {
     pub value: T,
     pub bytes: Vec<u8>,
+    pub object: ExactObjectRef,
+    pub prepared: PreparedExactObject,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalProtocolObject<T> {
+    pub value: T,
+    pub bytes: Vec<u8>,
+}
+
+pub(crate) struct PreparedProtocolObject<T> {
+    pub value: T,
+    pub prepared: PreparedExactObject,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedStoreWriteCommit {
-    pub package_bytes: Vec<u8>,
+    pub audiences: PreparedAudienceObjects,
     pub commit: ExactProtocolObject<StoreBatchCommit>,
     pub head: ExactProtocolObject<StoreDeviceHead>,
-    pub blob_manifest: StoreBlobManifest,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedSerialStoreWriteCommit {
-    pub package_bytes: Vec<u8>,
+    pub audiences: PreparedAudienceObjects,
     pub commit: ExactProtocolObject<StoreBatchCommit>,
-    pub blob_manifest: StoreBlobManifest,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedSerialStoreBranch {
     pub branch_id: PendingBranchId,
-    pub base: Option<CommitPosition>,
+    pub base: Option<StoreBatchCommitRef>,
     pub base_head_bytes: Option<Vec<u8>>,
+    pub base_head_version: Option<VersionToken>,
     pub writes: Vec<PreparedSerialStoreWriteCommit>,
-    pub head: ExactProtocolObject<StoreSerialHead>,
+    pub head: CanonicalProtocolObject<StoreSerialHead>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct UnresolvedSerialBranch {
     pub branch_id: PendingBranchId,
-    pub base: Option<CommitPosition>,
+    pub base: Option<StoreBatchCommitRef>,
     pub conflicted: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct OutboundStoreAck {
-    pub revision: u64,
-    pub ack_hash: ObjectHash,
-    pub previous_ack_hash: Option<ObjectHash>,
-    pub ack_bytes: Vec<u8>,
+    pub reference: StoreAckRef,
+    pub ack: ExactProtocolObject<StoreAck>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct DurableProtocolObject {
-    pub semantic_hash: ObjectHash,
-    pub bytes: Vec<u8>,
-    pub published: bool,
+pub(crate) struct PublishedStoreAck {
+    pub reference: StoreAckRef,
+    pub successor_slot: crate::storage::cloud::ObjectSlot,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DurableFounderGraph {
+    pub root: ExactProtocolObject<StoreProtocolRoot>,
+    pub registration: ExactProtocolObject<StoreDeviceRegistration>,
+    pub initial_ack: ExactProtocolObject<StoreAck>,
+    pub initial_ack_ref: StoreAckRef,
+    pub membership: DurableFounderMembership,
+    pub registration_state: LocalDeviceRegistrationState,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum DurableFounderMembership {
+    MergeConcurrent {
+        entry: ExactProtocolObject<MembershipEntry>,
+        entry_ref: MembershipEntryRef,
+        head: ExactProtocolObject<AuthorHead>,
+        head_ref: MembershipHeadRef,
+    },
+    Serial,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum DurableFounderMembershipJournal {
+    MergeConcurrent {
+        entry_ref: MembershipEntryRef,
+        entry_bytes: Vec<u8>,
+        entry_prepared: PreparedExactObject,
+        head_ref: MembershipHeadRef,
+        head_bytes: Vec<u8>,
+        head_prepared: PreparedExactObject,
+    },
+    Serial,
+}
+
+impl DurableFounderMembershipJournal {
+    fn from_graph(graph: &DurableFounderMembership) -> Self {
+        match graph {
+            DurableFounderMembership::MergeConcurrent {
+                entry,
+                entry_ref,
+                head,
+                head_ref,
+            } => Self::MergeConcurrent {
+                entry_ref: entry_ref.clone(),
+                entry_bytes: entry.bytes.clone(),
+                entry_prepared: entry.prepared.clone(),
+                head_ref: head_ref.clone(),
+                head_bytes: head.bytes.clone(),
+                head_prepared: head.prepared.clone(),
+            },
+            DurableFounderMembership::Serial => Self::Serial,
+        }
+    }
+
+    fn into_graph(self) -> Result<DurableFounderMembership, DbError> {
+        match self {
+            Self::MergeConcurrent {
+                entry_ref,
+                entry_bytes,
+                entry_prepared,
+                head_ref,
+                head_bytes,
+                head_prepared,
+            } => {
+                let entry_value: MembershipEntry =
+                    serde_json::from_slice(&entry_bytes).map_err(|error| {
+                        DbError::Message(format!("local founder membership entry: {error}"))
+                    })?;
+                let head_value: AuthorHead =
+                    serde_json::from_slice(&head_bytes).map_err(|error| {
+                        DbError::Message(format!("local founder membership head: {error}"))
+                    })?;
+                Ok(DurableFounderMembership::MergeConcurrent {
+                    entry: ExactProtocolObject {
+                        value: entry_value,
+                        bytes: entry_bytes,
+                        object: entry_prepared.reference().clone(),
+                        prepared: entry_prepared,
+                    },
+                    entry_ref,
+                    head: ExactProtocolObject {
+                        value: head_value,
+                        bytes: head_bytes,
+                        object: head_prepared.reference().clone(),
+                        prepared: head_prepared,
+                    },
+                    head_ref,
+                })
+            }
+            Self::Serial => Ok(DurableFounderMembership::Serial),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FounderMembershipRefs {
+    MergeConcurrent {
+        entry: MembershipEntryRef,
+        head: MembershipHeadRef,
+    },
+    Serial,
+}
+
+fn founder_graph_identity(graph: &DurableFounderGraph) -> ObjectHash {
+    let membership = match &graph.membership {
+        DurableFounderMembership::MergeConcurrent {
+            entry,
+            entry_ref,
+            head,
+            head_ref,
+        } => serde_json::to_vec(&(
+            entry_ref,
+            &entry.bytes,
+            &entry.prepared,
+            head_ref,
+            &head.bytes,
+            &head.prepared,
+        )),
+        DurableFounderMembership::Serial => serde_json::to_vec(&"serial"),
+    }
+    .expect("founder membership graph serialization cannot fail");
+    ObjectHash::digest(
+        &serde_json::to_vec(&(
+            &graph.root.bytes,
+            &graph.root.prepared,
+            &graph.registration.bytes,
+            &graph.registration.prepared,
+            &graph.initial_ack_ref,
+            &graph.initial_ack.bytes,
+            &graph.initial_ack.prepared,
+            membership,
+        ))
+        .expect("founder graph serialization cannot fail"),
+    )
+}
+
+fn load_store_root_authority_on(
+    conn: &Connection,
+) -> Result<Option<(crate::sync::store_commit::StoreRootRef, StoreProtocolRoot)>, DbError> {
+    conn.query_row(
+        "SELECT store_root_hash, store_protocol_root_bytes, store_root_object \
+         FROM store_protocol_root_authority WHERE singleton = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(DbError::from)?
+    .map(|(hash, bytes, object)| {
+        let value = StoreProtocolRoot::parse(&bytes)
+            .map_err(|error| DbError::Message(format!("Store root authority bytes: {error}")))?;
+        let store_root_hash: ObjectHash = hash.parse().map_err(|error| {
+            DbError::Message(format!("Store root authority semantic hash: {error}"))
+        })?;
+        let object: ExactObjectRef = serde_json::from_str(&object)
+            .map_err(|error| DbError::Message(format!("Store root authority object: {error}")))?;
+        if value.object_hash() != store_root_hash {
+            return Err(DbError::Message(
+                "Store root authority hash differs from its signed bytes".to_string(),
+            ));
+        }
+        Ok((
+            crate::sync::store_commit::StoreRootRef {
+                store_root_id: value.descriptor.store_root_id(),
+                store_root_hash,
+                object,
+            },
+            value,
+        ))
+    })
+    .transpose()
+}
+
+fn required_store_root_authority_on(
+    conn: &Connection,
+) -> Result<crate::sync::store_commit::StoreRootRef, DbError> {
+    load_store_root_authority_on(conn)?
+        .map(|(reference, _)| reference)
+        .ok_or_else(|| DbError::Message("exact Store root authority is absent".to_string()))
+}
+
+fn install_store_root_authority_on(
+    conn: &Connection,
+    reference: &crate::sync::store_commit::StoreRootRef,
+    bytes: &[u8],
+) -> Result<(), DbError> {
+    let value = StoreProtocolRoot::parse(bytes)
+        .map_err(|error| DbError::Message(format!("install Store root authority: {error}")))?;
+    if value.object_hash() != reference.store_root_hash {
+        return Err(DbError::Message(
+            "installed Store root reference differs from its signed bytes".to_string(),
+        ));
+    }
+    let object = serde_json::to_string(&reference.object)
+        .map_err(|error| DbError::Message(format!("serialize Store root authority: {error}")))?;
+    let existing = load_store_root_authority_on(conn)?;
+    if let Some((existing_reference, existing_value)) = existing {
+        if existing_reference == *reference && existing_value == value {
+            return Ok(());
+        }
+        return Err(DbError::Message(
+            "database already trusts a different exact Store root".to_string(),
+        ));
+    }
+    conn.execute(
+        "INSERT INTO store_protocol_root_authority \
+         (singleton, store_root_hash, store_protocol_root_bytes, store_root_object) \
+         VALUES (1, ?1, ?2, ?3)",
+        rusqlite::params![reference.store_root_hash.to_string(), bytes, object],
+    )
+    .map(|_| ())
+    .map_err(DbError::from)
+}
+
+fn install_store_founder_state_on(
+    conn: &Connection,
+    root: &crate::sync::store_commit::StoreRootRef,
+    founder_reference: &StoreDeviceRegistrationRef,
+    founder: &StoreDeviceRegistration,
+    founder_bytes: &[u8],
+    genesis: &ResolvedStoreDeviceState,
+) -> Result<(), DbError> {
+    if founder.store_root != *root {
+        return Err(DbError::Message(
+            "Store founder registration belongs to another exact root".to_string(),
+        ));
+    }
+    founder_reference
+        .verify_registration(founder)
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    if founder.to_bytes() != founder_bytes {
+        return Err(DbError::Message(
+            "Store founder registration differs from its exact bytes".to_string(),
+        ));
+    }
+    let founder_authority = crate::sync::store_commit::StoreDeviceRegistrationActivation::Founder {
+        root: root.clone(),
+    };
+    let founder_values = (
+        founder_reference.registration_hash.to_string(),
+        founder.author_pubkey.clone(),
+        founder.device_signing_pubkey.clone(),
+        founder_bytes.to_vec(),
+        serde_json::to_string(founder_reference).map_err(|error| {
+            DbError::Message(format!("serialize Store founder registration ref: {error}"))
+        })?,
+        serde_json::to_string(&founder_authority).map_err(|error| {
+            DbError::Message(format!("serialize Store founder activation: {error}"))
+        })?,
+    );
+    conn.execute(
+        "INSERT INTO store_device_registration_activations
+         (device_id, registration_hash, author_pubkey, device_signing_pubkey,
+          registration_bytes, registration_object, activation_authority)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(device_id) DO NOTHING",
+        rusqlite::params![
+            founder.device_id.to_string(),
+            &founder_values.0,
+            &founder_values.1,
+            &founder_values.2,
+            &founder_values.3,
+            &founder_values.4,
+            &founder_values.5,
+        ],
+    )
+    .map_err(DbError::from)?;
+    let stored_founder: (String, String, String, Vec<u8>, String, String) = conn
+        .query_row(
+            "SELECT registration_hash, author_pubkey, device_signing_pubkey,
+                    registration_bytes, registration_object, activation_authority
+             FROM store_device_registration_activations WHERE device_id = ?1",
+            [founder.device_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(DbError::from)?;
+    if stored_founder != founder_values {
+        return Err(DbError::Message(
+            "Store founder activation differs from installed exact authority".to_string(),
+        ));
+    }
+    let genesis = serde_json::to_string(genesis)
+        .map_err(|error| DbError::Message(format!("serialize Store device genesis: {error}")))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+        (STORE_DEVICE_GENESIS_STATE_KEY, &genesis),
+    )
+    .map_err(DbError::from)?;
+    let stored_genesis: String = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [STORE_DEVICE_GENESIS_STATE_KEY],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if stored_genesis != genesis {
+        return Err(DbError::Message(
+            "Store device genesis differs from installed exact authority".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_founder_graph(graph: &DurableFounderGraph) -> Result<(), DbError> {
+    let root = StoreProtocolRoot::parse(&graph.root.bytes)
+        .map_err(|error| DbError::Message(format!("founder Store root: {error}")))?;
+    if root != graph.root.value
+        || root.object_hash() != graph.root.value.object_hash()
+        || graph.root.object != *graph.root.prepared.reference()
+    {
+        return Err(DbError::Message(
+            "founder Store root differs from its prepared exact object".to_string(),
+        ));
+    }
+    let root_ref = crate::sync::store_commit::StoreRootRef {
+        store_root_id: root.descriptor.store_root_id(),
+        store_root_hash: root.object_hash(),
+        object: graph.root.object.clone(),
+    };
+    let registration = StoreDeviceRegistration::parse_at(
+        &graph.registration.bytes,
+        &root_ref,
+        graph.registration.value.device_id,
+    )
+    .map_err(|error| DbError::Message(format!("founder Store registration: {error}")))?;
+    if registration != graph.registration.value
+        || graph.registration.object != *graph.registration.prepared.reference()
+        || registration.author_pubkey != root.descriptor.founder_pubkey
+        || graph.registration.object.slot() != &root.descriptor.founder_registration
+        || registration.provider != root.descriptor.founder_provider_admin.provider
+        || !matches!(
+            registration.origin,
+            crate::sync::store_commit::StoreDeviceRegistrationOrigin::Founder { .. }
+        )
+    {
+        return Err(DbError::Message(
+            "founder registration differs from its root or prepared exact object".to_string(),
+        ));
+    }
+    let registration_ref = StoreDeviceRegistrationRef::from_registration(
+        &registration,
+        graph.registration.object.clone(),
+    );
+    let initial_ack = StoreAck::parse_at(
+        &graph.initial_ack.bytes,
+        root_ref.store_root_hash,
+        &graph.initial_ack_ref,
+        &registration,
+    )
+    .map_err(|error| DbError::Message(format!("founder initial acknowledgement: {error}")))?;
+    if initial_ack != graph.initial_ack.value
+        || graph.initial_ack_ref.revision != 1
+        || graph.initial_ack_ref.object != graph.initial_ack.object
+        || graph.initial_ack.object != *graph.initial_ack.prepared.reference()
+        || initial_ack.predecessor.is_some()
+        || initial_ack.author_registration != registration_ref
+        || match (&root.descriptor.write_policy, &initial_ack.store_cut) {
+            (
+                crate::WritePolicy::MergeConcurrent,
+                crate::sync::store_commit::StoreHistoryCut::MergeConcurrent(commits),
+            ) => !commits.is_empty(),
+            (
+                crate::WritePolicy::Serial,
+                crate::sync::store_commit::StoreHistoryCut::Serial(
+                    crate::sync::store_commit::StoreSerialPredecessor::Genesis {
+                        root: ack_root,
+                        founder_registration,
+                    },
+                ),
+            ) => ack_root != &root_ref || founder_registration != &registration_ref,
+            _ => true,
+        }
+    {
+        return Err(DbError::Message(
+            "founder initial acknowledgement differs from its exact root graph".to_string(),
+        ));
+    }
+    match (&root.descriptor.membership, &graph.membership) {
+        (
+            crate::sync::store_commit::StoreMembershipGenesis::MergeConcurrent { .. },
+            DurableFounderMembership::MergeConcurrent {
+                entry,
+                entry_ref,
+                head,
+                head_ref,
+            },
+        ) => {
+            let parsed_entry: MembershipEntry = serde_json::from_slice(&entry.bytes)
+                .map_err(|error| DbError::Message(format!("founder membership entry: {error}")))?;
+            if parsed_entry != entry.value
+                || root
+                    .descriptor
+                    .validate_merge_founder_entry(&parsed_entry)
+                    .is_err()
+                || entry_ref.coord != parsed_entry.coord()
+                || entry_ref.object != entry.object
+                || entry.object != *entry.prepared.reference()
+            {
+                return Err(DbError::Message(
+                    "founder membership entry differs from its root or exact reference".to_string(),
+                ));
+            }
+            let parsed_head: AuthorHead = serde_json::from_slice(&head.bytes)
+                .map_err(|error| DbError::Message(format!("founder membership head: {error}")))?;
+            let anchor = parsed_entry.change.membership_anchor().ok_or_else(|| {
+                DbError::Message("founder entry has no Store membership anchor".to_string())
+            })?;
+            let crate::sync::store_commit::GrantStreamAnchor::StoreMembership { first_slot } =
+                anchor
+            else {
+                return Err(DbError::Message(
+                    "founder membership entry uses a recovery anchor".to_string(),
+                ));
+            };
+            if parsed_head != head.value
+                || !parsed_head.verify(&registration)
+                || parsed_head.author_registration != registration_ref
+                || parsed_head.entry != *entry_ref
+                || parsed_head.predecessor.is_some()
+                || parsed_head.entry_coord() != parsed_entry.coord()
+                || head_ref.coord != parsed_entry.coord()
+                || head_ref.head_hash != parsed_head.head_hash()
+                || head_ref.object != head.object
+                || head.object != *head.prepared.reference()
+                || head.object.slot() != &first_slot
+                || parsed_head.successor.activation
+                    != StreamActivationId::store_membership(
+                        &root_ref,
+                        &registration_ref,
+                        &parsed_entry.author_owner_grant,
+                        &crate::sync::store_commit::GrantStreamAnchor::StoreMembership {
+                            first_slot: first_slot.clone(),
+                        },
+                    )
+            {
+                return Err(DbError::Message(
+                    "founder membership head differs from its exact root graph".to_string(),
+                ));
+            }
+        }
+        (
+            crate::sync::store_commit::StoreMembershipGenesis::Serial,
+            DurableFounderMembership::Serial,
+        ) => {}
+        _ => {
+            return Err(DbError::Message(
+                "founder membership graph differs from the root policy".to_string(),
+            ))
+        }
+    }
+    Ok(())
+}
+
+fn consume_store_creation_probes_on(
+    conn: &Connection,
+    graph: &DurableFounderGraph,
+) -> Result<(), DbError> {
+    use crate::sync::provider::{
+        ExactProbeProgress, ProviderProbeJournalRecord, SerialProbeProgress,
+    };
+    use crate::sync::store_protocol_root::{
+        StoreCreationAttempt, StoreCreationProbeIds, STORE_CREATION_ATTEMPT_STATE_KEY,
+    };
+
+    let attempt_json: String = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [STORE_CREATION_ATTEMPT_STATE_KEY],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    let attempt: StoreCreationAttempt = serde_json::from_str(&attempt_json)
+        .map_err(|error| DbError::Message(format!("parse Store creation attempt: {error}")))?;
+    let StoreCreationAttempt::FounderGraphReserved(graph_reservation) = attempt else {
+        return Err(DbError::Message(
+            "Store creation attempt has not reserved the complete founder graph".to_string(),
+        ));
+    };
+    let reservation = &graph_reservation.descriptor;
+    let descriptor = &graph.root.value.descriptor;
+    let founder = reservation.membership.founder();
+    let authority = &founder.root.authority;
+    if authority.creation_id != descriptor.creation_id
+        || authority.founder_grant != descriptor.founder_grant
+        || authority.provider_admin_grant != descriptor.founder_provider_admin.grant_id
+        || authority.binding.store != descriptor.provider
+        || authority.binding.device != descriptor.founder_provider_admin.provider
+        || authority.founder_pubkey != descriptor.founder_pubkey
+        || authority.write_policy != descriptor.write_policy
+        || authority.schema_version != descriptor.schema_version
+        || authority.sync_routing_hash != descriptor.sync_routing_hash
+        || founder.root.root_slot != descriptor.root_slot
+        || founder.registration_slot != descriptor.founder_registration
+        || &reservation.recovery_slot != descriptor.founder_recovery.first_slot()
+        || match (&reservation.membership, &descriptor.membership) {
+            (
+                crate::sync::store_protocol_root::MembershipReservation::MergeConcurrent {
+                    first_slot,
+                    ..
+                },
+                crate::sync::store_commit::StoreMembershipGenesis::MergeConcurrent {
+                    founder_membership,
+                },
+            ) => founder_membership.first_slot() != first_slot,
+            (
+                crate::sync::store_protocol_root::MembershipReservation::Serial { .. },
+                crate::sync::store_commit::StoreMembershipGenesis::Serial,
+            ) => false,
+            _ => true,
+        }
+    {
+        return Err(DbError::Message(
+            "signed Store descriptor differs from its durable creation attempt".to_string(),
+        ));
+    }
+    if graph.registration.value.store_commits != graph_reservation.store_commits
+        || graph.registration.value.acknowledgements != graph_reservation.acknowledgements
+        || graph.registration.value.snapshots != graph_reservation.snapshots
+        || graph.initial_ack.value.last_sync != authority.founder_timestamp
+        || graph.initial_ack.value.successor.next_slot != graph_reservation.next_ack_slot
+        || match (&graph.membership, &graph_reservation.membership) {
+            (
+                DurableFounderMembership::MergeConcurrent { entry, head, .. },
+                crate::sync::store_protocol_root::FounderMembershipPublicationReservation::MergeConcurrent {
+                    next_head_slot,
+                },
+            ) => {
+                entry.value.created_at != authority.founder_timestamp
+                    || head.value.successor.next_slot != *next_head_slot
+            }
+            (
+                DurableFounderMembership::Serial,
+                crate::sync::store_protocol_root::FounderMembershipPublicationReservation::Serial,
+            ) => false,
+            _ => true,
+        }
+    {
+        return Err(DbError::Message(
+            "signed founder graph differs from its durable slot reservation".to_string(),
+        ));
+    }
+
+    let load_probe = |probe_id: crate::sync::provider::ProviderProbeId| {
+        let key = format!("provider_probe/{}", hex::encode(probe_id.as_bytes()));
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM protocol_state WHERE key = ?1",
+                [&key],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        let record = serde_json::from_str(&value)
+            .map_err(|error| DbError::Message(format!("parse provider probe journal: {error}")))?;
+        Ok::<_, DbError>((key, record))
+    };
+    let (exact_id, serial_id) = match authority.probes {
+        StoreCreationProbeIds::MergeConcurrent { exact_slots } => (exact_slots, None),
+        StoreCreationProbeIds::Serial {
+            exact_slots,
+            serial_coordination,
+        } => (exact_slots, Some(serial_coordination)),
+    };
+    let (exact_key, exact) = load_probe(exact_id)?;
+    let ProviderProbeJournalRecord::Exact(exact) = exact else {
+        return Err(DbError::Message(
+            "Store creation exact probe id names another probe kind".to_string(),
+        ));
+    };
+    let ExactProbeProgress::ReceiptReady { receipt } = exact.progress else {
+        return Err(DbError::Message(
+            "Store creation exact probe has no terminal receipt".to_string(),
+        ));
+    };
+    if receipt != descriptor.founder_provider_admin.capability.exact_slots {
+        return Err(DbError::Message(
+            "signed Store descriptor differs from its terminal exact probe".to_string(),
+        ));
+    }
+    let mut consumed_keys = vec![exact_key];
+    match (
+        serial_id,
+        &descriptor
+            .founder_provider_admin
+            .capability
+            .serial_coordination,
+    ) {
+        (None, None) => {}
+        (Some(probe_id), Some(expected)) => {
+            let (key, serial) = load_probe(probe_id)?;
+            let ProviderProbeJournalRecord::Serial(serial) = serial else {
+                return Err(DbError::Message(
+                    "Store creation serial probe id names another probe kind".to_string(),
+                ));
+            };
+            let SerialProbeProgress::ReceiptReady { receipt } = serial.progress else {
+                return Err(DbError::Message(
+                    "Store creation serial probe has no terminal receipt".to_string(),
+                ));
+            };
+            if &receipt != expected {
+                return Err(DbError::Message(
+                    "signed Store descriptor differs from its terminal serial probe".to_string(),
+                ));
+            }
+            consumed_keys.push(key);
+        }
+        _ => {
+            return Err(DbError::Message(
+                "Store creation probe policy differs from the signed descriptor".to_string(),
+            ))
+        }
+    }
+    consumed_keys.push(STORE_CREATION_ATTEMPT_STATE_KEY.to_string());
+    for key in consumed_keys {
+        let deleted = conn
+            .execute("DELETE FROM protocol_state WHERE key = ?1", [key])
+            .map_err(DbError::from)?;
+        if deleted != 1 {
+            return Err(DbError::Message(
+                "Store creation journal disappeared during typed consumption".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn load_local_store_founder_graph_on(
+    conn: &Connection,
+) -> Result<Option<DurableFounderGraph>, DbError> {
+    let owned_rows: i64 = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_store_protocol_root) \
+                  + EXISTS(SELECT 1 FROM local_store_device_registration) \
+                  + EXISTS(SELECT 1 FROM local_store_founder_graph)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if owned_rows == 0 {
+        return Ok(None);
+    }
+    if owned_rows != 3 {
+        return Err(DbError::Message(
+            "local Store founder graph is only partially durable".to_string(),
+        ));
+    }
+    let raw = conn
+        .query_row(
+            "SELECT r.store_root_hash, r.store_protocol_root_bytes, r.prepared_object, \
+                    d.device_id, d.registration_hash, d.registration_bytes, d.prepared_object, \
+                    d.initial_ack_ref, d.initial_ack_bytes, d.initial_ack_prepared, d.state, \
+                    g.membership_graph \
+             FROM local_store_protocol_root r \
+             CROSS JOIN local_store_device_registration d \
+             CROSS JOIN local_store_founder_graph g \
+             WHERE r.singleton = 1 AND d.singleton = 1 AND g.singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Vec<u8>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                ))
+            },
+        )
+        .map_err(DbError::from)?;
+    let (
+        root_hash,
+        root_bytes,
+        root_prepared,
+        device_id,
+        registration_hash,
+        registration_bytes,
+        registration_prepared,
+        initial_ack_ref,
+        initial_ack_bytes,
+        initial_ack_prepared,
+        registration_state,
+        membership_graph,
+    ) = raw;
+    let registration_state: LocalDeviceRegistrationState =
+        serde_json::from_str(&registration_state).map_err(|error| {
+            DbError::Message(format!("local registration journal state: {error}"))
+        })?;
+    let root_value = StoreProtocolRoot::parse(&root_bytes)
+        .map_err(|error| DbError::Message(format!("local founder Store root: {error}")))?;
+    let root_prepared: PreparedExactObject = serde_json::from_str(&root_prepared)
+        .map_err(|error| DbError::Message(format!("local founder Store root object: {error}")))?;
+    let store_root_hash: ObjectHash = root_hash
+        .parse()
+        .map_err(|error| DbError::Message(format!("local founder Store root hash: {error}")))?;
+    if store_root_hash != root_value.object_hash() {
+        return Err(DbError::Message(
+            "local founder Store root hash differs from its bytes".to_string(),
+        ));
+    }
+    let root_ref = crate::sync::store_commit::StoreRootRef {
+        store_root_id: root_value.descriptor.store_root_id(),
+        store_root_hash,
+        object: root_prepared.reference().clone(),
+    };
+    let parsed_device_id = device_id
+        .parse()
+        .map_err(|error| DbError::Message(format!("local founder device id: {error}")))?;
+    let registration_value =
+        StoreDeviceRegistration::parse_at(&registration_bytes, &root_ref, parsed_device_id)
+            .map_err(|error| {
+                DbError::Message(format!("local founder Store registration: {error}"))
+            })?;
+    let parsed_registration_hash: ObjectHash = registration_hash.parse().map_err(|error| {
+        DbError::Message(format!("local founder Store registration hash: {error}"))
+    })?;
+    if parsed_registration_hash != registration_value.registration_hash() {
+        return Err(DbError::Message(
+            "local founder registration hash differs from its bytes".to_string(),
+        ));
+    }
+    let registration_prepared: PreparedExactObject = serde_json::from_str(&registration_prepared)
+        .map_err(|error| {
+        DbError::Message(format!("local founder registration object: {error}"))
+    })?;
+    let initial_ack_ref: StoreAckRef = serde_json::from_str(&initial_ack_ref)
+        .map_err(|error| DbError::Message(format!("local founder initial ack ref: {error}")))?;
+    let initial_ack_value = StoreAck::parse_at(
+        &initial_ack_bytes,
+        root_ref.store_root_hash,
+        &initial_ack_ref,
+        &registration_value,
+    )
+    .map_err(|error| DbError::Message(format!("local founder initial ack: {error}")))?;
+    let initial_ack_prepared: PreparedExactObject = serde_json::from_str(&initial_ack_prepared)
+        .map_err(|error| DbError::Message(format!("local founder initial ack object: {error}")))?;
+    let membership = serde_json::from_str::<DurableFounderMembershipJournal>(&membership_graph)
+        .map_err(|error| DbError::Message(format!("local founder membership graph: {error}")))?
+        .into_graph()?;
+    let graph = DurableFounderGraph {
+        root: ExactProtocolObject {
+            value: root_value,
+            bytes: root_bytes,
+            object: root_prepared.reference().clone(),
+            prepared: root_prepared,
+        },
+        registration: ExactProtocolObject {
+            value: registration_value,
+            bytes: registration_bytes,
+            object: registration_prepared.reference().clone(),
+            prepared: registration_prepared,
+        },
+        initial_ack: ExactProtocolObject {
+            value: initial_ack_value,
+            bytes: initial_ack_bytes,
+            object: initial_ack_prepared.reference().clone(),
+            prepared: initial_ack_prepared,
+        },
+        initial_ack_ref,
+        membership,
+        registration_state,
+    };
+    validate_founder_graph(&graph)?;
+    Ok(Some(graph))
+}
+
+/// The exact commit coordinate that first made a blob locator authoritative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BlobActivation {
+    pub coord: StoreCommitCoord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedAudiencePackage {
+    remote_object_id: ObjectHash,
+    package: AudiencePackage,
+    semantic_bytes: Vec<u8>,
+    stored_bytes: Vec<u8>,
+    object: ExactObjectRef,
+}
+
+impl PreparedAudiencePackage {
+    fn from_remote(remote: RemoteObjectRecord) -> Result<Self, DbError> {
+        remote
+            .validate()
+            .map_err(|error| DbError::Message(format!("prepared remote package: {error}")))?;
+        let is_package = match &remote {
+            RemoteObjectRecord::CandidateExclusive(record) => matches!(
+                record.identity.domain,
+                CandidateExclusiveObjectDomain::StorePackage
+                    | CandidateExclusiveObjectDomain::CirclePackage { .. }
+            ),
+            RemoteObjectRecord::SharedLiveSet(record) => matches!(
+                record.identity.domain,
+                SharedLiveSetObjectDomain::StorePackage | SharedLiveSetObjectDomain::CirclePackage
+            ),
+        };
+        if !is_package {
+            return Err(DbError::Message(
+                "prepared package index references a non-package remote object".to_string(),
+            ));
+        }
+        let remote_object_id = remote.object_id();
+        let semantic_bytes = remote.bytes().canonical_semantic_bytes().to_vec();
+        let object = remote.object().clone();
+        let stored_bytes = remote
+            .bytes()
+            .stored()
+            .inline_bytes()
+            .ok_or_else(|| {
+                DbError::Message("prepared package remote object is not inline".to_string())
+            })?
+            .to_vec();
+        Self::new(remote_object_id, semantic_bytes, stored_bytes, object)
+    }
+
+    pub(crate) fn new(
+        remote_object_id: ObjectHash,
+        semantic_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        object: ExactObjectRef,
+    ) -> Result<Self, DbError> {
+        let package = AudiencePackage::parse(&semantic_bytes)
+            .map_err(|error| DbError::Message(format!("prepared audience package: {error}")))?;
+        object.verify(&stored_bytes).map_err(|error| {
+            DbError::Message(format!("prepared audience package stored bytes: {error}"))
+        })?;
+        Ok(Self {
+            remote_object_id,
+            package,
+            semantic_bytes,
+            stored_bytes,
+            object,
+        })
+    }
+
+    pub(crate) fn remote_object_id(&self) -> ObjectHash {
+        self.remote_object_id
+    }
+
+    pub(crate) fn package(&self) -> &AudiencePackage {
+        &self.package
+    }
+
+    pub(crate) fn semantic_bytes(&self) -> &[u8] {
+        &self.semantic_bytes
+    }
+
+    pub(crate) fn stored_bytes(&self) -> &[u8] {
+        &self.stored_bytes
+    }
+
+    pub(crate) fn object(&self) -> &ExactObjectRef {
+        &self.object
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedAudienceBlob {
+    remote_object_id: ObjectHash,
+    audience: RemoteAudience,
+    blob: StoredBlobRef,
+    spool_path: Option<PathBuf>,
+}
+
+impl PreparedAudienceBlob {
+    pub(crate) fn from_remote(
+        audience: RemoteAudience,
+        expected_locator_hash: &str,
+        remote: RemoteObjectRecord,
+        spool_path: Option<PathBuf>,
+    ) -> Result<Self, DbError> {
+        remote
+            .validate()
+            .map_err(|error| DbError::Message(format!("prepared remote blob: {error}")))?;
+        if !matches!(
+            &remote,
+            RemoteObjectRecord::SharedLiveSet(record)
+                if record.identity.domain == SharedLiveSetObjectDomain::StoredBlob
+        ) {
+            return Err(DbError::Message(
+                "prepared blob index references a non-blob remote object".to_string(),
+            ));
+        }
+        let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
+            .map_err(|error| DbError::Message(format!("prepared blob locator: {error}")))?;
+        if locator.locator_hash().to_string() != expected_locator_hash {
+            return Err(DbError::Message(format!(
+                "prepared blob locator hashes to {}, indexed as {expected_locator_hash}",
+                locator.locator_hash()
+            )));
+        }
+        if locator.audience() != audience {
+            return Err(DbError::Message(format!(
+                "prepared blob index audience {audience:?} differs from locator audience {:?}",
+                locator.audience()
+            )));
+        }
+        let requires_upload = matches!(
+            &remote,
+            RemoteObjectRecord::SharedLiveSet(record)
+                if matches!(record.state, crate::sync::remote_object::OwnedObjectState::Prepared { .. })
+        );
+        if requires_upload && spool_path.is_none() {
+            return Err(DbError::Message(
+                "prepared blob awaiting upload has no local spool".to_string(),
+            ));
+        }
+        if spool_path.as_ref().is_some_and(|path| !path.is_absolute()) {
+            return Err(DbError::Message(
+                "prepared blob local spool path is not absolute".to_string(),
+            ));
+        }
+        let blob = StoredBlobRef::new(locator, remote.object().clone())
+            .map_err(|error| DbError::Message(format!("prepared blob reference: {error}")))?;
+        Ok(Self {
+            remote_object_id: remote.object_id(),
+            audience,
+            blob,
+            spool_path,
+        })
+    }
+
+    pub(crate) fn remote_object_id(&self) -> ObjectHash {
+        self.remote_object_id
+    }
+
+    pub(crate) fn audience(&self) -> &RemoteAudience {
+        &self.audience
+    }
+
+    pub(crate) fn blob(&self) -> &StoredBlobRef {
+        &self.blob
+    }
+
+    pub(crate) fn spool_path(&self) -> Option<&Path> {
+        self.spool_path.as_deref()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedAudienceObjects {
+    pub packages: Vec<PreparedAudiencePackage>,
+    pub blobs: Vec<PreparedAudienceBlob>,
+}
+
+pub(crate) struct PreparedRemoteObject {
+    pub record: RemoteObjectRecord,
+    pub spool_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MakeRemoteIntentState {
+    Uploading,
+    Cancelling,
+    Publishing(WriteId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredBlobReferenceState {
+    NotLiveRemote,
+    LiveRemote,
+    Unresolved,
+}
+
+fn validate_prepared_audience_blob_graph(
+    object_ids: &std::collections::BTreeSet<ObjectHash>,
+    audiences: &PreparedAudienceObjects,
+) -> Result<(), DbError> {
+    let mut indexed = std::collections::BTreeSet::new();
+    for package in &audiences.packages {
+        if !indexed.insert(package.remote_object_id()) {
+            return Err(DbError::Message(
+                "prepared audience objects contain a duplicate package body".to_string(),
+            ));
+        }
+    }
+    for blob in &audiences.blobs {
+        if !indexed.insert(blob.remote_object_id()) {
+            return Err(DbError::Message(
+                "prepared audience objects contain a duplicate blob body".to_string(),
+            ));
+        }
+    }
+    if &indexed != object_ids {
+        return Err(DbError::Message(
+            "closed remote objects differ from package/blob indexes".to_string(),
+        ));
+    }
+    validate_prepared_audience_blob_bindings(audiences)
+}
+
+fn validate_prepared_audience_blob_bindings(
+    audiences: &PreparedAudienceObjects,
+) -> Result<(), DbError> {
+    for package in &audiences.packages {
+        let audience = package.package().audience().remote_audience();
+        for binding in package.package().blob_bindings() {
+            if !audiences
+                .blobs
+                .iter()
+                .any(|blob| blob.audience() == &audience && blob.blob() == binding.blob())
+            {
+                return Err(DbError::Message(
+                    "prepared package blob binding has no exact blob index".to_string(),
+                ));
+            }
+        }
+    }
+    for blob in &audiences.blobs {
+        if !audiences.packages.iter().any(|package| {
+            package.package().audience().remote_audience() == *blob.audience()
+                && package
+                    .package()
+                    .blob_bindings()
+                    .iter()
+                    .any(|binding| binding.blob() == blob.blob())
+        }) {
+            return Err(DbError::Message(
+                "prepared blob index has no exact package binding".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "invariant-tests")]
+#[doc(hidden)]
+pub fn exercise_exact_outbound_blob_graph(
+    circle: bool,
+    include_body: bool,
+    include_locator: bool,
+    include_binding: bool,
+) -> Result<(), String> {
+    use crate::blob::BlobScope;
+    use crate::storage::cloud::ObjectSlot;
+    use crate::sync::audience_package::RowBlobLocatorBinding;
+    use crate::sync::circle::CircleId;
+    use crate::sync::circle_control::CircleControlCoord;
+    use crate::sync::store_commit::{CandidateFamilyId, StoreCommitCoord};
+
+    let store_root_hash = ObjectHash::digest(b"outbound-graph-store");
+    let write_id = WriteId::from_generated("outbound-graph-write".to_string());
+    let coord = StoreCommitCoord::Serial { sequence: 1 };
+    let candidate_family = CandidateFamilyId::from_hash(ObjectHash::digest(b"outbound-family"));
+    let remote_audience = if circle {
+        RemoteAudience::Circle(CircleId::from_bytes([7; 16]))
+    } else {
+        RemoteAudience::Store
+    };
+    let uploader_bytes = b"outbound graph uploader registration";
+    let uploader = StoreDeviceRegistrationRef {
+        device_id: "01"
+            .repeat(32)
+            .parse::<crate::sync::store_commit::StoreDeviceId>()
+            .map_err(|error| error.to_string())?,
+        registration_hash: ObjectHash::digest(uploader_bytes),
+        object: ExactObjectRef::new(
+            ObjectSlot::logical("store-v1/registrations/outbound-graph.json".to_string())
+                .map_err(|error| error.to_string())?,
+            uploader_bytes.len() as u64,
+            ObjectHash::digest(uploader_bytes),
+        ),
+    };
+    let locator = BlobLocator::opaque(
+        "media".to_string(),
+        "blob-a".to_string(),
+        uploader,
+        remote_audience.clone(),
+        BlobScope::Master,
+        crate::KeyFingerprint::from_bytes([3; 8]),
+        7,
+        ObjectHash::digest(b"content"),
+    )
+    .map_err(|error| error.to_string())?;
+    let stored_bytes = b"sealed-content".to_vec();
+    let object = ExactObjectRef::new(
+        ObjectSlot::logical(locator.semantic_key()).map_err(|error| error.to_string())?,
+        stored_bytes.len() as u64,
+        ObjectHash::digest(&stored_bytes),
+    );
+    let stored = StoredBlobRef::new(locator, object).map_err(|error| error.to_string())?;
+    let bindings = if include_binding {
+        vec![
+            RowBlobLocatorBinding::new("items", "row-a", "stamp-a", "media_blob", stored.clone())
+                .map_err(|error| error.to_string())?,
+        ]
+    } else {
+        Vec::new()
+    };
+    let package = if let RemoteAudience::Circle(circle_id) = remote_audience {
+        AudiencePackage::circle(
+            store_root_hash,
+            candidate_family,
+            write_id.clone(),
+            coord,
+            1,
+            circle_id,
+            CircleControlCoord::Serial {
+                author_pubkey: "author-a".to_string(),
+                generation: 1,
+                control_hash: ObjectHash::digest(b"circle-control"),
+            },
+            crate::KeyFingerprint::from_bytes([3; 8]),
+            b"changeset".to_vec(),
+            bindings,
+        )
+    } else {
+        AudiencePackage::store(
+            store_root_hash,
+            candidate_family,
+            write_id,
+            coord,
+            1,
+            b"changeset".to_vec(),
+            bindings,
+        )
+    }
+    .map_err(|error| error.to_string())?;
+    let package_bytes = package.to_bytes();
+    let package_object = ExactObjectRef::new(
+        ObjectSlot::logical("test/package".to_string()).map_err(|error| error.to_string())?,
+        package_bytes.len() as u64,
+        ObjectHash::digest(&package_bytes),
+    );
+    let package_id = ObjectHash::digest(b"package-record");
+    let blob_id = ObjectHash::digest(b"blob-record");
+    let packages = vec![PreparedAudiencePackage::new(
+        package_id,
+        package_bytes.clone(),
+        package_bytes,
+        package_object,
+    )
+    .map_err(|error| error.to_string())?];
+    let blobs = if include_locator {
+        vec![PreparedAudienceBlob {
+            remote_object_id: blob_id,
+            audience: remote_audience,
+            blob: stored,
+            spool_path: Some(PathBuf::from("/outbound-blob.spool")),
+        }]
+    } else {
+        Vec::new()
+    };
+    let mut object_ids = std::collections::BTreeSet::from([package_id]);
+    if include_body {
+        object_ids.insert(blob_id);
+    }
+    validate_prepared_audience_blob_graph(&object_ids, &PreparedAudienceObjects { packages, blobs })
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct DurableDeviceRegistration {
-    pub revision: u64,
+    pub device_id: crate::sync::store_commit::StoreDeviceId,
     pub registration_hash: ObjectHash,
-    pub previous_registration_hash: Option<ObjectHash>,
-    pub state: StoreDeviceRegistrationState,
     pub registration_bytes: Vec<u8>,
-    pub activation_base_head_bytes: Option<Vec<u8>>,
-    pub activation_commit_bytes: Option<Vec<u8>>,
-    pub activation_head_bytes: Option<Vec<u8>>,
-    pub published: bool,
+    pub prepared: PreparedExactObject,
+    pub initial_ack_ref: StoreAckRef,
+    pub initial_ack: ExactProtocolObject<StoreAck>,
+    pub state: LocalDeviceRegistrationState,
 }
 
-struct StoredDeviceRegistrationActivation {
-    registration_bytes: Vec<u8>,
-    base_head_bytes: Option<Vec<u8>>,
-    commit_bytes: Option<Vec<u8>>,
-    head_bytes: Option<Vec<u8>>,
-    published: i64,
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum LocalDeviceRegistrationState {
+    Prepared,
+    Created,
+    Activated {
+        authority: crate::sync::store_commit::StoreDeviceRegistrationActivation,
+    },
+    Retired {
+        authority: crate::sync::store_commit::StoreDeviceRegistrationActivation,
+        retirement: crate::sync::store_commit::StoreDeviceSelfRetirementRef,
+    },
+}
+
+type PreparedLocalDeviceRegistrationRow =
+    (String, String, Vec<u8>, String, String, Vec<u8>, String);
+type LocalDeviceRegistrationJournalRow = (
+    String,
+    String,
+    Vec<u8>,
+    String,
+    String,
+    Vec<u8>,
+    String,
+    String,
+);
+
+impl DurableDeviceRegistration {
+    pub(crate) fn is_activated(&self) -> bool {
+        matches!(self.state, LocalDeviceRegistrationState::Activated { .. })
+    }
+
+    pub(crate) fn is_retired(&self) -> bool {
+        matches!(self.state, LocalDeviceRegistrationState::Retired { .. })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -982,35 +2263,52 @@ pub(crate) struct DurableMembershipMutation {
 
 #[derive(Debug, Clone)]
 pub(crate) struct DurableSnapshotPublication {
-    pub snapshot_hash: ObjectHash,
-    pub image_hash: ObjectHash,
-    pub image_bytes: Vec<u8>,
-    pub meta_bytes: Vec<u8>,
+    pub reference: StoreSnapshotRef,
+    pub meta: ExactProtocolObject<SnapshotMeta>,
+    pub image: ExactProtocolObject<Vec<u8>>,
+    pub blobs: Vec<PreparedSnapshotBlob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreparedSnapshotBlob {
+    pub bindings: Vec<RowBlobLocatorBinding>,
+    pub authority: crate::sync::audience_package::PackageAudience,
+    pub remote: RemoteObjectRecord,
+    pub spool_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PublishedStoreSnapshot {
+    pub reference: StoreSnapshotRef,
+    pub successor_slot: crate::storage::cloud::ObjectSlot,
+    pub meta: SnapshotMeta,
 }
 
 pub(crate) struct StoreWritePreparation {
     pub write_id: WriteId,
-    pub package_bytes: Vec<u8>,
-    pub commit: StoreBatchCommit,
-    pub head: StoreDeviceHead,
-    pub blob_manifest: StoreBlobManifest,
+    pub remote_objects: Vec<RemoteObjectRecord>,
+    pub audiences: PreparedAudienceObjects,
+    pub commit: PreparedProtocolObject<StoreBatchCommit>,
+    pub head: PreparedProtocolObject<StoreDeviceHead>,
     pub local_cleanup: StoreBatchLocalCleanup,
     pub completion: StoreBatchCompletion,
 }
 
 pub(crate) struct SerialStoreWritePreparation {
     pub branch_id: PendingBranchId,
-    pub base: Option<CommitPosition>,
+    pub base: Option<StoreBatchCommitRef>,
     pub base_head_bytes: Option<Vec<u8>>,
+    pub base_head_version: Option<VersionToken>,
     pub writes: Vec<SerialStoreWritePreparationEntry>,
     pub head: StoreSerialHead,
 }
 
 pub(crate) struct SerialStoreWritePreparationEntry {
     pub write_id: WriteId,
-    pub package_bytes: Vec<u8>,
-    pub commit: StoreBatchCommit,
-    pub blob_manifest: StoreBlobManifest,
+    pub remote_objects: Vec<RemoteObjectRecord>,
+    pub audiences: PreparedAudienceObjects,
+    pub commit: PreparedProtocolObject<StoreBatchCommit>,
     pub local_cleanup: StoreBatchLocalCleanup,
     pub completion: StoreBatchCompletion,
 }
@@ -1019,18 +2317,17 @@ pub(crate) struct SerialStoreWritePreparationEntry {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum PreparedStoreWriteState {
     MergeConcurrent {
-        commit_bytes: Vec<u8>,
-        head_bytes: Vec<u8>,
-        blob_manifest: StoreBlobManifest,
+        commit: DurablePreparedProtocolObject,
+        head: DurablePreparedProtocolObject,
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
     },
     SerialPreparing,
     Serial {
         base_head_bytes: Option<Vec<u8>>,
-        commit_bytes: Vec<u8>,
+        base_head_version: Option<VersionToken>,
+        commit: DurablePreparedProtocolObject,
         tip_head_bytes: Option<Vec<u8>>,
-        blob_manifest: StoreBlobManifest,
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
     },
@@ -1038,8 +2335,9 @@ enum PreparedStoreWriteState {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoreBlobManifest {
-    pub blobs: Vec<BlobRef>,
+struct DurablePreparedProtocolObject {
+    semantic_bytes: Vec<u8>,
+    prepared: PreparedExactObject,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1050,16 +2348,7 @@ pub(crate) struct StoreBatchLocalCleanup {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StoreBatchCompletion {
-    pub consumed_make_remote_intents: Vec<StoreConsumedMakeRemoteIntent>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct StoreConsumedMakeRemoteIntent {
-    pub root_table: String,
-    pub root_id: String,
-}
+pub(crate) struct StoreBatchCompletion {}
 
 fn validate_host_synced_tables(
     conn: &Connection,
@@ -1399,7 +2688,7 @@ impl Database {
     }
 
     pub async fn pending_writes(&self) -> Result<Vec<PendingWrite>, DbError> {
-        self.call(|conn| {
+        self.call(move |conn| {
             let mut statement = conn
                 .prepare(
                     "SELECT write_id, status, affected_rows FROM store_writes
@@ -1665,7 +2954,7 @@ impl Database {
                     schema.clone(),
                 )
                 .map_err(|error| DbError::Message(format!("invalid blocked-write inverse: {error}")))?;
-                crate::sync::apply::apply_changeset_strict_on(&tx, inverse, &[])
+                crate::sync::apply::apply_changeset_strict_on(&tx, inverse)
                     .map_err(|error| DbError::Message(format!("reverse blocked-write suffix: {error}")))?;
             }
             let discarded_ids: Vec<_> = discarded
@@ -1726,6 +3015,7 @@ impl Database {
             drop(statement);
 
             let mut conflict = None;
+            let mut conflict_exact_base = None;
             for (write, base) in &records {
                 let WriteStatus::Conflict(candidate) = &write.status else {
                     continue;
@@ -1739,13 +3029,18 @@ impl Database {
                         "MergeConcurrent base carries a Serial conflict".to_string(),
                     ));
                 };
-                if branch_id != &candidate.branch_id || stored_base != &candidate.base {
+                if branch_id != &candidate.branch_id
+                    || stored_base.as_ref().map(StoreBatchCommitRef::position) != candidate.base
+                {
                     return Err(DbError::Message(
                         "Serial conflict status differs from its durable branch base".to_string(),
                     ));
                 }
                 match &conflict {
-                    None => conflict = Some(candidate.clone()),
+                    None => {
+                        conflict = Some(candidate.clone());
+                        conflict_exact_base = Some(stored_base.clone());
+                    }
                     Some(existing) if existing == candidate => {}
                     Some(_) => {
                         return Err(DbError::Message(
@@ -1759,7 +3054,7 @@ impl Database {
             };
             let expected_base = StoreWriteBase::Serial {
                 branch_id: conflict.branch_id.clone(),
-                base: conflict.base.clone(),
+                base: conflict_exact_base.expect("conflict row carries exact base"),
             };
             let mut writes = Vec::new();
             for (write, base) in records {
@@ -1790,6 +3085,25 @@ impl Database {
             }))
         })
         .await
+    }
+
+    pub async fn conflicted_serial_branch_base(
+        &self,
+        branch_id: &PendingBranchId,
+    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
+        let branch = self.unresolved_serial_branch().await?.ok_or_else(|| {
+            DbError::Message(format!(
+                "Serial branch {} does not exist",
+                branch_id.first_write_id()
+            ))
+        })?;
+        if &branch.branch_id != branch_id || !branch.conflicted {
+            return Err(DbError::Message(format!(
+                "Serial branch {} is not conflicted",
+                branch_id.first_write_id()
+            )));
+        }
+        Ok(branch.base)
     }
 
     pub(crate) async fn unresolved_serial_branch(
@@ -2280,77 +3594,72 @@ impl Database {
     fn capture_store_write_blob_facts_on(
         tx: &rusqlite::Transaction<'_>,
         changeset: &[u8],
-        gates: &Gates,
         blob_decls: &BlobDecls,
     ) -> Result<StoreWriteBlobFacts, DbError> {
         let changes = crate::changeset::walk(changeset)
             .map_err(|error| DbError::Message(format!("read Store write blobs: {error}")))?;
         let mut facts = BTreeMap::new();
         for change in changes {
-            let Some((blob, size)) = blob_decls
+            let Some(publication) = blob_decls
                 .publication_blob_from_change(tx, &change)
                 .map_err(|error| DbError::Message(format!("capture Store write blob: {error}")))?
             else {
                 continue;
             };
-            let pk = change.pk().ok_or_else(|| {
+            let plaintext_hash = publication.plaintext_hash.parse().map_err(|error| {
                 DbError::Message(format!(
-                    "blob-bearing Store write row in {:?} has no primary key",
-                    change.table
+                    "capture Store write blob {}/{} plaintext hash: {error}",
+                    publication.blob.namespace, publication.blob.id
                 ))
             })?;
-            let fact = match blob.provenance {
-                Provenance::UserProvided => {
-                    let local = tx
-                        .query_row(
-                            "SELECT 1 FROM local_blob_refs WHERE blob_id = ?1",
-                            [&blob.id],
-                            |_| Ok(()),
-                        )
-                        .optional()
-                        .map_err(DbError::from)?
-                        .is_some();
-                    StoreWriteBlobFact::UserProvided {
-                        blob,
-                        state: if local {
-                            StoreWriteUserBlobState::Local
-                        } else {
-                            StoreWriteUserBlobState::Remote
-                        },
-                    }
-                }
-                Provenance::HostProvided => {
-                    let state =
-                        match gates
-                            .resolve_root_of(tx, &change.table, pk)
-                            .map_err(|error| {
-                                DbError::Message(format!("resolve Store write blob root: {error}"))
-                            })? {
-                            Some((root_table, root_id)) => {
-                                match Self::make_remote_intent_retain_pinned(
-                                    tx,
-                                    &root_table,
-                                    &root_id,
-                                )? {
-                                    Some(retain_pinned) => StoreWriteHostBlobState::MakeRemote {
-                                        root_table,
-                                        root_id,
-                                        retain_pinned,
-                                    },
-                                    None => StoreWriteHostBlobState::Ordinary,
-                                }
-                            }
-                            None => StoreWriteHostBlobState::Ordinary,
-                        };
-                    StoreWriteBlobFact::HostProvided { blob, size, state }
-                }
+            let external_path = if publication.blob.provenance == Provenance::UserProvided {
+                tx.query_row(
+                    "SELECT path FROM local_blob_refs
+                     WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
+                       AND row_stamp = ?4 AND namespace = ?5 AND blob_id = ?6",
+                    rusqlite::params![
+                        publication.table,
+                        publication.row_id,
+                        publication.column,
+                        publication.row_stamp,
+                        publication.blob.namespace,
+                        publication.blob.id,
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?
+                .map(PathBuf::from)
+            } else {
+                None
             };
-            let key = (fact.blob().namespace.clone(), fact.blob().id.clone());
+            let previous = previous_row_blob_for_write_on(
+                tx,
+                &publication.table,
+                &publication.row_id,
+                &publication.row_stamp,
+                &publication.column,
+                &publication.blob,
+                publication.plaintext_size,
+                plaintext_hash,
+            )?;
+            let fact = StoreWriteBlobFact {
+                table: publication.table,
+                row_id: publication.row_id,
+                row_stamp: publication.row_stamp,
+                column: publication.column,
+                blob: publication.blob,
+                plaintext_size: publication.plaintext_size,
+                plaintext_hash,
+                external_path,
+                previous,
+            };
+            let key = fact.identity_key();
             if let Some(prior) = facts.insert(key.clone(), fact.clone()) {
                 if prior != fact {
                     return Err(DbError::Message(format!(
-                        "Store write gives blob {}/{} conflicting publication facts",
-                        key.0, key.1
+                        "Store write gives row {}/{}/{} at {} conflicting blob facts",
+                        key.0, key.1, key.2, key.3
                     )));
                 }
             }
@@ -2363,25 +3672,19 @@ impl Database {
     fn capture_partition_blob_facts_on(
         tx: &rusqlite::Transaction<'_>,
         partitions: &[gate::AudiencePartition],
-        gates: &Gates,
         blob_decls: &BlobDecls,
     ) -> Result<StoreWriteBlobFacts, DbError> {
         let mut facts = BTreeMap::new();
         for partition in partitions {
-            for fact in Self::capture_store_write_blob_facts_on(
-                tx,
-                &partition.changeset,
-                gates,
-                blob_decls,
-            )?
-            .blobs
+            for fact in
+                Self::capture_store_write_blob_facts_on(tx, &partition.changeset, blob_decls)?.blobs
             {
-                let key = (fact.blob().namespace.clone(), fact.blob().id.clone());
+                let key = fact.identity_key();
                 if let Some(prior) = facts.insert(key.clone(), fact.clone()) {
                     if prior != fact {
                         return Err(DbError::Message(format!(
-                            "audience partitions give blob {}/{} conflicting publication facts",
-                            key.0, key.1
+                            "audience partitions give row {}/{}/{} at {} conflicting blob facts",
+                            key.0, key.1, key.2, key.3
                         )));
                     }
                 }
@@ -2588,13 +3891,13 @@ impl Database {
         }
         if status == WriteStatus::Pending {
             for fact in &blob_facts.blobs {
-                let StoreWriteBlobFact::HostProvided { blob, .. } = fact else {
+                if fact.blob.provenance != Provenance::HostProvided {
                     continue;
-                };
+                }
                 tx.execute(
-                    "INSERT INTO store_write_blob_leases (write_id, namespace, blob_id) \
-                     VALUES (?1, ?2, ?3)",
-                    (write_id.as_str(), &blob.namespace, &blob.id),
+                    "INSERT OR IGNORE INTO store_write_blob_leases
+                     (write_id, namespace, blob_id) VALUES (?1, ?2, ?3)",
+                    (write_id.as_str(), &fact.blob.namespace, &fact.blob.id),
                 )
                 .map_err(DbError::from)?;
             }
@@ -2627,22 +3930,14 @@ impl Database {
             let partitions =
                 Self::partition_captured_write_on(&tx, &captured, gates, write_policy, routing)
                     .map_err(E::from)?;
-            let blob_facts =
-                Self::capture_partition_blob_facts_on(&tx, &partitions, gates, blob_decls)
-                    .map_err(E::from)?;
-            let rows_changed = conn.total_changes().saturating_sub(changes_before);
-            let local_device_id: String = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [LOCAL_DEVICE_ID_STATE_KEY],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)
+            let blob_facts = Self::capture_partition_blob_facts_on(&tx, &partitions, blob_decls)
                 .map_err(E::from)?;
+            let rows_changed = conn.total_changes().saturating_sub(changes_before);
+            let local_stream_id = local_merge_stream_id_on(&tx).map_err(E::from)?;
             let inverse_changeset = Self::invert_changeset(&captured).map_err(E::from)?;
             let base = match write_policy {
                 WritePolicy::MergeConcurrent => StoreWriteBase::MergeConcurrent {
-                    dependencies: Self::materialized_frontier_on(&tx, Some(&local_device_id))
+                    dependencies: Self::materialized_frontier_on(&tx, local_stream_id.as_deref())
                         .map_err(E::from)?,
                 },
                 WritePolicy::Serial => {
@@ -3014,21 +4309,14 @@ impl Database {
         changeset: Vec<u8>,
     ) -> Result<(), DbError> {
         let write_id = self.new_write_id();
-        let gates = self.gates();
         let blob_decls = self.blob_decls();
         let write_policy = self.write_policy();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let local_device_id: String = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [LOCAL_DEVICE_ID_STATE_KEY],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
+            let local_stream_id = local_merge_stream_id_on(&tx)?;
             let base = match write_policy {
                 WritePolicy::MergeConcurrent => StoreWriteBase::MergeConcurrent {
-                    dependencies: Self::materialized_frontier_on(&tx, Some(&local_device_id))?,
+                    dependencies: Self::materialized_frontier_on(&tx, local_stream_id.as_deref())?,
                 },
                 WritePolicy::Serial => StoreWriteBase::Serial {
                     branch_id: PendingBranchId::from_first_write(write_id.clone()),
@@ -3041,8 +4329,7 @@ impl Database {
                 control: None,
                 changeset,
             }];
-            let blob_facts =
-                Self::capture_partition_blob_facts_on(&tx, &partitions, &gates, &blob_decls)?;
+            let blob_facts = Self::capture_partition_blob_facts_on(&tx, &partitions, &blob_decls)?;
             Self::insert_store_write_on(
                 &tx,
                 &write_id,
@@ -3065,43 +4352,71 @@ impl Database {
         let statuses = self.state.write_statuses.clone();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let local_device_id: String = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [LOCAL_DEVICE_ID_STATE_KEY],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            if stage.commit.device_id != local_device_id || stage.head.device_id != local_device_id
+            let local_device_id: String = tx.query_row(
+                "SELECT value FROM protocol_state WHERE key = ?1",
+                [LOCAL_DEVICE_ID_STATE_KEY],
+                |row| row.get(0),
+            ).map_err(DbError::from)?;
+            let root = required_store_root_authority_on(&tx)?;
+            let (registration_bytes, registration_object): (Vec<u8>, String) = tx.query_row(
+                "SELECT registration_bytes, registration_object \
+                 FROM store_device_registration_activations WHERE device_id = ?1",
+                [&local_device_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(DbError::from)?;
+            let registration_ref: StoreDeviceRegistrationRef =
+                serde_json::from_str(&registration_object).map_err(|error| {
+                    DbError::Message(format!("prepared write exact registration ref: {error}"))
+                })?;
+            if registration_ref != stage.commit.value.author_registration
+                || registration_ref != stage.head.value.author_registration
             {
-                return Err(DbError::Message(format!(
-                    "prepared Store write belongs to {:?}/{:?}, local device is {:?}",
-                    stage.commit.device_id, stage.head.device_id, local_device_id
-                )));
+                return Err(DbError::Message(
+                    "prepared Store commit/head author registration differs from local activation"
+                        .to_string(),
+                ));
             }
-            let store_root_hash = Self::required_store_root_hash_on(&tx)?;
-            stage
-                .commit
-                .verify_at(
-                    store_root_hash,
-                    WritePolicy::MergeConcurrent,
-                    &local_device_id,
-                    stage.commit.seq(),
-                )
-                .map_err(|error| {
-                    DbError::Message(format!("verify prepared Store commit: {error}"))
-                })?;
-            stage
-                .commit
-                .verify_store_package(&stage.package_bytes)
-                .map_err(|error| {
-                    DbError::Message(format!("verify prepared Store package: {error}"))
-                })?;
-            if stage.commit.write_id != stage.write_id {
+            let registration = StoreDeviceRegistration::parse_at(
+                &registration_bytes,
+                &root,
+                registration_ref.device_id,
+            ).map_err(|error| DbError::Message(format!(
+                "prepared write author registration: {error}"
+            )))?;
+            registration_ref.verify_registration(&registration)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let stream_id = AuthorStreamId::store_announcements(&root, &registration_ref);
+            let coord = StoreCommitCoord::MergeConcurrent {
+                stream_id,
+                sequence: stage.commit.value.seq(),
+            };
+            stage.commit.value.verify_at(root.store_root_hash, &coord, &registration)
+                .map_err(|error| DbError::Message(format!(
+                    "verify prepared Store commit: {error}"
+                )))?;
+            if stage.commit.value.write_id != stage.write_id {
                 return Err(DbError::Message(
                     "prepared write id differs from signed commit".to_string(),
                 ));
             }
+            let commit_ref = StoreBatchCommitRef::from_commit(
+                &stage.commit.value,
+                coord,
+                stage.commit.prepared.reference().clone(),
+            ).map_err(|error| DbError::Message(error.to_string()))?;
+            if stage.head.value.commit != commit_ref {
+                return Err(DbError::Message(
+                    "prepared Store head does not activate the exact prepared commit".to_string(),
+                ));
+            }
+            StoreDeviceHead::parse_at(
+                &stage.head.value.to_bytes(),
+                root.store_root_hash,
+                &registration,
+                &commit_ref,
+            ).map_err(|error| DbError::Message(format!(
+                "verify prepared Store head: {error}"
+            )))?;
             let (stored_changeset, stored_base, stored_status, stored_preparation): (
                 Vec<u8>,
                 String,
@@ -3121,12 +4436,12 @@ impl Database {
                     stage.write_id
                 )));
             }
-            if stored_changeset != stage.package_bytes {
-                return Err(DbError::Message(format!(
-                    "prepared package differs from write {} changeset",
-                    stage.write_id
-                )));
-            }
+            let partitions = Self::prepared_store_write_partitions_on(
+                &tx,
+                stage.write_id.as_str(),
+                &stored_changeset,
+                WritePolicy::MergeConcurrent,
+            )?;
             let stored_base: StoreWriteBase =
                 serde_json::from_str(&stored_base).map_err(|error| {
                     DbError::Message(format!("write {} base: {error}", stage.write_id))
@@ -3140,11 +4455,17 @@ impl Database {
                     stage.write_id
                 )));
             };
-            if stored_dependencies
-                != *stage.commit.merge_dependencies().map_err(|error| {
-                    DbError::Message(format!("prepared Store commit policy: {error}"))
-                })?
-            {
+            let stored_dependencies = CommitFrontier::from_refs(
+                WritePolicy::MergeConcurrent,
+                stored_dependencies,
+            ).map_err(|error| DbError::Message(format!(
+                "stored write dependencies: {error}"
+            )))?;
+            if stored_dependencies.merge_commits().map_err(|error| {
+                DbError::Message(error.to_string())
+            })? != stage.commit.value.merge_dependencies().map_err(|error| {
+                DbError::Message(format!("prepared Store commit policy: {error}"))
+            })? {
                 return Err(DbError::Message(format!(
                     "prepared commit dependencies differ from write {}",
                     stage.write_id
@@ -3165,45 +4486,39 @@ impl Database {
                     "write {other_write_id} already owns Store publication"
                 )));
             }
-            let expected_position = stage.commit.position();
-            if stage.head.position.as_ref() != Some(&expected_position) {
-                return Err(DbError::Message(
-                    "outbound Store head does not activate its commit".to_string(),
-                ));
-            }
-            let head_bytes = stage.head.to_bytes();
-            let parsed_head = StoreDeviceHead::parse_at(
-                &head_bytes,
-                store_root_hash,
-                &local_device_id,
-                stage.commit.seq(),
-            )
-            .map_err(|error| DbError::Message(format!("verify prepared Store head: {error}")))?;
-            if parsed_head != stage.head {
-                return Err(DbError::Message(
-                    "prepared Store head changed during encoding".to_string(),
-                ));
-            }
-
-            let durable_predecessor = Self::latest_position_for_device_on(&tx, &local_device_id)?;
+            let durable_predecessor =
+                Self::latest_position_for_device_on(&tx, &stream_id.to_string())?;
             let expected_seq = durable_predecessor
                 .as_ref()
-                .map_or(1, |position| position.seq.saturating_add(1));
-            let expected_hash = durable_predecessor.map(|position| position.commit_hash);
-            if stage.commit.seq() != expected_seq
-                || stage.commit.previous_commit_hash() != expected_hash
+                .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+            if stage.commit.value.seq() != expected_seq
+                || stage.commit.value.order.predecessor() != durable_predecessor.as_ref()
             {
                 return Err(DbError::Message(format!(
-                    "outbound Store commit is {}/{:?}, expected {expected_seq}/{expected_hash:?}",
-                    stage.commit.seq(),
-                    stage.commit.previous_commit_hash()
+                    "outbound Store commit exact predecessor differs from durable {durable_predecessor:?}"
                 )));
             }
 
+            Self::persist_closed_write_objects_on(
+                &tx,
+                &stage.write_id,
+                root.store_root_hash,
+                &commit_ref,
+                &stage.commit.value,
+                &partitions,
+                &stage.remote_objects,
+                &stage.audiences,
+            )?;
+
             let prepared = PreparedStoreWriteState::MergeConcurrent {
-                commit_bytes: stage.commit.to_bytes(),
-                head_bytes,
-                blob_manifest: stage.blob_manifest,
+                commit: DurablePreparedProtocolObject {
+                    semantic_bytes: stage.commit.value.to_bytes(),
+                    prepared: stage.commit.prepared,
+                },
+                head: DurablePreparedProtocolObject {
+                    semantic_bytes: stage.head.value.to_bytes(),
+                    prepared: stage.head.prepared,
+                },
                 local_cleanup: stage.local_cleanup,
                 completion: stage.completion,
             };
@@ -3255,33 +4570,73 @@ impl Database {
                     |row| row.get(0),
                 )
                 .map_err(DbError::from)?;
-            let store_root_hash = Self::required_store_root_hash_on(&tx)?;
+            let root = required_store_root_authority_on(&tx)?;
             let expected_base = StoreWriteBase::Serial {
                 branch_id: stage.branch_id.clone(),
                 base: stage.base.clone(),
             };
+            if stage.base_head_bytes.is_some() != stage.base_head_version.is_some() {
+                return Err(DbError::Message(
+                    "Serial base head bytes and opaque version receipt must be present together"
+                        .to_string(),
+                ));
+            }
+            match stage.base_head_bytes.as_deref() {
+                Some(bytes) => {
+                    let unverified: StoreSerialHead = serde_json::from_slice(bytes)
+                        .map_err(|error| DbError::Message(format!("Serial base head: {error}")))?;
+                    let executor_ref = match &unverified.state {
+                        StoreSerialHeadState::Genesis {
+                            founder_registration,
+                            ..
+                        } => founder_registration,
+                        StoreSerialHeadState::Commit {
+                            author_registration,
+                            ..
+                        } => author_registration,
+                    };
+                    let executor = load_activated_registration_on(&tx, &root, executor_ref)?;
+                    let verified = StoreSerialHead::parse(bytes, root.store_root_hash, &executor)
+                        .map_err(|error| {
+                        DbError::Message(format!("verify Serial base head: {error}"))
+                    })?;
+                    let base_ref = match verified.state {
+                        StoreSerialHeadState::Genesis {
+                            root: head_root,
+                            founder_registration,
+                        } => {
+                            if head_root != root || founder_registration != executor_ref.clone() {
+                                return Err(DbError::Message(
+                                    "Serial genesis head differs from exact Store authority"
+                                        .to_string(),
+                                ));
+                            }
+                            None
+                        }
+                        StoreSerialHeadState::Commit { commit, .. } => Some(commit),
+                    };
+                    if base_ref != stage.base {
+                        return Err(DbError::Message(
+                            "Serial branch base differs from the exact observed head".to_string(),
+                        ));
+                    }
+                }
+                None if stage.base.is_some() => {
+                    return Err(DbError::Message(
+                        "Serial branch has a base commit without observed head evidence"
+                            .to_string(),
+                    ));
+                }
+                None => {}
+            }
             let head_bytes = stage.head.to_bytes();
-            let parsed_head =
-                StoreSerialHead::parse(&head_bytes, store_root_hash).map_err(|error| {
-                    DbError::Message(format!("verify prepared Serial head: {error}"))
-                })?;
-            if parsed_head != stage.head {
-                return Err(DbError::Message(
-                    "prepared Serial head changed during encoding".to_string(),
-                ));
-            }
-            let tip = stage.writes.last().expect("nonempty checked above");
-            if stage.head.commit.as_ref() != Some(&tip.commit.position())
-                || stage.head.tip_write_id.as_ref() != Some(&tip.write_id)
-            {
-                return Err(DbError::Message(
-                    "prepared Serial head does not activate the branch tip".to_string(),
-                ));
-            }
             let mut predecessor = stage.base.clone();
+            let mut tip_ref = None;
+            let mut tip_registration = None;
             for (index, write) in stage.writes.iter().enumerate() {
-                if write.commit.write_id != write.write_id
-                    || write.commit.device_id != local_device_id
+                if write.commit.value.write_id != write.write_id
+                    || write.commit.value.author_registration.device_id.to_string()
+                        != local_device_id
                 {
                     return Err(DbError::Message(format!(
                         "prepared Serial write {} identity differs from its commit",
@@ -3290,31 +4645,58 @@ impl Database {
                 }
                 let expected_seq = predecessor
                     .as_ref()
-                    .map_or(1, |position| position.seq.saturating_add(1));
-                let expected_hash = predecessor.as_ref().map(|position| position.commit_hash);
+                    .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+                let coord = StoreCommitCoord::Serial {
+                    sequence: expected_seq,
+                };
+                let registration = load_activated_registration_on(
+                    &tx,
+                    &root,
+                    &write.commit.value.author_registration,
+                )?;
                 write
                     .commit
-                    .verify_at(
-                        store_root_hash,
-                        WritePolicy::Serial,
-                        SERIAL_STREAM_ID,
-                        expected_seq,
-                    )
+                    .value
+                    .verify_at(root.store_root_hash, &coord, &registration)
                     .map_err(|error| {
                         DbError::Message(format!("verify prepared Serial commit: {error}"))
                     })?;
-                write
-                    .commit
-                    .verify_store_package(&write.package_bytes)
-                    .map_err(|error| {
-                        DbError::Message(format!("verify prepared Serial package: {error}"))
-                    })?;
-                if write.commit.previous_commit_hash() != expected_hash {
+                let order_matches = match (&predecessor, &write.commit.value.order) {
+                    (
+                        Some(expected),
+                        crate::sync::store_commit::StoreCommitOrder::Serial {
+                            predecessor: StoreSerialPredecessor::Commit(actual),
+                            ..
+                        },
+                    ) => actual == expected,
+                    (
+                        None,
+                        crate::sync::store_commit::StoreCommitOrder::Serial {
+                            predecessor:
+                                StoreSerialPredecessor::Genesis {
+                                    root: commit_root,
+                                    founder_registration,
+                                },
+                            ..
+                        },
+                    ) => {
+                        commit_root == &root
+                            && founder_registration == &write.commit.value.author_registration
+                    }
+                    _ => false,
+                };
+                if !order_matches {
                     return Err(DbError::Message(format!(
-                        "prepared Serial commit {} has the wrong predecessor",
+                        "prepared Serial commit {} has the wrong exact predecessor",
                         write.write_id
                     )));
                 }
+                let commit_ref = StoreBatchCommitRef::from_commit(
+                    &write.commit.value,
+                    coord,
+                    write.commit.prepared.reference().clone(),
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?;
                 let (stored_changeset, stored_base, status, prepared): (
                     Vec<u8>,
                     String,
@@ -3334,8 +4716,7 @@ impl Database {
                     .map_err(|error| {
                         DbError::Message(format!("stored Serial reservation: {error}"))
                     })?;
-                if stored_changeset != write.package_bytes
-                    || stored_base != expected_base
+                if stored_base != expected_base
                     || status != "\"publishing\""
                     || !matches!(stored_prepared, PreparedStoreWriteState::SerialPreparing)
                 {
@@ -3344,12 +4725,31 @@ impl Database {
                         write.write_id
                     )));
                 }
+                let partitions = Self::prepared_store_write_partitions_on(
+                    &tx,
+                    write.write_id.as_str(),
+                    &stored_changeset,
+                    WritePolicy::Serial,
+                )?;
+                Self::persist_closed_write_objects_on(
+                    &tx,
+                    &write.write_id,
+                    root.store_root_hash,
+                    &commit_ref,
+                    &write.commit.value,
+                    &partitions,
+                    &write.remote_objects,
+                    &write.audiences,
+                )?;
                 let tip_head_bytes = (index + 1 == stage.writes.len()).then(|| head_bytes.clone());
                 let durable = PreparedStoreWriteState::Serial {
                     base_head_bytes: stage.base_head_bytes.clone(),
-                    commit_bytes: write.commit.to_bytes(),
+                    base_head_version: stage.base_head_version.clone(),
+                    commit: DurablePreparedProtocolObject {
+                        semantic_bytes: write.commit.value.to_bytes(),
+                        prepared: write.commit.prepared.clone(),
+                    },
                     tip_head_bytes,
-                    blob_manifest: write.blob_manifest.clone(),
                     local_cleanup: write.local_cleanup.clone(),
                     completion: write.completion.clone(),
                 };
@@ -3369,7 +4769,37 @@ impl Database {
                         write.write_id
                     )));
                 }
-                predecessor = Some(write.commit.position());
+                predecessor = Some(commit_ref.clone());
+                tip_ref = Some(commit_ref);
+                tip_registration = Some(registration);
+            }
+            let tip_ref = tip_ref.expect("nonempty checked above");
+            let tip_registration = tip_registration.expect("nonempty checked above");
+            let parsed_head =
+                StoreSerialHead::parse(&head_bytes, root.store_root_hash, &tip_registration)
+                    .map_err(|error| {
+                        DbError::Message(format!("verify prepared Serial head: {error}"))
+                    })?;
+            let tip_author_ref = &stage
+                .writes
+                .last()
+                .expect("nonempty checked above")
+                .commit
+                .value
+                .author_registration;
+            if parsed_head != stage.head
+                || !matches!(
+                    &stage.head.state,
+                    StoreSerialHeadState::Commit {
+                        author_registration,
+                        commit,
+                    } if author_registration == tip_author_ref
+                        && commit == &tip_ref
+                )
+            {
+                return Err(DbError::Message(
+                    "prepared Serial head does not activate the exact branch tip".to_string(),
+                ));
             }
             let reserved_count: i64 = tx
                 .query_row(
@@ -3413,98 +4843,10 @@ impl Database {
         Ok(write_ids)
     }
 
-    fn rebase_unprepared_serial_branch_on(
-        tx: &rusqlite::Transaction<'_>,
-        predecessor: Option<CommitPosition>,
-        activated: CommitPosition,
-    ) -> Result<(), DbError> {
-        let mut statement = tx
-            .prepare(
-                "SELECT write_id, status, base, prepared FROM store_writes
-                 WHERE status != '\"local_only\"'
-                   AND json_extract(status, '$.published') IS NULL
-                   AND json_extract(status, '$.resolved') IS NULL
-                   AND json_type(base, '$.serial') IS NOT NULL
-                 ORDER BY ordinal",
-            )
-            .map_err(DbError::from)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })
-            .map_err(DbError::from)?;
-        let mut branch_base = None;
-        let mut branch_len = 0_usize;
-        for row in rows {
-            let (write_id, raw_status, raw_base, prepared) = row.map_err(DbError::from)?;
-            let status: WriteStatus = serde_json::from_str(&raw_status)
-                .map_err(|error| DbError::Message(format!("Serial branch status: {error}")))?;
-            let base: StoreWriteBase = serde_json::from_str(&raw_base)
-                .map_err(|error| DbError::Message(format!("Serial branch base: {error}")))?;
-            if branch_base.as_ref().is_some_and(|stored| stored != &base) {
-                return Err(DbError::Message(
-                    "Serial database contains more than one unresolved branch".to_string(),
-                ));
-            }
-            branch_base.get_or_insert(base);
-            if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_))
-                || prepared.is_some()
-            {
-                return Err(DbError::Message(format!(
-                    "Serial branch write {write_id} cannot be rebased during registration activation"
-                )));
-            }
-            branch_len = branch_len.checked_add(1).ok_or_else(|| {
-                DbError::Message("Serial branch length exceeds usize".to_string())
-            })?;
-        }
-        drop(statement);
-        let Some(StoreWriteBase::Serial { branch_id, base }) = branch_base else {
-            return Ok(());
-        };
-        if base != predecessor {
-            return Ok(());
-        }
-        let old_base = StoreWriteBase::Serial {
-            branch_id: branch_id.clone(),
-            base,
-        };
-        let rebased = StoreWriteBase::Serial {
-            branch_id,
-            base: Some(activated),
-        };
-        let updated = tx
-            .execute(
-                "UPDATE store_writes SET base = ?2
-                 WHERE base = ?1 AND prepared IS NULL
-                   AND (status = '\"pending\"' OR json_extract(status, '$.blocked') IS NOT NULL)",
-                rusqlite::params![
-                    serde_json::to_string(&old_base).map_err(|error| DbError::Message(format!(
-                        "serialize prior Serial branch base: {error}"
-                    )))?,
-                    serde_json::to_string(&rebased).map_err(|error| DbError::Message(format!(
-                        "serialize rebased Serial branch: {error}"
-                    )))?,
-                ],
-            )
-            .map_err(DbError::from)?;
-        if updated != branch_len {
-            return Err(DbError::Message(
-                "Serial branch changed during registration activation".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     pub(crate) async fn release_serial_store_branch_reservation(
         &self,
         branch_id: PendingBranchId,
-        base: Option<CommitPosition>,
+        base: Option<StoreBatchCommitRef>,
         status: WriteStatus,
     ) -> Result<(), DbError> {
         if !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_)) {
@@ -3568,240 +4910,581 @@ impl Database {
     pub(crate) async fn oldest_prepared_store_write(
         &self,
     ) -> Result<Option<PreparedStoreWriteCommit>, DbError> {
-        self.call(|conn| {
-            conn.query_row(
-                "SELECT write_id, changeset, base, prepared FROM store_writes
+        let loaded = self
+            .call(|conn| {
+                let row = conn
+                    .query_row(
+                        "SELECT write_id, changeset, base, prepared FROM store_writes
                  WHERE prepared IS NOT NULL
-                   AND status IN ('\"pending\"', '\"publishing\"')
+                   AND status = '\"publishing\"'
                  ORDER BY ordinal LIMIT 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .map(|(write_id, package_bytes, base, prepared)| {
-                let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
-                    .map_err(|error| DbError::Message(format!("prepared Store write: {error}")))?;
-                let PreparedStoreWriteState::MergeConcurrent {
-                    commit_bytes,
-                    head_bytes,
-                    blob_manifest,
-                    ..
-                } = prepared
-                else {
-                    return Err(DbError::Message(
-                        "serial branch reached MergeConcurrent publication".to_string(),
-                    ));
-                };
-                let commit: StoreBatchCommit = serde_json::from_slice(&commit_bytes)
-                    .map_err(|error| DbError::Message(format!("prepared Store commit: {error}")))?;
-                let head: StoreDeviceHead = serde_json::from_slice(&head_bytes)
-                    .map_err(|error| DbError::Message(format!("prepared Store head: {error}")))?;
-                let write_id = WriteId::from_generated(write_id);
-                if commit.write_id != write_id {
-                    return Err(DbError::Message(
-                        "prepared write id differs from signed commit".to_string(),
-                    ));
-                }
-                let base: StoreWriteBase = serde_json::from_str(&base)
-                    .map_err(|error| DbError::Message(format!("prepared write base: {error}")))?;
-                let StoreWriteBase::MergeConcurrent { dependencies } = base else {
-                    return Err(DbError::Message(
-                        "serial base reached MergeConcurrent publication".to_string(),
-                    ));
-                };
-                if *commit.merge_dependencies().map_err(|error| {
-                    DbError::Message(format!("prepared Store commit policy: {error}"))
-                })? != dependencies
-                {
-                    return Err(DbError::Message(
-                        "prepared commit differs from its write dependency frontier".to_string(),
-                    ));
-                }
-                Ok(PreparedStoreWriteCommit {
-                    package_bytes,
-                    commit: ExactProtocolObject {
-                        value: commit,
-                        bytes: commit_bytes,
-                    },
-                    head: ExactProtocolObject {
-                        value: head,
-                        bytes: head_bytes,
-                    },
-                    blob_manifest,
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Vec<u8>>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(DbError::from)?;
+                row.map(|(write_id, stored_changeset, base, prepared)| {
+                    let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
+                        .map_err(|error| {
+                            DbError::Message(format!("prepared Store write: {error}"))
+                        })?;
+                    let PreparedStoreWriteState::MergeConcurrent { commit, head, .. } = prepared
+                    else {
+                        return Err(DbError::Message(
+                            "serial branch reached MergeConcurrent publication".to_string(),
+                        ));
+                    };
+                    let write_id = WriteId::from_generated(write_id);
+                    let unverified_commit: StoreBatchCommit =
+                        serde_json::from_slice(&commit.semantic_bytes).map_err(|error| {
+                            DbError::Message(format!("prepared Store commit: {error}"))
+                        })?;
+                    if unverified_commit.write_id != write_id {
+                        return Err(DbError::Message(
+                            "prepared write id differs from signed commit".to_string(),
+                        ));
+                    }
+                    let root = required_store_root_authority_on(conn)?;
+                    let registration_ref = &unverified_commit.author_registration;
+                    let (registration_bytes, stored_registration_ref): (Vec<u8>, String) = conn
+                        .query_row(
+                            "SELECT registration_bytes, registration_object \
+                         FROM store_device_registration_activations \
+                         WHERE device_id = ?1 AND registration_hash = ?2",
+                            (
+                                registration_ref.device_id.to_string(),
+                                registration_ref.registration_hash.to_string(),
+                            ),
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .map_err(DbError::from)?;
+                    let stored_registration_ref: StoreDeviceRegistrationRef =
+                        serde_json::from_str(&stored_registration_ref).map_err(|error| {
+                            DbError::Message(format!("prepared write registration ref: {error}"))
+                        })?;
+                    if stored_registration_ref != *registration_ref {
+                        return Err(DbError::Message(
+                            "prepared commit registration differs from its activation".to_string(),
+                        ));
+                    }
+                    let registration = StoreDeviceRegistration::parse_at(
+                        &registration_bytes,
+                        &root,
+                        registration_ref.device_id,
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!("prepared write registration: {error}"))
+                    })?;
+                    let stream_id = AuthorStreamId::store_announcements(&root, registration_ref);
+                    let coord = StoreCommitCoord::MergeConcurrent {
+                        stream_id,
+                        sequence: unverified_commit.seq(),
+                    };
+                    let commit_value = StoreBatchCommit::parse_at(
+                        &commit.semantic_bytes,
+                        root.store_root_hash,
+                        &coord,
+                        &registration,
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!("verify prepared Store commit: {error}"))
+                    })?;
+                    let commit_ref = StoreBatchCommitRef::from_commit(
+                        &commit_value,
+                        coord,
+                        commit.prepared.reference().clone(),
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    let head_value = StoreDeviceHead::parse_at(
+                        &head.semantic_bytes,
+                        root.store_root_hash,
+                        &registration,
+                        &commit_ref,
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!("verify prepared Store head: {error}"))
+                    })?;
+                    let base: StoreWriteBase = serde_json::from_str(&base).map_err(|error| {
+                        DbError::Message(format!("prepared write base: {error}"))
+                    })?;
+                    let StoreWriteBase::MergeConcurrent { dependencies } = base else {
+                        return Err(DbError::Message(
+                            "serial base reached MergeConcurrent publication".to_string(),
+                        ));
+                    };
+                    let dependencies =
+                        CommitFrontier::from_refs(WritePolicy::MergeConcurrent, dependencies)
+                            .map_err(|error| {
+                                DbError::Message(format!("prepared dependency frontier: {error}"))
+                            })?;
+                    if dependencies
+                        .merge_commits()
+                        .map_err(|error| DbError::Message(error.to_string()))?
+                        != commit_value.merge_dependencies().map_err(|error| {
+                            DbError::Message(format!("prepared Store commit policy: {error}"))
+                        })?
+                    {
+                        return Err(DbError::Message(
+                            "prepared commit differs from its write dependency frontier"
+                                .to_string(),
+                        ));
+                    }
+                    let partitions = Self::prepared_store_write_partitions_on(
+                        conn,
+                        write_id.as_str(),
+                        &stored_changeset,
+                        WritePolicy::MergeConcurrent,
+                    )?;
+                    let audiences = load_prepared_audience_objects_on(conn, &write_id)?;
+                    let expected_package_count = usize::from(commit_value.store_package.is_some())
+                        .checked_add(commit_value.circle_packages.len())
+                        .ok_or_else(|| DbError::Message("package count overflow".to_string()))?;
+                    if audiences.packages.len() != expected_package_count
+                        || audiences.packages.len()
+                            != usize::from(partitions.store.is_some()) + partitions.circles.len()
+                    {
+                        return Err(DbError::Message(
+                            "prepared package indexes do not exactly cover commit audiences"
+                                .to_string(),
+                        ));
+                    }
+                    for package in &audiences.packages {
+                        let value = package.package();
+                        if value.write_id() != &write_id
+                            || value.commit_coord() != &commit_ref.coord
+                            || value.candidate_family() != commit_value.candidate_family()
+                        {
+                            return Err(DbError::Message(
+                                "indexed audience package differs from its exact commit"
+                                    .to_string(),
+                            ));
+                        }
+                        let expected_object = match value.audience() {
+                            crate::sync::audience_package::PackageAudience::Store => {
+                                commit_value
+                                    .verify_store_package(package.semantic_bytes())
+                                    .map_err(|error| DbError::Message(error.to_string()))?;
+                                &commit_value
+                                    .store_package
+                                    .as_ref()
+                                    .expect("verified present")
+                                    .object
+                            }
+                            crate::sync::audience_package::PackageAudience::Circle {
+                                circle_id,
+                                ..
+                            } => {
+                                commit_value
+                                    .verify_circle_package(*circle_id, package.semantic_bytes())
+                                    .map_err(|error| DbError::Message(error.to_string()))?;
+                                &commit_value
+                                    .circle_packages
+                                    .iter()
+                                    .find(|entry| entry.circle_id == *circle_id)
+                                    .expect("verified present")
+                                    .package
+                                    .object
+                            }
+                        };
+                        if package.object() != expected_object {
+                            return Err(DbError::Message(
+                                "indexed audience package exact object differs from its commit"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    for package in &audiences.packages {
+                        let audience = package.package().audience().remote_audience();
+                        for binding in package.package().blob_bindings() {
+                            if !audiences.blobs.iter().any(|blob| {
+                                blob.audience() == &audience && blob.blob() == binding.blob()
+                            }) {
+                                return Err(DbError::Message(
+                                    "prepared package blob binding has no exact blob index"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    for blob in &audiences.blobs {
+                        if !audiences.packages.iter().any(|package| {
+                            package.package().audience().remote_audience() == *blob.audience()
+                                && package
+                                    .package()
+                                    .blob_bindings()
+                                    .iter()
+                                    .any(|binding| binding.blob() == blob.blob())
+                        }) {
+                            return Err(DbError::Message(
+                                "prepared blob index has no exact package binding".to_string(),
+                            ));
+                        }
+                    }
+                    Ok(PreparedStoreWriteCommit {
+                        audiences,
+                        commit: ExactProtocolObject {
+                            value: commit_value,
+                            bytes: commit.semantic_bytes,
+                            object: commit.prepared.reference().clone(),
+                            prepared: commit.prepared,
+                        },
+                        head: ExactProtocolObject {
+                            value: head_value,
+                            bytes: head.semantic_bytes,
+                            object: head.prepared.reference().clone(),
+                            prepared: head.prepared,
+                        },
+                    })
                 })
+                .transpose()
             })
-            .transpose()
-        })
-        .await
+            .await?;
+        if let Some(batch) = &loaded {
+            for blob in &batch.audiences.blobs {
+                if let Some(spool_path) = blob.spool_path() {
+                    crate::local_blob::verify_exact_file(blob.blob().object(), spool_path)
+                        .await
+                        .map_err(|error| {
+                            DbError::Message(format!("prepared blob spool: {error}"))
+                        })?;
+                }
+            }
+        }
+        Ok(loaded)
     }
 
     pub(crate) async fn prepared_serial_store_branch(
         &self,
     ) -> Result<Option<PreparedSerialStoreBranch>, DbError> {
-        self.call(|conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT write_id, changeset, base, prepared FROM store_writes
+        let loaded = self
+            .call(|conn| {
+                let root = required_store_root_authority_on(conn)?;
+                let mut statement = conn
+                    .prepare(
+                        "SELECT write_id, changeset, base, prepared FROM store_writes
                      WHERE prepared IS NOT NULL AND status = '\"publishing\"'
                      ORDER BY ordinal",
-                )
-                .map_err(DbError::from)?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                })
-                .map_err(DbError::from)?;
-            let mut branch_id = None;
-            let mut base = None;
-            let mut base_head_bytes: Option<Option<Vec<u8>>> = None;
-            let mut writes = Vec::new();
-            let mut head = None;
-            for row in rows {
-                let (write_id, package_bytes, raw_base, prepared) = row.map_err(DbError::from)?;
-                let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
-                    .map_err(|error| DbError::Message(format!("prepared Serial write: {error}")))?;
-                if matches!(prepared, PreparedStoreWriteState::SerialPreparing) {
-                    if writes.is_empty() {
-                        return Ok(None);
-                    }
-                    return Err(DbError::Message(
-                        "Serial branch mixes reserved and exact prepared writes".to_string(),
-                    ));
-                }
-                let PreparedStoreWriteState::Serial {
-                    base_head_bytes: row_base_head_bytes,
-                    commit_bytes,
-                    tip_head_bytes,
-                    blob_manifest,
-                    ..
-                } = prepared
-                else {
-                    return Err(DbError::Message(
-                        "MergeConcurrent write reached Serial publication".to_string(),
-                    ));
-                };
-                let StoreWriteBase::Serial {
-                    branch_id: row_branch_id,
-                    base: row_base,
-                } = serde_json::from_str(&raw_base)
-                    .map_err(|error| DbError::Message(format!("prepared Serial base: {error}")))?
-                else {
-                    return Err(DbError::Message(
-                        "MergeConcurrent base reached Serial publication".to_string(),
-                    ));
-                };
-                if branch_id
-                    .as_ref()
-                    .is_some_and(|value| value != &row_branch_id)
-                    || base.as_ref().is_some_and(|value| value != &row_base)
-                    || base_head_bytes
-                        .as_ref()
-                        .is_some_and(|value| value != &row_base_head_bytes)
-                {
-                    return Err(DbError::Message(
-                        "prepared Serial writes do not share one branch base".to_string(),
-                    ));
-                }
-                branch_id.get_or_insert(row_branch_id);
-                base.get_or_insert(row_base);
-                base_head_bytes.get_or_insert(row_base_head_bytes);
-                let commit: StoreBatchCommit =
-                    serde_json::from_slice(&commit_bytes).map_err(|error| {
-                        DbError::Message(format!("prepared Serial commit: {error}"))
-                    })?;
-                if commit.write_id.as_str() != write_id {
-                    return Err(DbError::Message(
-                        "prepared Serial write id differs from signed commit".to_string(),
-                    ));
-                }
-                if let Some(head_bytes) = tip_head_bytes {
-                    if head.is_some() {
+                    )
+                    .map_err(DbError::from)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    })
+                    .map_err(DbError::from)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)?;
+                drop(statement);
+                let mut branch_id = None;
+                let mut base = None;
+                let mut base_head_bytes: Option<Option<Vec<u8>>> = None;
+                let mut base_head_version: Option<Option<VersionToken>> = None;
+                let mut writes = Vec::new();
+                let mut head = None;
+                let mut predecessor: Option<StoreBatchCommitRef> = None;
+                for row in rows {
+                    let (write_id, stored_changeset, raw_base, prepared) = row;
+                    let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
+                        .map_err(|error| {
+                            DbError::Message(format!("prepared Serial write: {error}"))
+                        })?;
+                    if matches!(prepared, PreparedStoreWriteState::SerialPreparing) {
+                        if writes.is_empty() {
+                            return Ok(None);
+                        }
                         return Err(DbError::Message(
-                            "prepared Serial branch has more than one tip head".to_string(),
+                            "Serial branch mixes reserved and exact prepared writes".to_string(),
                         ));
                     }
-                    let value: StoreSerialHead =
-                        serde_json::from_slice(&head_bytes).map_err(|error| {
-                            DbError::Message(format!("prepared Serial head: {error}"))
+                    let PreparedStoreWriteState::Serial {
+                        base_head_bytes: row_base_head_bytes,
+                        base_head_version: row_base_head_version,
+                        commit,
+                        tip_head_bytes,
+                        ..
+                    } = prepared
+                    else {
+                        return Err(DbError::Message(
+                            "MergeConcurrent write reached Serial publication".to_string(),
+                        ));
+                    };
+                    let StoreWriteBase::Serial {
+                        branch_id: row_branch_id,
+                        base: row_base,
+                    } = serde_json::from_str(&raw_base).map_err(|error| {
+                        DbError::Message(format!("prepared Serial base: {error}"))
+                    })?
+                    else {
+                        return Err(DbError::Message(
+                            "MergeConcurrent base reached Serial publication".to_string(),
+                        ));
+                    };
+                    if branch_id
+                        .as_ref()
+                        .is_some_and(|value| value != &row_branch_id)
+                        || base.as_ref().is_some_and(|value| value != &row_base)
+                        || base_head_bytes
+                            .as_ref()
+                            .is_some_and(|value| value != &row_base_head_bytes)
+                        || base_head_version
+                            .as_ref()
+                            .is_some_and(|value| value != &row_base_head_version)
+                    {
+                        return Err(DbError::Message(
+                            "prepared Serial writes do not share one branch base".to_string(),
+                        ));
+                    }
+                    branch_id.get_or_insert(row_branch_id);
+                    base.get_or_insert(row_base);
+                    base_head_bytes.get_or_insert(row_base_head_bytes);
+                    base_head_version.get_or_insert(row_base_head_version);
+                    let unverified: StoreBatchCommit =
+                        serde_json::from_slice(&commit.semantic_bytes).map_err(|error| {
+                            DbError::Message(format!("prepared Serial commit: {error}"))
                         })?;
-                    head = Some(ExactProtocolObject {
-                        value,
-                        bytes: head_bytes,
+                    if unverified.write_id.as_str() != write_id {
+                        return Err(DbError::Message(
+                            "prepared Serial write id differs from signed commit".to_string(),
+                        ));
+                    }
+                    if writes.is_empty() {
+                        predecessor = base.as_ref().expect("first row stored base").clone();
+                    }
+                    let expected_sequence = predecessor
+                        .as_ref()
+                        .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+                    let coord = StoreCommitCoord::Serial {
+                        sequence: expected_sequence,
+                    };
+                    let registration = load_activated_registration_on(
+                        conn,
+                        &root,
+                        &unverified.author_registration,
+                    )?;
+                    let commit_value = StoreBatchCommit::parse_at(
+                        &commit.semantic_bytes,
+                        root.store_root_hash,
+                        &coord,
+                        &registration,
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!("verify prepared Serial commit: {error}"))
+                    })?;
+                    let order_matches = match (&predecessor, &commit_value.order) {
+                        (
+                            Some(expected),
+                            crate::sync::store_commit::StoreCommitOrder::Serial {
+                                predecessor: StoreSerialPredecessor::Commit(actual),
+                                ..
+                            },
+                        ) => actual == expected,
+                        (
+                            None,
+                            crate::sync::store_commit::StoreCommitOrder::Serial {
+                                predecessor:
+                                    StoreSerialPredecessor::Genesis {
+                                        root: commit_root,
+                                        founder_registration,
+                                    },
+                                ..
+                            },
+                        ) => {
+                            commit_root == &root
+                                && founder_registration == &commit_value.author_registration
+                        }
+                        _ => false,
+                    };
+                    if !order_matches {
+                        return Err(DbError::Message(
+                            "prepared Serial commit chain has a different exact predecessor"
+                                .to_string(),
+                        ));
+                    }
+                    let commit_ref = StoreBatchCommitRef::from_commit(
+                        &commit_value,
+                        coord,
+                        commit.prepared.reference().clone(),
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    let write_id = WriteId::from_generated(write_id);
+                    let partitions = Self::prepared_store_write_partitions_on(
+                        conn,
+                        write_id.as_str(),
+                        &stored_changeset,
+                        WritePolicy::Serial,
+                    )?;
+                    let audiences = load_prepared_audience_objects_on(conn, &write_id)?;
+                    Self::validate_loaded_write_objects(
+                        &write_id,
+                        &commit_ref,
+                        &commit_value,
+                        &partitions,
+                        &audiences,
+                    )?;
+                    if let Some(head_bytes) = tip_head_bytes {
+                        if head.is_some() {
+                            return Err(DbError::Message(
+                                "prepared Serial branch has more than one tip head".to_string(),
+                            ));
+                        }
+                        let value = StoreSerialHead::parse(
+                            &head_bytes,
+                            root.store_root_hash,
+                            &registration,
+                        )
+                        .map_err(|error| {
+                            DbError::Message(format!("verify prepared Serial head: {error}"))
+                        })?;
+                        head = Some(CanonicalProtocolObject {
+                            value,
+                            bytes: head_bytes,
+                        });
+                    }
+                    writes.push(PreparedSerialStoreWriteCommit {
+                        audiences,
+                        commit: ExactProtocolObject {
+                            value: commit_value,
+                            bytes: commit.semantic_bytes,
+                            object: commit.prepared.reference().clone(),
+                            prepared: commit.prepared,
+                        },
                     });
+                    predecessor = Some(commit_ref);
                 }
-                writes.push(PreparedSerialStoreWriteCommit {
-                    package_bytes,
-                    commit: ExactProtocolObject {
-                        value: commit,
-                        bytes: commit_bytes,
-                    },
-                    blob_manifest,
-                });
+                if writes.is_empty() {
+                    return Ok(None);
+                }
+                let head = head.ok_or_else(|| {
+                    DbError::Message(
+                        "prepared Serial branch has no activating tip head".to_string(),
+                    )
+                })?;
+                let tip_ref = predecessor.expect("nonempty branch has exact tip");
+                let tip_author = &writes
+                    .last()
+                    .expect("nonempty branch")
+                    .commit
+                    .value
+                    .author_registration;
+                if !matches!(
+                    &head.value.state,
+                    StoreSerialHeadState::Commit {
+                        author_registration,
+                        commit,
+                    } if author_registration == tip_author && commit == &tip_ref
+                ) {
+                    return Err(DbError::Message(
+                        "prepared Serial head does not activate the exact final commit".to_string(),
+                    ));
+                }
+                let base_value = base.expect("nonempty branch");
+                let base_bytes = base_head_bytes.expect("nonempty branch");
+                let base_version = base_head_version.expect("nonempty branch");
+                if base_bytes.is_some() != base_version.is_some() {
+                    return Err(DbError::Message(
+                        "Serial base head bytes and opaque version receipt differ in presence"
+                            .to_string(),
+                    ));
+                }
+                match base_bytes.as_deref() {
+                    Some(bytes) => {
+                        let unverified: StoreSerialHead =
+                            serde_json::from_slice(bytes).map_err(|error| {
+                                DbError::Message(format!("stored Serial base head: {error}"))
+                            })?;
+                        let executor_ref = match &unverified.state {
+                            StoreSerialHeadState::Genesis {
+                                founder_registration,
+                                ..
+                            } => founder_registration,
+                            StoreSerialHeadState::Commit {
+                                author_registration,
+                                ..
+                            } => author_registration,
+                        };
+                        let executor = load_activated_registration_on(conn, &root, executor_ref)?;
+                        let verified =
+                            StoreSerialHead::parse(bytes, root.store_root_hash, &executor)
+                                .map_err(|error| {
+                                    DbError::Message(format!(
+                                        "verify stored Serial base head: {error}"
+                                    ))
+                                })?;
+                        let observed = match verified.state {
+                            StoreSerialHeadState::Genesis {
+                                root: observed_root,
+                                ..
+                            } => {
+                                if observed_root != root {
+                                    return Err(DbError::Message(
+                                        "stored Serial genesis head has a different exact root"
+                                            .to_string(),
+                                    ));
+                                }
+                                None
+                            }
+                            StoreSerialHeadState::Commit { commit, .. } => Some(commit),
+                        };
+                        if observed != base_value {
+                            return Err(DbError::Message(
+                                "stored Serial base evidence differs from branch base".to_string(),
+                            ));
+                        }
+                    }
+                    None if base_value.is_some() => {
+                        return Err(DbError::Message(
+                            "stored Serial base commit has no head evidence".to_string(),
+                        ));
+                    }
+                    None => {}
+                }
+                Ok(Some(PreparedSerialStoreBranch {
+                    branch_id: branch_id.expect("nonempty branch"),
+                    base: base_value,
+                    base_head_bytes: base_bytes,
+                    base_head_version: base_version,
+                    writes,
+                    head,
+                }))
+            })
+            .await?;
+        if let Some(branch) = &loaded {
+            for write in &branch.writes {
+                for blob in &write.audiences.blobs {
+                    if let Some(spool_path) = blob.spool_path() {
+                        crate::local_blob::verify_exact_file(blob.blob().object(), spool_path)
+                            .await
+                            .map_err(|error| {
+                                DbError::Message(format!("prepared Serial blob spool: {error}"))
+                            })?;
+                    }
+                }
             }
-            if writes.is_empty() {
-                return Ok(None);
-            }
-            let head = head.ok_or_else(|| {
-                DbError::Message("prepared Serial branch has no activating tip head".to_string())
-            })?;
-            if writes.last().map(|write| write.commit.value.position()) != head.value.commit.clone()
-            {
-                return Err(DbError::Message(
-                    "prepared Serial head does not activate the final commit".to_string(),
-                ));
-            }
-            Ok(Some(PreparedSerialStoreBranch {
-                branch_id: branch_id.expect("nonempty branch"),
-                base: base.expect("nonempty branch"),
-                base_head_bytes: base_head_bytes.expect("nonempty branch"),
-                writes,
-                head,
-            }))
-        })
-        .await
+        }
+        Ok(loaded)
     }
 
     pub(crate) async fn latest_local_store_position(
         &self,
-    ) -> Result<Option<CommitPosition>, DbError> {
-        self.call(|conn| {
-            let device_id: String = conn
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [LOCAL_DEVICE_ID_STATE_KEY],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            Self::latest_position_for_device_on(conn, &device_id)
-        })
-        .await
-    }
-
-    #[doc(hidden)]
-    pub async fn latest_outbound_store_position(&self) -> Result<Option<CommitPosition>, DbError> {
+    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         let write_policy = self.write_policy();
         self.call(move |conn| {
             let stream_id = match write_policy {
-                WritePolicy::MergeConcurrent => conn
-                    .query_row(
-                        "SELECT value FROM protocol_state WHERE key = ?1",
-                        [LOCAL_DEVICE_ID_STATE_KEY],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .map_err(DbError::from)?,
+                WritePolicy::MergeConcurrent => {
+                    let (root, registration, _) = local_store_authority_on(conn)?;
+                    AuthorStreamId::store_announcements(&root, &registration).to_string()
+                }
                 WritePolicy::Serial => SERIAL_STREAM_ID.to_string(),
             };
             Self::latest_position_for_device_on(conn, &stream_id)
@@ -3811,9 +5494,11 @@ impl Database {
 
     pub(crate) async fn complete_prepared_store_write(
         &self,
-        position: CommitPosition,
+        accepted: StoreBatchCommitRef,
     ) -> Result<(), DbError> {
         let statuses = self.state.write_statuses.clone();
+        let gates = self.state.gates.clone();
+        let synced_tables = self.state.synced_tables.clone();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let local_device_id: String = tx
@@ -3846,9 +5531,8 @@ impl Database {
             let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
                 .map_err(|error| DbError::Message(format!("prepared Store write: {error}")))?;
             let PreparedStoreWriteState::MergeConcurrent {
-                commit_bytes,
+                commit,
                 local_cleanup,
-                completion,
                 ..
             } = prepared
             else {
@@ -3856,54 +5540,48 @@ impl Database {
                     "serial branch reached MergeConcurrent completion".to_string(),
                 ));
             };
-            let store_root_hash = Self::required_store_root_hash_on(&tx)?;
-            let commit = StoreBatchCommit::parse_at(
-                &commit_bytes,
-                store_root_hash,
-                WritePolicy::MergeConcurrent,
-                &local_device_id,
-                position.seq,
+            let root = required_store_root_authority_on(&tx)?;
+            let unverified: StoreBatchCommit = serde_json::from_slice(&commit.semantic_bytes)
+                .map_err(|error| DbError::Message(format!("prepared Store commit: {error}")))?;
+            let registration =
+                load_activated_registration_on(&tx, &root, &unverified.author_registration)?;
+            let expected_stream =
+                AuthorStreamId::store_announcements(&root, &unverified.author_registration);
+            if !matches!(
+                accepted.coord,
+                StoreCommitCoord::MergeConcurrent { stream_id, .. }
+                    if stream_id == expected_stream
+            ) || accepted.object != *commit.prepared.reference()
+            {
+                return Err(DbError::Message(
+                    "accepted Merge head differs from the exact prepared commit".to_string(),
+                ));
+            }
+            let commit_value = StoreBatchCommit::parse_at(
+                &commit.semantic_bytes,
+                root.store_root_hash,
+                &accepted.coord,
+                &registration,
             )
             .map_err(|error| DbError::Message(format!("outbound commit: {error}")))?;
-            if commit.position() != position {
-                return Err(DbError::Message(format!(
-                    "prepared Store write is {:?}, completion named {:?}",
-                    commit.position(),
-                    position
-                )));
-            }
-            if commit.write_id.as_str() != stored_write_id {
+            accepted
+                .verify_commit(&commit_value)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            if commit_value.write_id.as_str() != stored_write_id {
                 return Err(DbError::Message(
                     "prepared write id differs from signed commit".to_string(),
                 ));
             }
-            Self::record_materialized_commit_on(&tx, &commit)?;
-            for drop in local_cleanup.drops {
-                tx.execute(
-                    "INSERT INTO published_blob_drop_intents
-                     (seq, namespace, blob_id, size, disposition)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(seq, namespace, blob_id) DO NOTHING",
-                    rusqlite::params![
-                        Self::sequence_to_sqlite(&local_device_id, position.seq)?,
-                        drop.namespace,
-                        drop.id,
-                        i64::try_from(drop.size).map_err(|_| DbError::Message(
-                            "outbound local cleanup size exceeds SQLite integer".to_string()
-                        ))?,
-                        drop.disposition.as_db(),
-                    ],
-                )
-                .map_err(DbError::from)?;
-            }
-            for intent in completion.consumed_make_remote_intents {
-                Self::delete_make_remote_intent_on(&tx, &intent.root_table, &intent.root_id)?;
-            }
-            tx.execute(
-                "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
-                [stored_write_id.as_str()],
-            )
-            .map_err(DbError::from)?;
+            let write_id = commit_value.write_id.clone();
+            Self::activate_prepared_write_on(
+                &tx,
+                &gates,
+                &synced_tables,
+                &write_id,
+                &commit_value,
+                &accepted,
+                local_cleanup,
+            )?;
             let cleared = tx
                 .execute(
                     "UPDATE store_writes SET prepared = NULL
@@ -3916,10 +5594,9 @@ impl Database {
                     "prepared Store write disappeared".to_string(),
                 ));
             }
-            let write_id = commit.write_id;
             let status = WriteStatus::Published(PublishedPosition::MergeConcurrent {
                 device_id: local_device_id,
-                position,
+                position: accepted.position(),
             });
             Self::set_write_status_on(&tx, &write_id, &status)?;
             tx.commit().map_err(DbError::from)?;
@@ -3932,8 +5609,8 @@ impl Database {
     pub(crate) async fn mark_serial_branch_conflict(
         &self,
         branch_id: PendingBranchId,
-        base: Option<CommitPosition>,
-        current: Option<CommitPosition>,
+        base: Option<StoreBatchCommitRef>,
+        current: Option<StoreBatchCommitRef>,
     ) -> Result<(), DbError> {
         let statuses = self.state.write_statuses.clone();
         self.call(move |conn| {
@@ -3944,8 +5621,8 @@ impl Database {
             };
             let conflict = crate::SerializationConflict {
                 branch_id: branch_id.clone(),
-                base,
-                current,
+                base: base.as_ref().map(StoreBatchCommitRef::position),
+                current: current.as_ref().map(StoreBatchCommitRef::position),
             };
             let status = WriteStatus::Conflict(conflict);
             let status_json = serde_json::to_string(&status)
@@ -3996,13 +5673,37 @@ impl Database {
 
     pub(crate) async fn complete_prepared_serial_branch(
         &self,
-        activated: CommitPosition,
-        tip_write_id: WriteId,
+        accepted: VersionedObject,
     ) -> Result<u64, DbError> {
         let statuses = self.state.write_statuses.clone();
+        let gates = self.state.gates.clone();
+        let synced_tables = self.state.synced_tables.clone();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let store_root_hash = Self::required_store_root_hash_on(&tx)?;
+            let root = required_store_root_authority_on(&tx)?;
+            let accepted_unverified: StoreSerialHead = serde_json::from_slice(&accepted.bytes)
+                .map_err(|error| DbError::Message(format!("accepted Serial head: {error}")))?;
+            let accepted_author_ref = match &accepted_unverified.state {
+                StoreSerialHeadState::Commit {
+                    author_registration,
+                    ..
+                } => author_registration,
+                StoreSerialHeadState::Genesis { .. } => {
+                    return Err(DbError::Message(
+                        "prepared Serial branch cannot complete at a genesis head".to_string(),
+                    ));
+                }
+            };
+            let accepted_author = load_activated_registration_on(&tx, &root, accepted_author_ref)?;
+            let accepted_head =
+                StoreSerialHead::parse(&accepted.bytes, root.store_root_hash, &accepted_author)
+                    .map_err(|error| {
+                        DbError::Message(format!("verify accepted Serial head: {error}"))
+                    })?;
+            let accepted_tip = match &accepted_head.state {
+                StoreSerialHeadState::Commit { commit, .. } => commit.clone(),
+                StoreSerialHeadState::Genesis { .. } => unreachable!("rejected above"),
+            };
             let mut statement = tx
                 .prepare(
                     "SELECT write_id, prepared, base FROM store_writes
@@ -4018,11 +5719,16 @@ impl Database {
                         row.get::<_, String>(2)?,
                     ))
                 })
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
                 .map_err(DbError::from)?;
+            drop(statement);
             let mut completed = Vec::new();
             let mut completed_base = None;
+            let mut predecessor = None;
+            let mut prepared_tip_head = None;
             for row in rows {
-                let (stored_write_id, prepared, raw_base) = row.map_err(DbError::from)?;
+                let (stored_write_id, prepared, raw_base) = row;
                 let stored_base: StoreWriteBase = serde_json::from_str(&raw_base)
                     .map_err(|error| DbError::Message(format!("prepared Serial base: {error}")))?;
                 match &completed_base {
@@ -4031,13 +5737,13 @@ impl Database {
                             "prepared Serial branch contains inconsistent bases".to_string(),
                         ));
                     }
-                    None => completed_base = Some(stored_base),
+                    None => completed_base = Some(stored_base.clone()),
                     Some(_) => {}
                 }
                 let PreparedStoreWriteState::Serial {
-                    commit_bytes,
+                    commit,
+                    tip_head_bytes,
                     local_cleanup,
-                    completion,
                     ..
                 } = serde_json::from_str(&prepared)
                     .map_err(|error| DbError::Message(format!("prepared Serial write: {error}")))?
@@ -4046,75 +5752,139 @@ impl Database {
                         "non-Serial write reached Serial completion".to_string(),
                     ));
                 };
-                let commit: StoreBatchCommit =
-                    serde_json::from_slice(&commit_bytes).map_err(|error| {
-                        DbError::Message(format!("prepared Serial commit: {error}"))
-                    })?;
-                commit
-                    .verify_at(
-                        store_root_hash,
-                        WritePolicy::Serial,
-                        SERIAL_STREAM_ID,
-                        commit.seq(),
-                    )
+                let unverified: StoreBatchCommit = serde_json::from_slice(&commit.semantic_bytes)
                     .map_err(|error| {
-                        DbError::Message(format!("outbound Serial commit: {error}"))
-                    })?;
-                if commit.write_id.as_str() != stored_write_id {
+                    DbError::Message(format!("prepared Serial commit: {error}"))
+                })?;
+                if predecessor.is_none() {
+                    let StoreWriteBase::Serial { base, .. } = &stored_base else {
+                        return Err(DbError::Message(
+                            "Merge base reached Serial completion".to_string(),
+                        ));
+                    };
+                    predecessor = base.clone();
+                }
+                let sequence = predecessor
+                    .as_ref()
+                    .map_or(1, |reference: &StoreBatchCommitRef| {
+                        reference.coord.sequence().saturating_add(1)
+                    });
+                let coord = StoreCommitCoord::Serial { sequence };
+                let registration =
+                    load_activated_registration_on(&tx, &root, &unverified.author_registration)?;
+                let commit_value = StoreBatchCommit::parse_at(
+                    &commit.semantic_bytes,
+                    root.store_root_hash,
+                    &coord,
+                    &registration,
+                )
+                .map_err(|error| DbError::Message(format!("outbound Serial commit: {error}")))?;
+                let commit_ref = StoreBatchCommitRef::from_commit(
+                    &commit_value,
+                    coord,
+                    commit.prepared.reference().clone(),
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?;
+                let order_matches = match (&predecessor, &commit_value.order) {
+                    (
+                        Some(expected),
+                        crate::sync::store_commit::StoreCommitOrder::Serial {
+                            predecessor: StoreSerialPredecessor::Commit(actual),
+                            ..
+                        },
+                    ) => actual == expected,
+                    (
+                        None,
+                        crate::sync::store_commit::StoreCommitOrder::Serial {
+                            predecessor:
+                                StoreSerialPredecessor::Genesis {
+                                    root: commit_root,
+                                    founder_registration,
+                                },
+                            ..
+                        },
+                    ) => {
+                        commit_root == &root
+                            && founder_registration == &commit_value.author_registration
+                    }
+                    _ => false,
+                };
+                if !order_matches {
+                    return Err(DbError::Message(
+                        "prepared Serial completion chain has a different exact predecessor"
+                            .to_string(),
+                    ));
+                }
+                if commit_value.write_id.as_str() != stored_write_id {
                     return Err(DbError::Message(
                         "prepared Serial write id differs from signed commit".to_string(),
                     ));
                 }
-                Self::record_materialized_commit_on(&tx, &commit)?;
-                for drop in local_cleanup.drops {
-                    tx.execute(
-                        "INSERT INTO published_blob_drop_intents
-                         (seq, namespace, blob_id, size, disposition)
-                         VALUES (?1, ?2, ?3, ?4, ?5)
-                         ON CONFLICT(seq, namespace, blob_id) DO NOTHING",
-                        rusqlite::params![
-                            Self::sequence_to_sqlite(SERIAL_STREAM_ID, commit.seq())?,
-                            drop.namespace,
-                            drop.id,
-                            i64::try_from(drop.size).map_err(|_| DbError::Message(
-                                "outbound local cleanup size exceeds SQLite integer".to_string()
-                            ))?,
-                            drop.disposition.as_db(),
-                        ],
+                let write_id = commit_value.write_id.clone();
+                Self::activate_prepared_write_on(
+                    &tx,
+                    &gates,
+                    &synced_tables,
+                    &write_id,
+                    &commit_value,
+                    &commit_ref,
+                    local_cleanup,
+                )?;
+                let cleared = tx
+                    .execute(
+                        "UPDATE store_writes SET prepared = NULL WHERE write_id = ?1",
+                        [write_id.as_str()],
                     )
                     .map_err(DbError::from)?;
+                if cleared != 1 {
+                    return Err(DbError::Message(format!(
+                        "prepared Serial write {write_id} disappeared during completion"
+                    )));
                 }
-                for intent in completion.consumed_make_remote_intents {
-                    Self::delete_make_remote_intent_on(&tx, &intent.root_table, &intent.root_id)?;
-                }
-                let write_id = commit.write_id.clone();
-                tx.execute(
-                    "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
-                    [write_id.as_str()],
-                )
-                .map_err(DbError::from)?;
-                tx.execute(
-                    "UPDATE store_writes SET prepared = NULL WHERE write_id = ?1",
-                    [write_id.as_str()],
-                )
-                .map_err(DbError::from)?;
                 let status = WriteStatus::Published(PublishedPosition::Serial {
-                    position: commit.position(),
+                    position: commit_ref.position(),
                 });
                 Self::set_write_status_on(&tx, &write_id, &status)?;
-                completed.push((write_id, status, commit.position()));
+                if let Some(bytes) = tip_head_bytes {
+                    if prepared_tip_head.replace(bytes).is_some() {
+                        return Err(DbError::Message(
+                            "prepared Serial branch has multiple tip heads".to_string(),
+                        ));
+                    }
+                }
+                predecessor = Some(commit_ref.clone());
+                completed.push((write_id, status, commit_ref));
             }
-            drop(statement);
-            let Some((final_write_id, _, final_position)) = completed.last() else {
+            let Some((_, _, final_ref)) = completed.last() else {
                 return Err(DbError::Message(
                     "prepared Serial branch is absent".to_string(),
                 ));
             };
-            if final_write_id != &tip_write_id || final_position != &activated {
+            if final_ref != &accepted_tip
+                || prepared_tip_head.as_deref() != Some(accepted.bytes.as_slice())
+            {
                 return Err(DbError::Message(
-                    "activated Serial head differs from the prepared branch tip".to_string(),
+                    "accepted Serial head differs from the exact prepared branch tip".to_string(),
                 ));
             }
+            tx.execute(
+                "INSERT INTO serial_head_receipt \
+                 (singleton, head_bytes, version_token, commit_ref) VALUES (1, ?1, ?2, ?3) \
+                 ON CONFLICT(singleton) DO UPDATE SET \
+                   head_bytes = excluded.head_bytes, \
+                   version_token = excluded.version_token, \
+                   commit_ref = excluded.commit_ref",
+                (
+                    &accepted.bytes,
+                    serde_json::to_string(&accepted.version).map_err(|error| {
+                        DbError::Message(format!("serialize Serial version receipt: {error}"))
+                    })?,
+                    serde_json::to_string(&accepted_tip).map_err(|error| {
+                        DbError::Message(format!("serialize accepted Serial commit ref: {error}"))
+                    })?,
+                ),
+            )
+            .map_err(DbError::from)?;
             let completed_base = completed_base.ok_or_else(|| {
                 DbError::Message("prepared Serial branch base is absent".to_string())
             })?;
@@ -4135,7 +5905,7 @@ impl Database {
                     branch_id: PendingBranchId::from_first_write(WriteId::from_generated(
                         suffix_first,
                     )),
-                    base: Some(activated.clone()),
+                    base: Some(accepted_tip.clone()),
                 };
                 tx.execute(
                     "UPDATE store_writes SET base = ?2
@@ -4220,7 +5990,10 @@ impl Database {
             }
             match status {
                 WriteStatus::Conflict(conflict) => {
-                    if conflict.branch_id != stored_branch_id || conflict.base != base {
+                    if conflict.branch_id != stored_branch_id
+                        || conflict.base
+                            != base.as_ref().map(StoreBatchCommitRef::position)
+                    {
                         return Err(DbError::Message(
                             "Serial conflict status differs from its durable branch base"
                                 .to_string(),
@@ -4265,17 +6038,20 @@ impl Database {
         for (_, inverse) in branch.iter().rev() {
             let inverse = crate::sync::apply::ValidatedChangeset::new(inverse, schema.clone())
                 .map_err(|error| DbError::Message(format!("invalid Serial inverse: {error}")))?;
-            crate::sync::apply::apply_changeset_strict_on(tx, inverse, &[])
+            crate::sync::apply::apply_changeset_strict_on(tx, inverse)
                 .map_err(|error| DbError::Message(format!("reverse Serial branch: {error}")))?;
         }
         let mut predecessor = branch_base;
         for resolution in plan.commits {
             let expected_seq = predecessor
                 .as_ref()
-                .map_or(1, |position| position.seq.saturating_add(1));
-            let expected_hash = predecessor.as_ref().map(|position| position.commit_hash);
+                .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
             if resolution.commit.seq() != expected_seq
-                || resolution.commit.previous_commit_hash() != expected_hash
+                || resolution.commit_ref.coord
+                    != (StoreCommitCoord::Serial {
+                        sequence: expected_seq,
+                    })
+                || resolution.commit.order.predecessor() != predecessor.as_ref()
             {
                 return Err(DbError::Message(format!(
                     "Serial resolution commit {} does not follow the branch base",
@@ -4290,8 +6066,7 @@ impl Database {
                 .map_err(|error| {
                     DbError::Message(format!("invalid Serial resolution changeset: {error}"))
                 })?;
-                crate::sync::apply::apply_changeset_strict_on(tx, changeset, &resolution.uploads)
-                    .map_err(|error| {
+                crate::sync::apply::apply_changeset_strict_on(tx, changeset).map_err(|error| {
                     DbError::Message(format!(
                         "apply Serial resolution commit {}: {error}",
                         resolution.commit.seq()
@@ -4315,17 +6090,22 @@ impl Database {
             Self::record_verified_circle_activations_on(
                 tx,
                 &resolution.commit,
+                &resolution.commit_ref,
                 &resolution.circle_activations,
             )?;
             Self::record_materialized_serial_commit_on(
                 tx,
                 &resolution.commit,
-                &resolution.authorization_after.membership,
-                resolution.authorization_after.key_generation,
+                &resolution.commit_ref,
+                &resolution.authorization_after,
             )?;
-            predecessor = Some(resolution.commit.position());
+            predecessor = Some(resolution.commit_ref);
         }
-        if predecessor != plan.head.commit {
+        let head_commit = match plan.head.state {
+            StoreSerialHeadState::Commit { commit, .. } => Some(commit),
+            StoreSerialHeadState::Genesis { .. } => None,
+        };
+        if predecessor != head_commit {
             return Err(DbError::Message(
                 "Serial resolution commits do not reach the verified global head".to_string(),
             ));
@@ -4417,13 +6197,9 @@ impl Database {
                         StoreWriteRouting::SerialScoped,
                     )
                     .map_err(E::from)?;
-                    let blob_facts = Self::capture_partition_blob_facts_on(
-                        &tx,
-                        &partitions,
-                        &gates,
-                        &blob_decls,
-                    )
-                    .map_err(E::from)?;
+                    let blob_facts =
+                        Self::capture_partition_blob_facts_on(&tx, &partitions, &blob_decls)
+                            .map_err(E::from)?;
                     let rows_changed = tx.total_changes().saturating_sub(changes_before);
                     let inverse_changeset = Self::invert_changeset(&captured).map_err(E::from)?;
                     let base = StoreWriteBase::Serial {
@@ -4465,83 +6241,103 @@ impl Database {
 
     pub(crate) async fn latest_local_store_ack(
         &self,
-    ) -> Result<Option<(u64, ObjectHash)>, DbError> {
-        self.call(|conn| {
-            conn.query_row(
-                "SELECT revision, ack_hash FROM (\
-                   SELECT revision, ack_hash FROM outbound_store_acks \
-                   UNION ALL \
-                   SELECT revision, ack_hash FROM published_store_acks\
-                 ) ORDER BY revision DESC LIMIT 1",
-                [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .map(|(revision, hash)| {
-                Ok((
-                    Self::sequence_from_sqlite("Store acknowledgement", revision)?,
-                    hash.parse().map_err(|error| {
-                        DbError::Message(format!("Store acknowledgement hash: {error}"))
-                    })?,
-                ))
-            })
-            .transpose()
-        })
-        .await
+    ) -> Result<Option<PublishedStoreAck>, DbError> {
+        self.call(load_published_store_ack_on).await
     }
 
-    pub(crate) async fn stage_store_ack(&self, ack: StoreAck) -> Result<(), DbError> {
+    pub(crate) async fn stage_store_ack(
+        &self,
+        ack: StoreAck,
+        prepared: PreparedExactObject,
+    ) -> Result<StoreAckRef, DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let store_root_hash = Self::required_store_root_hash_on(&tx)?;
-            let device_id: String = tx
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [LOCAL_DEVICE_ID_STATE_KEY],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            StoreAck::parse_at(&ack.to_bytes(), store_root_hash, &device_id, ack.revision)
-                .map_err(|error| DbError::Message(format!("verify staged Store acknowledgement: {error}")))?;
-            let previous = tx
-                .query_row(
-                    "SELECT revision, ack_hash FROM published_store_acks \
-                     ORDER BY revision DESC LIMIT 1",
-                    [],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()
-                .map_err(DbError::from)?;
-            let expected_revision = previous.as_ref().map_or(1, |(revision, _)| revision + 1);
-            let expected_previous = previous
-                .map(|(_, hash)| {
-                    hash.parse::<ObjectHash>().map_err(|error| {
-                        DbError::Message(format!("published Store acknowledgement hash: {error}"))
-                    })
-                })
-                .transpose()?;
-            if i64::try_from(ack.revision).ok() != Some(expected_revision)
-                || ack.previous_ack_hash != expected_previous
-            {
-                return Err(DbError::Message(format!(
-                    "Store acknowledgement does not extend local chain at revision {expected_revision}"
-                )));
+            let (root, registration_ref, registration) = local_store_authority_on(&tx)?;
+            if ack.author_registration != registration_ref {
+                return Err(DbError::Message(
+                    "staged Store acknowledgement author differs from local activation".to_string(),
+                ));
             }
-            let bytes = ack.to_bytes();
+            let reference = StoreAckRef {
+                revision: ack.revision,
+                ack_hash: ack.ack_hash(),
+                object: prepared.reference().clone(),
+            };
+            let verified = StoreAck::parse_at(
+                &ack.to_bytes(),
+                root.store_root_hash,
+                &reference,
+                &registration,
+            )
+            .map_err(|error| {
+                DbError::Message(format!("verify staged Store acknowledgement: {error}"))
+            })?;
+            if verified != ack {
+                return Err(DbError::Message(
+                    "staged Store acknowledgement changed during exact verification".to_string(),
+                ));
+            }
+            let previous = load_published_store_ack_on(&tx)?;
+            let (expected_revision, expected_predecessor, expected_slot) = match &previous {
+                Some(previous) => (
+                    previous.reference.revision.checked_add(1).ok_or_else(|| {
+                        DbError::Message("Store acknowledgement revision overflow".to_string())
+                    })?,
+                    Some(previous.reference.clone()),
+                    previous.successor_slot.clone(),
+                ),
+                None => (1, None, store_ack_first_slot(&registration)?.clone()),
+            };
+            if ack.revision != expected_revision
+                || ack.predecessor != expected_predecessor
+                || prepared.reference().slot() != &expected_slot
+            {
+                return Err(DbError::Message(
+                    "Store acknowledgement does not extend the exact local stream".to_string(),
+                ));
+            }
+            if ack.successor.predecessor
+                != previous
+                    .as_ref()
+                    .map(|value| value.reference.object.clone())
+            {
+                return Err(DbError::Message(
+                    "Store acknowledgement successor names a different predecessor".to_string(),
+                ));
+            }
+            let next_revision = ack.revision.checked_add(1).ok_or_else(|| {
+                DbError::Message("Store acknowledgement revision overflow".to_string())
+            })?;
+            if ack.successor.activation
+                != StreamActivationId::store_acknowledgements(&root, &registration_ref)
+                || ack.successor.next_slot.logical_key()
+                    != format!(
+                        "{}.json",
+                        ack_slot_prefix(&registration.device_id.to_string(), next_revision)
+                    )
+            {
+                return Err(DbError::Message(
+                    "Store acknowledgement successor is outside its activated exact stream"
+                        .to_string(),
+                ));
+            }
+            let ack_ref = serde_json::to_string(&reference).map_err(|error| {
+                DbError::Message(format!(
+                    "serialize exact Store acknowledgement ref: {error}"
+                ))
+            })?;
+            let prepared = serde_json::to_string(&prepared).map_err(|error| {
+                DbError::Message(format!("serialize prepared Store acknowledgement: {error}"))
+            })?;
             tx.execute(
                 "INSERT INTO outbound_store_acks \
-                 (revision, ack_hash, previous_ack_hash, ack_bytes) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![
-                    Self::sequence_to_sqlite("Store acknowledgement", ack.revision)?,
-                    ack.ack_hash().to_string(),
-                    ack.previous_ack_hash.map(|hash| hash.to_string()),
-                    bytes,
-                ],
+                 (singleton, ack_ref, ack_bytes, prepared_object) \
+                 VALUES (1, ?1, ?2, ?3)",
+                rusqlite::params![ack_ref, ack.to_bytes(), prepared],
             )
             .map_err(DbError::from)?;
-            tx.commit().map_err(DbError::from)
+            tx.commit().map_err(DbError::from)?;
+            Ok(reference)
         })
         .await
     }
@@ -4549,59 +6345,32 @@ impl Database {
     pub(crate) async fn oldest_outbound_store_ack(
         &self,
     ) -> Result<Option<OutboundStoreAck>, DbError> {
-        self.call(|conn| {
-            conn.query_row(
-                "SELECT revision, ack_hash, previous_ack_hash, ack_bytes \
-                 FROM outbound_store_acks ORDER BY revision LIMIT 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Vec<u8>>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .map(|(revision, ack_hash, previous_ack_hash, ack_bytes)| {
-                Ok(OutboundStoreAck {
-                    revision: Self::sequence_from_sqlite("Store acknowledgement", revision)?,
-                    ack_hash: ack_hash.parse().map_err(|error| {
-                        DbError::Message(format!("outbound Store acknowledgement hash: {error}"))
-                    })?,
-                    previous_ack_hash: previous_ack_hash
-                        .map(|hash| {
-                            hash.parse().map_err(|error| {
-                                DbError::Message(format!(
-                                    "outbound Store previous acknowledgement hash: {error}"
-                                ))
-                            })
-                        })
-                        .transpose()?,
-                    ack_bytes,
-                })
-            })
-            .transpose()
-        })
-        .await
+        self.call(load_outbound_store_ack_on).await
     }
 
     pub(crate) async fn complete_outbound_store_ack(
         &self,
-        revision: u64,
-        ack_hash: ObjectHash,
+        accepted: StoreAckRef,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
+                DbError::Message("outbound Store acknowledgement is absent".to_string())
+            })?;
+            if outbound.reference != accepted {
+                return Err(DbError::Message(
+                    "accepted Store acknowledgement differs from the prepared exact object"
+                        .to_string(),
+                ));
+            }
             let deleted = tx
                 .execute(
-                    "DELETE FROM outbound_store_acks WHERE revision = ?1 AND ack_hash = ?2",
-                    (
-                        Self::sequence_to_sqlite("Store acknowledgement", revision)?,
-                        ack_hash.to_string(),
-                    ),
+                    "DELETE FROM outbound_store_acks WHERE singleton = 1 AND ack_ref = ?1",
+                    [serde_json::to_string(&accepted).map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize accepted Store acknowledgement ref: {error}"
+                        ))
+                    })?],
                 )
                 .map_err(DbError::from)?;
             if deleted != 1 {
@@ -4609,11 +6378,24 @@ impl Database {
                     "outbound Store acknowledgement disappeared".to_string(),
                 ));
             }
+            let successor_slot = serde_json::to_string(&outbound.ack.value.successor.next_slot)
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize Store acknowledgement successor slot: {error}"
+                    ))
+                })?;
             tx.execute(
-                "INSERT INTO published_store_acks (revision, ack_hash) VALUES (?1, ?2)",
+                "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
+                 VALUES (1, ?1, ?2) \
+                 ON CONFLICT(singleton) DO UPDATE SET \
+                   ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot",
                 (
-                    Self::sequence_to_sqlite("Store acknowledgement", revision)?,
-                    ack_hash.to_string(),
+                    serde_json::to_string(&accepted).map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize published Store acknowledgement ref: {error}"
+                        ))
+                    })?,
+                    successor_slot,
                 ),
             )
             .map_err(DbError::from)?;
@@ -4701,13 +6483,14 @@ impl Database {
                     return Ok(existing);
                 }
             }
+            let selected = reusable.iter().next_back().copied().unwrap_or(candidate);
             conn.execute(
                 "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                rusqlite::params![key, candidate.to_string()],
+                rusqlite::params![key, selected.to_string()],
             )
             .map_err(DbError::from)?;
-            Ok(candidate)
+            Ok(selected)
         })
         .await
     }
@@ -4796,161 +6579,612 @@ impl Database {
     pub(crate) async fn outbound_snapshot_publication(
         &self,
     ) -> Result<Option<DurableSnapshotPublication>, DbError> {
-        self.call(|conn| {
-            conn.query_row(
-                "SELECT snapshot_hash, image_hash, image_bytes, meta_bytes \
-                 FROM outbound_store_snapshot WHERE singleton = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, Vec<u8>>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .map(|(snapshot_hash, image_hash, image_bytes, meta_bytes)| {
-                let snapshot_hash = snapshot_hash.parse().map_err(|error| {
-                    DbError::Message(format!("outbound snapshot hash: {error}"))
-                })?;
-                let image_hash: ObjectHash = image_hash.parse().map_err(|error| {
-                    DbError::Message(format!("outbound snapshot image hash: {error}"))
-                })?;
-                if ObjectHash::digest(&image_bytes) != image_hash {
-                    return Err(DbError::Message(
-                        "outbound snapshot image hash differs from its exact bytes".to_string(),
-                    ));
+        let pending = self.call(load_outbound_store_snapshot_on).await?;
+        if let Some(pending) = &pending {
+            for blob in &pending.blobs {
+                if let Some(spool_path) = &blob.spool_path {
+                    crate::local_blob::verify_exact_file(blob.remote.object(), spool_path)
+                        .await
+                        .map_err(|error| {
+                            DbError::Message(format!("prepared snapshot blob spool: {error}"))
+                        })?;
                 }
-                Ok(DurableSnapshotPublication {
-                    snapshot_hash,
-                    image_hash,
-                    image_bytes,
-                    meta_bytes,
-                })
-            })
-            .transpose()
-        })
-        .await
+            }
+        }
+        Ok(pending)
     }
 
     pub(crate) async fn stage_snapshot_publication(
         &self,
-        snapshot_hash: ObjectHash,
-        image_hash: ObjectHash,
+        meta: SnapshotMeta,
+        meta_prepared: PreparedExactObject,
         image_bytes: Vec<u8>,
-        meta_bytes: Vec<u8>,
-    ) -> Result<(), DbError> {
+        image_prepared: PreparedExactObject,
+        blobs: Vec<PreparedSnapshotBlob>,
+    ) -> Result<StoreSnapshotRef, DbError> {
+        let synced_tables = self.synced_tables().to_vec();
+        let gates = self.gates();
         self.call(move |conn| {
-            if ObjectHash::digest(&image_bytes) != image_hash {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (root, registration_ref, registration) = local_store_authority_on(&tx)?;
+            if meta.author_registration != registration_ref {
                 return Err(DbError::Message(
-                    "staged snapshot image hash differs from its exact bytes".to_string(),
+                    "staged Store snapshot author differs from local activation".to_string(),
                 ));
             }
-            let existing = conn
-                .query_row(
-                    "SELECT snapshot_hash, image_hash, image_bytes, meta_bytes \
-                     FROM outbound_store_snapshot WHERE singleton = 1",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Vec<u8>>(2)?,
-                            row.get::<_, Vec<u8>>(3)?,
-                        ))
-                    },
-                )
-                .optional()
-                .map_err(DbError::from)?;
-            if let Some((stored_snapshot, stored_image, stored_image_bytes, stored_meta_bytes)) =
-                existing
+            if meta.image.object != *image_prepared.reference()
+                || ObjectHash::digest(&image_bytes) != meta.image.image_hash
+                || meta.image.object.slot().logical_key()
+                    != format!(
+                        "{}.db",
+                        snapshot_image_semantic_prefix(
+                            &registration.device_id.to_string(),
+                            meta.image.image_hash,
+                        )
+                    )
             {
-                if stored_snapshot == snapshot_hash.to_string()
-                    && stored_image == image_hash.to_string()
-                    && stored_image_bytes == image_bytes
-                    && stored_meta_bytes == meta_bytes
-                {
-                    return Ok(());
-                }
                 return Err(DbError::Message(
-                    "a different snapshot publication is already pending".to_string(),
+                    "staged Store snapshot image differs from its exact reference".to_string(),
                 ));
             }
-            conn.execute(
+            let reference = StoreSnapshotRef {
+                sequence: meta.sequence,
+                snapshot_hash: meta.snapshot_hash(),
+                object: meta_prepared.reference().clone(),
+            };
+            let verified = SnapshotMeta::parse_at(
+                &meta.to_bytes(),
+                root.store_root_hash,
+                &reference,
+                &registration,
+            )
+            .map_err(|error| {
+                DbError::Message(format!("verify staged Store snapshot metadata: {error}"))
+            })?;
+            if verified != meta {
+                return Err(DbError::Message(
+                    "staged Store snapshot changed during exact verification".to_string(),
+                ));
+            }
+            let previous = load_published_store_snapshot_on(&tx)?;
+            let (expected_sequence, expected_predecessor, expected_slot) = match &previous {
+                Some(previous) => (
+                    previous.reference.sequence.checked_add(1).ok_or_else(|| {
+                        DbError::Message("Store snapshot sequence overflow".to_string())
+                    })?,
+                    Some(previous.reference.clone()),
+                    previous.successor_slot.clone(),
+                ),
+                None => (1, None, store_snapshot_first_slot(&registration)?.clone()),
+            };
+            if meta.sequence != expected_sequence
+                || meta.predecessor != expected_predecessor
+                || meta_prepared.reference().slot() != &expected_slot
+                || meta.successor.predecessor
+                    != previous
+                        .as_ref()
+                        .map(|value| value.reference.object.clone())
+            {
+                return Err(DbError::Message(
+                    "Store snapshot does not extend the exact local stream".to_string(),
+                ));
+            }
+            let next_sequence = meta
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| DbError::Message("Store snapshot sequence overflow".to_string()))?;
+            if meta.successor.activation
+                != StreamActivationId::store_snapshots(&root, &registration_ref)
+                || meta.successor.next_slot.logical_key()
+                    != format!(
+                        "{}.json",
+                        snapshot_slot_prefix(&registration.device_id.to_string(), next_sequence)
+                    )
+            {
+                return Err(DbError::Message(
+                    "Store snapshot successor is outside its activated exact stream".to_string(),
+                ));
+            }
+            for blob in &blobs {
+                validate_snapshot_blob_plan_on(conn, &gates, &synced_tables, &meta, blob)?;
+            }
+            tx.execute(
                 "INSERT INTO outbound_store_snapshot \
-                 (singleton, snapshot_hash, image_hash, image_bytes, meta_bytes) \
-                 VALUES (1, ?1, ?2, ?3, ?4)",
+                 (singleton, snapshot_ref, meta_prepared, image_ref, image_prepared, \
+                  image_bytes, meta_bytes, blobs) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
-                    snapshot_hash.to_string(),
-                    image_hash.to_string(),
+                    serde_json::to_string(&reference).map_err(|error| DbError::Message(
+                        format!("serialize exact Store snapshot ref: {error}")
+                    ))?,
+                    serde_json::to_string(&meta_prepared).map_err(|error| DbError::Message(
+                        format!("serialize prepared Store snapshot metadata: {error}")
+                    ))?,
+                    serde_json::to_string(&meta.image).map_err(|error| DbError::Message(
+                        format!("serialize exact Store snapshot image ref: {error}")
+                    ))?,
+                    serde_json::to_string(&image_prepared).map_err(|error| DbError::Message(
+                        format!("serialize prepared Store snapshot image: {error}")
+                    ))?,
                     image_bytes,
-                    meta_bytes,
+                    meta.to_bytes(),
+                    serde_json::to_string(&blobs).map_err(|error| DbError::Message(format!(
+                        "serialize prepared Store snapshot blobs: {error}"
+                    )))?,
                 ],
             )
-            .map(|_| ())
-            .map_err(DbError::from)
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)?;
+            Ok(reference)
         })
         .await
     }
 
+    pub(crate) async fn latest_local_store_snapshot(
+        &self,
+    ) -> Result<Option<PublishedStoreSnapshot>, DbError> {
+        self.call(load_published_store_snapshot_on).await
+    }
+
     pub(crate) async fn complete_snapshot_publication(
         &self,
-        snapshot_hash: ObjectHash,
+        accepted: StoreSnapshotRef,
     ) -> Result<(), DbError> {
-        let write_policy = self.write_policy();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let (stored_image_hash, image_bytes, meta_bytes): (String, Vec<u8>, Vec<u8>) = tx
-                .query_row(
-                    "SELECT image_hash, image_bytes, meta_bytes \
-                     FROM outbound_store_snapshot \
-                     WHERE singleton = 1 AND snapshot_hash = ?1",
-                    [snapshot_hash.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            let outbound = load_outbound_store_snapshot_on(&tx)?
+                .ok_or_else(|| DbError::Message("outbound Store snapshot is absent".to_string()))?;
+            if outbound.reference != accepted {
+                return Err(DbError::Message(
+                    "accepted Store snapshot differs from the prepared exact object".to_string(),
+                ));
+            }
+            for blob in &outbound.blobs {
+                install_snapshot_blob_plan_on(&tx, blob)?;
+                if let Some(path) = &blob.spool_path {
+                    tx.execute(
+                        "INSERT INTO snapshot_blob_spool_cleanup (path) VALUES (?1)
+                         ON CONFLICT(path) DO NOTHING",
+                        [path.to_string_lossy().as_ref()],
+                    )
+                    .map_err(DbError::from)?;
+                }
+            }
+            let deleted = tx
+                .execute(
+                    "DELETE FROM outbound_store_snapshot \
+                     WHERE singleton = 1 AND snapshot_ref = ?1",
+                    [serde_json::to_string(&accepted).map_err(|error| {
+                        DbError::Message(format!("serialize accepted Store snapshot ref: {error}"))
+                    })?],
                 )
                 .map_err(DbError::from)?;
-            let image_hash: ObjectHash = stored_image_hash.parse().map_err(|error| {
-                DbError::Message(format!("outbound snapshot image hash: {error}"))
-            })?;
-            if ObjectHash::digest(&image_bytes) != image_hash {
+            if deleted != 1 {
                 return Err(DbError::Message(
-                    "outbound snapshot image hash differs from its exact bytes".to_string(),
+                    "outbound snapshot ownership row is absent or changed".to_string(),
                 ));
             }
-            let unverified: SnapshotMeta =
-                serde_json::from_slice(&meta_bytes).map_err(|error| {
-                    DbError::Message(format!("outbound snapshot metadata: {error}"))
-                })?;
-            let meta = SnapshotMeta::parse_at(
-                &meta_bytes,
-                unverified.store_root_hash,
-                &unverified.author_pubkey,
-                snapshot_hash,
+            tx.execute(
+                "INSERT INTO published_store_snapshot \
+                 (singleton, snapshot_ref, successor_slot, meta_bytes) VALUES (1, ?1, ?2, ?3) \
+                 ON CONFLICT(singleton) DO UPDATE SET \
+                   snapshot_ref = excluded.snapshot_ref, \
+                   successor_slot = excluded.successor_slot, \
+                   meta_bytes = excluded.meta_bytes",
+                rusqlite::params![
+                    serde_json::to_string(&accepted).map_err(|error| DbError::Message(format!(
+                        "serialize published Store snapshot ref: {error}"
+                    )))?,
+                    serde_json::to_string(&outbound.meta.value.successor.next_slot).map_err(
+                        |error| DbError::Message(format!(
+                            "serialize Store snapshot successor slot: {error}"
+                        ))
+                    )?,
+                    outbound.meta.bytes,
+                ],
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn snapshot_blob_spool_cleanup_paths(&self) -> Result<Vec<PathBuf>, DbError> {
+        self.call(|conn| {
+            let mut statement = conn
+                .prepare("SELECT path FROM snapshot_blob_spool_cleanup ORDER BY path")
+                .map_err(DbError::from)?;
+            let paths = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(DbError::from)?
+                .map(|row| row.map(PathBuf::from).map_err(DbError::from))
+                .collect();
+            paths
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_snapshot_blob_spool_cleanup(
+        &self,
+        path: &Path,
+    ) -> Result<(), DbError> {
+        let path = path.to_string_lossy().into_owned();
+        self.call(move |conn| {
+            let deleted = conn
+                .execute(
+                    "DELETE FROM snapshot_blob_spool_cleanup WHERE path = ?1",
+                    [&path],
+                )
+                .map_err(DbError::from)?;
+            if deleted != 1 {
+                return Err(DbError::Message(
+                    "snapshot blob spool cleanup ownership is absent".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn local_store_root_ref(
+        &self,
+    ) -> Result<Option<crate::sync::store_commit::StoreRootRef>, DbError> {
+        self.call(|conn| {
+            load_store_root_authority_on(conn)
+                .map(|authority| authority.map(|(reference, _)| reference))
+        })
+        .await
+    }
+
+    pub(crate) async fn install_store_root_authority(
+        &self,
+        reference: crate::sync::store_commit::StoreRootRef,
+        bytes: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            install_store_root_authority_on(&tx, &reference, &bytes)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn install_store_owner_anchor(
+        &self,
+        root: crate::sync::store_commit::StoreRootRef,
+        founder_reference: StoreDeviceRegistrationRef,
+        founder: StoreDeviceRegistration,
+        founder_bytes: Vec<u8>,
+        genesis: ResolvedStoreDeviceState,
+        owner: String,
+        head_refs: Vec<crate::sync::membership::MembershipHeadRef>,
+    ) -> Result<(), DbError> {
+        if founder.author_pubkey != owner {
+            return Err(DbError::Message(
+                "Store founder registration author differs from the owner anchor".to_string(),
+            ));
+        }
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            install_store_founder_state_on(
+                &tx,
+                &root,
+                &founder_reference,
+                &founder,
+                &founder_bytes,
+                &genesis,
+            )?;
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY, owner,],
+            )
+            .map_err(DbError::from)?;
+            for reference in &head_refs {
+                crate::sync::membership_ops::upsert_head_cursor_on(&tx, reference)?;
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn local_store_founder_graph(
+        &self,
+    ) -> Result<Option<DurableFounderGraph>, DbError> {
+        self.call(load_local_store_founder_graph_on).await
+    }
+
+    pub(crate) async fn stage_store_founder_graph(
+        &self,
+        graph: DurableFounderGraph,
+    ) -> Result<(), DbError> {
+        validate_founder_graph(&graph)?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            if let Some(existing) = load_local_store_founder_graph_on(&tx)? {
+                validate_founder_graph(&existing)?;
+                if founder_graph_identity(&existing) == founder_graph_identity(&graph) {
+                    return Ok(());
+                }
+                return Err(DbError::Message(
+                    "local Store founder graph already owns different exact objects".to_string(),
+                ));
+            }
+            consume_store_creation_probes_on(&tx, &graph)?;
+            tx.execute(
+                "INSERT INTO local_store_protocol_root \
+                 (singleton, store_root_hash, store_protocol_root_bytes, prepared_object) \
+                 VALUES (1, ?1, ?2, ?3)",
+                rusqlite::params![
+                    graph.root.value.object_hash().to_string(),
+                    graph.root.bytes,
+                    serde_json::to_string(&graph.root.prepared).map_err(|error| {
+                        DbError::Message(format!("serialize prepared Store root: {error}"))
+                    })?,
+                ],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO local_store_device_registration \
+                 (singleton, device_id, registration_hash, registration_bytes, prepared_object, \
+                  initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    graph.registration.value.device_id.to_string(),
+                    graph.registration.value.registration_hash().to_string(),
+                    graph.registration.bytes,
+                    serde_json::to_string(&graph.registration.prepared).map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize prepared founder registration: {error}"
+                        ))
+                    })?,
+                    serde_json::to_string(&graph.initial_ack_ref).map_err(|error| {
+                        DbError::Message(format!("serialize founder initial ack ref: {error}"))
+                    })?,
+                    graph.initial_ack.bytes,
+                    serde_json::to_string(&graph.initial_ack.prepared).map_err(|error| {
+                        DbError::Message(format!("serialize founder initial ack object: {error}"))
+                    })?,
+                    serde_json::to_string(&LocalDeviceRegistrationState::Prepared).map_err(
+                        |error| DbError::Message(format!(
+                            "serialize registration journal state: {error}"
+                        ))
+                    )?,
+                ],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO local_store_founder_graph \
+                 (singleton, membership_graph) VALUES (1, ?1)",
+                rusqlite::params![serde_json::to_string(
+                    &DurableFounderMembershipJournal::from_graph(&graph.membership,)
+                )
+                .map_err(|error| DbError::Message(format!(
+                    "serialize founder membership graph: {error}"
+                )))?,],
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_store_founder_graph(
+        &self,
+        expected_root: crate::sync::store_commit::StoreRootRef,
+        expected_registration: StoreDeviceRegistrationRef,
+        expected_initial_ack: StoreAckRef,
+        expected_membership: FounderMembershipRefs,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let graph = load_local_store_founder_graph_on(&tx)?.ok_or_else(|| {
+                DbError::Message("local Store founder graph is absent".to_string())
+            })?;
+            let root = crate::sync::store_commit::StoreRootRef {
+                store_root_id: graph.root.value.descriptor.store_root_id(),
+                store_root_hash: graph.root.value.object_hash(),
+                object: graph.root.object.clone(),
+            };
+            let registration = StoreDeviceRegistrationRef::from_registration(
+                &graph.registration.value,
+                graph.registration.object.clone(),
+            );
+            if root != expected_root
+                || registration != expected_registration
+                || graph.initial_ack_ref != expected_initial_ack
+                || match (&graph.membership, &expected_membership) {
+                    (
+                        DurableFounderMembership::MergeConcurrent {
+                            entry_ref,
+                            head_ref,
+                            ..
+                        },
+                        FounderMembershipRefs::MergeConcurrent { entry, head },
+                    ) => entry_ref != entry || head_ref != head,
+                    (DurableFounderMembership::Serial, FounderMembershipRefs::Serial) => false,
+                    _ => true,
+                }
+            {
+                return Err(DbError::Message(
+                    "verified founder graph differs from its durable exact references".to_string(),
+                ));
+            }
+            let founder_authority =
+                crate::sync::store_commit::StoreDeviceRegistrationActivation::Founder {
+                    root: root.clone(),
+                };
+            let device_genesis = ResolvedStoreDeviceState::founder(
+                &root,
+                registration.clone(),
+                &graph.root.value.descriptor.founder_pubkey,
+                graph.root.value.descriptor.founder_grant.clone(),
+                &graph.root.value.descriptor.founder_recovery,
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            let device_genesis_json = serde_json::to_string(&device_genesis).map_err(|error| {
+                DbError::Message(format!("serialize Store device genesis state: {error}"))
+            })?;
+            let device_id = registration.device_id.to_string();
+            let registration_hash = registration.registration_hash.to_string();
+            match &graph.registration_state {
+                LocalDeviceRegistrationState::Prepared => {
+                    return Err(DbError::Message(
+                        "founder registration and initial acknowledgement are not exact-created"
+                            .to_string(),
+                    ));
+                }
+                LocalDeviceRegistrationState::Created => {}
+                LocalDeviceRegistrationState::Activated { authority } => {
+                    if authority != &founder_authority {
+                        return Err(DbError::Message(
+                            "founder registration journal carries another activation authority"
+                                .to_string(),
+                        ));
+                    }
+                    let installed = load_store_root_authority_on(&tx)?;
+                    let stored: Option<(String, String, String)> = tx
+                        .query_row(
+                            "SELECT registration_object, activation_authority, registration_hash \
+                             FROM store_device_registration_activations WHERE device_id = ?1",
+                            [&device_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .optional()
+                        .map_err(DbError::from)?;
+                    let ack: Option<String> = tx
+                        .query_row(
+                            "SELECT ack_ref FROM published_store_acks WHERE singleton = 1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(DbError::from)?;
+                    let stored_device_genesis: Option<String> = tx
+                        .query_row(
+                            "SELECT value FROM protocol_state WHERE key = ?1",
+                            [STORE_DEVICE_GENESIS_STATE_KEY],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(DbError::from)?;
+                    if installed
+                        .as_ref()
+                        .map(|(reference, value)| (reference, value))
+                        != Some((&root, &graph.root.value))
+                        || stored
+                            != Some((
+                                serde_json::to_string(&registration).map_err(|error| {
+                                    DbError::Message(format!(
+                                        "serialize founder registration ref: {error}"
+                                    ))
+                                })?,
+                                serde_json::to_string(&founder_authority).map_err(|error| {
+                                    DbError::Message(format!(
+                                        "serialize founder authority: {error}"
+                                    ))
+                                })?,
+                                registration.registration_hash.to_string(),
+                            ))
+                        || ack
+                            != Some(serde_json::to_string(&graph.initial_ack_ref).map_err(
+                                |error| {
+                                    DbError::Message(format!("serialize founder ack ref: {error}"))
+                                },
+                            )?)
+                        || stored_device_genesis.as_deref() != Some(&device_genesis_json)
+                    {
+                        return Err(DbError::Message(
+                            "activated founder journal differs from installed exact authority"
+                                .to_string(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                LocalDeviceRegistrationState::Retired { .. } => {
+                    return Err(DbError::Message(
+                        "founder graph cannot complete through a retired local registration".into(),
+                    ));
+                }
+            }
+            install_store_root_authority_on(&tx, &root, &graph.root.bytes)?;
+            let activation = serde_json::to_string(
+                &crate::sync::store_commit::StoreDeviceRegistrationActivation::Founder {
+                    root: root.clone(),
+                },
             )
             .map_err(|error| {
-                DbError::Message(format!("verify outbound snapshot metadata: {error}"))
+                DbError::Message(format!(
+                    "serialize founder registration activation: {error}"
+                ))
             })?;
-            if meta.image_hash != image_hash {
+            let journal_state = serde_json::to_string(&LocalDeviceRegistrationState::Activated {
+                authority: founder_authority,
+            })
+            .map_err(|error| {
+                DbError::Message(format!("serialize founder registration journal: {error}"))
+            })?;
+            let updated = tx
+                .execute(
+                    "UPDATE local_store_device_registration SET state = ?1 \
+                     WHERE singleton = 1 AND device_id = ?2 AND registration_hash = ?3 \
+                       AND initial_ack_ref = ?4 AND state = ?5",
+                    rusqlite::params![
+                        journal_state,
+                        &device_id,
+                        &registration_hash,
+                        serde_json::to_string(&graph.initial_ack_ref).map_err(|error| {
+                            DbError::Message(format!("serialize founder initial ack ref: {error}"))
+                        })?,
+                        serde_json::to_string(&LocalDeviceRegistrationState::Created).map_err(
+                            |error| DbError::Message(format!(
+                                "serialize created journal state: {error}"
+                            ))
+                        )?,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
                 return Err(DbError::Message(
-                    "outbound snapshot metadata names different image bytes".to_string(),
+                    "founder registration journal did not activate".to_string(),
                 ));
             }
-            if meta.coverage.policy() != write_policy {
-                return Err(DbError::Message(format!(
-                    "outbound snapshot coverage uses {:?}, database uses {write_policy:?}",
-                    meta.coverage.policy()
-                )));
-            }
-            let frontier = serde_json::to_string(&meta.coverage).map_err(|error| {
-                DbError::Message(format!("serialize snapshot frontier: {error}"))
-            })?;
+            tx.execute(
+                "INSERT INTO store_device_registration_activations \
+                 (device_id, registration_hash, author_pubkey, device_signing_pubkey, \
+                  registration_bytes, registration_object, activation_authority) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    &device_id,
+                    &registration_hash,
+                    graph.registration.value.author_pubkey,
+                    graph.registration.value.device_signing_pubkey,
+                    graph.registration.bytes,
+                    serde_json::to_string(&registration).map_err(|error| {
+                        DbError::Message(format!("serialize founder registration ref: {error}"))
+                    })?,
+                    activation,
+                ],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO published_store_acks \
+                 (singleton, ack_ref, successor_slot) VALUES (1, ?1, ?2)",
+                rusqlite::params![
+                    serde_json::to_string(&graph.initial_ack_ref).map_err(|error| {
+                        DbError::Message(format!("serialize founder initial ack ref: {error}"))
+                    })?,
+                    serde_json::to_string(&graph.initial_ack.value.successor.next_slot).map_err(
+                        |error| DbError::Message(format!(
+                            "serialize founder ack successor: {error}"
+                        ))
+                    )?,
+                ],
+            )
+            .map_err(DbError::from)?;
             for (key, value) in [
-                (LAST_SNAPSHOT_HASH_STATE_KEY, snapshot_hash.to_string()),
-                ("last_snapshot_time", meta.created_at.clone()),
-                (LAST_SNAPSHOT_FRONTIER_STATE_KEY, frontier),
+                (LOCAL_DEVICE_ID_STATE_KEY, device_id),
+                (STORE_DEVICE_GENESIS_STATE_KEY, device_genesis_json),
             ] {
                 tx.execute(
                     "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
@@ -4959,162 +7193,34 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             }
-            let snapshot_position = match &meta.coverage {
-                CommitFrontier::MergeConcurrent(coverage) => {
-                    let local_device_id: String = tx
-                        .query_row(
-                            "SELECT value FROM protocol_state WHERE key = ?1",
-                            [LOCAL_DEVICE_ID_STATE_KEY],
-                            |row| row.get(0),
-                        )
-                        .map_err(DbError::from)?;
-                    coverage.get(&local_device_id)
-                }
-                CommitFrontier::Serial(position) => position.as_ref(),
-            };
-            match snapshot_position {
-                Some(position) => {
-                    let encoded = serde_json::to_string(position).map_err(|error| {
-                        DbError::Message(format!("serialize snapshot position: {error}"))
-                    })?;
+            match &graph.membership {
+                DurableFounderMembership::MergeConcurrent { head_ref, .. } => {
                     tx.execute(
                         "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
                          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (LAST_SNAPSHOT_POSITION_STATE_KEY, encoded),
+                        (
+                            crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                            &graph.root.value.descriptor.founder_pubkey,
+                        ),
                     )
                     .map_err(DbError::from)?;
+                    crate::sync::membership_ops::upsert_head_cursor_on(&tx, head_ref)?;
                 }
-                None => {
-                    tx.execute(
-                        "DELETE FROM protocol_state WHERE key = ?1",
-                        [LAST_SNAPSHOT_POSITION_STATE_KEY],
+                DurableFounderMembership::Serial => {
+                    let authorization = SerialAuthorizationState::from_founder(
+                        &root,
+                        &graph.root.value,
+                        &registration,
+                        &graph.registration.value,
                     )
-                    .map_err(DbError::from)?;
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    Self::install_serial_root_authorization_on(
+                        &tx,
+                        &graph.root.value.descriptor.founder_pubkey,
+                        &authorization,
+                    )?;
                 }
             }
-            let deleted = tx
-                .execute(
-                    "DELETE FROM outbound_store_snapshot \
-                     WHERE singleton = 1 AND snapshot_hash = ?1",
-                    [snapshot_hash.to_string()],
-                )
-                .map_err(DbError::from)?;
-            if deleted != 1 {
-                return Err(DbError::Message(
-                    "outbound snapshot ownership row is absent or changed".to_string(),
-                ));
-            }
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
-    pub(crate) async fn local_store_protocol_root(
-        &self,
-    ) -> Result<Option<DurableProtocolObject>, DbError> {
-        self.call(|conn| {
-            conn.query_row(
-                "SELECT store_root_hash, store_protocol_root_bytes, published \
-                 FROM local_store_protocol_root WHERE singleton = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .map(|(hash, bytes, published)| {
-                Ok(DurableProtocolObject {
-                    semantic_hash: hash.parse().map_err(|error| {
-                        DbError::Message(format!("local store protocol root hash: {error}"))
-                    })?,
-                    bytes,
-                    published: match published {
-                        0 => false,
-                        1 => true,
-                        value => {
-                            return Err(DbError::Message(format!(
-                                "local store protocol root has invalid published value {value}"
-                            )))
-                        }
-                    },
-                })
-            })
-            .transpose()
-        })
-        .await
-    }
-
-    pub(crate) async fn stage_store_protocol_root(
-        &self,
-        store_protocol_root: StoreProtocolRoot,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let bytes = store_protocol_root.to_bytes();
-            let parsed = StoreProtocolRoot::parse(&bytes)
-                .map_err(|error| DbError::Message(format!("verify staged store protocol root: {error}")))?;
-            if parsed != store_protocol_root {
-                return Err(DbError::Message(
-                    "staged store protocol root changed during encoding".to_string(),
-                ));
-            }
-            let hash = store_protocol_root.object_hash();
-            let existing = conn
-                .query_row(
-                    "SELECT store_root_hash, store_protocol_root_bytes FROM local_store_protocol_root \
-                     WHERE singleton = 1",
-                    [],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-                )
-                .optional()
-                .map_err(DbError::from)?;
-            if let Some((existing_hash, existing_bytes)) = existing {
-                if existing_hash == hash.to_string() && existing_bytes == bytes {
-                    return Ok(());
-                }
-                return Err(DbError::Message(
-                    "local store protocol root already owns different bytes".to_string(),
-                ));
-            }
-            conn.execute(
-                "INSERT INTO local_store_protocol_root \
-                 (singleton, store_root_hash, store_protocol_root_bytes, published) VALUES (1, ?1, ?2, 0)",
-                (hash.to_string(), bytes),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
-    pub(crate) async fn complete_store_protocol_root(
-        &self,
-        store_root_hash: ObjectHash,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let updated = tx
-                .execute(
-                    "UPDATE local_store_protocol_root SET published = 1 \
-                     WHERE singleton = 1 AND store_root_hash = ?1",
-                    [store_root_hash.to_string()],
-                )
-                .map_err(DbError::from)?;
-            if updated != 1 {
-                return Err(DbError::Message(
-                    "local store protocol root ownership row is absent".to_string(),
-                ));
-            }
-            tx.execute(
-                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (STORE_ROOT_HASH_STATE_KEY, store_root_hash.to_string()),
-            )
-            .map_err(DbError::from)?;
             tx.commit().map_err(DbError::from)
         })
         .await
@@ -5124,10 +7230,1033 @@ impl Database {
         &self,
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
         self.read_local_store_device_registration(
-            "SELECT revision, registration_hash, previous_registration_hash, state, \
-                    registration_bytes, activation_base_head_bytes, activation_commit_bytes, activation_head_bytes, published \
-             FROM local_store_device_registration ORDER BY revision DESC LIMIT 1",
+            "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
+                    initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state \
+             FROM local_store_device_registration WHERE singleton = 1",
         )
+        .await
+    }
+
+    pub async fn export_activated_device_continuation(
+        &self,
+        identity_signer: &crate::keys::UserKeypair,
+    ) -> Result<crate::sync::restore_code::ActivatedContinuation, DbError> {
+        let durable = self
+            .latest_local_store_device_registration()
+            .await?
+            .ok_or_else(|| DbError::Message("local Store device registration is absent".into()))?;
+        let LocalDeviceRegistrationState::Activated { authority } = durable.state else {
+            return Err(DbError::Message(
+                "local Store device registration is not activated".into(),
+            ));
+        };
+        let root = self
+            .local_store_root_ref()
+            .await?
+            .ok_or_else(DbError::missing_store_root_hash)?;
+        let registration = StoreDeviceRegistration::parse_at(
+            &durable.registration_bytes,
+            &root,
+            durable.device_id,
+        )
+        .map_err(|error| DbError::Message(format!("local Store registration: {error}")))?;
+        let registration_ref = StoreDeviceRegistrationRef::from_registration(
+            &registration,
+            durable.prepared.reference().clone(),
+        );
+        if registration_ref.registration_hash != durable.registration_hash {
+            return Err(DbError::Message(
+                "local Store registration hash differs from its exact object".into(),
+            ));
+        }
+        let device_signer = registration
+            .device_signer(identity_signer)
+            .map_err(|error| DbError::Message(format!("local device signer: {error}")))?;
+        let latest_ack = self
+            .latest_local_store_ack()
+            .await?
+            .ok_or_else(|| DbError::Message("local Store acknowledgement is absent".into()))?;
+        Ok(crate::sync::restore_code::ActivatedContinuation {
+            identity_signing_secret: hex::encode(identity_signer.to_keypair_bytes()),
+            device_signing_secret: hex::encode(device_signer.to_keypair_bytes()),
+            registration: registration_ref,
+            registration_bytes: durable.registration_bytes,
+            registration_prepared: durable.prepared,
+            initial_ack: durable.initial_ack_ref,
+            initial_ack_bytes: durable.initial_ack.bytes,
+            initial_ack_prepared: durable.initial_ack.prepared,
+            activation: authority,
+            latest_ack: latest_ack.reference,
+            latest_snapshot: self
+                .latest_local_store_snapshot()
+                .await?
+                .map(|snapshot| snapshot.reference),
+            latest_position: self.latest_local_store_position().await?,
+        })
+    }
+
+    pub async fn install_activated_device_continuation(
+        &self,
+        continuation: crate::sync::restore_code::ActivatedContinuation,
+        identity_signer: &crate::keys::UserKeypair,
+        device_signer: &crate::keys::UserKeypair,
+        ack_chain: Vec<(StoreAckRef, StoreAck)>,
+        latest_snapshot: Option<(StoreSnapshotRef, SnapshotMeta)>,
+    ) -> Result<(), DbError> {
+        let root = self
+            .local_store_root_ref()
+            .await?
+            .ok_or_else(DbError::missing_store_root_hash)?;
+        let registration = StoreDeviceRegistration::parse_at(
+            &continuation.registration_bytes,
+            &root,
+            continuation.registration.device_id,
+        )
+        .map_err(|error| DbError::Message(format!("continued Store registration: {error}")))?;
+        continuation
+            .registration
+            .verify_registration(&registration)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let derived_device = registration
+            .device_signer(identity_signer)
+            .map_err(|error| DbError::Message(format!("continued device signer: {error}")))?;
+        if derived_device.to_keypair_bytes() != device_signer.to_keypair_bytes()
+            || continuation.registration_prepared.reference() != &continuation.registration.object
+            || continuation.initial_ack_prepared.reference() != &continuation.initial_ack.object
+        {
+            return Err(DbError::Message(
+                "continued device keys or exact registration objects differ".into(),
+            ));
+        }
+        let initial_ack = StoreAck::parse_at(
+            &continuation.initial_ack_bytes,
+            root.store_root_hash,
+            &continuation.initial_ack,
+            &registration,
+        )
+        .map_err(|error| DbError::Message(format!("continued initial ack: {error}")))?;
+        let Some((latest_ack_ref, latest_ack)) = ack_chain.first() else {
+            return Err(DbError::Message(
+                "continued acknowledgement chain is empty".into(),
+            ));
+        };
+        if initial_ack.revision != 1
+            || initial_ack.predecessor.is_some()
+            || latest_ack.author_registration != continuation.registration
+            || latest_ack_ref != &continuation.latest_ack
+            || ack_chain.last().map(|(reference, _)| reference) != Some(&continuation.initial_ack)
+            || ack_chain.windows(2).any(|pair| {
+                pair[0].1.predecessor.as_ref() != Some(&pair[1].0)
+                    || pair[0].0.revision != pair[0].1.revision
+                    || pair[1].0.revision != pair[1].1.revision
+            })
+        {
+            return Err(DbError::Message(
+                "continued acknowledgement chain differs from its exact authority".into(),
+            ));
+        }
+        let latest_successor_slot = latest_ack.successor.next_slot.clone();
+        match (&continuation.latest_snapshot, &latest_snapshot) {
+            (None, None) => {}
+            (Some(expected), Some((reference, meta))) if expected == reference => {
+                let verified = crate::sync::store_snapshot::verify_store_snapshot_bytes(
+                    &root,
+                    &continuation.registration,
+                    &registration,
+                    reference,
+                    &meta.to_bytes(),
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?;
+                if verified != *meta {
+                    return Err(DbError::Message(
+                        "continued snapshot changed during exact verification".into(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(DbError::Message(
+                    "continued snapshot stream differs from its exact authority".into(),
+                ));
+            }
+        }
+
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let activated = load_activated_registration_on(&tx, &root, &continuation.registration)?;
+            if activated != registration {
+                return Err(DbError::Message(
+                    "continued registration differs from activated Store state".into(),
+                ));
+            }
+            let stored_authority: String = tx
+                .query_row(
+                    "SELECT activation_authority FROM store_device_registration_activations \
+                     WHERE device_id = ?1 AND registration_hash = ?2",
+                    (
+                        continuation.registration.device_id.to_string(),
+                        continuation.registration.registration_hash.to_string(),
+                    ),
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let stored_authority: crate::sync::store_commit::StoreDeviceRegistrationActivation =
+                serde_json::from_str(&stored_authority).map_err(|error| {
+                    DbError::Message(format!("continued activation authority: {error}"))
+                })?;
+            if stored_authority != continuation.activation {
+                return Err(DbError::Message(
+                    "continued registration has another activation authority".into(),
+                ));
+            }
+            if let Some(position) = &continuation.latest_position {
+                let stream_id = match &position.coord {
+                    StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
+                    StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
+                };
+                let restored_position = Self::latest_position_for_device_on(&tx, &stream_id)?;
+                if restored_position.as_ref() != Some(position) {
+                    return Err(DbError::Message(
+                        "continued device position is absent from restored history".into(),
+                    ));
+                }
+            }
+            let existing_local: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM local_store_device_registration",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let existing_ack: i64 = tx
+                .query_row("SELECT COUNT(*) FROM published_store_acks", [], |row| {
+                    row.get(0)
+                })
+                .map_err(DbError::from)?;
+            let existing_snapshot: i64 = tx
+                .query_row("SELECT COUNT(*) FROM published_store_snapshot", [], |row| {
+                    row.get(0)
+                })
+                .map_err(DbError::from)?;
+            let existing_device: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let state = serde_json::to_string(&LocalDeviceRegistrationState::Activated {
+                authority: continuation.activation.clone(),
+            })
+            .map_err(|error| DbError::Message(format!("continued activation: {error}")))?;
+            let expected_local = (
+                continuation.registration.device_id.to_string(),
+                continuation.registration.registration_hash.to_string(),
+                continuation.registration_bytes.clone(),
+                serde_json::to_string(&continuation.registration_prepared).map_err(|error| {
+                    DbError::Message(format!("continued registration object: {error}"))
+                })?,
+                serde_json::to_string(&continuation.initial_ack).map_err(|error| {
+                    DbError::Message(format!("continued initial ack ref: {error}"))
+                })?,
+                continuation.initial_ack_bytes.clone(),
+                serde_json::to_string(&continuation.initial_ack_prepared).map_err(|error| {
+                    DbError::Message(format!("continued initial ack object: {error}"))
+                })?,
+                state,
+            );
+            match existing_local {
+                0 => {
+                    tx.execute(
+                        "INSERT INTO local_store_device_registration \
+                         (singleton, device_id, registration_hash, registration_bytes, \
+                          prepared_object, initial_ack_ref, initial_ack_bytes, \
+                          initial_ack_prepared, state) \
+                         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        rusqlite::params![
+                            expected_local.0,
+                            expected_local.1,
+                            expected_local.2,
+                            expected_local.3,
+                            expected_local.4,
+                            expected_local.5,
+                            expected_local.6,
+                            expected_local.7,
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+                }
+                1 => {
+                    let actual = tx
+                        .query_row(
+                            "SELECT device_id, registration_hash, registration_bytes, \
+                             prepared_object, initial_ack_ref, initial_ack_bytes, \
+                             initial_ack_prepared, state FROM local_store_device_registration \
+                             WHERE singleton = 1",
+                            [],
+                            |row| {
+                                Ok((
+                                    row.get::<_, String>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, Vec<u8>>(2)?,
+                                    row.get::<_, String>(3)?,
+                                    row.get::<_, String>(4)?,
+                                    row.get::<_, Vec<u8>>(5)?,
+                                    row.get::<_, String>(6)?,
+                                    row.get::<_, String>(7)?,
+                                ))
+                            },
+                        )
+                        .map_err(DbError::from)?;
+                    if actual != expected_local {
+                        return Err(DbError::Message(
+                            "restored local device state differs from continuation".into(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(DbError::Message(
+                        "restored database carries multiple local device journals".into(),
+                    ));
+                }
+            }
+            match existing_ack {
+                0 => {}
+                1 => {
+                    let (stored_ref, stored_successor): (String, String) = tx
+                        .query_row(
+                            "SELECT ack_ref, successor_slot FROM published_store_acks \
+                             WHERE singleton = 1",
+                            [],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .map_err(DbError::from)?;
+                    let stored_ref: StoreAckRef =
+                        serde_json::from_str(&stored_ref).map_err(|error| {
+                            DbError::Message(format!("restored acknowledgement: {error}"))
+                        })?;
+                    let Some((_, stored_ack)) = ack_chain
+                        .iter()
+                        .find(|(reference, _)| reference == &stored_ref)
+                    else {
+                        return Err(DbError::Message(
+                            "restored acknowledgement is outside the continuation chain".into(),
+                        ));
+                    };
+                    if stored_successor
+                        != serde_json::to_string(&stored_ack.successor.next_slot).map_err(
+                            |error| DbError::Message(format!("restored ack successor: {error}")),
+                        )?
+                    {
+                        return Err(DbError::Message(
+                            "restored acknowledgement successor differs from its signature".into(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(DbError::Message(
+                        "restored database carries multiple local acknowledgements".into(),
+                    ));
+                }
+            }
+            match (existing_snapshot, latest_snapshot.as_ref()) {
+                (0, None) => {}
+                (0, Some((reference, meta))) => {
+                    tx.execute(
+                        "INSERT INTO published_store_snapshot \
+                         (singleton, snapshot_ref, successor_slot, meta_bytes) \
+                         VALUES (1, ?1, ?2, ?3)",
+                        rusqlite::params![
+                            serde_json::to_string(reference).map_err(|error| {
+                                DbError::Message(format!(
+                                    "serialize continued Store snapshot ref: {error}"
+                                ))
+                            })?,
+                            serde_json::to_string(&meta.successor.next_slot).map_err(|error| {
+                                DbError::Message(format!(
+                                    "serialize continued Store snapshot successor: {error}"
+                                ))
+                            })?,
+                            meta.to_bytes(),
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+                }
+                (1, Some((reference, meta))) => {
+                    let actual: (String, String, Vec<u8>) = tx
+                        .query_row(
+                            "SELECT snapshot_ref, successor_slot, meta_bytes \
+                             FROM published_store_snapshot WHERE singleton = 1",
+                            [],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .map_err(DbError::from)?;
+                    let expected = (
+                        serde_json::to_string(reference).map_err(|error| {
+                            DbError::Message(format!(
+                                "serialize continued Store snapshot ref: {error}"
+                            ))
+                        })?,
+                        serde_json::to_string(&meta.successor.next_slot).map_err(|error| {
+                            DbError::Message(format!(
+                                "serialize continued Store snapshot successor: {error}"
+                            ))
+                        })?,
+                        meta.to_bytes(),
+                    );
+                    if actual != expected {
+                        return Err(DbError::Message(
+                            "restored local snapshot stream differs from continuation".into(),
+                        ));
+                    }
+                }
+                (1, None) => {
+                    return Err(DbError::Message(
+                        "restored database carries a snapshot outside the continuation".into(),
+                    ));
+                }
+                _ => {
+                    return Err(DbError::Message(
+                        "restored database carries multiple local snapshots".into(),
+                    ));
+                }
+            }
+            let latest_ref = serde_json::to_string(&continuation.latest_ack)
+                .map_err(|error| DbError::Message(format!("continued latest ack: {error}")))?;
+            let latest_successor = serde_json::to_string(&latest_successor_slot)
+                .map_err(|error| DbError::Message(format!("continued ack successor: {error}")))?;
+            if existing_ack == 0 {
+                tx.execute(
+                    "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
+                     VALUES (1, ?1, ?2)",
+                    (&latest_ref, &latest_successor),
+                )
+                .map_err(DbError::from)?;
+            } else {
+                tx.execute(
+                    "UPDATE published_store_acks SET ack_ref = ?1, successor_slot = ?2 \
+                     WHERE singleton = 1",
+                    (&latest_ref, &latest_successor),
+                )
+                .map_err(DbError::from)?;
+            }
+            match existing_device {
+                Some(existing) if existing == continuation.registration.device_id.to_string() => {}
+                Some(_) => {
+                    return Err(DbError::Message(
+                        "restored local device id differs from continuation".into(),
+                    ));
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
+                        (
+                            LOCAL_DEVICE_ID_STATE_KEY,
+                            continuation.registration.device_id.to_string(),
+                        ),
+                    )
+                    .map_err(DbError::from)?;
+                }
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_merge_owner_recovery(
+        &self,
+        commit: StoreBatchCommit,
+        commit_ref: StoreBatchCommitRef,
+        registration: StoreDeviceRegistration,
+        authority: crate::sync::store_commit::StoreDeviceRegistrationActivation,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            Self::record_activated_store_device_registrations_on(
+                &tx,
+                &commit,
+                &[(registration, authority)],
+            )?;
+            Self::record_materialized_commit_on(&tx, &commit, &commit_ref)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_serial_owner_recovery(
+        &self,
+        commit: StoreBatchCommit,
+        commit_ref: StoreBatchCommitRef,
+        registration: StoreDeviceRegistration,
+        authority: crate::sync::store_commit::StoreDeviceRegistrationActivation,
+        authorization: SerialAuthorizationState,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            Self::record_activated_store_device_registrations_on(
+                &tx,
+                &commit,
+                &[(registration, authority)],
+            )?;
+            Self::record_materialized_serial_commit_on(&tx, &commit, &commit_ref, &authorization)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn stage_local_store_device_registration(
+        &self,
+        registration: ExactProtocolObject<StoreDeviceRegistration>,
+        initial_ack_ref: StoreAckRef,
+        initial_ack: ExactProtocolObject<StoreAck>,
+    ) -> Result<(), DbError> {
+        let registration_ref = StoreDeviceRegistrationRef::from_registration(
+            &registration.value,
+            registration.object.clone(),
+        );
+        if registration.value.to_bytes() != registration.bytes
+            || registration.object != *registration.prepared.reference()
+            || initial_ack.value.to_bytes() != initial_ack.bytes
+            || initial_ack.object != *initial_ack.prepared.reference()
+            || initial_ack_ref.object != initial_ack.object
+            || initial_ack_ref.ack_hash != initial_ack.value.ack_hash()
+            || initial_ack_ref.revision != initial_ack.value.revision
+            || initial_ack.value.author_registration != registration_ref
+        {
+            return Err(DbError::Message(
+                "local registration staging graph contains mismatched exact objects".to_string(),
+            ));
+        }
+        self.call(move |conn| {
+            let root = required_store_root_authority_on(conn)?;
+            if registration.value.store_root != root {
+                return Err(DbError::Message(
+                    "local registration staging graph belongs to another Store root".to_string(),
+                ));
+            }
+            let prepared = serde_json::to_string(&registration.prepared).map_err(|error| {
+                DbError::Message(format!("serialize prepared local registration: {error}"))
+            })?;
+            let ack_ref = serde_json::to_string(&initial_ack_ref).map_err(|error| {
+                DbError::Message(format!("serialize local initial ack ref: {error}"))
+            })?;
+            let ack_prepared = serde_json::to_string(&initial_ack.prepared).map_err(|error| {
+                DbError::Message(format!("serialize prepared local initial ack: {error}"))
+            })?;
+            let existing: Option<PreparedLocalDeviceRegistrationRow> = conn
+                .query_row(
+                    "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
+                            initial_ack_ref, initial_ack_bytes, initial_ack_prepared \
+                     FROM local_store_device_registration WHERE singleton = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let expected = (
+                registration_ref.device_id.to_string(),
+                registration_ref.registration_hash.to_string(),
+                registration.bytes.clone(),
+                prepared.clone(),
+                ack_ref.clone(),
+                initial_ack.bytes.clone(),
+                ack_prepared.clone(),
+            );
+            match existing {
+                Some(existing) if existing == expected => Ok(()),
+                Some(_) => Err(DbError::Message(
+                    "local registration journal already owns different exact objects".to_string(),
+                )),
+                None => conn
+                    .execute(
+                        "INSERT INTO local_store_device_registration \
+                         (singleton, device_id, registration_hash, registration_bytes, \
+                          prepared_object, initial_ack_ref, initial_ack_bytes, \
+                          initial_ack_prepared, state) \
+                         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        rusqlite::params![
+                            expected.0,
+                            expected.1,
+                            expected.2,
+                            expected.3,
+                            expected.4,
+                            expected.5,
+                            expected.6,
+                            serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
+                                .map_err(|error| DbError::Message(format!(
+                                    "serialize local registration state: {error}"
+                                )))?,
+                        ],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from),
+            }
+        })
+        .await
+    }
+
+    pub(crate) async fn install_existing_local_founder_device(
+        &self,
+        registration: ExactProtocolObject<StoreDeviceRegistration>,
+        initial_ack_ref: StoreAckRef,
+        initial_ack: ExactProtocolObject<StoreAck>,
+    ) -> Result<(), DbError> {
+        let registration_ref = StoreDeviceRegistrationRef::from_registration(
+            &registration.value,
+            registration.object.clone(),
+        );
+        if registration.value.to_bytes() != registration.bytes
+            || registration.object != *registration.prepared.reference()
+            || initial_ack.value.to_bytes() != initial_ack.bytes
+            || initial_ack.object != *initial_ack.prepared.reference()
+            || initial_ack_ref.object != initial_ack.object
+            || initial_ack_ref.ack_hash != initial_ack.value.ack_hash()
+            || initial_ack_ref.revision != 1
+            || initial_ack.value.revision != 1
+            || initial_ack.value.predecessor.is_some()
+            || initial_ack.value.author_registration != registration_ref
+        {
+            return Err(DbError::Message(
+                "existing founder device graph contains mismatched exact objects".to_string(),
+            ));
+        }
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let root = required_store_root_authority_on(&tx)?;
+            let crate::sync::store_commit::StoreDeviceRegistrationOrigin::Founder { .. } =
+                &registration.value.origin
+            else {
+                return Err(DbError::Message(
+                    "existing local founder device has a non-founder origin".to_string(),
+                ));
+            };
+            if registration.value.store_root != root {
+                return Err(DbError::Message(
+                    "existing local founder device belongs to another Store root".to_string(),
+                ));
+            }
+            let activated = load_activated_registration_on(&tx, &root, &registration_ref)?;
+            if activated != registration.value {
+                return Err(DbError::Message(
+                    "existing local founder device differs from its installed activation"
+                        .to_string(),
+                ));
+            }
+            let authority = crate::sync::store_commit::StoreDeviceRegistrationActivation::Founder {
+                root: root.clone(),
+            };
+            let expected = (
+                registration_ref.device_id.to_string(),
+                registration_ref.registration_hash.to_string(),
+                registration.bytes.clone(),
+                serde_json::to_string(&registration.prepared).map_err(|error| {
+                    DbError::Message(format!("serialize existing founder registration: {error}"))
+                })?,
+                serde_json::to_string(&initial_ack_ref).map_err(|error| {
+                    DbError::Message(format!("serialize existing founder ack ref: {error}"))
+                })?,
+                initial_ack.bytes.clone(),
+                serde_json::to_string(&initial_ack.prepared).map_err(|error| {
+                    DbError::Message(format!("serialize existing founder ack object: {error}"))
+                })?,
+                serde_json::to_string(&LocalDeviceRegistrationState::Activated { authority })
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize existing founder registration state: {error}"
+                        ))
+                    })?,
+            );
+            tx.execute(
+                "INSERT INTO local_store_device_registration
+                 (singleton, device_id, registration_hash, registration_bytes,
+                  prepared_object, initial_ack_ref, initial_ack_bytes,
+                  initial_ack_prepared, state)
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(singleton) DO NOTHING",
+                rusqlite::params![
+                    &expected.0,
+                    &expected.1,
+                    &expected.2,
+                    &expected.3,
+                    &expected.4,
+                    &expected.5,
+                    &expected.6,
+                    &expected.7,
+                ],
+            )
+            .map_err(DbError::from)?;
+            let stored: LocalDeviceRegistrationJournalRow = tx
+                .query_row(
+                    "SELECT device_id, registration_hash, registration_bytes, prepared_object,
+                            initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state
+                     FROM local_store_device_registration WHERE singleton = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                        ))
+                    },
+                )
+                .map_err(DbError::from)?;
+            if stored != expected {
+                return Err(DbError::Message(
+                    "existing local founder journal owns different exact objects".to_string(),
+                ));
+            }
+            let ack_ref = serde_json::to_string(&initial_ack_ref).map_err(|error| {
+                DbError::Message(format!("serialize existing founder ack ref: {error}"))
+            })?;
+            let successor =
+                serde_json::to_string(&initial_ack.value.successor.next_slot).map_err(|error| {
+                    DbError::Message(format!("serialize existing founder ack successor: {error}"))
+                })?;
+            tx.execute(
+                "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot)
+                 VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO NOTHING",
+                (&ack_ref, &successor),
+            )
+            .map_err(DbError::from)?;
+            let stored_ack: (String, String) = tx
+                .query_row(
+                    "SELECT ack_ref, successor_slot FROM published_store_acks WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            if stored_ack != (ack_ref, successor) {
+                return Err(DbError::Message(
+                    "existing local founder acknowledgement differs from exact cloud state"
+                        .to_string(),
+                ));
+            }
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO NOTHING",
+                (LOCAL_DEVICE_ID_STATE_KEY, &expected.0),
+            )
+            .map_err(DbError::from)?;
+            let stored_device_id: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [LOCAL_DEVICE_ID_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if stored_device_id != expected.0 {
+                return Err(DbError::Message(
+                    "existing local founder device id conflicts with installed state".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn stage_owner_recovery_registration(
+        &self,
+        registration: ExactProtocolObject<StoreDeviceRegistration>,
+        initial_ack_ref: StoreAckRef,
+        initial_ack: ExactProtocolObject<StoreAck>,
+        activation: crate::sync::store_commit::StoreDeviceRegistrationActivation,
+    ) -> Result<bool, DbError> {
+        let (
+            crate::sync::store_commit::StoreDeviceRegistrationOrigin::Recovery {
+                recovery_id: origin_recovery_id,
+                recovery_slot,
+                owner_grant,
+                ..
+            },
+            crate::sync::store_commit::StoreDeviceRegistrationActivation::Recovery {
+                recovery_id: activation_recovery_id,
+                node,
+            },
+        ) = (&registration.value.origin, &activation)
+        else {
+            return Err(DbError::Message(
+                "Owner recovery journal requires one Recovery registration authority".into(),
+            ));
+        };
+        if origin_recovery_id != activation_recovery_id
+            || node.object.slot() != recovery_slot
+            || node.owner_grant != *owner_grant
+        {
+            return Err(DbError::Message(
+                "Owner recovery registration differs from its activation authority".into(),
+            ));
+        }
+        let registration_ref = StoreDeviceRegistrationRef::from_registration(
+            &registration.value,
+            registration.object.clone(),
+        );
+        if registration.value.to_bytes() != registration.bytes
+            || registration.object != *registration.prepared.reference()
+            || initial_ack.value.to_bytes() != initial_ack.bytes
+            || initial_ack.object != *initial_ack.prepared.reference()
+            || initial_ack_ref.object != initial_ack.object
+            || initial_ack_ref.ack_hash != initial_ack.value.ack_hash()
+            || initial_ack_ref.revision != 1
+            || initial_ack.value.predecessor.is_some()
+            || initial_ack.value.author_registration != registration_ref
+        {
+            return Err(DbError::Message(
+                "Owner recovery registration graph contains mismatched exact objects".into(),
+            ));
+        }
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let root = required_store_root_authority_on(&tx)?;
+            if registration.value.store_root != root {
+                return Err(DbError::Message(
+                    "Owner recovery registration belongs to another Store root".into(),
+                ));
+            }
+            let exact_registration_ref =
+                serde_json::to_string(&registration_ref).map_err(|error| {
+                    DbError::Message(format!("Owner recovery registration ref: {error}"))
+                })?;
+            let exact_activation = serde_json::to_string(&activation).map_err(|error| {
+                DbError::Message(format!("Owner recovery activation authority: {error}"))
+            })?;
+            let activated = tx
+                .query_row(
+                    "SELECT registration_hash, registration_bytes, registration_object, \
+                            activation_authority \
+                     FROM store_device_registration_activations WHERE device_id = ?1",
+                    [registration_ref.device_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let activated = match activated {
+                None => false,
+                Some(existing)
+                    if existing
+                        == (
+                            registration_ref.registration_hash.to_string(),
+                            registration.bytes.clone(),
+                            exact_registration_ref,
+                            exact_activation,
+                        ) =>
+                {
+                    true
+                }
+                Some(_) => {
+                    return Err(DbError::Message(
+                        "Owner recovery device already has different exact activation authority"
+                            .into(),
+                    ));
+                }
+            };
+            tx.execute("DELETE FROM local_store_device_registration", [])
+                .map_err(DbError::from)?;
+            tx.execute("DELETE FROM published_store_acks", [])
+                .map_err(DbError::from)?;
+            tx.execute(
+                "DELETE FROM protocol_state WHERE key = ?1",
+                [LOCAL_DEVICE_ID_STATE_KEY],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO local_store_device_registration \
+                 (singleton, device_id, registration_hash, registration_bytes, \
+                  prepared_object, initial_ack_ref, initial_ack_bytes, \
+                  initial_ack_prepared, state) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    registration_ref.device_id.to_string(),
+                    registration_ref.registration_hash.to_string(),
+                    registration.bytes,
+                    serde_json::to_string(&registration.prepared).map_err(|error| {
+                        DbError::Message(format!("Owner recovery registration object: {error}"))
+                    })?,
+                    serde_json::to_string(&initial_ack_ref).map_err(|error| {
+                        DbError::Message(format!("Owner recovery initial ack ref: {error}"))
+                    })?,
+                    initial_ack.bytes,
+                    serde_json::to_string(&initial_ack.prepared).map_err(|error| {
+                        DbError::Message(format!("Owner recovery initial ack object: {error}"))
+                    })?,
+                    serde_json::to_string(&if activated {
+                        LocalDeviceRegistrationState::Activated {
+                            authority: activation,
+                        }
+                    } else {
+                        LocalDeviceRegistrationState::Prepared
+                    })
+                    .map_err(|error| DbError::Message(format!(
+                        "Owner recovery journal state: {error}"
+                    )))?,
+                ],
+            )
+            .map_err(DbError::from)?;
+            if activated {
+                tx.execute(
+                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
+                    (
+                        LOCAL_DEVICE_ID_STATE_KEY,
+                        registration_ref.device_id.to_string(),
+                    ),
+                )
+                .map_err(DbError::from)?;
+                tx.execute(
+                    "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
+                     VALUES (1, ?1, ?2)",
+                    rusqlite::params![
+                        serde_json::to_string(&initial_ack_ref).map_err(|error| {
+                            DbError::Message(format!(
+                                "Owner recovery published initial ack ref: {error}"
+                            ))
+                        })?,
+                        serde_json::to_string(&initial_ack.value.successor.next_slot).map_err(
+                            |error| DbError::Message(format!(
+                                "Owner recovery initial ack successor: {error}"
+                            ))
+                        )?,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            }
+            tx.commit().map_err(DbError::from)?;
+            Ok(activated)
+        })
+        .await
+    }
+
+    pub(crate) async fn stage_local_store_device_retirement(
+        &self,
+        payload: Vec<u8>,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let existing: Option<(Vec<u8>, i64)> = conn
+                .query_row(
+                    "SELECT payload, published FROM local_store_device_retirement WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            match existing {
+                Some((existing, _)) if existing == payload => Ok(()),
+                Some(_) => Err(DbError::Message(
+                    "local Store device retirement already owns different exact objects".into(),
+                )),
+                None => conn
+                    .execute(
+                        "INSERT INTO local_store_device_retirement (singleton, payload, published) VALUES (1, ?1, 0)",
+                        [payload],
+                    )
+                    .map(|_| ())
+                    .map_err(DbError::from),
+            }
+        })
+        .await
+    }
+
+    pub(crate) async fn local_store_device_retirement(
+        &self,
+    ) -> Result<Option<(Vec<u8>, bool)>, DbError> {
+        self.call(|conn| {
+            conn.query_row(
+                "SELECT payload, published FROM local_store_device_retirement WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()
+            .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_local_store_device_retirement(
+        &self,
+        expected_payload: Vec<u8>,
+        retirement: crate::sync::store_commit::StoreDeviceSelfRetirementRef,
+        commit: StoreBatchCommit,
+        commit_ref: StoreBatchCommitRef,
+        serial_authorization: Option<SerialAuthorizationState>,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (payload, published): (Vec<u8>, i64) = tx
+                .query_row(
+                    "SELECT payload, published FROM local_store_device_retirement WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            if payload != expected_payload {
+                return Err(DbError::Message(
+                    "local Store device retirement changed exact ownership".into(),
+                ));
+            }
+            if published == 1 {
+                return Ok(());
+            }
+            match serial_authorization {
+                Some(authorization) => Self::record_materialized_serial_commit_on(
+                    &tx,
+                    &commit,
+                    &commit_ref,
+                    &authorization,
+                )?,
+                None => Self::record_materialized_commit_on(&tx, &commit, &commit_ref)?,
+            }
+            let state: String = tx
+                .query_row(
+                    "SELECT state FROM local_store_device_registration WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let LocalDeviceRegistrationState::Activated { authority } =
+                serde_json::from_str(&state).map_err(|error| {
+                    DbError::Message(format!("parse active registration journal: {error}"))
+                })?
+            else {
+                return Err(DbError::Message(
+                    "only an activated local registration can retire".into(),
+                ));
+            };
+            tx.execute(
+                "UPDATE local_store_device_registration SET state = ?1 WHERE singleton = 1",
+                [serde_json::to_string(&LocalDeviceRegistrationState::Retired {
+                    authority,
+                    retirement,
+                })
+                .map_err(|error| DbError::Message(format!("serialize retired registration: {error}")))?],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "UPDATE local_store_device_retirement SET published = 1 WHERE singleton = 1 AND published = 0",
+                [],
+            )
+            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
         .await
     }
 
@@ -5135,10 +8264,9 @@ impl Database {
         &self,
     ) -> Result<Option<DurableDeviceRegistration>, DbError> {
         self.read_local_store_device_registration(
-            "SELECT revision, registration_hash, previous_registration_hash, state, \
-                    registration_bytes, activation_base_head_bytes, activation_commit_bytes, activation_head_bytes, published \
-             FROM local_store_device_registration WHERE published = 0 \
-             ORDER BY revision LIMIT 1",
+            "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
+                    initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state \
+             FROM local_store_device_registration WHERE singleton = 1 AND state = '\"prepared\"'",
         )
         .await
     }
@@ -5150,79 +8278,77 @@ impl Database {
         self.call(move |conn| {
             conn.query_row(sql, [], |row| {
                 Ok((
-                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, Option<Vec<u8>>>(5)?,
-                    row.get::<_, Option<Vec<u8>>>(6)?,
-                    row.get::<_, Option<Vec<u8>>>(7)?,
-                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })
             .optional()
             .map_err(DbError::from)?
             .map(
-                |(
-                    revision,
-                    hash,
-                    previous_hash,
-                    state,
-                    bytes,
-                    activation_base_head_bytes,
-                    activation_commit_bytes,
-                    activation_head_bytes,
-                    published,
-                )| {
-                    let revision = u64::try_from(revision).map_err(|_| {
-                        DbError::Message(format!(
-                            "local Store device registration has invalid revision {revision}"
-                        ))
+                |(device_id, hash, bytes, prepared, ack_ref, ack_bytes, ack_prepared, state)| {
+                    let device_id = device_id.parse().map_err(|error| {
+                        DbError::Message(format!("local Store device id: {error}"))
                     })?;
-                    if revision == 0 {
-                        return Err(DbError::Message(
-                            "local Store device registration has revision zero".to_string(),
-                        ));
-                    }
+                    let prepared: PreparedExactObject =
+                        serde_json::from_str(&prepared).map_err(|error| {
+                            DbError::Message(format!(
+                                "local Store device registration prepared object: {error}"
+                            ))
+                        })?;
+                    let registration = StoreDeviceRegistration::parse_at(
+                        &bytes,
+                        &required_store_root_authority_on(conn)?,
+                        device_id,
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!("local Store device registration: {error}"))
+                    })?;
+                    let initial_ack_ref: StoreAckRef =
+                        serde_json::from_str(&ack_ref).map_err(|error| {
+                            DbError::Message(format!(
+                                "local Store initial acknowledgement ref: {error}"
+                            ))
+                        })?;
+                    let initial_ack_value = StoreAck::parse_at(
+                        &ack_bytes,
+                        registration.store_root.store_root_hash,
+                        &initial_ack_ref,
+                        &registration,
+                    )
+                    .map_err(|error| {
+                        DbError::Message(format!("local Store initial acknowledgement: {error}"))
+                    })?;
+                    let initial_ack_prepared: PreparedExactObject =
+                        serde_json::from_str(&ack_prepared).map_err(|error| {
+                            DbError::Message(format!("local Store initial ack object: {error}"))
+                        })?;
                     Ok(DurableDeviceRegistration {
-                        revision,
+                        device_id,
                         registration_hash: hash.parse().map_err(|error| {
                             DbError::Message(format!(
                                 "local Store device registration hash: {error}"
                             ))
                         })?,
-                        previous_registration_hash: previous_hash
-                            .map(|hash| {
-                                hash.parse().map_err(|error| {
-                                    DbError::Message(format!(
-                                        "local Store device previous registration hash: {error}"
-                                    ))
-                                })
-                            })
-                            .transpose()?,
-                        state: match state.as_str() {
-                            "active" => StoreDeviceRegistrationState::Active,
-                            "retired" => StoreDeviceRegistrationState::Retired,
-                            _ => {
-                                return Err(DbError::Message(format!(
-                                    "local Store device registration has invalid state {state:?}"
-                                )))
-                            }
-                        },
                         registration_bytes: bytes,
-                        activation_base_head_bytes,
-                        activation_commit_bytes,
-                        activation_head_bytes,
-                        published: match published {
-                            0 => false,
-                            1 => true,
-                            value => {
-                                return Err(DbError::Message(format!(
-                            "local Store device registration has invalid published value {value}"
-                        )))
-                            }
+                        prepared,
+                        initial_ack_ref,
+                        initial_ack: ExactProtocolObject {
+                            value: initial_ack_value,
+                            bytes: ack_bytes,
+                            object: initial_ack_prepared.reference().clone(),
+                            prepared: initial_ack_prepared,
                         },
+                        state: serde_json::from_str(&state).map_err(|error| {
+                            DbError::Message(format!(
+                                "local Store registration journal state: {error}"
+                            ))
+                        })?,
                     })
                 },
             )
@@ -5231,448 +8357,125 @@ impl Database {
         .await
     }
 
-    pub(crate) async fn stage_store_device_registration(
+    pub(crate) async fn mark_local_store_device_registration_created(
         &self,
-        registration: StoreDeviceRegistration,
+        registration: ExactProtocolObject<StoreDeviceRegistration>,
+        initial_ack: StoreAckRef,
+        initial_ack_object: ExactProtocolObject<StoreAck>,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
-            let store_root_hash = Self::required_store_root_hash_on(conn)?;
-            let device_id: String = conn
-                .query_row(
-                    "SELECT value FROM protocol_state WHERE key = ?1",
-                    [LOCAL_DEVICE_ID_STATE_KEY],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            let bytes = registration.to_bytes();
-            let parsed = StoreDeviceRegistration::parse_at(
-                &bytes,
-                store_root_hash,
-                &device_id,
-                registration.revision,
-            )
-            .map_err(|error| {
-                DbError::Message(format!("verify Store device registration: {error}"))
-            })?;
-            if parsed != registration {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let registration_ref = StoreDeviceRegistrationRef::from_registration(
+                &registration.value,
+                registration.object.clone(),
+            );
+            if registration_ref.object != *registration.prepared.reference()
+                || initial_ack.object != *initial_ack_object.prepared.reference()
+            {
                 return Err(DbError::Message(
-                    "Store device registration changed during verification".to_string(),
+                    "created registration refs differ from their prepared objects".to_string(),
                 ));
             }
-            let hash = registration.registration_hash();
-            let existing = conn
+            let durable: (Vec<u8>, String, String, Vec<u8>, String, String) = tx
                 .query_row(
-                    "SELECT revision, registration_hash, state, registration_bytes, published \
-                     FROM local_store_device_registration ORDER BY revision DESC LIMIT 1",
-                    [],
+                    "SELECT registration_bytes, prepared_object, initial_ack_ref, \
+                            initial_ack_bytes, initial_ack_prepared, state \
+                     FROM local_store_device_registration \
+                     WHERE singleton = 1 AND device_id = ?1 AND registration_hash = ?2",
+                    (
+                        registration_ref.device_id.to_string(),
+                        registration_ref.registration_hash.to_string(),
+                    ),
                     |row| {
                         Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, Vec<u8>>(3)?,
-                            row.get::<_, i64>(4)?,
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
                         ))
                     },
                 )
-                .optional()
                 .map_err(DbError::from)?;
-            if let Some((revision, existing_hash, state, existing_bytes, published)) = existing {
-                let revision = u64::try_from(revision).map_err(|_| {
-                    DbError::Message(
-                        "local Store device registration revision is negative".to_string(),
-                    )
+            let stored_registration_prepared: PreparedExactObject =
+                serde_json::from_str(&durable.1).map_err(|error| {
+                    DbError::Message(format!("stored registration object: {error}"))
                 })?;
-                if revision == registration.revision {
-                    if existing_hash == hash.to_string() && existing_bytes == bytes {
-                        return Ok(());
-                    }
-                    return Err(DbError::Message(format!(
-                        "local Store device registration revision {revision} owns different bytes"
-                    )));
-                }
-                let previous = StoreDeviceRegistration::parse_at(
-                    &existing_bytes,
-                    store_root_hash,
-                    &device_id,
-                    revision,
-                )
-                .map_err(|error| {
-                    DbError::Message(format!(
-                        "verify previous Store device registration: {error}"
-                    ))
-                })?;
-                if previous.registration_hash().to_string() != existing_hash
-                    || previous.author_pubkey != registration.author_pubkey
-                {
-                    return Err(DbError::Message(
-                        "Store device registration successor must retain the exact author chain"
-                            .to_string(),
-                    ));
-                }
-                if published != 1 {
-                    return Err(DbError::Message(format!(
-                        "local Store device registration revision {revision} is not published"
-                    )));
-                }
-                if registration.revision != revision + 1
-                    || registration.previous_registration_hash
-                        != Some(existing_hash.parse().map_err(|error| {
-                            DbError::Message(format!(
-                                "previous Store device registration hash: {error}"
-                            ))
-                        })?)
-                    || state != "active"
-                    || registration.state != StoreDeviceRegistrationState::Retired
-                {
-                    return Err(DbError::Message(
-                        "Store device registration must transition from published Active to Retired"
-                            .to_string(),
-                    ));
-                }
-            } else if registration.revision != 1
-                || registration.previous_registration_hash.is_some()
-                || registration.state != StoreDeviceRegistrationState::Active
+            let stored_ack_ref: StoreAckRef = serde_json::from_str(&durable.2)
+                .map_err(|error| DbError::Message(format!("stored initial ack ref: {error}")))?;
+            let stored_ack_prepared: PreparedExactObject = serde_json::from_str(&durable.4)
+                .map_err(|error| DbError::Message(format!("stored initial ack object: {error}")))?;
+            if registration_ref.object != *stored_registration_prepared.reference()
+                || registration.prepared.reference() != stored_registration_prepared.reference()
+                || registration.prepared.stored_bytes()
+                    != stored_registration_prepared.stored_bytes()
+                || registration.bytes != durable.0
+                || initial_ack != stored_ack_ref
+                || initial_ack_object.prepared.reference() != stored_ack_prepared.reference()
+                || initial_ack_object.prepared.stored_bytes() != stored_ack_prepared.stored_bytes()
+                || initial_ack_object.bytes != durable.3
             {
                 return Err(DbError::Message(
-                    "first Store device registration must be revision 1 Active".to_string(),
-                ));
-            }
-            let revision = i64::try_from(registration.revision).map_err(|_| {
-                DbError::Message(
-                    "Store device registration revision exceeds SQLite INTEGER".to_string(),
-                )
-            })?;
-            let state = match registration.state {
-                StoreDeviceRegistrationState::Active => "active",
-                StoreDeviceRegistrationState::Retired => "retired",
-            };
-            conn.execute(
-                "INSERT INTO local_store_device_registration \
-                 (revision, registration_hash, previous_registration_hash, state, \
-                  registration_bytes, activation_base_head_bytes, activation_commit_bytes, activation_head_bytes, published) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, 0)",
-                (
-                    revision,
-                    hash.to_string(),
-                    registration
-                        .previous_registration_hash
-                        .map(|hash| hash.to_string()),
-                    state,
-                    bytes,
-                ),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
-    pub(crate) async fn stage_merge_store_device_registration_activation(
-        &self,
-        revision: u64,
-        registration_hash: ObjectHash,
-        commit: StoreBatchCommit,
-        head: StoreDeviceHead,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            if commit.policy() != WritePolicy::MergeConcurrent
-                || head.position.as_ref() != Some(&commit.position())
-            {
-                return Err(DbError::Message(
-                    "Merge Store device registration activation has an invalid commit/head"
+                    "created registration differs from its complete durable exact objects"
                         .to_string(),
                 ));
             }
-            Self::stage_store_device_registration_activation_on(
-                conn,
-                revision,
-                registration_hash,
-                None,
-                &commit,
-                &head.to_bytes(),
-            )
-        })
-        .await
-    }
-
-    pub(crate) async fn stage_serial_store_device_registration_activation(
-        &self,
-        revision: u64,
-        registration_hash: ObjectHash,
-        base_head_bytes: Option<Vec<u8>>,
-        commit: StoreBatchCommit,
-        head: StoreSerialHead,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            if commit.policy() != WritePolicy::Serial
-                || head.commit.as_ref() != Some(&commit.position())
-            {
-                return Err(DbError::Message(
-                    "Serial Store device registration activation has an invalid commit/head"
-                        .to_string(),
-                ));
-            }
-            Self::stage_store_device_registration_activation_on(
-                conn,
-                revision,
-                registration_hash,
-                base_head_bytes.as_deref(),
-                &commit,
-                &head.to_bytes(),
-            )
-        })
-        .await
-    }
-
-    fn stage_store_device_registration_activation_on(
-        conn: &Connection,
-        revision: u64,
-        registration_hash: ObjectHash,
-        base_head_bytes: Option<&[u8]>,
-        commit: &StoreBatchCommit,
-        head_bytes: &[u8],
-    ) -> Result<(), DbError> {
-        let revision = i64::try_from(revision).map_err(|_| {
-            DbError::Message(
-                "Store device registration revision exceeds SQLite INTEGER".to_string(),
-            )
-        })?;
-        let stored = conn
-            .query_row(
-                "SELECT registration_bytes, activation_base_head_bytes, activation_commit_bytes, activation_head_bytes, published \
-                 FROM local_store_device_registration \
-                 WHERE revision = ?1 AND registration_hash = ?2",
-                (revision, registration_hash.to_string()),
-                |row| {
-                    Ok(StoredDeviceRegistrationActivation {
-                        registration_bytes: row.get(0)?,
-                        base_head_bytes: row.get(1)?,
-                        commit_bytes: row.get(2)?,
-                        head_bytes: row.get(3)?,
-                        published: row.get(4)?,
-                    })
-                },
-            )
-            .map_err(DbError::from)?;
-        let registration = StoreDeviceRegistration::parse_at(
-            &stored.registration_bytes,
-            commit.store_root_hash,
-            &commit.device_id,
-            revision as u64,
-        )
-        .map_err(|error| {
-            DbError::Message(format!("verify local Store device registration: {error}"))
-        })?;
-        let reference = StoreDeviceRegistrationRef::from_registration(&registration);
-        if commit.device_registrations.as_slice() != [reference]
-            || commit.author_pubkey != registration.author_pubkey
-            || commit.control.is_some()
-            || !commit.circle_controls.is_empty()
-            || commit.store_package.is_some()
-            || !commit.circle_packages.is_empty()
-        {
-            return Err(DbError::Message(
-                "Store device registration activation is not an exact control-only batch"
-                    .to_string(),
-            ));
-        }
-        let commit_bytes = commit.to_bytes();
-        match (
-            stored.base_head_bytes,
-            stored.commit_bytes,
-            stored.head_bytes,
-            stored.published,
-        ) {
-            (None, None, None, 0) => {
-                conn.execute(
-                    "UPDATE local_store_device_registration \
-                     SET activation_base_head_bytes = ?3, activation_commit_bytes = ?4, activation_head_bytes = ?5 \
-                     WHERE revision = ?1 AND registration_hash = ?2 AND published = 0",
+            let prepared = serde_json::to_string(&LocalDeviceRegistrationState::Prepared).map_err(
+                |error| DbError::Message(format!("serialize prepared journal: {error}")),
+            )?;
+            let created = serde_json::to_string(&LocalDeviceRegistrationState::Created)
+                .map_err(|error| DbError::Message(format!("serialize created journal: {error}")))?;
+            let updated = tx
+                .execute(
+                    "UPDATE local_store_device_registration SET state = ?1 \
+                     WHERE singleton = 1 AND device_id = ?2 AND registration_hash = ?3 \
+                       AND initial_ack_ref = ?4 AND state = ?5",
                     rusqlite::params![
-                        revision,
-                        registration_hash.to_string(),
-                        base_head_bytes,
-                        commit_bytes,
-                        head_bytes,
+                        created,
+                        registration_ref.device_id.to_string(),
+                        registration_ref.registration_hash.to_string(),
+                        serde_json::to_string(&initial_ack).map_err(|error| {
+                            DbError::Message(format!("serialize initial ack ref: {error}"))
+                        })?,
+                        prepared,
                     ],
                 )
                 .map_err(DbError::from)?;
-                Ok(())
+            if updated != 1 {
+                let already: Option<String> = tx
+                    .query_row(
+                        "SELECT state FROM local_store_device_registration \
+                         WHERE singleton = 1 AND device_id = ?1 AND registration_hash = ?2",
+                        (
+                            registration_ref.device_id.to_string(),
+                            registration_ref.registration_hash.to_string(),
+                        ),
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(DbError::from)?;
+                if already.as_deref() != Some(created.as_str()) {
+                    return Err(DbError::Message(
+                        "local registration journal is absent or differs from the created object"
+                            .to_string(),
+                    ));
+                }
             }
-            (existing_base, Some(existing_commit), Some(existing_head), 0)
-                if existing_base.as_deref() == base_head_bytes
-                    && existing_commit == commit_bytes
-                    && existing_head == head_bytes =>
-            {
-                Ok(())
-            }
-            (existing_base, Some(existing_commit), Some(existing_head), 1)
-                if existing_base.as_deref() == base_head_bytes
-                    && existing_commit == commit_bytes
-                    && existing_head == head_bytes =>
-            {
-                Ok(())
-            }
-            _ => Err(DbError::Message(
-                "Store device registration owns different activation bytes".to_string(),
-            )),
-        }
-    }
-
-    pub(crate) async fn complete_merge_store_device_registration_activation(
-        &self,
-        revision: u64,
-        registration_hash: ObjectHash,
-        commit: StoreBatchCommit,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let registration = Self::owned_registration_for_activation_on(
-                &tx,
-                revision,
-                registration_hash,
-                &commit,
-            )?;
-            Self::record_activated_store_device_registrations_on(&tx, &commit, &[registration])?;
-            Self::record_materialized_commit_on(&tx, &commit)?;
-            Self::mark_store_device_registration_published_on(&tx, revision, registration_hash)?;
             tx.commit().map_err(DbError::from)
         })
         .await
     }
-
-    pub(crate) async fn complete_serial_store_device_registration_activation(
-        &self,
-        revision: u64,
-        registration_hash: ObjectHash,
-        commit: StoreBatchCommit,
-        authorization: SerialAuthorizationState,
-    ) -> Result<(), DbError> {
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let registration = Self::owned_registration_for_activation_on(
-                &tx,
-                revision,
-                registration_hash,
-                &commit,
-            )?;
-            Self::record_activated_store_device_registrations_on(&tx, &commit, &[registration])?;
-            Self::record_materialized_serial_commit_on(
-                &tx,
-                &commit,
-                &authorization.membership,
-                authorization.key_generation,
-            )?;
-            let predecessor = commit
-                .previous_commit_hash()
-                .map(|commit_hash| CommitPosition {
-                    seq: commit.seq() - 1,
-                    commit_hash,
-                });
-            Self::rebase_unprepared_serial_branch_on(&tx, predecessor, commit.position())?;
-            Self::mark_store_device_registration_published_on(&tx, revision, registration_hash)?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
-    fn owned_registration_for_activation_on(
-        tx: &rusqlite::Transaction<'_>,
-        revision: u64,
-        registration_hash: ObjectHash,
-        commit: &StoreBatchCommit,
-    ) -> Result<StoreDeviceRegistration, DbError> {
-        let revision_sql = i64::try_from(revision).map_err(|_| {
-            DbError::Message(
-                "Store device registration revision exceeds SQLite INTEGER".to_string(),
-            )
-        })?;
-        let (registration_bytes, activation_commit_bytes): (Vec<u8>, Vec<u8>) = tx
-            .query_row(
-                "SELECT registration_bytes, activation_commit_bytes \
-                 FROM local_store_device_registration \
-                 WHERE revision = ?1 AND registration_hash = ?2 AND published = 0",
-                (revision_sql, registration_hash.to_string()),
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(DbError::from)?;
-        if activation_commit_bytes != commit.to_bytes() {
-            return Err(DbError::Message(
-                "Store device registration activation commit differs from durable bytes"
-                    .to_string(),
-            ));
-        }
-        StoreDeviceRegistration::parse_at(
-            &registration_bytes,
-            commit.store_root_hash,
-            &commit.device_id,
-            revision,
-        )
-        .map_err(|error| {
-            DbError::Message(format!("verify owned Store device registration: {error}"))
-        })
-    }
-
-    fn mark_store_device_registration_published_on(
-        tx: &rusqlite::Transaction<'_>,
-        revision: u64,
-        registration_hash: ObjectHash,
-    ) -> Result<(), DbError> {
-        let revision = i64::try_from(revision).map_err(|_| {
-            DbError::Message(
-                "Store device registration revision exceeds SQLite INTEGER".to_string(),
-            )
-        })?;
-        let updated = tx
-            .execute(
-                "UPDATE local_store_device_registration SET published = 1 \
-                 WHERE revision = ?1 AND registration_hash = ?2 AND published = 0 \
-                   AND activation_commit_bytes IS NOT NULL AND activation_head_bytes IS NOT NULL",
-                (revision, registration_hash.to_string()),
-            )
-            .map_err(DbError::from)?;
-        if updated != 1 {
-            return Err(DbError::Message(
-                "local Store device registration activation row is absent".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    // ---- Bookkeeping: protocol_state ----
 
     fn required_store_root_hash_on(conn: &Connection) -> Result<ObjectHash, DbError> {
-        let raw = conn
-            .query_row(
-                "SELECT value FROM protocol_state WHERE key = ?1",
-                [STORE_ROOT_HASH_STATE_KEY],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .ok_or_else(DbError::missing_store_root_hash)?;
-        raw.parse::<ObjectHash>()
-            .map_err(|error| DbError::invalid_store_root_hash(error.to_string()))
+        load_store_root_authority_on(conn)?
+            .map(|(reference, _)| reference.store_root_hash)
+            .ok_or_else(DbError::missing_store_root_hash)
     }
 
+    #[cfg(test)]
     pub(crate) async fn required_store_root_hash(&self) -> Result<ObjectHash, DbError> {
         self.call(Self::required_store_root_hash_on).await
-    }
-
-    pub(crate) async fn required_store_root_hash_mapped<E>(
-        &self,
-        missing: impl FnOnce() -> E,
-        invalid: impl FnOnce(String) -> E,
-        other: impl FnOnce(DbError) -> E,
-    ) -> Result<ObjectHash, E> {
-        self.required_store_root_hash()
-            .await
-            .map_err(|error| match error {
-                DbError::StoreRootHashMissing => missing(),
-                DbError::StoreRootHashInvalid { reason } => invalid(reason),
-                error @ DbError::Message(_) => other(error),
-            })
     }
 
     pub async fn get_protocol_state(&self, key: &str) -> Result<Option<String>, DbError> {
@@ -5685,6 +8488,467 @@ impl Database {
             )
             .optional()
             .map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn begin_store_creation_attempt(
+        &self,
+        initialized: crate::sync::store_protocol_root::StoreCreationAttempt,
+    ) -> Result<crate::sync::store_protocol_root::StoreCreationAttempt, DbError> {
+        let value = serde_json::to_string(&initialized).map_err(|error| {
+            DbError::Message(format!("serialize Store creation attempt: {error}"))
+        })?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (
+                    crate::sync::store_protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY,
+                    &value,
+                ),
+            )
+            .map_err(DbError::from)?;
+            let actual: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [crate::sync::store_protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)?;
+            serde_json::from_str(&actual)
+                .map_err(|error| DbError::Message(format!("parse Store creation attempt: {error}")))
+        })
+        .await
+    }
+
+    pub(crate) async fn load_store_creation_attempt(
+        &self,
+    ) -> Result<Option<crate::sync::store_protocol_root::StoreCreationAttempt>, DbError> {
+        self.call(move |conn| {
+            let value = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [crate::sync::store_protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            value
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|error| {
+                        DbError::Message(format!("parse Store creation attempt: {error}"))
+                    })
+                })
+                .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn advance_store_creation_attempt(
+        &self,
+        previous: crate::sync::store_protocol_root::StoreCreationAttempt,
+        next: crate::sync::store_protocol_root::StoreCreationAttempt,
+    ) -> Result<(), DbError> {
+        let previous = serde_json::to_string(&previous).map_err(|error| {
+            DbError::Message(format!("serialize Store creation predecessor: {error}"))
+        })?;
+        let next = serde_json::to_string(&next).map_err(|error| {
+            DbError::Message(format!("serialize Store creation successor: {error}"))
+        })?;
+        self.call(move |conn| {
+            let changed = conn
+                .execute(
+                    "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                    (
+                        &next,
+                        crate::sync::store_protocol_root::STORE_CREATION_ATTEMPT_STATE_KEY,
+                        &previous,
+                    ),
+                )
+                .map_err(DbError::from)?;
+            if changed != 1 {
+                return Err(DbError::Message(
+                    "Store creation attempt advance lost its exact predecessor".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn load_provider_probe_journal(
+        &self,
+        probe_id: crate::sync::provider::ProviderProbeId,
+    ) -> Result<Option<crate::sync::provider::ProviderProbeJournalRecord>, DbError> {
+        let key = format!("provider_probe/{}", hex::encode(probe_id.as_bytes()));
+        self.call(move |conn| {
+            let value = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            value
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|error| {
+                        DbError::Message(format!("parse provider probe journal: {error}"))
+                    })
+                })
+                .transpose()
+        })
+        .await
+    }
+
+    pub(crate) async fn begin_provider_probe_journal(
+        &self,
+        prepared: crate::sync::provider::ProviderProbeJournalRecord,
+    ) -> Result<crate::sync::provider::ProviderProbeJournalRecord, DbError> {
+        prepared.validate_begin().map_err(|error| {
+            DbError::Message(format!("invalid provider probe journal beginning: {error}"))
+        })?;
+        let key = format!(
+            "provider_probe/{}",
+            hex::encode(prepared.probe_id().as_bytes())
+        );
+        let value = serde_json::to_string(&prepared).map_err(|error| {
+            DbError::Message(format!("serialize provider probe journal: {error}"))
+        })?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (&key, &value),
+            )
+            .map_err(DbError::from)?;
+            let actual: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)?;
+            serde_json::from_str(&actual)
+                .map_err(|error| DbError::Message(format!("parse provider probe journal: {error}")))
+        })
+        .await
+    }
+
+    pub(crate) async fn advance_provider_probe_journal(
+        &self,
+        previous: crate::sync::provider::ProviderProbeJournalRecord,
+        next: crate::sync::provider::ProviderProbeJournalRecord,
+    ) -> Result<(), DbError> {
+        previous.validate_transition(&next).map_err(|error| {
+            DbError::Message(format!("invalid provider probe journal advance: {error}"))
+        })?;
+        let key = format!(
+            "provider_probe/{}",
+            hex::encode(previous.probe_id().as_bytes())
+        );
+        let previous = serde_json::to_string(&previous).map_err(|error| {
+            DbError::Message(format!("serialize provider probe journal: {error}"))
+        })?;
+        let next = serde_json::to_string(&next).map_err(|error| {
+            DbError::Message(format!("serialize provider probe journal: {error}"))
+        })?;
+        self.call(move |conn| {
+            let changed = conn
+                .execute(
+                    "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                    (&next, &key, &previous),
+                )
+                .map_err(DbError::from)?;
+            if changed != 1 {
+                return Err(DbError::Message(
+                    "provider probe journal advance lost its exact predecessor".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn prepare_device_join_challenge_publication(
+        &self,
+        challenge: crate::sync::provider::CrossPrincipalProbeChallenge,
+    ) -> Result<crate::sync::provider::DeviceJoinChallengePublicationRecord, DbError> {
+        use crate::sync::provider::{
+            DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
+        };
+
+        let key = format!(
+            "device_join_challenge_publication/{}",
+            hex::encode(challenge.probe_id.as_bytes())
+        );
+        let prepared = DeviceJoinChallengePublicationRecord {
+            challenge,
+            progress: DeviceJoinChallengePublicationProgress::Prepared,
+        };
+        let value = serde_json::to_string(&prepared).map_err(|error| {
+            DbError::Message(format!(
+                "serialize device join challenge publication: {error}"
+            ))
+        })?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (&key, &value),
+            )
+            .map_err(DbError::from)?;
+            let actual: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)?;
+            let actual: DeviceJoinChallengePublicationRecord = serde_json::from_str(&actual)
+                .map_err(|error| {
+                    DbError::Message(format!("parse device join challenge publication: {error}"))
+                })?;
+            if actual.challenge != prepared.challenge {
+                return Err(DbError::Message(
+                    "device join challenge probe id was reused with different bytes".to_string(),
+                ));
+            }
+            Ok(actual)
+        })
+        .await
+    }
+
+    pub(crate) async fn publish_device_join_challenge(
+        &self,
+        authorization: crate::sync::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: crate::sync::provider::CrossPrincipalProbeChallenge,
+    ) -> Result<(), DbError> {
+        use crate::sync::provider::{
+            DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
+        };
+
+        let key = format!(
+            "device_join_challenge_publication/{}",
+            hex::encode(challenge.probe_id.as_bytes())
+        );
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let previous_json: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let previous: DeviceJoinChallengePublicationRecord =
+                serde_json::from_str(&previous_json).map_err(|error| {
+                    DbError::Message(format!("parse device join challenge publication: {error}"))
+                })?;
+            if previous.challenge != challenge {
+                return Err(DbError::Message(
+                    "device join challenge publication differs from prepared bytes".to_string(),
+                ));
+            }
+            match &previous.progress {
+                DeviceJoinChallengePublicationProgress::Prepared => {
+                    let next = DeviceJoinChallengePublicationRecord {
+                        challenge,
+                        progress: DeviceJoinChallengePublicationProgress::Published {
+                            authorization,
+                        },
+                    };
+                    let next_json = serde_json::to_string(&next).map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize device join challenge publication: {error}"
+                        ))
+                    })?;
+                    let changed = tx
+                        .execute(
+                            "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                            (&next_json, &key, &previous_json),
+                        )
+                        .map_err(DbError::from)?;
+                    if changed != 1 {
+                        return Err(DbError::Message(
+                            "device join challenge publication lost its exact predecessor"
+                                .to_string(),
+                        ));
+                    }
+                }
+                DeviceJoinChallengePublicationProgress::Published {
+                    authorization: existing,
+                } if existing == &authorization => {}
+                DeviceJoinChallengePublicationProgress::Published { .. } => {
+                    return Err(DbError::Message(
+                        "device join challenge publication authorization changed".to_string(),
+                    ));
+                }
+                DeviceJoinChallengePublicationProgress::ProducerClosed { .. }
+                | DeviceJoinChallengePublicationProgress::CancelledBeforeCreate { .. } => {
+                    return Err(DbError::Message(
+                        "device join challenge producer is closed".to_string(),
+                    ));
+                }
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn close_published_device_join_challenge(
+        &self,
+        authorization: crate::sync::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: crate::sync::provider::CrossPrincipalProbeChallenge,
+    ) -> Result<(), DbError> {
+        use crate::sync::provider::{
+            DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
+        };
+
+        let key = format!(
+            "device_join_challenge_publication/{}",
+            hex::encode(challenge.probe_id.as_bytes())
+        );
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let previous_json: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let previous: DeviceJoinChallengePublicationRecord =
+                serde_json::from_str(&previous_json).map_err(|error| {
+                    DbError::Message(format!("parse device join challenge publication: {error}"))
+                })?;
+            if previous.challenge != challenge {
+                return Err(DbError::Message(
+                    "device join challenge closure differs from prepared bytes".to_string(),
+                ));
+            }
+            match &previous.progress {
+                DeviceJoinChallengePublicationProgress::Published {
+                    authorization: existing,
+                } if existing == &authorization => {
+                    let next = DeviceJoinChallengePublicationRecord {
+                        challenge,
+                        progress: DeviceJoinChallengePublicationProgress::ProducerClosed {
+                            authorization,
+                        },
+                    };
+                    let next_json = serde_json::to_string(&next).map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize device join challenge closure: {error}"
+                        ))
+                    })?;
+                    let changed = tx
+                        .execute(
+                            "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                            (&next_json, &key, &previous_json),
+                        )
+                        .map_err(DbError::from)?;
+                    if changed != 1 {
+                        return Err(DbError::Message(
+                            "device join challenge closure lost its exact predecessor".to_string(),
+                        ));
+                    }
+                }
+                DeviceJoinChallengePublicationProgress::ProducerClosed {
+                    authorization: existing,
+                } if existing == &authorization => {}
+                _ => {
+                    return Err(DbError::Message(
+                        "device join challenge cannot close from its current state".to_string(),
+                    ));
+                }
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn cancel_unpublished_device_join_challenge(
+        &self,
+        authorization: crate::sync::provider::DeviceJoinChallengePublicationAuthorization,
+        challenge: crate::sync::provider::CrossPrincipalProbeChallenge,
+        cancellation: crate::sync::store_commit::DeviceJoinOutcomeRef,
+    ) -> Result<(), DbError> {
+        use crate::sync::provider::{
+            DeviceJoinChallengePublicationProgress, DeviceJoinChallengePublicationRecord,
+        };
+
+        if cancellation.attempt() != &authorization.attempt {
+            return Err(DbError::Message(
+                "device join challenge cancellation names another attempt".to_string(),
+            ));
+        }
+        let key = format!(
+            "device_join_challenge_publication/{}",
+            hex::encode(challenge.probe_id.as_bytes())
+        );
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let previous_json: String = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let previous: DeviceJoinChallengePublicationRecord =
+                serde_json::from_str(&previous_json).map_err(|error| {
+                    DbError::Message(format!("parse device join challenge publication: {error}"))
+                })?;
+            if previous.challenge != challenge {
+                return Err(DbError::Message(
+                    "device join challenge cancellation differs from prepared bytes".to_string(),
+                ));
+            }
+            match &previous.progress {
+                DeviceJoinChallengePublicationProgress::Prepared => {
+                    let next = DeviceJoinChallengePublicationRecord {
+                        challenge,
+                        progress: DeviceJoinChallengePublicationProgress::CancelledBeforeCreate {
+                            authorization,
+                            cancellation,
+                        },
+                    };
+                    let next_json = serde_json::to_string(&next).map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize device join challenge cancellation: {error}"
+                        ))
+                    })?;
+                    let changed = tx
+                        .execute(
+                            "UPDATE protocol_state SET value = ?1 WHERE key = ?2 AND value = ?3",
+                            (&next_json, &key, &previous_json),
+                        )
+                        .map_err(DbError::from)?;
+                    if changed != 1 {
+                        return Err(DbError::Message(
+                            "device join challenge cancellation lost its exact predecessor"
+                                .to_string(),
+                        ));
+                    }
+                }
+                DeviceJoinChallengePublicationProgress::CancelledBeforeCreate {
+                    authorization: existing_authorization,
+                    cancellation: existing_cancellation,
+                } if existing_authorization == &authorization
+                    && existing_cancellation == &cancellation => {}
+                _ => {
+                    return Err(DbError::Message(
+                        "device join challenge cannot cancel before create from its current state"
+                            .to_string(),
+                    ));
+                }
+            }
+            tx.commit().map_err(DbError::from)
         })
         .await
     }
@@ -5742,67 +9006,6 @@ impl Database {
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
         let key = crate::blob::cache::cache_budget_state_key(namespace);
         self.set_protocol_state(&key, &max_bytes.to_string()).await
-    }
-
-    // ---- Bookkeeping: blob_uploaders (which device uploaded a blob) ----
-
-    /// The hex public key of the device that uploaded blob `(namespace, id)`, or
-    /// `None` if this device has never recorded one. The read dispatch consults it
-    /// to key a blob under its uploader's prefix; a `None` is a missing dispatch
-    /// key the read surfaces loud, never a cue to scan an untrusted listing.
-    pub(crate) async fn blob_uploader(
-        &self,
-        namespace: &str,
-        id: &str,
-    ) -> Result<Option<String>, DbError> {
-        let (namespace, id) = (namespace.to_string(), id.to_string());
-        self.call(move |conn| {
-            conn.query_row(
-                "SELECT uploader FROM blob_uploaders WHERE namespace = ?1 AND blob_id = ?2",
-                (namespace, id),
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
-    /// Record blob `(namespace, id)`'s uploader on `conn`, composable inside a
-    /// caller's transaction so the record commits atomically with the changeset
-    /// apply it belongs to (never a later repair). Idempotent — re-recording the
-    /// same uploader (a changeset re-applied after an FK-deferred retry) is a
-    /// no-op; a later, authoritative uploader (a re-upload by a different member)
-    /// overwrites.
-    pub(crate) fn record_blob_uploader_on(
-        conn: &Connection,
-        namespace: &str,
-        id: &str,
-        uploader: &str,
-    ) -> Result<(), DbError> {
-        conn.execute(
-            "INSERT INTO blob_uploaders (namespace, blob_id, uploader) VALUES (?1, ?2, ?3) \
-             ON CONFLICT(namespace, blob_id) DO UPDATE SET uploader = excluded.uploader",
-            (namespace, id, uploader),
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    }
-
-    /// Record blob `(namespace, id)`'s uploader outside any caller transaction —
-    /// used by the inline host-provided upload, which records this device as the
-    /// uploader for a blob it just sealed to the cloud. Recording an authoritative
-    /// fact (who uploaded), not repairing wrong state.
-    pub(crate) async fn record_blob_uploader(
-        &self,
-        namespace: &str,
-        id: &str,
-        uploader: &str,
-    ) -> Result<(), DbError> {
-        let (namespace, id, uploader) =
-            (namespace.to_string(), id.to_string(), uploader.to_string());
-        self.call(move |conn| Self::record_blob_uploader_on(conn, &namespace, &id, &uploader))
-            .await
     }
 
     // ---- Materialized Store commit ledger ----
@@ -6057,6 +9260,78 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn circle_publication_context(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        expected_control: crate::sync::circle::CircleControlCoord,
+    ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
+        self.call(move |conn| {
+            let control_coord = serde_json::to_string(&expected_control).map_err(|error| {
+                DbError::Message(format!("serialize Circle publication coordinate: {error}"))
+            })?;
+            let (control_bytes, access_bytes): (Vec<u8>, Vec<u8>) = conn
+                .query_row(
+                    "SELECT activation.control_bytes, access.access_bytes
+                     FROM circle_control_activations AS activation
+                     JOIN circle_access_cache AS access
+                       ON access.circle_id = activation.circle_id
+                      AND access.control_coord = activation.control_coord
+                     WHERE activation.circle_id = ?1
+                       AND activation.control_coord = ?2
+                       AND access.disposition = 'active'",
+                    (circle_id.to_string(), control_coord),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let control: crate::sync::circle::CircleControl =
+                serde_json::from_slice(&control_bytes).map_err(|error| {
+                    DbError::Message(format!("parse Circle publication control: {error}"))
+                })?;
+            let access: crate::sync::circle::CircleAccessLeaf =
+                serde_json::from_slice(&access_bytes).map_err(|error| {
+                    DbError::Message(format!("parse Circle publication access: {error}"))
+                })?;
+            if !control.verify()
+                || control.circle_id != circle_id
+                || control.coord() != expected_control
+                || !access.verify_signature()
+                || access.circle_id != circle_id
+                || access.epoch_id != control.epoch_id
+            {
+                return Err(DbError::Message(format!(
+                    "Circle {circle_id} publication authority differs from its exact activation"
+                )));
+            }
+            let crate::sync::circle::CircleAccessDisposition::Active {
+                keyring,
+                key_fingerprint,
+                roster,
+            } = access.disposition
+            else {
+                return Err(DbError::Message(format!(
+                    "Circle {circle_id} has no active publication key"
+                )));
+            };
+            if key_fingerprint != control.key_fingerprint || roster != control.roster {
+                return Err(DbError::Message(format!(
+                    "Circle {circle_id} publication key differs from its exact control"
+                )));
+            }
+            let encryption = EncryptionService::from(
+                crate::encryption::MasterKeyring::from_serialized(&keyring).map_err(|error| {
+                    DbError::Message(format!("parse Circle publication keyring: {error}"))
+                })?,
+            );
+            if encryption.seal_key_fingerprint() != key_fingerprint {
+                return Err(DbError::Message(format!(
+                    "Circle {circle_id} publication key fingerprint is invalid"
+                )));
+            }
+            Ok((encryption, key_fingerprint))
+        })
+        .await
+    }
+
     pub(crate) async fn update_circle_operation(
         &self,
         journal: crate::sync::circle_ops::CircleOperationJournal,
@@ -6119,19 +9394,47 @@ impl Database {
             }
             let unverified_commit: StoreBatchCommit = serde_json::from_slice(&journal.commit_bytes)
                 .map_err(|error| DbError::Message(format!("parse circle Store commit: {error}")))?;
-            let verify_commit = |policy, stream_id: &str| {
+            let root = required_store_root_authority_on(&tx)?;
+            let author =
+                load_activated_registration_on(&tx, &root, &unverified_commit.author_registration)?;
+            let verify_commit = || {
                 let commit = StoreBatchCommit::parse_at(
                     &journal.commit_bytes,
-                    creation.control.value.store_root_hash,
-                    policy,
-                    stream_id,
-                    unverified_commit.seq(),
+                    root.store_root_hash,
+                    &journal.commit_ref.coord,
+                    &author,
                 )
                 .map_err(|error| {
                     DbError::Message(format!("verify circle Store commit: {error}"))
                 })?;
-                let expected_ref = creation.control_ref();
-                if commit.circle_controls.as_slice() != [expected_ref]
+                journal
+                    .commit_ref
+                    .verify_commit(&commit)
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                if journal.commit_ref.object.slot().logical_key()
+                    != commit_semantic_prefix(
+                        &match &journal.commit_ref.coord {
+                            StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
+                                stream_id.to_string()
+                            }
+                            StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
+                        },
+                        commit.seq(),
+                        commit.commit_hash(),
+                    ) + ".json"
+                {
+                    return Err(DbError::Message(
+                        "circle commit exact object occupies a different semantic slot".to_string(),
+                    ));
+                }
+                let [control_ref] = commit.circle_controls.as_slice() else {
+                    return Err(DbError::Message(
+                        "circle creation Store commit is not an exact control-only batch"
+                            .to_string(),
+                    ));
+                };
+                let expected_ref = creation.control_ref(control_ref.objects().clone());
+                if control_ref != &expected_ref
                     || commit.store_package.is_some()
                     || !commit.circle_packages.is_empty()
                     || commit.control.is_some()
@@ -6142,30 +9445,33 @@ impl Database {
                             .to_string(),
                     ));
                 }
-                let activation =
-                    crate::sync::circle_ops::verify_local_circle_activation(&journal, &commit)
-                        .map_err(|error| DbError::Message(error.to_string()))?;
+                let activation = crate::sync::circle_ops::verify_local_circle_activation(
+                    &journal,
+                    &journal.commit_ref,
+                    &commit,
+                    &author,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?;
                 Ok((commit, activation))
             };
             let (commit, activation) = match &journal.policy {
                 crate::sync::circle_ops::CircleOperationPolicy::MergeConcurrent { head } => {
-                    let (commit, activation) =
-                        verify_commit(WritePolicy::MergeConcurrent, &head.device_id)?;
+                    let (commit, activation) = verify_commit()?;
                     let parsed = StoreDeviceHead::parse_at(
                         &head.to_bytes(),
                         commit.store_root_hash,
-                        &commit.device_id,
-                        commit.seq(),
+                        &author,
+                        &journal.commit_ref,
                     )
                     .map_err(|error| {
                         DbError::Message(format!("verify circle activation head: {error}"))
                     })?;
-                    if parsed.position.as_ref() != Some(&commit.position()) {
+                    if parsed.commit != journal.commit_ref {
                         return Err(DbError::Message(
                             "circle activation head names a different commit".to_string(),
                         ));
                     }
-                    Self::record_materialized_commit_on(&tx, &commit)?;
+                    Self::record_materialized_commit_on(&tx, &commit, &journal.commit_ref)?;
                     (commit, activation)
                 }
                 crate::sync::circle_ops::CircleOperationPolicy::Serial {
@@ -6173,13 +9479,17 @@ impl Database {
                     authorization,
                     ..
                 } => {
-                    let (commit, activation) =
-                        verify_commit(WritePolicy::Serial, SERIAL_STREAM_ID)?;
-                    let parsed = StoreSerialHead::parse(&head.to_bytes(), commit.store_root_hash)
-                        .map_err(|error| {
-                        DbError::Message(format!("verify circle Serial head: {error}"))
-                    })?;
-                    if parsed.commit.as_ref() != Some(&commit.position()) {
+                    let (commit, activation) = verify_commit()?;
+                    let parsed =
+                        StoreSerialHead::parse(&head.to_bytes(), commit.store_root_hash, &author)
+                            .map_err(|error| {
+                            DbError::Message(format!("verify circle Serial head: {error}"))
+                        })?;
+                    if !matches!(
+                        parsed.state,
+                        StoreSerialHeadState::Commit { ref commit, .. }
+                            if commit == &journal.commit_ref
+                    ) {
                         return Err(DbError::Message(
                             "circle Serial head names a different commit".to_string(),
                         ));
@@ -6187,13 +9497,18 @@ impl Database {
                     Self::record_materialized_serial_commit_on(
                         &tx,
                         &commit,
-                        &authorization.membership,
-                        authorization.key_generation,
+                        &journal.commit_ref,
+                        authorization,
                     )?;
                     (commit, activation)
                 }
             };
-            Self::record_verified_circle_activations_on(&tx, &commit, &[activation])?;
+            Self::record_verified_circle_activations_on(
+                &tx,
+                &commit,
+                &journal.commit_ref,
+                &[activation],
+            )?;
             let deleted = tx
                 .execute(
                     "DELETE FROM circle_operations WHERE operation_id = ?1 AND circle_id = ?2",
@@ -6212,27 +9527,26 @@ impl Database {
 
     pub(crate) async fn materialized_frontier(
         &self,
-    ) -> Result<BTreeMap<String, CommitPosition>, DbError> {
+    ) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
         self.call(|conn| Self::materialized_frontier_on(conn, None))
             .await
     }
 
-    pub(crate) async fn exact_materialized_hash(
+    pub(crate) async fn exact_materialized_ref(
         &self,
-        device_id: &str,
-        seq: u64,
-    ) -> Result<Option<ObjectHash>, DbError> {
-        let device_id = device_id.to_string();
-        self.call(move |conn| Self::materialized_position_on(conn, &device_id, seq))
+        stream_id: &str,
+        sequence: u64,
+    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
+        let stream_id = stream_id.to_string();
+        self.call(move |conn| Self::materialized_commit_ref_on(conn, &stream_id, sequence))
             .await
     }
 
-    pub(crate) async fn snapshot_coverage_frontier(
-        &self,
-    ) -> Result<BTreeMap<String, CommitPosition>, DbError> {
-        self.call(|conn| {
+    pub(crate) async fn snapshot_coverage_frontier(&self) -> Result<CommitFrontier, DbError> {
+        let policy = self.write_policy();
+        self.call(move |conn| {
             let mut stmt = conn
-                .prepare("SELECT device_id, seq, commit_hash FROM snapshot_coverage")
+                .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage")
                 .map_err(DbError::from)?;
             let rows = stmt
                 .query_map([], |row| {
@@ -6245,18 +9559,13 @@ impl Database {
                 .map_err(DbError::from)?;
             let mut frontier = BTreeMap::new();
             for row in rows {
-                let (device_id, seq, hash) = row.map_err(DbError::from)?;
-                frontier.insert(
-                    device_id.clone(),
-                    CommitPosition {
-                        seq: Self::sequence_from_sqlite(&device_id, seq)?,
-                        commit_hash: hash.parse().map_err(|error| {
-                            DbError::Message(format!("snapshot coverage hash: {error}"))
-                        })?,
-                    },
-                );
+                let (device_id, seq, reference) = row.map_err(DbError::from)?;
+                let seq = Self::sequence_from_sqlite(&device_id, seq)?;
+                let reference = Self::parse_stored_commit_ref(&device_id, seq, &reference)?;
+                frontier.insert(device_id.clone(), reference);
             }
-            Ok(frontier)
+            CommitFrontier::from_refs(policy, frontier)
+                .map_err(|error| DbError::Message(format!("snapshot coverage frontier: {error}")))
         })
         .await
     }
@@ -6264,11 +9573,11 @@ impl Database {
     pub(crate) fn materialized_frontier_on(
         conn: &Connection,
         exclude_device: Option<&str>,
-    ) -> Result<BTreeMap<String, CommitPosition>, DbError> {
+    ) -> Result<BTreeMap<String, StoreBatchCommitRef>, DbError> {
         let mut frontier = BTreeMap::new();
         let mut stmt = conn
             .prepare(
-                "SELECT m.device_id, m.seq, m.commit_hash \
+                "SELECT m.device_id, m.seq, m.commit_ref \
                  FROM materialized_commits m \
                  JOIN (SELECT device_id, MAX(seq) AS seq FROM materialized_commits \
                        GROUP BY device_id) latest \
@@ -6285,23 +9594,19 @@ impl Database {
             })
             .map_err(DbError::from)?;
         for row in rows {
-            let (device_id, seq, hash) = row.map_err(DbError::from)?;
+            let (device_id, seq, reference) = row.map_err(DbError::from)?;
             if exclude_device == Some(device_id.as_str()) {
                 continue;
             }
+            let seq = Self::sequence_from_sqlite(&device_id, seq)?;
             frontier.insert(
                 device_id.clone(),
-                CommitPosition {
-                    seq: Self::sequence_from_sqlite(&device_id, seq)?,
-                    commit_hash: hash.parse().map_err(|error| {
-                        DbError::Message(format!("materialized commit hash: {error}"))
-                    })?,
-                },
+                Self::parse_stored_commit_ref(&device_id, seq, &reference)?,
             );
         }
 
         let mut coverage = conn
-            .prepare("SELECT device_id, seq, commit_hash FROM snapshot_coverage")
+            .prepare("SELECT device_id, seq, commit_ref FROM snapshot_coverage")
             .map_err(DbError::from)?;
         let rows = coverage
             .query_map([], |row| {
@@ -6313,54 +9618,70 @@ impl Database {
             })
             .map_err(DbError::from)?;
         for row in rows {
-            let (device_id, seq, hash) = row.map_err(DbError::from)?;
+            let (device_id, seq, reference) = row.map_err(DbError::from)?;
             if exclude_device == Some(device_id.as_str()) {
                 continue;
             }
-            let position = CommitPosition {
-                seq: Self::sequence_from_sqlite(&device_id, seq)?,
-                commit_hash: hash.parse().map_err(|error| {
-                    DbError::Message(format!("snapshot coverage hash: {error}"))
-                })?,
-            };
+            let seq = Self::sequence_from_sqlite(&device_id, seq)?;
+            let reference = Self::parse_stored_commit_ref(&device_id, seq, &reference)?;
             if frontier
                 .get(&device_id)
-                .is_none_or(|current| current.seq < position.seq)
+                .is_none_or(|current| current.coord.sequence() < reference.coord.sequence())
             {
-                frontier.insert(device_id, position);
+                frontier.insert(device_id, reference);
             }
         }
         Ok(frontier)
     }
 
-    pub(crate) fn materialized_position_on(
+    fn parse_stored_commit_ref(
+        stream_id: &str,
+        sequence: u64,
+        encoded: &str,
+    ) -> Result<StoreBatchCommitRef, DbError> {
+        let reference: StoreBatchCommitRef = serde_json::from_str(encoded)
+            .map_err(|error| DbError::Message(format!("stored exact Store commit ref: {error}")))?;
+        let coordinate_matches = match &reference.coord {
+            StoreCommitCoord::Serial { sequence: declared } => {
+                stream_id == SERIAL_STREAM_ID && *declared == sequence
+            }
+            StoreCommitCoord::MergeConcurrent {
+                stream_id: declared,
+                sequence: declared_sequence,
+            } => declared.to_string() == stream_id && *declared_sequence == sequence,
+        };
+        if !coordinate_matches {
+            return Err(DbError::Message(format!(
+                "stored exact Store commit ref differs from {stream_id}/{sequence}"
+            )));
+        }
+        Ok(reference)
+    }
+
+    pub(crate) fn materialized_commit_ref_on(
         conn: &Connection,
-        device_id: &str,
-        seq: u64,
-    ) -> Result<Option<ObjectHash>, DbError> {
-        let seq = Self::sequence_to_sqlite(device_id, seq)?;
+        stream_id: &str,
+        sequence: u64,
+    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
+        let seq = Self::sequence_to_sqlite(stream_id, sequence)?;
         conn.query_row(
-            "SELECT commit_hash FROM materialized_commits \
-             WHERE device_id = ?1 AND seq = ?2",
-            (device_id, seq),
+            "SELECT commit_ref FROM materialized_commits WHERE device_id = ?1 AND seq = ?2",
+            (stream_id, seq),
             |row| row.get::<_, String>(0),
         )
         .optional()
         .map_err(DbError::from)?
-        .map(|hash| {
-            hash.parse()
-                .map_err(|error| DbError::Message(format!("materialized commit hash: {error}")))
-        })
+        .map(|encoded| Self::parse_stored_commit_ref(stream_id, sequence, &encoded))
         .transpose()
     }
 
     fn latest_position_for_device_on(
         conn: &Connection,
         device_id: &str,
-    ) -> Result<Option<CommitPosition>, DbError> {
+    ) -> Result<Option<StoreBatchCommitRef>, DbError> {
         let materialized = conn
             .query_row(
-                "SELECT seq, commit_hash FROM materialized_commits
+                "SELECT seq, commit_ref FROM materialized_commits
                  WHERE device_id = ?1 ORDER BY seq DESC LIMIT 1",
                 [device_id],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
@@ -6369,40 +9690,41 @@ impl Database {
             .map_err(DbError::from)?;
         let coverage = conn
             .query_row(
-                "SELECT seq, commit_hash FROM snapshot_coverage WHERE device_id = ?1",
+                "SELECT seq, commit_ref FROM snapshot_coverage WHERE device_id = ?1",
                 [device_id],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(DbError::from)?;
-        let positions = [materialized, coverage]
+        let references = [materialized, coverage]
             .into_iter()
             .flatten()
-            .map(|(seq, hash)| {
-                Ok(CommitPosition {
-                    seq: Self::sequence_from_sqlite(device_id, seq)?,
-                    commit_hash: hash.parse().map_err(|error| {
-                        DbError::Message(format!("latest Store position hash: {error}"))
-                    })?,
-                })
+            .map(|(seq, reference)| {
+                let seq = Self::sequence_from_sqlite(device_id, seq)?;
+                Self::parse_stored_commit_ref(device_id, seq, &reference)
             })
             .collect::<Result<Vec<_>, DbError>>()?;
-        if positions.len() == 2
-            && positions[0].seq == positions[1].seq
-            && positions[0].commit_hash != positions[1].commit_hash
+        if references.len() == 2
+            && references[0].coord.sequence() == references[1].coord.sequence()
+            && references[0] != references[1]
         {
             return Err(DbError::Message(format!(
                 "materialized ledger and snapshot coverage fork {device_id:?} at sequence {}",
-                positions[0].seq
+                references[0].coord.sequence()
             )));
         }
-        Ok(positions.into_iter().max_by_key(|position| position.seq))
+        Ok(references
+            .into_iter()
+            .max_by_key(|reference| reference.coord.sequence()))
     }
 
     pub(crate) fn record_activated_store_device_registrations_on(
         conn: &Connection,
         commit: &StoreBatchCommit,
-        registrations: &[StoreDeviceRegistration],
+        registrations: &[(
+            StoreDeviceRegistration,
+            crate::sync::store_commit::StoreDeviceRegistrationActivation,
+        )],
     ) -> Result<(), DbError> {
         if registrations.len() != commit.device_registrations.len() {
             return Err(DbError::Message(
@@ -6410,182 +9732,569 @@ impl Database {
                     .to_string(),
             ));
         }
-        let stream_id = commit.order.stream_id(&commit.device_id);
-        let seq = Self::sequence_to_sqlite(stream_id, commit.seq())?;
-        let commit_hash = commit.commit_hash().to_string();
-        for reference in &commit.device_registrations {
-            let registration = registrations
+        for signed in &commit.device_registrations {
+            let (registration, authority) = registrations
                 .iter()
-                .find(|registration| {
-                    registration.device_id == reference.device_id
-                        && registration.revision == reference.revision
-                })
+                .find(|(registration, _)| registration.device_id == signed.registration.device_id)
                 .ok_or_else(|| {
                     DbError::Message(format!(
-                        "Store commit is missing registration bytes for {:?} revision {}",
-                        reference.device_id, reference.revision
+                        "Store commit is missing registration bytes for {}",
+                        signed.registration.device_id
                     ))
                 })?;
-            reference
+            signed
+                .registration
                 .verify_registration(registration)
                 .map_err(|error| DbError::Message(error.to_string()))?;
-            if registration.store_root_hash != commit.store_root_hash
-                || registration.author_pubkey != commit.author_pubkey
-            {
+            if registration.store_root.store_root_hash != commit.store_root_hash {
                 return Err(DbError::Message(format!(
-                    "Store registration {:?} revision {} is not signed by its activating commit author",
-                    registration.device_id, registration.revision
+                    "Store registration {} belongs to a different Store",
+                    registration.device_id
                 )));
             }
-            let existing = conn
+            let expected_authority = match (&registration.origin, &signed.authority) {
+                (
+                    crate::sync::store_commit::StoreDeviceRegistrationOrigin::Join {
+                        attempt_id: origin_attempt,
+                        outcome_slot,
+                        ..
+                    },
+                    crate::sync::store_commit::StoreDeviceRegistrationActivationRef::Join {
+                        attempt_id,
+                        outcome,
+                    },
+                ) if origin_attempt == attempt_id && outcome_slot == outcome.slot() => {
+                    crate::sync::store_commit::StoreDeviceRegistrationActivation::Join {
+                        attempt_id: *attempt_id,
+                        outcome: outcome.clone(),
+                    }
+                }
+                (
+                    crate::sync::store_commit::StoreDeviceRegistrationOrigin::Recovery {
+                        recovery_id: origin_recovery,
+                        recovery_slot,
+                        ..
+                    },
+                    crate::sync::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
+                        recovery_id,
+                        node,
+                    },
+                ) if origin_recovery == recovery_id && recovery_slot == node.slot() => {
+                    crate::sync::store_commit::StoreDeviceRegistrationActivation::Recovery {
+                        recovery_id: *recovery_id,
+                        node: node.clone(),
+                    }
+                }
+                _ => {
+                    return Err(DbError::Message(format!(
+                        "Store registration {} origin differs from its signed activation authority",
+                        registration.device_id
+                    )))
+                }
+            };
+            if authority != &expected_authority {
+                return Err(DbError::Message(format!(
+                    "verified Store registration {} authority differs from the signed commit",
+                    registration.device_id
+                )));
+            }
+            let registration_bytes = registration.to_bytes();
+            let registration_object =
+                serde_json::to_string(&signed.registration).map_err(|error| {
+                    DbError::Message(format!("serialize Store registration exact ref: {error}"))
+                })?;
+            let activation_authority = serde_json::to_string(authority).map_err(|error| {
+                DbError::Message(format!("serialize Store registration authority: {error}"))
+            })?;
+            let inserted = conn
+                .execute(
+                    "INSERT INTO store_device_registration_activations
+                     (device_id, registration_hash, author_pubkey, device_signing_pubkey,
+                      registration_bytes, registration_object, activation_authority)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(device_id) DO NOTHING",
+                    rusqlite::params![
+                        registration.device_id.to_string(),
+                        signed.registration.registration_hash.to_string(),
+                        registration.author_pubkey,
+                        registration.device_signing_pubkey,
+                        registration_bytes,
+                        registration_object,
+                        activation_authority,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if inserted == 0 {
+                let existing: (String, Vec<u8>, String, String) = conn
+                    .query_row(
+                        "SELECT registration_hash, registration_bytes, registration_object,
+                                activation_authority
+                         FROM store_device_registration_activations WHERE device_id = ?1",
+                        [registration.device_id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .map_err(DbError::from)?;
+                if existing
+                    != (
+                        signed.registration.registration_hash.to_string(),
+                        registration.to_bytes(),
+                        serde_json::to_string(&signed.registration).map_err(|error| {
+                            DbError::Message(format!(
+                                "serialize Store registration exact ref: {error}"
+                            ))
+                        })?,
+                        serde_json::to_string(authority).map_err(|error| {
+                            DbError::Message(format!(
+                                "serialize Store registration authority: {error}"
+                            ))
+                        })?,
+                    )
+                {
+                    return Err(DbError::Message(format!(
+                        "Store device {} already has a different one-shot registration",
+                        registration.device_id
+                    )));
+                }
+            }
+            let local: Option<LocalDeviceRegistrationJournalRow> = conn
                 .query_row(
-                    "SELECT revision, registration_hash, previous_registration_hash, state, \
-                            author_pubkey, registration_bytes, stream_id, seq, commit_hash \
-                     FROM store_device_registration_activations \
-                     WHERE device_id = ?1 ORDER BY revision DESC LIMIT 1",
-                    [&registration.device_id],
+                    "SELECT device_id, registration_hash, registration_bytes, prepared_object, \
+                            initial_ack_ref, initial_ack_bytes, initial_ack_prepared, state \
+                     FROM local_store_device_registration WHERE singleton = 1",
+                    [],
                     |row| {
                         Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, Vec<u8>>(5)?,
-                            row.get::<_, String>(6)?,
-                            row.get::<_, i64>(7)?,
-                            row.get::<_, String>(8)?,
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
                         ))
                     },
                 )
                 .optional()
                 .map_err(DbError::from)?;
-            let registration_bytes = registration.to_bytes();
-            let state = match registration.state {
-                StoreDeviceRegistrationState::Active => "active",
-                StoreDeviceRegistrationState::Retired => "retired",
+            let Some((
+                local_device,
+                local_hash,
+                local_bytes,
+                local_prepared,
+                local_ack_ref,
+                local_ack_bytes,
+                local_ack_prepared,
+                local_state,
+            )) = local
+            else {
+                continue;
             };
-            let previous_hash = registration
-                .previous_registration_hash
-                .map(|hash| hash.to_string());
-            if let Some((
-                existing_revision,
-                existing_hash,
-                existing_previous,
-                existing_state,
-                existing_author,
-                existing_bytes,
-                existing_stream,
-                existing_seq,
-                existing_commit,
-            )) = existing
-            {
-                let existing_revision = u64::try_from(existing_revision).map_err(|_| {
-                    DbError::Message(
-                        "activated Store device registration revision is negative".to_string(),
-                    )
-                })?;
-                if existing_revision == registration.revision {
-                    if existing_hash == reference.registration_hash.to_string()
-                        && existing_previous == previous_hash
-                        && existing_state == state
-                        && existing_author == registration.author_pubkey
-                        && existing_bytes == registration_bytes
-                        && existing_stream == stream_id
-                        && existing_seq == seq
-                        && existing_commit == commit_hash
-                    {
-                        continue;
-                    }
-                    return Err(DbError::Message(format!(
-                        "Store device registration {:?} revision {} has a different activation",
-                        registration.device_id, registration.revision
-                    )));
-                }
-                let expected_revision = existing_revision.checked_add(1).ok_or_else(|| {
-                    DbError::Message("Store device registration revision overflow".to_string())
-                })?;
-                if registration.revision != expected_revision
-                    || previous_hash.as_deref() != Some(existing_hash.as_str())
-                    || registration.author_pubkey != existing_author
-                    || existing_state != "active"
-                    || registration.state != StoreDeviceRegistrationState::Retired
-                {
-                    return Err(DbError::Message(format!(
-                        "Store device registration {:?} revision {} does not extend its activated chain",
-                        registration.device_id, registration.revision
-                    )));
-                }
-            } else if registration.revision != 1
-                || registration.previous_registration_hash.is_some()
-                || registration.state != StoreDeviceRegistrationState::Active
-            {
-                return Err(DbError::Message(format!(
-                    "Store device registration {:?} must begin with revision 1 Active",
-                    registration.device_id
-                )));
+            if local_device != registration.device_id.to_string() {
+                continue;
             }
-            conn.execute(
-                "INSERT INTO store_device_registration_activations \
-                 (device_id, revision, registration_hash, previous_registration_hash, state, \
-                  author_pubkey, registration_bytes, stream_id, seq, commit_hash) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                rusqlite::params![
-                    registration.device_id,
-                    i64::try_from(registration.revision).map_err(|_| DbError::Message(
-                        "Store device registration revision exceeds SQLite INTEGER".to_string()
-                    ))?,
-                    reference.registration_hash.to_string(),
-                    previous_hash,
-                    state,
-                    registration.author_pubkey,
-                    registration_bytes,
-                    stream_id,
-                    seq,
-                    commit_hash,
-                ],
+            let local_prepared: PreparedExactObject = serde_json::from_str(&local_prepared)
+                .map_err(|error| DbError::Message(format!("local registration object: {error}")))?;
+            let local_ack_ref: StoreAckRef = serde_json::from_str(&local_ack_ref)
+                .map_err(|error| DbError::Message(format!("local initial ack ref: {error}")))?;
+            let local_ack_prepared: PreparedExactObject = serde_json::from_str(&local_ack_prepared)
+                .map_err(|error| DbError::Message(format!("local initial ack object: {error}")))?;
+            if local_hash != signed.registration.registration_hash.to_string()
+                || local_bytes != registration.to_bytes()
+                || local_prepared.reference() != &signed.registration.object
+                || local_ack_prepared.reference() != &local_ack_ref.object
+            {
+                return Err(DbError::Message(
+                    "activating commit differs from the complete local registration ref"
+                        .to_string(),
+                ));
+            }
+            let ack = StoreAck::parse_at(
+                &local_ack_bytes,
+                registration.store_root.store_root_hash,
+                &local_ack_ref,
+                registration,
             )
-            .map_err(DbError::from)?;
+            .map_err(|error| DbError::Message(format!("local initial ack: {error}")))?;
+            if ack.revision != 1
+                || ack.predecessor.is_some()
+                || local_ack_prepared
+                    .reference()
+                    .verify(local_ack_prepared.stored_bytes())
+                    .is_err()
+            {
+                return Err(DbError::Message(
+                    "local registration journal does not carry an initial acknowledgement"
+                        .to_string(),
+                ));
+            }
+            let state: LocalDeviceRegistrationState =
+                serde_json::from_str(&local_state).map_err(|error| {
+                    DbError::Message(format!("local registration journal: {error}"))
+                })?;
+            let activated_state = LocalDeviceRegistrationState::Activated {
+                authority: authority.clone(),
+            };
+            match state {
+                LocalDeviceRegistrationState::Prepared => {
+                    return Err(DbError::Message(
+                        "Store commit cannot activate a registration before exact creation"
+                            .to_string(),
+                    ));
+                }
+                LocalDeviceRegistrationState::Created => {
+                    let updated = conn
+                        .execute(
+                            "UPDATE local_store_device_registration SET state = ?1 \
+                             WHERE singleton = 1 AND device_id = ?2 AND registration_hash = ?3 \
+                               AND initial_ack_ref = ?4 AND state = ?5",
+                            rusqlite::params![
+                                serde_json::to_string(&activated_state).map_err(|error| {
+                                    DbError::Message(format!(
+                                        "serialize activated journal: {error}"
+                                    ))
+                                })?,
+                                local_device,
+                                local_hash,
+                                serde_json::to_string(&local_ack_ref).map_err(|error| {
+                                    DbError::Message(format!(
+                                        "serialize local initial ack: {error}"
+                                    ))
+                                })?,
+                                serde_json::to_string(&LocalDeviceRegistrationState::Created)
+                                    .map_err(|error| DbError::Message(format!(
+                                        "serialize created journal: {error}"
+                                    )))?,
+                            ],
+                        )
+                        .map_err(DbError::from)?;
+                    if updated != 1 {
+                        return Err(DbError::Message(
+                            "local registration journal changed during activation".to_string(),
+                        ));
+                    }
+                    conn.execute(
+                        "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
+                         VALUES (1, ?1, ?2)",
+                        rusqlite::params![
+                            serde_json::to_string(&local_ack_ref).map_err(|error| {
+                                DbError::Message(format!(
+                                    "serialize activated initial ack: {error}"
+                                ))
+                            })?,
+                            serde_json::to_string(&ack.successor.next_slot).map_err(|error| {
+                                DbError::Message(format!(
+                                    "serialize activated ack successor: {error}"
+                                ))
+                            })?,
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+                    conn.execute(
+                        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (
+                            LOCAL_DEVICE_ID_STATE_KEY,
+                            registration.device_id.to_string(),
+                        ),
+                    )
+                    .map_err(DbError::from)?;
+                }
+                LocalDeviceRegistrationState::Activated {
+                    authority: existing,
+                } if existing == *authority => {
+                    let stored_ack: (String, String) = conn
+                        .query_row(
+                            "SELECT ack_ref, successor_slot FROM published_store_acks \
+                             WHERE singleton = 1",
+                            [],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .map_err(DbError::from)?;
+                    let local_device_id: Option<String> = conn
+                        .query_row(
+                            "SELECT value FROM protocol_state WHERE key = ?1",
+                            [LOCAL_DEVICE_ID_STATE_KEY],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(DbError::from)?;
+                    if stored_ack.0
+                        != serde_json::to_string(&local_ack_ref).map_err(|error| {
+                            DbError::Message(format!("serialize replayed initial ack: {error}"))
+                        })?
+                        || stored_ack.1
+                            != serde_json::to_string(&ack.successor.next_slot).map_err(|error| {
+                                DbError::Message(format!(
+                                    "serialize replayed ack successor: {error}"
+                                ))
+                            })?
+                        || local_device_id.as_deref() != Some(local_device.as_str())
+                    {
+                        return Err(DbError::Message(
+                            "activated local journal differs from its exact initial ack"
+                                .to_string(),
+                        ));
+                    }
+                }
+                LocalDeviceRegistrationState::Activated { .. } => {
+                    return Err(DbError::Message(
+                        "local registration already has another exact activation authority"
+                            .to_string(),
+                    ));
+                }
+                LocalDeviceRegistrationState::Retired { .. } => {
+                    return Err(DbError::Message(
+                        "retired local registration cannot be activated again".to_string(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn activated_store_device_registrations(
         &self,
     ) -> Result<Vec<StoreDeviceRegistration>, DbError> {
-        let store_root_hash = self.required_store_root_hash().await?;
+        Ok(self
+            .activated_store_device_registration_records()
+            .await?
+            .into_iter()
+            .map(|(_, registration)| registration)
+            .collect())
+    }
+
+    pub(crate) async fn store_device_state_for_order(
+        &self,
+        order: &crate::sync::store_commit::StoreCommitOrder,
+    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
+        let order = order.clone();
+        self.call(move |conn| {
+            let genesis = load_store_device_genesis_state_on(conn)?;
+            match order {
+                crate::sync::store_commit::StoreCommitOrder::MergeConcurrent {
+                    predecessor,
+                    dependencies,
+                    ..
+                } => {
+                    let mut frontier = dependencies;
+                    if let Some(predecessor) = predecessor {
+                        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = predecessor.coord
+                        else {
+                            return Err(DbError::Message(
+                                "Merge predecessor has a Serial coordinate".to_string(),
+                            ));
+                        };
+                        if frontier
+                            .insert(stream_id, predecessor.clone())
+                            .is_some_and(|current| current != predecessor)
+                        {
+                            return Err(DbError::Message(
+                                "Merge predecessor differs from the same-stream dependency"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    let state = if frontier.is_empty() {
+                        genesis
+                    } else {
+                        ResolvedStoreDeviceState::merge(
+                            frontier
+                                .values()
+                                .map(|reference| load_store_device_snapshot_on(conn, reference))
+                                .collect::<Result<Vec<_>, _>>()?,
+                        )
+                        .map_err(|error| DbError::Message(error.to_string()))?
+                    };
+                    let reference = StoreDeviceStateRef::merge_concurrent(
+                        CommitFrontier::MergeConcurrent(frontier),
+                        &state,
+                    )
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                    Ok((reference, state))
+                }
+                crate::sync::store_commit::StoreCommitOrder::Serial { predecessor, .. } => {
+                    let state = match &predecessor {
+                        StoreSerialPredecessor::Genesis { .. } => genesis,
+                        StoreSerialPredecessor::Commit(reference) => {
+                            load_store_device_snapshot_on(conn, reference)?
+                        }
+                    };
+                    let reference = StoreDeviceStateRef::serial(predecessor, &state)
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                    Ok((reference, state))
+                }
+            }
+        })
+        .await
+    }
+
+    pub(crate) async fn activated_store_device_registration_records(
+        &self,
+    ) -> Result<Vec<(StoreDeviceRegistrationRef, StoreDeviceRegistration)>, DbError> {
+        let root = self
+            .local_store_root_ref()
+            .await?
+            .ok_or_else(DbError::missing_store_root_hash)?;
         self.call(move |conn| {
             let mut statement = conn
                 .prepare(
-                    "SELECT device_id, revision, registration_bytes \
-                     FROM store_device_registration_activations \
-                     ORDER BY device_id, revision",
+                    "SELECT device_id, registration_hash, registration_bytes,
+                            registration_object
+                     FROM store_device_registration_activations ORDER BY device_id",
                 )
                 .map_err(DbError::from)?;
-            let rows = statement
+                let rows = statement
                 .query_map([], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(1)?,
                         row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 })
                 .map_err(DbError::from)?;
-            rows.map(|row| {
-                let (device_id, revision, bytes) = row.map_err(DbError::from)?;
-                let revision = u64::try_from(revision).map_err(|_| {
-                    DbError::Message(
-                        "activated Store device registration revision is negative".to_string(),
-                    )
-                })?;
-                StoreDeviceRegistration::parse_at(&bytes, store_root_hash, &device_id, revision)
-                    .map_err(|error| {
+            rows
+                .map(|row| {
+                    let (device_id, registration_hash, bytes, object) =
+                        row.map_err(DbError::from)?;
+                    let device_id = device_id.parse().map_err(|error| {
+                        DbError::Message(format!("activated Store device id: {error}"))
+                    })?;
+                    let registration_hash = registration_hash.parse().map_err(|error| {
                         DbError::Message(format!(
-                            "activated Store device registration {device_id:?}/{revision}: {error}"
+                            "activated Store device registration hash: {error}"
                         ))
-                    })
-            })
-            .collect()
+                    })?;
+                    let reference: StoreDeviceRegistrationRef =
+                        serde_json::from_str(&object).map_err(|error| {
+                        DbError::Message(format!(
+                            "activated Store device exact reference: {error}"
+                        ))
+                    })?;
+                    if reference.device_id != device_id
+                        || reference.registration_hash != registration_hash
+                    {
+                        return Err(DbError::Message(
+                            "activated Store registration columns differ from its exact reference"
+                                .to_string(),
+                        ));
+                    }
+                    let registration = StoreDeviceRegistration::parse_at(&bytes, &root, device_id)
+                        .map_err(|error| {
+                            DbError::Message(format!(
+                                "activated Store device registration {device_id}: {error}"
+                            ))
+                        })?;
+                    reference.verify_registration(&registration).map_err(|error| {
+                        DbError::Message(format!(
+                            "activated Store device registration {device_id} exact reference: {error}"
+                        ))
+                    })?;
+                    Ok((reference, registration))
+                })
+                .collect::<Result<Vec<_>, DbError>>()
+        })
+        .await
+    }
+
+    pub(crate) async fn activated_store_device_registration(
+        &self,
+        reference: StoreDeviceRegistrationRef,
+    ) -> Result<StoreDeviceRegistration, DbError> {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
+            DbError::Message("Store root is absent while loading an activated device".to_string())
+        })?;
+        self.call(move |conn| load_activated_registration_on(conn, &root, &reference))
+            .await
+    }
+
+    pub(crate) async fn local_blob_write_authority(
+        &self,
+    ) -> Result<(StoreDeviceRegistrationRef, StoreDeviceRegistration), DbError> {
+        self.call(|conn| {
+            local_store_authority_on(conn)
+                .map(|(_, reference, registration)| (reference, registration))
+        })
+        .await
+    }
+
+    pub(crate) async fn activated_store_device_registration_with_authority(
+        &self,
+        reference: StoreDeviceRegistrationRef,
+    ) -> Result<
+        (
+            StoreDeviceRegistration,
+            crate::sync::store_commit::StoreDeviceRegistrationActivation,
+        ),
+        DbError,
+    > {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
+            DbError::Message("Store root is absent while loading an activated device".to_string())
+        })?;
+        self.call(move |conn| {
+            let registration = load_activated_registration_on(conn, &root, &reference)?;
+            let authority: String = conn
+                .query_row(
+                    "SELECT activation_authority FROM store_device_registration_activations \
+                     WHERE device_id = ?1 AND registration_hash = ?2",
+                    (
+                        reference.device_id.to_string(),
+                        reference.registration_hash.to_string(),
+                    ),
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let authority = serde_json::from_str(&authority).map_err(|error| {
+                DbError::Message(format!("activated Store registration authority: {error}"))
+            })?;
+            Ok((registration, authority))
+        })
+        .await
+    }
+
+    pub(crate) async fn activated_store_device_registration_for_device(
+        &self,
+        device_id: crate::sync::store_commit::StoreDeviceId,
+    ) -> Result<
+        Option<(
+            StoreDeviceRegistrationRef,
+            StoreDeviceRegistration,
+            crate::sync::store_commit::StoreDeviceRegistrationActivation,
+        )>,
+        DbError,
+    > {
+        let root = self.local_store_root_ref().await?.ok_or_else(|| {
+            DbError::Message("Store root is absent while loading an activated device".to_string())
+        })?;
+        self.call(move |conn| {
+            let stored: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT registration_object, activation_authority \
+                     FROM store_device_registration_activations WHERE device_id = ?1",
+                    [device_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let Some((reference, authority)) = stored else {
+                return Ok(None);
+            };
+            let reference: StoreDeviceRegistrationRef =
+                serde_json::from_str(&reference).map_err(|error| {
+                    DbError::Message(format!("activated Store registration ref: {error}"))
+                })?;
+            if reference.device_id != device_id {
+                return Err(DbError::Message(
+                    "activated Store registration row names another device".to_string(),
+                ));
+            }
+            let registration = load_activated_registration_on(conn, &root, &reference)?;
+            let authority = serde_json::from_str(&authority).map_err(|error| {
+                DbError::Message(format!("activated Store registration authority: {error}"))
+            })?;
+            Ok(Some((reference, registration, authority)))
         })
         .await
     }
@@ -6593,47 +10302,178 @@ impl Database {
     pub(crate) fn record_materialized_commit_on(
         conn: &Connection,
         commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
     ) -> Result<(), DbError> {
-        let actual_hash = commit.commit_hash();
-        let stream_id = commit.order.stream_id(&commit.device_id);
+        commit_ref
+            .verify_commit(commit)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let stored_registration: String = conn
+            .query_row(
+                "SELECT registration_object FROM store_device_registration_activations \
+                 WHERE device_id = ?1 AND registration_hash = ?2",
+                (
+                    commit.author_registration.device_id.to_string(),
+                    commit.author_registration.registration_hash.to_string(),
+                ),
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        let stored_registration: StoreDeviceRegistrationRef =
+            serde_json::from_str(&stored_registration).map_err(|error| {
+                DbError::Message(format!("materialized author registration ref: {error}"))
+            })?;
+        if stored_registration != commit.author_registration {
+            return Err(DbError::Message(
+                "materialized commit author registration differs from its activation".to_string(),
+            ));
+        }
+        let root = required_store_root_authority_on(conn)?;
+        if root.store_root_hash != commit.store_root_hash {
+            return Err(DbError::Message(
+                "materialized commit belongs to a different Store root".to_string(),
+            ));
+        }
+        let expected_stream =
+            AuthorStreamId::store_announcements(&root, &commit.author_registration);
+        let (stream_id, sequence) = match commit_ref.coord {
+            StoreCommitCoord::MergeConcurrent {
+                stream_id,
+                sequence,
+            } if stream_id == expected_stream => (stream_id.to_string(), sequence),
+            StoreCommitCoord::MergeConcurrent { .. } => {
+                return Err(DbError::Message(
+                    "Merge materialization stream differs from its exact author registration"
+                        .to_string(),
+                ));
+            }
+            StoreCommitCoord::Serial { sequence } => (SERIAL_STREAM_ID.to_string(), sequence),
+        };
+        if sequence != commit.seq() || commit_ref.coord.policy() != commit.policy() {
+            return Err(DbError::Message(
+                "materialization coordinate differs from its signed commit".to_string(),
+            ));
+        }
         let predecessor = if commit.seq() == 1 {
             None
-        } else if let Some(hash) =
-            Self::materialized_position_on(conn, stream_id, commit.seq() - 1)?
+        } else if let Some(reference) =
+            Self::materialized_commit_ref_on(conn, &stream_id, commit.seq() - 1)?
         {
-            Some(hash)
+            Some(reference)
         } else {
             conn.query_row(
-                "SELECT commit_hash FROM snapshot_coverage \
+                "SELECT commit_ref FROM snapshot_coverage \
                  WHERE device_id = ?1 AND seq = ?2",
                 (
-                    stream_id,
-                    Self::sequence_to_sqlite(stream_id, commit.seq() - 1)?,
+                    &stream_id,
+                    Self::sequence_to_sqlite(&stream_id, commit.seq() - 1)?,
                 ),
                 |row| row.get::<_, String>(0),
             )
             .optional()
             .map_err(DbError::from)?
-            .map(|hash| {
-                hash.parse()
-                    .map_err(|error| DbError::Message(format!("snapshot coverage hash: {error}")))
+            .map(|reference| {
+                serde_json::from_str(&reference).map_err(|error| {
+                    DbError::Message(format!("snapshot coverage exact commit ref: {error}"))
+                })
             })
             .transpose()?
         };
-        if predecessor != commit.previous_commit_hash() {
+        if predecessor.as_ref() != commit.order.predecessor() {
             return Err(DbError::Message(format!(
                 "Store commit {}/{} names predecessor {:?}, durable predecessor is {:?}",
                 stream_id,
                 commit.seq(),
-                commit.previous_commit_hash(),
+                commit.order.predecessor(),
                 predecessor
             )));
         }
-        let seq = Self::sequence_to_sqlite(stream_id, commit.seq())?;
+        let mut device_state = load_declared_store_device_state_on(conn, &commit.device_state)?;
+        let recovery_author = commit.device_registrations.iter().find_map(|activation| {
+            if activation.registration != commit.author_registration {
+                return None;
+            }
+            let crate::sync::store_commit::StoreDeviceRegistrationActivationRef::Recovery {
+                node,
+                ..
+            } = &activation.authority
+            else {
+                return None;
+            };
+            let registration =
+                load_activated_registration_on(conn, &root, &activation.registration).ok()?;
+            let crate::sync::store_commit::StoreDeviceRegistrationOrigin::Recovery {
+                owner_grant,
+                ..
+            } = registration.origin
+            else {
+                return None;
+            };
+            Some((
+                activation.registration.clone(),
+                crate::sync::store_commit::OwnerRecoveryCursor {
+                    owner_grant,
+                    position: crate::sync::store_commit::OwnerRecoveryPosition::At {
+                        node: node.clone(),
+                    },
+                },
+            ))
+        });
+        if let Some((registration, recovery)) = &recovery_author {
+            device_state = device_state
+                .activate_registration(registration.clone(), Some(recovery.clone()))
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        let active_author = device_state
+            .devices
+            .get(&commit.author_registration.device_id)
+            .is_some_and(|record| {
+                record.registration == commit.author_registration
+                    && matches!(
+                        record.status,
+                        crate::sync::store_commit::StoreDeviceStatus::Active
+                    )
+            });
+        if !active_author {
+            return Err(DbError::Message(
+                "materialized commit author is not active at its exact predecessor state".into(),
+            ));
+        }
+        for activation in &commit.device_registrations {
+            if recovery_author
+                .as_ref()
+                .is_some_and(|(registration, _)| registration == &activation.registration)
+            {
+                continue;
+            }
+            device_state = device_state
+                .activate_registration(activation.registration.clone(), None)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        for retirement in &commit.device_retirements {
+            device_state = device_state
+                .self_retire(retirement.clone())
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        let seq = Self::sequence_to_sqlite(&stream_id, commit.seq())?;
+        let commit_ref_json = serde_json::to_string(commit_ref).map_err(|error| {
+            DbError::Message(format!("serialize exact Store commit ref: {error}"))
+        })?;
         conn.execute(
-            "INSERT INTO materialized_commits (device_id, seq, commit_hash) \
+            "INSERT INTO store_device_state_snapshots (commit_ref, state) VALUES (?1, ?2)",
+            rusqlite::params![
+                &commit_ref_json,
+                serde_json::to_string(&device_state).map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize materialized Store device state: {error}"
+                    ))
+                })?,
+            ],
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "INSERT INTO materialized_commits (device_id, seq, commit_ref) \
              VALUES (?1, ?2, ?3)",
-            (stream_id, seq, actual_hash.to_string()),
+            (&stream_id, seq, commit_ref_json),
         )
         .map(|_| ())
         .map_err(DbError::from)
@@ -6642,6 +10482,7 @@ impl Database {
     pub(crate) fn record_verified_circle_activations_on(
         conn: &Connection,
         commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
         activations: &[crate::sync::circle_ops::VerifiedCircleReference],
     ) -> Result<(), DbError> {
         if activations.len() != commit.circle_controls.len() {
@@ -6649,8 +10490,14 @@ impl Database {
                 "verified circle activations do not cover every control reference".to_string(),
             ));
         }
-        let stream_id = commit.order.stream_id(&commit.device_id);
-        let seq = Self::sequence_to_sqlite(stream_id, commit.seq())?;
+        commit_ref
+            .verify_commit(commit)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let stream_id = match &commit_ref.coord {
+            StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
+            StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
+        };
+        let seq = Self::sequence_to_sqlite(&stream_id, commit_ref.coord.sequence())?;
         for activation in activations {
             if !commit.circle_controls.contains(&activation.reference)
                 || activation.reference.circle_id() != activation.circle_id
@@ -6802,18 +10649,24 @@ impl Database {
     pub(crate) fn record_materialized_serial_commit_on(
         conn: &Connection,
         commit: &StoreBatchCommit,
-        membership: &SerialMembershipState,
-        key_generation: u64,
+        commit_ref: &StoreBatchCommitRef,
+        authorization: &SerialAuthorizationState,
     ) -> Result<(), DbError> {
         if commit.policy() != WritePolicy::Serial {
             return Err(DbError::Message(
                 "Serial membership state cannot accompany a MergeConcurrent commit".to_string(),
             ));
         }
-        Self::record_materialized_commit_on(conn, commit)?;
-        let membership = serde_json::to_string(membership).map_err(|error| {
+        Self::record_materialized_commit_on(conn, commit, commit_ref)?;
+        let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
             DbError::Message(format!("serialize Serial membership state: {error}"))
         })?;
+        let provider_admin =
+            serde_json::to_string(&authorization.provider_admin).map_err(|error| {
+                DbError::Message(format!(
+                    "serialize Serial provider administrator state: {error}"
+                ))
+            })?;
         conn.execute(
             "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -6823,7 +10676,16 @@ impl Database {
         conn.execute(
             "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (SERIAL_KEY_GENERATION_STATE_KEY, key_generation.to_string()),
+            (SERIAL_PROVIDER_ADMIN_STATE_KEY, provider_admin),
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (
+                SERIAL_KEY_GENERATION_STATE_KEY,
+                authorization.key_generation.to_string(),
+            ),
         )
         .map(|_| ())
         .map_err(DbError::from)
@@ -6838,6 +10700,43 @@ impl Database {
             .map_err(|error| DbError::Message(format!("parse Serial membership state: {error}")))
     }
 
+    pub async fn serial_authorization_state(
+        &self,
+    ) -> Result<Option<SerialAuthorizationState>, DbError> {
+        let membership = self.get_protocol_state(SERIAL_MEMBERSHIP_STATE_KEY).await?;
+        let provider_admin = self
+            .get_protocol_state(SERIAL_PROVIDER_ADMIN_STATE_KEY)
+            .await?;
+        let key_generation = self
+            .get_protocol_state(SERIAL_KEY_GENERATION_STATE_KEY)
+            .await?;
+        match (membership, provider_admin, key_generation) {
+            (None, None, None) => Ok(None),
+            (Some(membership), Some(provider_admin), Some(key_generation)) => {
+                let membership = serde_json::from_str(&membership).map_err(|error| {
+                    DbError::Message(format!("parse Serial membership state: {error}"))
+                })?;
+                let provider_admin: ProviderAdminState = serde_json::from_str(&provider_admin)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "parse Serial provider administrator state: {error}"
+                        ))
+                    })?;
+                let key_generation = key_generation.parse::<u64>().map_err(|error| {
+                    DbError::Message(format!("parse Serial key generation: {error}"))
+                })?;
+                Ok(Some(SerialAuthorizationState {
+                    membership,
+                    provider_admin,
+                    key_generation,
+                }))
+            }
+            _ => Err(DbError::Message(
+                "Serial authorization state is only partially durable".to_string(),
+            )),
+        }
+    }
+
     pub async fn serial_key_generation(&self) -> Result<Option<u64>, DbError> {
         let Some(raw) = self
             .get_protocol_state(SERIAL_KEY_GENERATION_STATE_KEY)
@@ -6850,6 +10749,67 @@ impl Database {
             .map_err(|error| DbError::Message(format!("parse Serial key generation: {error}")))
     }
 
+    fn install_serial_root_authorization_on(
+        conn: &Connection,
+        founder_pubkey: &str,
+        authorization: &SerialAuthorizationState,
+    ) -> Result<(), DbError> {
+        if Self::latest_position_for_device_on(conn, SERIAL_STREAM_ID)?.is_some() {
+            return Err(DbError::Message(
+                "cannot install founder-only Serial authorization after a materialized commit"
+                    .to_string(),
+            ));
+        }
+        let existing_state: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM protocol_state WHERE key IN (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                    SERIAL_MEMBERSHIP_STATE_KEY,
+                    SERIAL_KEY_GENERATION_STATE_KEY,
+                    SERIAL_PROVIDER_ADMIN_STATE_KEY,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if existing_state != 0 {
+            return Err(DbError::Message(
+                "cannot install founder-only Serial authorization over existing state".to_string(),
+            ));
+        }
+        let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
+            DbError::Message(format!(
+                "serialize Serial founder membership state: {error}"
+            ))
+        })?;
+        let provider_admin =
+            serde_json::to_string(&authorization.provider_admin).map_err(|error| {
+                DbError::Message(format!(
+                    "serialize Serial founder provider administrator state: {error}"
+                ))
+            })?;
+        for (key, value) in [
+            (
+                crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
+                founder_pubkey.to_string(),
+            ),
+            (SERIAL_MEMBERSHIP_STATE_KEY, membership),
+            (SERIAL_PROVIDER_ADMIN_STATE_KEY, provider_admin),
+            (
+                SERIAL_KEY_GENERATION_STATE_KEY,
+                authorization.key_generation.to_string(),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            .map_err(DbError::from)?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn install_serial_root_authorization(
         &self,
         founder_pubkey: String,
@@ -6857,52 +10817,7 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            if Self::latest_position_for_device_on(&tx, SERIAL_STREAM_ID)?.is_some() {
-                return Err(DbError::Message(
-                    "cannot install founder-only Serial authorization after a materialized commit"
-                        .to_string(),
-                ));
-            }
-            let existing_state: i64 = tx
-                .query_row(
-                    "SELECT COUNT(*) FROM protocol_state WHERE key IN (?1, ?2, ?3)",
-                    rusqlite::params![
-                        crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
-                        SERIAL_MEMBERSHIP_STATE_KEY,
-                        SERIAL_KEY_GENERATION_STATE_KEY,
-                    ],
-                    |row| row.get(0),
-                )
-                .map_err(DbError::from)?;
-            if existing_state != 0 {
-                return Err(DbError::Message(
-                    "cannot install founder-only Serial authorization over existing state"
-                        .to_string(),
-                ));
-            }
-            let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
-                DbError::Message(format!(
-                    "serialize Serial founder membership state: {error}"
-                ))
-            })?;
-            for (key, value) in [
-                (
-                    crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
-                    founder_pubkey,
-                ),
-                (SERIAL_MEMBERSHIP_STATE_KEY, membership),
-                (
-                    SERIAL_KEY_GENERATION_STATE_KEY,
-                    authorization.key_generation.to_string(),
-                ),
-            ] {
-                tx.execute(
-                    "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (key, value),
-                )
-                .map_err(DbError::from)?;
-            }
+            Self::install_serial_root_authorization_on(&tx, &founder_pubkey, &authorization)?;
             tx.commit().map_err(DbError::from)
         })
         .await
@@ -6911,6 +10826,7 @@ impl Database {
     pub(crate) async fn materialize_serial_control_commit(
         &self,
         commit: StoreBatchCommit,
+        commit_ref: StoreBatchCommitRef,
         authorization_after: SerialAuthorizationState,
     ) -> Result<(), DbError> {
         if commit.control.is_none() || commit.store_package.is_some() {
@@ -6923,8 +10839,8 @@ impl Database {
             Self::record_materialized_serial_commit_on(
                 &tx,
                 &commit,
-                &authorization_after.membership,
-                authorization_after.key_generation,
+                &commit_ref,
+                &authorization_after,
             )?;
             tx.commit().map_err(DbError::from)
         })
@@ -6933,7 +10849,7 @@ impl Database {
 
     pub(crate) async fn install_serial_authorization_at_position(
         &self,
-        expected: CommitPosition,
+        expected: StoreBatchCommitRef,
         authorization: SerialAuthorizationState,
     ) -> Result<(), DbError> {
         self.call(move |conn| {
@@ -6947,10 +10863,23 @@ impl Database {
             let membership = serde_json::to_string(&authorization.membership).map_err(|error| {
                 DbError::Message(format!("serialize Serial membership state: {error}"))
             })?;
+            let provider_admin = serde_json::to_string(&authorization.provider_admin).map_err(
+                |error| {
+                    DbError::Message(format!(
+                        "serialize Serial provider administrator state: {error}"
+                    ))
+                },
+            )?;
             tx.execute(
                 "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (SERIAL_MEMBERSHIP_STATE_KEY, membership),
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (SERIAL_PROVIDER_ADMIN_STATE_KEY, provider_admin),
             )
             .map_err(DbError::from)?;
             tx.execute(
@@ -6970,9 +10899,37 @@ impl Database {
     pub(crate) async fn install_bootstrap_state(
         &self,
         coverage: &CommitFrontier,
-        snapshot_hash: ObjectHash,
-        store_root_hash: ObjectHash,
+        snapshot: PublishedStoreSnapshot,
+        store_root: crate::sync::store_objects::VerifiedObject<StoreProtocolRoot>,
+        founder: crate::sync::store_objects::VerifiedObject<StoreDeviceRegistration>,
     ) -> Result<(), DbError> {
+        if store_root.value.to_bytes() != store_root.bytes
+            || store_root.value.object_hash() != store_root.semantic_hash
+        {
+            return Err(DbError::Message(
+                "bootstrap Store root differs from its verified object".to_string(),
+            ));
+        }
+        let store_root_ref = crate::sync::store_commit::StoreRootRef {
+            store_root_id: store_root.value.descriptor.store_root_id(),
+            store_root_hash: store_root.semantic_hash,
+            object: store_root.object,
+        };
+        let founder_reference =
+            StoreDeviceRegistrationRef::from_registration(&founder.value, founder.object.clone());
+        if founder.semantic_hash != founder_reference.registration_hash {
+            return Err(DbError::Message(
+                "bootstrap founder semantic hash differs from its exact registration".to_string(),
+            ));
+        }
+        let genesis = ResolvedStoreDeviceState::founder(
+            &store_root_ref,
+            founder_reference.clone(),
+            &store_root.value.descriptor.founder_pubkey,
+            store_root.value.descriptor.founder_grant.clone(),
+            &store_root.value.descriptor.founder_recovery,
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
         if coverage.policy() != self.write_policy() {
             return Err(DbError::Message(format!(
                 "snapshot coverage uses {:?}, database uses {:?}",
@@ -6980,36 +10937,178 @@ impl Database {
                 self.write_policy()
             )));
         }
-        let coverage = coverage.clone().into_positions();
+        if snapshot.meta.coverage != *coverage
+            || snapshot.meta.store_root_hash != store_root_ref.store_root_hash
+            || snapshot.meta.snapshot_hash() != snapshot.reference.snapshot_hash
+            || snapshot.meta.successor.next_slot != snapshot.successor_slot
+        {
+            return Err(DbError::Message(
+                "bootstrap snapshot state differs from its exact signed metadata".to_string(),
+            ));
+        }
+        let coverage = coverage.clone().into_refs();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            validate_snapshot_object_owners_on(&tx, &store_root_ref, &snapshot.meta)?;
+            install_store_root_authority_on(&tx, &store_root_ref, &store_root.bytes)?;
+            install_store_founder_state_on(
+                &tx,
+                &store_root_ref,
+                &founder_reference,
+                &founder.value,
+                &founder.bytes,
+                &genesis,
+            )?;
             tx.execute("DELETE FROM snapshot_coverage", [])
                 .map_err(DbError::from)?;
-            for (device_id, position) in coverage {
+            for (stream_id, reference) in coverage {
+                let encoded = serde_json::to_string(&reference).map_err(|error| {
+                    DbError::Message(format!("serialize snapshot exact commit ref: {error}"))
+                })?;
                 tx.execute(
                     "INSERT INTO snapshot_coverage \
-                     (device_id, seq, commit_hash, snapshot_hash) VALUES (?1, ?2, ?3, ?4)",
+                     (device_id, seq, commit_ref, snapshot_hash) VALUES (?1, ?2, ?3, ?4)",
                     (
-                        &device_id,
-                        Self::sequence_to_sqlite(&device_id, position.seq)?,
-                        position.commit_hash.to_string(),
-                        snapshot_hash.to_string(),
+                        &stream_id,
+                        Self::sequence_to_sqlite(&stream_id, reference.coord.sequence())?,
+                        encoded,
+                        snapshot.reference.snapshot_hash.to_string(),
                     ),
                 )
                 .map_err(DbError::from)?;
             }
-            tx.execute(
-                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (STORE_ROOT_HASH_STATE_KEY, store_root_hash.to_string()),
-            )
-            .map_err(DbError::from)?;
-            tx.execute(
-                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (LAST_SNAPSHOT_HASH_STATE_KEY, snapshot_hash.to_string()),
-            )
-            .map_err(DbError::from)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn install_device_join_bootstrap(
+        &self,
+        root: crate::sync::store_commit::StoreRootRef,
+        plan: crate::sync::store_pull::DeviceJoinBootstrapPlan,
+    ) -> Result<(), DbError> {
+        if plan.coverage.policy() != self.write_policy() {
+            return Err(DbError::Message(
+                "device join bootstrap cut differs from the database write policy".to_string(),
+            ));
+        }
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let installed_root = required_store_root_authority_on(&tx)?;
+            if installed_root != root || plan.founder.store_root != root {
+                return Err(DbError::Message(
+                    "device join bootstrap root differs from the installed exact root".to_string(),
+                ));
+            }
+            install_store_founder_state_on(
+                &tx,
+                &root,
+                &plan.founder_reference,
+                &plan.founder,
+                &plan.founder_bytes,
+                &plan.genesis,
+            )?;
+
+            let coverage_refs = match plan.coverage.clone() {
+                crate::sync::store_commit::StoreHistoryCut::MergeConcurrent(frontier) => frontier
+                    .into_iter()
+                    .map(|(stream_id, reference)| (stream_id.to_string(), reference))
+                    .collect::<BTreeMap<_, _>>(),
+                crate::sync::store_commit::StoreHistoryCut::Serial(
+                    StoreSerialPredecessor::Commit(reference),
+                ) => BTreeMap::from([(SERIAL_STREAM_ID.to_string(), reference)]),
+                crate::sync::store_commit::StoreHistoryCut::Serial(
+                    StoreSerialPredecessor::Genesis { .. },
+                ) => BTreeMap::new(),
+            };
+            let mut coverage = BTreeMap::new();
+            for (stream_id, reference) in coverage_refs {
+                let sequence = reference.coord.sequence();
+                let materialized = Self::materialized_commit_ref_on(&tx, &stream_id, sequence)?;
+                if materialized.as_ref().is_some_and(|stored| stored != &reference) {
+                    return Err(DbError::Message(format!(
+                        "device join bootstrap conflicts with materialized commit at {stream_id}/{sequence}"
+                    )));
+                }
+                let snapshot = tx
+                    .query_row(
+                        "SELECT commit_ref FROM snapshot_coverage
+                         WHERE device_id = ?1 AND seq = ?2",
+                        (
+                            &stream_id,
+                            Self::sequence_to_sqlite(&stream_id, sequence)?,
+                        ),
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(DbError::from)?
+                    .map(|encoded| Self::parse_stored_commit_ref(&stream_id, sequence, &encoded))
+                    .transpose()?;
+                if snapshot.as_ref().is_some_and(|stored| stored != &reference) {
+                    return Err(DbError::Message(format!(
+                        "device join bootstrap conflicts with snapshot coverage at {stream_id}/{sequence}"
+                    )));
+                }
+                coverage.insert(
+                    stream_id,
+                    (reference, materialized.is_some() || snapshot.is_some()),
+                );
+            }
+
+            for prepared in &plan.commits {
+                let stream_id = match &prepared.reference.coord {
+                    StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
+                    StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
+                };
+                let already_represented = coverage.get(&stream_id).is_some_and(
+                    |(reference, represented)| {
+                        *represented
+                            && prepared.reference.coord.sequence()
+                                <= reference.coord.sequence()
+                    },
+                );
+                if !already_represented
+                    && (prepared.commit.store_package.is_some()
+                        || !prepared.commit.circle_packages.is_empty())
+                {
+                    return Err(DbError::Message(format!(
+                        "device join bootstrap cannot advance over unmaterialized row data at {stream_id}/{}",
+                        prepared.reference.coord.sequence()
+                    )));
+                }
+            }
+
+            for prepared in plan.commits {
+                let stream_id = match &prepared.reference.coord {
+                    StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
+                    StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
+                };
+                if coverage.get(&stream_id).is_some_and(|(reference, represented)| {
+                    *represented
+                        && prepared.reference.coord.sequence() <= reference.coord.sequence()
+                }) {
+                    continue;
+                }
+                if let Some(existing) = Self::materialized_commit_ref_on(
+                    &tx,
+                    &stream_id,
+                    prepared.reference.coord.sequence(),
+                )? {
+                    if existing != prepared.reference {
+                        return Err(DbError::Message(format!(
+                            "device join bootstrap conflicts at {stream_id}/{}",
+                            prepared.reference.coord.sequence()
+                        )));
+                    }
+                    continue;
+                }
+                Self::record_activated_store_device_registrations_on(
+                    &tx,
+                    &prepared.commit,
+                    &prepared.registrations,
+                )?;
+                Self::record_materialized_commit_on(&tx, &prepared.commit, &prepared.reference)?;
+            }
             tx.commit().map_err(DbError::from)
         })
         .await
@@ -7042,222 +11141,1484 @@ impl Database {
         })
     }
 
-    // ---- Cloud outbox ----
-
-    /// Enqueue a blob upload. `scope` names which key the blob is encrypted
-    /// under (master or a derived scope); coven persists it on the row and
-    /// resolves it to a key at drain, long after the enqueue site is gone.
-    /// At most one upload per `(operation, cloud_key)`; a re-enqueue for the same key
-    /// overwrites the row's source path, scope, and pin choice with this call's values
-    /// (latest enqueue decides). Queuing an upload also cancels any pending delete of
-    /// the same key — latest intent wins, so a re-upload isn't tombstoned in the same
-    /// cycle.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn enqueue_upload(
-        &self,
-        file_id: &str,
-        cloud_key: &str,
-        source_path: Option<&str>,
-        scope: crate::blob::BlobScope,
-        retain_pinned: bool,
-        created_at: &str,
+    pub(crate) fn persist_prepared_audience_objects_on(
+        conn: &Connection,
+        write_id: &WriteId,
+        packages: &[PreparedAudiencePackage],
+        blobs: &[PreparedAudienceBlob],
     ) -> Result<(), DbError> {
-        let (file_id, cloud_key, source_path, created_at) = (
-            file_id.to_string(),
-            cloud_key.to_string(),
-            source_path.map(str::to_string),
-            created_at.to_string(),
-        );
-        self.call(move |conn| {
-            Self::enqueue_upload_on(
+        let package_audiences = packages
+            .iter()
+            .map(|prepared| {
+                if prepared.package().write_id() != write_id {
+                    return Err(DbError::Message(format!(
+                        "prepared audience package write {} differs from journal write {write_id}",
+                        prepared.package().write_id()
+                    )));
+                }
+                Ok(prepared.package().audience().remote_audience())
+            })
+            .collect::<Result<std::collections::BTreeSet<_>, DbError>>()?;
+        if package_audiences.len() != packages.len() {
+            return Err(DbError::Message(format!(
+                "write {write_id} has duplicate prepared package audiences"
+            )));
+        }
+        for prepared in packages {
+            let audience = prepared.package().audience().remote_audience();
+            validate_remote_object_on(
                 conn,
-                &file_id,
-                &cloud_key,
-                source_path.as_deref(),
-                scope,
-                retain_pinned,
-                &created_at,
+                prepared.remote_object_id(),
+                prepared.object(),
+                prepared.semantic_bytes(),
+                RemoteStoredRepresentationRef::Inline(prepared.stored_bytes()),
+            )?;
+            conn.execute(
+                "INSERT INTO store_write_packages
+                 (write_id, audience, remote_object_id)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(write_id, audience) DO NOTHING",
+                rusqlite::params![
+                    write_id.as_str(),
+                    remote_audience_to_db(&audience),
+                    prepared.remote_object_id().to_string(),
+                ],
             )
+            .map_err(DbError::from)?;
+            validate_prepared_package_on(conn, write_id, prepared)?;
+        }
+        for prepared in blobs {
+            if !package_audiences.contains(prepared.audience()) {
+                return Err(DbError::Message(format!(
+                    "write {write_id} has a prepared blob for {:?} without that audience's package",
+                    prepared.audience()
+                )));
+            }
+            let locator = prepared.blob().locator();
+            validate_remote_object_on(
+                conn,
+                prepared.remote_object_id(),
+                prepared.blob().object(),
+                &locator.to_bytes(),
+                RemoteStoredRepresentationRef::Blob,
+            )?;
+            let locator_hash = locator.locator_hash();
+            let spool_path = prepared
+                .spool_path()
+                .map(|path| {
+                    path.to_str().map(str::to_string).ok_or_else(|| {
+                        DbError::Message("prepared blob spool path is not UTF-8".to_string())
+                    })
+                })
+                .transpose()?;
+            conn.execute(
+                "INSERT INTO store_write_blobs
+                 (write_id, audience, locator_hash, remote_object_id, spool_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(write_id, audience, remote_object_id) DO NOTHING",
+                rusqlite::params![
+                    write_id.as_str(),
+                    remote_audience_to_db(prepared.audience()),
+                    locator_hash.to_string(),
+                    prepared.remote_object_id().to_string(),
+                    spool_path,
+                ],
+            )
+            .map_err(DbError::from)?;
+            validate_prepared_blob_on(conn, write_id, prepared)?;
+        }
+        Ok(())
+    }
+
+    fn persist_closed_write_objects_on(
+        conn: &Connection,
+        write_id: &WriteId,
+        store_root_hash: ObjectHash,
+        commit_ref: &StoreBatchCommitRef,
+        commit: &StoreBatchCommit,
+        partitions: &PreparedStoreWritePartitions,
+        remote_objects: &[RemoteObjectRecord],
+        audiences: &PreparedAudienceObjects,
+    ) -> Result<(), DbError> {
+        let mut object_ids = std::collections::BTreeSet::new();
+        for remote in remote_objects {
+            remote
+                .validate()
+                .map_err(|error| DbError::Message(format!("prepared remote object: {error}")))?;
+            if !object_ids.insert(remote.object_id()) {
+                return Err(DbError::Message(
+                    "prepared write contains a duplicate remote object".to_string(),
+                ));
+            }
+        }
+        validate_prepared_audience_blob_graph(&object_ids, audiences)?;
+        for remote in remote_objects {
+            let object_id = remote.object_id();
+            let existing = conn
+                .query_row(
+                    "SELECT state FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let persisted = match existing {
+                Some(state) => {
+                    let existing: RemoteObjectRecord = serde_json::from_str(&state).map_err(
+                        |error| {
+                            DbError::Message(format!(
+                                "prepared remote object {object_id} has invalid closed state: {error}"
+                            ))
+                        },
+                    )?;
+                    merge_prepared_remote_object(existing, remote, commit_ref)?
+                }
+                None => remote.clone(),
+            };
+            let state = serde_json::to_string(&persisted).map_err(|error| {
+                DbError::Message(format!("serialize closed remote object: {error}"))
+            })?;
+            conn.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
+                 ON CONFLICT(object_id) DO UPDATE SET state = excluded.state",
+                (object_id.to_string(), state),
+            )
+            .map_err(DbError::from)?;
+        }
+        let expected_partition_count = usize::from(partitions.store.is_some())
+            .checked_add(partitions.circles.len())
+            .ok_or_else(|| DbError::Message("audience partition count overflow".to_string()))?;
+        if audiences.packages.len() != expected_partition_count {
+            return Err(DbError::Message(
+                "prepared audience packages do not cover every write partition".to_string(),
+            ));
+        }
+        let mut indexed = std::collections::BTreeSet::new();
+        for package in &audiences.packages {
+            let value = package.package();
+            if value.store_root_hash() != store_root_hash
+                || value.write_id() != write_id
+                || value.commit_coord() != &commit_ref.coord
+                || value.candidate_family() != commit.candidate_family()
+            {
+                return Err(DbError::Message(
+                    "prepared audience package differs from its exact Store commit".to_string(),
+                ));
+            }
+            match value.audience() {
+                crate::sync::audience_package::PackageAudience::Store => {
+                    let partition = partitions.store.as_ref().ok_or_else(|| {
+                        DbError::Message(
+                            "prepared Store package has no Store partition".to_string(),
+                        )
+                    })?;
+                    if value.changeset() != partition.changeset {
+                        return Err(DbError::Message(
+                            "prepared Store package changeset differs from its partition"
+                                .to_string(),
+                        ));
+                    }
+                    commit
+                        .verify_store_package(package.semantic_bytes())
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                }
+                crate::sync::audience_package::PackageAudience::Circle { circle_id, .. } => {
+                    let partition = partitions
+                        .circles
+                        .iter()
+                        .find(|partition| partition.audience == Audience::Circle(*circle_id))
+                        .ok_or_else(|| {
+                            DbError::Message(format!(
+                                "prepared Circle package {circle_id} has no partition"
+                            ))
+                        })?;
+                    if value.changeset() != partition.changeset {
+                        return Err(DbError::Message(format!(
+                            "prepared Circle package {circle_id} changeset differs from its partition"
+                        )));
+                    }
+                    commit
+                        .verify_circle_package(*circle_id, package.semantic_bytes())
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                }
+            }
+            indexed.insert(package.remote_object_id());
+        }
+        indexed.extend(
+            audiences
+                .blobs
+                .iter()
+                .map(PreparedAudienceBlob::remote_object_id),
+        );
+        debug_assert_eq!(indexed, object_ids);
+        Self::persist_prepared_audience_objects_on(
+            conn,
+            write_id,
+            &audiences.packages,
+            &audiences.blobs,
+        )
+    }
+
+    fn validate_loaded_write_objects(
+        write_id: &WriteId,
+        commit_ref: &StoreBatchCommitRef,
+        commit: &StoreBatchCommit,
+        partitions: &PreparedStoreWritePartitions,
+        audiences: &PreparedAudienceObjects,
+    ) -> Result<(), DbError> {
+        let expected_package_count = usize::from(commit.store_package.is_some())
+            .checked_add(commit.circle_packages.len())
+            .ok_or_else(|| DbError::Message("package count overflow".to_string()))?;
+        let partition_count = usize::from(partitions.store.is_some())
+            .checked_add(partitions.circles.len())
+            .ok_or_else(|| DbError::Message("audience partition count overflow".to_string()))?;
+        if audiences.packages.len() != expected_package_count
+            || audiences.packages.len() != partition_count
+        {
+            return Err(DbError::Message(
+                "prepared package indexes do not exactly cover commit audiences".to_string(),
+            ));
+        }
+        for package in &audiences.packages {
+            let value = package.package();
+            if value.write_id() != write_id
+                || value.commit_coord() != &commit_ref.coord
+                || value.candidate_family() != commit.candidate_family()
+            {
+                return Err(DbError::Message(
+                    "indexed audience package differs from its exact commit".to_string(),
+                ));
+            }
+            let expected_object = match value.audience() {
+                crate::sync::audience_package::PackageAudience::Store => {
+                    commit
+                        .verify_store_package(package.semantic_bytes())
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                    &commit
+                        .store_package
+                        .as_ref()
+                        .expect("verified present")
+                        .object
+                }
+                crate::sync::audience_package::PackageAudience::Circle { circle_id, .. } => {
+                    commit
+                        .verify_circle_package(*circle_id, package.semantic_bytes())
+                        .map_err(|error| DbError::Message(error.to_string()))?;
+                    &commit
+                        .circle_packages
+                        .iter()
+                        .find(|entry| entry.circle_id == *circle_id)
+                        .expect("verified present")
+                        .package
+                        .object
+                }
+            };
+            if package.object() != expected_object {
+                return Err(DbError::Message(
+                    "indexed audience package exact object differs from its commit".to_string(),
+                ));
+            }
+            value
+                .validate_blob_uploader(&commit.author_registration)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        validate_prepared_audience_blob_bindings(audiences)
+    }
+
+    fn activate_prepared_write_on(
+        conn: &Connection,
+        gates: &Gates,
+        synced_tables: &[SyncedTable],
+        write_id: &WriteId,
+        commit: &StoreBatchCommit,
+        commit_ref: &StoreBatchCommitRef,
+        local_cleanup: StoreBatchLocalCleanup,
+    ) -> Result<(), DbError> {
+        commit_ref
+            .verify_commit(commit)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let audiences = load_prepared_audience_objects_on(conn, write_id)?;
+        for package in &audiences.packages {
+            package
+                .package()
+                .validate_blob_uploader(&commit.author_registration)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+        }
+        let mut object_ids = std::collections::BTreeSet::new();
+        object_ids.extend(
+            audiences
+                .packages
+                .iter()
+                .map(PreparedAudiencePackage::remote_object_id),
+        );
+        object_ids.extend(
+            audiences
+                .blobs
+                .iter()
+                .map(PreparedAudienceBlob::remote_object_id),
+        );
+        for object_id in object_ids {
+            let mut remote = load_remote_object_on(conn, object_id)?;
+            remote.activate(commit_ref).map_err(|error| {
+                DbError::Message(format!("activate remote object {object_id}: {error}"))
+            })?;
+            let state = serde_json::to_string(&remote).map_err(|error| {
+                DbError::Message(format!("serialize activated remote object: {error}"))
+            })?;
+            let updated = conn
+                .execute(
+                    "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
+                    (object_id.to_string(), state),
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(format!(
+                    "remote object {object_id} disappeared during activation"
+                )));
+            }
+        }
+        let activation = BlobActivation {
+            coord: commit_ref.coord.clone(),
+        };
+        let mut consumed_uploads = 0;
+        for package in &audiences.packages {
+            let winning_rows = crate::sync::apply::current_winning_rows(
+                conn,
+                synced_tables,
+                package.package().changeset(),
+            )?;
+            Self::install_winning_blob_bindings_on(
+                conn,
+                gates,
+                synced_tables,
+                package.package(),
+                &activation,
+                &winning_rows,
+            )?;
+            for binding in package.package().blob_bindings() {
+                if consume_created_upload_handoff_on(conn, package.package(), binding)? {
+                    consumed_uploads += 1;
+                }
+            }
+        }
+        match Self::make_remote_publication_root_on(conn, write_id)? {
+            Some((root_table, root_id)) => {
+                if consumed_uploads == 0 {
+                    return Err(DbError::Message(format!(
+                        "make_remote publication {write_id} for {root_table:?}/{root_id:?} contains no Created upload handoff"
+                    )));
+                }
+                let remaining: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM cloud_outbox
+                         WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
+                        (&root_table, &root_id),
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                if remaining != 0 {
+                    return Err(DbError::Message(format!(
+                        "make_remote publication {write_id} left {remaining} upload handoff(s) for {root_table:?}/{root_id:?}"
+                    )));
+                }
+                Self::complete_make_remote_publication_on(conn, write_id)?;
+            }
+            None if consumed_uploads != 0 => {
+                return Err(DbError::Message(format!(
+                    "Store write {write_id} consumed Created upload handoffs without a make_remote publication intent"
+                )));
+            }
+            None => {}
+        }
+        Self::record_materialized_commit_on(conn, commit, commit_ref)?;
+        for drop in local_cleanup.drops {
+            conn.execute(
+                "INSERT INTO published_blob_drop_intents
+                 (seq, namespace, blob_id, size, disposition)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(seq, namespace, blob_id) DO NOTHING",
+                rusqlite::params![
+                    Self::sequence_to_sqlite(
+                        &match &commit_ref.coord {
+                            StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
+                                stream_id.to_string()
+                            }
+                            StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
+                        },
+                        commit_ref.coord.sequence(),
+                    )?,
+                    drop.namespace,
+                    drop.id,
+                    i64::try_from(drop.size).map_err(|_| DbError::Message(
+                        "outbound local cleanup size exceeds SQLite integer".to_string()
+                    ))?,
+                    drop.disposition.as_db(),
+                ],
+            )
+            .map_err(DbError::from)?;
+        }
+        conn.execute(
+            "DELETE FROM store_write_packages WHERE write_id = ?1",
+            [write_id.as_str()],
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "DELETE FROM store_write_blobs WHERE write_id = ?1",
+            [write_id.as_str()],
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
+            [write_id.as_str()],
+        )
+        .map_err(DbError::from)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn prepared_audience_objects(
+        &self,
+        write_id: &WriteId,
+    ) -> Result<PreparedAudienceObjects, DbError> {
+        let write_id = write_id.clone();
+        let loaded = self
+            .call(move |conn| load_prepared_audience_objects_on(conn, &write_id))
+            .await?;
+
+        let mut verified_blobs = Vec::with_capacity(loaded.blobs.len());
+        for prepared in loaded.blobs {
+            if let Some(spool_path) = prepared.spool_path() {
+                crate::local_blob::verify_exact_file(prepared.blob().object(), spool_path)
+                    .await
+                    .map_err(|error| DbError::Message(format!("prepared blob spool: {error}")))?;
+            }
+            verified_blobs.push(prepared);
+        }
+        Ok(PreparedAudienceObjects {
+            packages: loaded.packages,
+            blobs: verified_blobs,
+        })
+    }
+
+    pub(crate) async fn prepared_remote_objects(
+        &self,
+        write_id: &WriteId,
+    ) -> Result<Vec<PreparedRemoteObject>, DbError> {
+        let write_id = write_id.clone();
+        self.call(move |conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT remote_object_id, NULL AS spool_path
+                     FROM store_write_packages WHERE write_id = ?1
+                     UNION
+                     SELECT remote_object_id, spool_path
+                     FROM store_write_blobs WHERE write_id = ?1
+                     ORDER BY remote_object_id",
+                )
+                .map_err(DbError::from)?;
+            let ids = statement
+                .query_map([write_id.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            ids.into_iter()
+                .map(|(encoded, spool_path)| {
+                    let id = encoded.parse().map_err(|error| {
+                        DbError::Message(format!("prepared remote object id: {error}"))
+                    })?;
+                    Ok(PreparedRemoteObject {
+                        record: load_remote_object_on(conn, id)?,
+                        spool_path: spool_path.map(PathBuf::from),
+                    })
+                })
+                .collect()
         })
         .await
     }
 
-    /// Transaction-composable form of [`enqueue_upload`](Self::enqueue_upload):
-    /// runs on a connection the host already holds inside a
-    /// [`call`](Self::call) closure, so the host can commit a row's upload
-    /// intent atomically with the row itself (e.g. an import that must either
-    /// land with its uploads queued or not land at all).
-    pub fn enqueue_upload_on(
-        conn: &Connection,
-        file_id: &str,
-        cloud_key: &str,
-        source_path: Option<&str>,
-        scope: crate::blob::BlobScope,
-        retain_pinned: bool,
-        created_at: &str,
-    ) -> Result<(), DbError> {
-        // Latest intent wins: queuing an upload for a key cancels a pending delete
-        // of the same key, so a re-upload and a stale delete can't both be live in
-        // one cycle (which the upload-then-delete phase split would otherwise
-        // resolve by deleting the freshly re-uploaded blob). Runs on the caller's
-        // connection so a transactional import stays atomic with this cancel.
-        conn.execute(
-            "DELETE FROM cloud_outbox WHERE operation = 'delete' AND cloud_key = ?1",
-            [cloud_key],
-        )
-        .map_err(DbError::from)?;
-        // Latest enqueue wins for the row's parameters too, not just its existence. A
-        // second make_remote on the same still-Local root re-registers the source path
-        // and pin choice; the queued row must adopt them, or the drain would upload the
-        // stale path (retrying a dead path forever) or miss the new pin. Reset the
-        // attempt counter and backoff so a corrected path retries immediately rather
-        // than waiting out the failed old path's window.
-        conn.execute(
-            "INSERT INTO cloud_outbox \
-             (operation, file_id, cloud_key, source_path, scope, retain_pinned, created_at) \
-             VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6) \
-             ON CONFLICT(operation, cloud_key) DO UPDATE SET \
-                 source_path = excluded.source_path, \
-                 scope = excluded.scope, \
-                 retain_pinned = excluded.retain_pinned, \
-                 attempt_count = 0, \
-                 last_error = NULL, \
-                 last_attempt_at = NULL",
-            (
-                file_id,
-                cloud_key,
-                source_path,
-                scope.to_outbox_str(),
-                retain_pinned,
-                created_at,
-            ),
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
+    pub(crate) async fn mark_remote_object_uploaded(
+        &self,
+        expected: RemoteObjectRecord,
+    ) -> Result<RemoteObjectRecord, DbError> {
+        self.call(move |conn| {
+            let object_id = expected.object_id();
+            let current = load_remote_object_on(conn, object_id)?;
+            if current != expected {
+                return Err(DbError::Message(format!(
+                    "remote object {object_id} changed before upload completion"
+                )));
+            }
+            let mut uploaded = current;
+            uploaded.mark_uploaded_verified().map_err(|error| {
+                DbError::Message(format!("mark remote object {object_id} uploaded: {error}"))
+            })?;
+            let expected_json = serde_json::to_string(&expected).map_err(|error| {
+                DbError::Message(format!("serialize expected remote object: {error}"))
+            })?;
+            let uploaded_json = serde_json::to_string(&uploaded).map_err(|error| {
+                DbError::Message(format!("serialize uploaded remote object: {error}"))
+            })?;
+            let updated = conn
+                .execute(
+                    "UPDATE remote_objects SET state = ?3
+                     WHERE object_id = ?1 AND state = ?2",
+                    (object_id.to_string(), expected_json, uploaded_json),
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(format!(
+                    "remote object {object_id} lost upload ownership"
+                )));
+            }
+            Ok(uploaded)
+        })
+        .await
     }
 
-    /// Enqueue a blob delete. The next sync cycle's drain turns it into a signed
-    /// cloud tombstone, and a later GC reclaims the blob once the convergence grace
-    /// has passed (see [`crate::blob::delete`]). Idempotent on `(operation,
-    /// cloud_key)`. Queuing a delete also cancels any pending upload of the same key
-    /// — latest intent wins.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn enqueue_delete(&self, cloud_key: &str, created_at: &str) -> Result<(), DbError> {
-        let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
-        self.call(move |conn| Self::enqueue_delete_on(conn, &cloud_key, &created_at))
+    /// Install only blob bindings whose exact row stamp won the enclosing
+    /// changeset. The caller owns the transaction, so app rows, locator facts,
+    /// and the materialized commit position either all commit or all roll back.
+    pub(crate) fn install_winning_blob_bindings_on(
+        conn: &Connection,
+        gates: &Gates,
+        synced_tables: &[SyncedTable],
+        package: &AudiencePackage,
+        activation: &BlobActivation,
+        winning_rows: &[crate::sync::apply::WinningRow],
+    ) -> Result<usize, DbError> {
+        if package.commit_coord() != &activation.coord {
+            return Err(DbError::Message(format!(
+                "blob activation {:?} does not match audience package {:?}",
+                activation.coord,
+                package.commit_coord()
+            )));
+        }
+
+        let package_audience = package.audience().remote_audience();
+        for winner in winning_rows {
+            let Some(table) = synced_tables
+                .iter()
+                .find(|table| table.name() == winner.table)
+            else {
+                return Err(DbError::Message(format!(
+                    "winning changeset row names undeclared table {:?}",
+                    winner.table
+                )));
+            };
+            let Some(declaration) = table.blob() else {
+                continue;
+            };
+            match winner.row_stamp.as_deref() {
+                Some(row_stamp) => conn.execute(
+                    "DELETE FROM row_blob_locators
+                     WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
+                       AND row_stamp <> ?4",
+                    rusqlite::params![
+                        winner.table,
+                        winner.row_id,
+                        declaration.id_column,
+                        row_stamp,
+                    ],
+                ),
+                None => conn.execute(
+                    "DELETE FROM row_blob_locators
+                     WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3",
+                    rusqlite::params![winner.table, winner.row_id, declaration.id_column],
+                ),
+            }
+            .map_err(DbError::from)?;
+        }
+        let mut installed = 0;
+        for binding in package.blob_bindings() {
+            let Some(table) = synced_tables
+                .iter()
+                .find(|table| table.name() == binding.table())
+            else {
+                return Err(DbError::Message(format!(
+                    "blob binding names undeclared table {:?}",
+                    binding.table()
+                )));
+            };
+            let declaration = table.blob().ok_or_else(|| {
+                DbError::Message(format!(
+                    "blob binding names table {:?}, which has no blob declaration",
+                    binding.table()
+                ))
+            })?;
+            if binding.column() != declaration.id_column {
+                return Err(DbError::Message(format!(
+                    "blob binding column {:?} does not match declared blob-id column {:?} on table {:?}",
+                    binding.column(), declaration.id_column, binding.table()
+                )));
+            }
+
+            let Some(row) = live_blob_row(conn, binding.table(), binding.row_id(), declaration)?
+            else {
+                continue;
+            };
+            if row.stamp != binding.row_stamp() {
+                continue;
+            }
+
+            let live_audience =
+                gate::live_row_audience(conn, gates, binding.table(), binding.row_id()).map_err(
+                    |error| {
+                        DbError::Message(format!(
+                            "resolve winning blob row audience for {:?}/{:?}: {error}",
+                            binding.table(),
+                            binding.row_id()
+                        ))
+                    },
+                )?;
+            let live_audience = RemoteAudience::try_from(live_audience).map_err(|error| {
+                DbError::Message(format!(
+                    "winning blob row {:?}/{:?} is not remote: {error}",
+                    binding.table(),
+                    binding.row_id()
+                ))
+            })?;
+            if live_audience != package_audience {
+                return Err(DbError::Message(format!(
+                    "winning blob row {:?}/{:?} belongs to {:?}, but its package belongs to {:?}",
+                    binding.table(),
+                    binding.row_id(),
+                    live_audience,
+                    package_audience
+                )));
+            }
+            validate_live_blob_row(binding, declaration, &row, &live_audience)?;
+
+            let locator = binding.blob().locator();
+            let locator_hash = locator.locator_hash();
+            let remote_object_id = remote_object_id(binding.blob().object());
+            let remote = load_remote_object_on(conn, remote_object_id)?;
+            if !remote.is_activated_stored_blob() {
+                return Err(DbError::Message(format!(
+                    "blob locator {locator_hash} does not reference an activated uploaded blob"
+                )));
+            }
+            validate_remote_object_on(
+                conn,
+                remote_object_id,
+                binding.blob().object(),
+                &locator.to_bytes(),
+                RemoteStoredRepresentationRef::Blob,
+            )?;
+            conn.execute(
+                "INSERT INTO blob_locators
+                 (remote_object_id, locator_hash)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(remote_object_id) DO NOTHING",
+                rusqlite::params![remote_object_id.to_string(), locator_hash.to_string(),],
+            )
+            .map_err(DbError::from)?;
+            validate_stored_locator_on(conn, binding.blob())?;
+
+            let audience_authority =
+                serde_json::to_string(package.audience()).map_err(|error| {
+                    DbError::Message(format!("serialize row blob audience authority: {error}"))
+                })?;
+            conn.execute(
+                "INSERT INTO row_blob_locators
+                 (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(table_name, row_id, column_name, row_stamp) DO NOTHING",
+                rusqlite::params![
+                    binding.table(),
+                    binding.row_id(),
+                    binding.column(),
+                    binding.row_stamp(),
+                    audience_authority,
+                    remote_object_id.to_string(),
+                ],
+            )
+            .map_err(DbError::from)?;
+            validate_stored_row_binding_on(conn, binding, package.audience(), remote_object_id)?;
+            installed += 1;
+        }
+        Ok(installed)
+    }
+
+    pub(crate) fn install_pulled_blob_activations_on(
+        conn: &Connection,
+        package: &AudiencePackage,
+        owner: &StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
+        if package.commit_coord() != &owner.coord {
+            return Err(DbError::Message(
+                "pulled blob package coordinate differs from its activating commit".to_string(),
+            ));
+        }
+        for binding in package.blob_bindings() {
+            let stored = binding.blob();
+            let object_id = remote_object_id(stored.object());
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                    [object_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let remote = if exists {
+                let mut remote = load_remote_object_on(conn, object_id)?;
+                remote
+                    .merge_blob_activation(stored, owner)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "merge pulled blob activation {object_id}: {error}"
+                        ))
+                    })?;
+                remote
+            } else {
+                RemoteObjectRecord::activated_blob(stored, owner.clone()).map_err(|error| {
+                    DbError::Message(format!(
+                        "construct pulled blob activation {object_id}: {error}"
+                    ))
+                })?
+            };
+            let state = serde_json::to_string(&remote).map_err(|error| {
+                DbError::Message(format!("serialize pulled blob activation: {error}"))
+            })?;
+            conn.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2) \
+                 ON CONFLICT(object_id) DO UPDATE SET state = excluded.state",
+                rusqlite::params![object_id.to_string(), state],
+            )
+            .map_err(DbError::from)?;
+        }
+        Ok(())
+    }
+
+    pub async fn row_blob_ref(&self, table: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
+        let table = self
+            .synced_tables()
+            .iter()
+            .find(|candidate| candidate.name() == table)
+            .cloned()
+            .ok_or_else(|| DbError::Message(format!("undeclared synced table {table:?}")))?;
+        if table.blob().is_none() {
+            return Err(DbError::Message(format!(
+                "synced table {:?} has no blob declaration",
+                table.name()
+            )));
+        }
+        let row_id = row_id.to_string();
+        let gates = self.gates();
+        self.call(move |conn| Self::row_blob_ref_on(conn, &gates, &table, &row_id))
             .await
     }
 
-    /// Transaction-composable form of [`enqueue_delete`](Self::enqueue_delete):
-    /// runs on a connection the host already holds inside a [`call`](Self::call)
-    /// closure, so coven's `make_local` can flip a root's gate false and enqueue its
-    /// blob deletes in one transaction — the tombstone can't be lost to a crash
-    /// between the flip and a separate enqueue. A delete touches no key, so it
-    /// carries no scope (the column is NULL for a delete row).
-    pub fn enqueue_delete_on(
+    pub async fn validate_row_blob_ref(&self, reference: &RowBlobRef) -> Result<(), DbError> {
+        let current = self
+            .row_blob_ref(reference.table(), reference.row_id())
+            .await?;
+        if &current != reference {
+            return Err(DbError::Message(format!(
+                "row blob reference {:?}/{:?}/{:?} at {:?} is stale",
+                reference.table(),
+                reference.row_id(),
+                reference.column(),
+                reference.row_stamp()
+            )));
+        }
+        Ok(())
+    }
+
+    pub async fn row_blob_refs_for_root(
+        &self,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Vec<RowBlobRef>, DbError> {
+        let root_table = root_table.to_string();
+        let root_id = root_id.to_string();
+        let gates = self.gates();
+        let tables = self.synced_tables().to_vec();
+        self.call(move |conn| {
+            Self::row_blob_refs_for_root_on(conn, &gates, &tables, &root_table, &root_id)
+        })
+        .await
+    }
+
+    pub(crate) fn row_blob_refs_for_root_on(
         conn: &Connection,
-        cloud_key: &str,
+        gates: &Gates,
+        tables: &[SyncedTable],
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Vec<RowBlobRef>, DbError> {
+        let mut rows = gates
+            .subtree_rows(conn, root_table, root_id)
+            .map_err(|error| DbError::Message(error.to_string()))?
+            .into_iter()
+            .collect::<Vec<_>>();
+        rows.sort();
+        let tables = tables
+            .iter()
+            .map(|table| (table.name(), table))
+            .collect::<BTreeMap<_, _>>();
+        rows.into_iter()
+            .filter_map(|(table_name, row_id)| {
+                tables
+                    .get(table_name.as_str())
+                    .filter(|table| table.blob().is_some())
+                    .map(|table| Self::row_blob_ref_on(conn, gates, table, &row_id))
+            })
+            .collect()
+    }
+
+    pub(crate) fn upload_entries_for_rows_on(
+        conn: &Connection,
+        rows: &[RowBlobRef],
+    ) -> Result<Vec<OutboxEntry>, DbError> {
+        rows.iter()
+            .filter_map(|row| {
+                match upload_entry_for_identity_on(
+                    conn,
+                    row.table(),
+                    row.row_id(),
+                    row.column(),
+                    row.row_stamp(),
+                ) {
+                    Ok(Some(entry)) => Some(Ok(entry)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn upload_entries_for_root_on(
+        conn: &Connection,
+        gates: &Gates,
+        tables: &[SyncedTable],
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Vec<OutboxEntry>, DbError> {
+        let rows = Self::row_blob_refs_for_root_on(conn, gates, tables, root_table, root_id)?;
+        Self::upload_entries_for_rows_on(conn, &rows)
+    }
+
+    pub(crate) fn stored_blob_reference_state_on(
+        conn: &Connection,
+        gates: &Gates,
+        tables: &[SyncedTable],
+        stored: &StoredBlobRef,
+    ) -> Result<StoredBlobReferenceState, DbError> {
+        let exact_object_id = remote_object_id(stored.object()).to_string();
+        let mut statement = conn
+            .prepare(
+                "SELECT table_name, row_id, row_stamp FROM row_blob_locators
+                 WHERE remote_object_id = ?1",
+            )
+            .map_err(DbError::from)?;
+        let bindings = statement
+            .query_map([exact_object_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        let mut unresolved = false;
+        for (table_name, row_id, row_stamp) in bindings {
+            let table = tables
+                .iter()
+                .find(|candidate| candidate.name() == table_name)
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "stored blob binding names undeclared table {table_name:?}"
+                    ))
+                })?;
+            let declaration = table.blob().ok_or_else(|| {
+                DbError::Message(format!(
+                    "stored blob binding names table {table_name:?} without a blob declaration"
+                ))
+            })?;
+            let Some(live) = live_blob_row(conn, &table_name, &row_id, declaration)? else {
+                continue;
+            };
+            if live.stamp != row_stamp {
+                continue;
+            }
+            match gates
+                .root_kept_of(conn, &table_name, &row_id)
+                .map_err(|error| DbError::Message(error.to_string()))?
+            {
+                Some(false) => continue,
+                None => {
+                    unresolved = true;
+                    continue;
+                }
+                Some(true) => {}
+            }
+            let reference = Self::row_blob_ref_on(conn, gates, table, &row_id)?;
+            if matches!(reference.authority(), RowBlobAuthority::Remote(_))
+                && reference.stored() == Some(stored)
+            {
+                return Ok(StoredBlobReferenceState::LiveRemote);
+            }
+        }
+        Ok(if unresolved {
+            StoredBlobReferenceState::Unresolved
+        } else {
+            StoredBlobReferenceState::NotLiveRemote
+        })
+    }
+
+    pub(crate) fn row_blob_ref_on(
+        conn: &Connection,
+        gates: &Gates,
+        table: &SyncedTable,
+        row_id: &str,
+    ) -> Result<RowBlobRef, DbError> {
+        let declaration = table.blob().ok_or_else(|| {
+            DbError::Message(format!(
+                "synced table {:?} has no blob declaration",
+                table.name()
+            ))
+        })?;
+        let row = live_blob_row(conn, table.name(), row_id, declaration)?.ok_or_else(|| {
+            DbError::Message(format!(
+                "blob-bearing row {:?}/{row_id:?} does not exist",
+                table.name()
+            ))
+        })?;
+        let audience =
+            gate::live_row_audience(conn, gates, table.name(), row_id).map_err(|error| {
+                DbError::Message(format!(
+                    "resolve blob row audience for {:?}/{row_id:?}: {error}",
+                    table.name()
+                ))
+            })?;
+        let (authority, stored) = match RemoteAudience::try_from(audience.clone()) {
+            Err(_) if audience == Audience::Local => (RowBlobAuthority::Local, None),
+            Err(error) => {
+                return Err(DbError::Message(format!(
+                    "blob row {:?}/{row_id:?} has invalid audience: {error}",
+                    table.name()
+                )));
+            }
+            Ok(remote_audience) => {
+                let installed: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT binding.audience_authority, locator.remote_object_id
+                         FROM row_blob_locators AS binding
+                         JOIN blob_locators AS locator
+                           ON locator.remote_object_id = binding.remote_object_id
+                         WHERE binding.table_name = ?1
+                           AND binding.row_id = ?2
+                           AND binding.column_name = ?3
+                           AND binding.row_stamp = ?4",
+                        rusqlite::params![table.name(), row_id, declaration.id_column, row.stamp,],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(DbError::from)?;
+                let exact = if let Some((authority_json, remote_object_id)) = installed {
+                    let package_authority: crate::sync::audience_package::PackageAudience =
+                        serde_json::from_str(&authority_json).map_err(|error| {
+                            DbError::Message(format!(
+                                "remote blob row {:?}/{row_id:?} has invalid audience authority: {error}",
+                                table.name()
+                            ))
+                        })?;
+                    let remote_object_id = remote_object_id.parse().map_err(|error| {
+                        DbError::Message(format!(
+                            "remote blob row {:?}/{row_id:?} has invalid prepared object id: {error}",
+                            table.name()
+                        ))
+                    })?;
+                    let remote = load_remote_object_on(conn, remote_object_id)?;
+                    if !remote.is_activated_stored_blob() {
+                        return Err(DbError::Message(format!(
+                            "remote blob row {:?}/{row_id:?} references a blob without activated ownership",
+                            table.name()
+                        )));
+                    }
+                    let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
+                        .map_err(|error| {
+                            DbError::Message(format!(
+                                "remote blob row {:?}/{row_id:?} has invalid locator: {error}",
+                                table.name()
+                            ))
+                        })?;
+                    let stored = StoredBlobRef::new(locator, remote.object().clone()).map_err(
+                        |error| {
+                            DbError::Message(format!(
+                                "remote blob row {:?}/{row_id:?} has invalid stored blob reference: {error}",
+                                table.name()
+                            ))
+                        },
+                    )?;
+                    Some((package_authority, stored))
+                } else {
+                    created_upload_handoff_on(
+                        conn,
+                        table.name(),
+                        row_id,
+                        &declaration.id_column,
+                        &row.stamp,
+                    )?
+                    .map(|handoff| (handoff.authority, handoff.stored))
+                };
+                let Some((package_authority, stored)) = exact else {
+                    return RowBlobRef::new(
+                        table.name().to_string(),
+                        row_id.to_string(),
+                        row.stamp,
+                        declaration.id_column.clone(),
+                        BlobRef {
+                            namespace: declaration.namespace.clone(),
+                            id: row.blob_id,
+                            scope: declaration.scope.clone(),
+                            cloud_path: row.cloud_path,
+                            provenance: declaration.provenance,
+                            fill: declaration.fill,
+                        },
+                        row.plaintext_size,
+                        row.plaintext_hash,
+                        RowBlobAuthority::PendingRemote(remote_audience),
+                        None,
+                    )
+                    .map_err(DbError::Message);
+                };
+                if package_authority.remote_audience() != remote_audience {
+                    return Err(DbError::Message(format!(
+                        "remote blob row {:?}/{row_id:?} has audience authority {:?}, expected {remote_audience:?}",
+                        table.name(), package_authority
+                    )));
+                }
+                validate_live_blob_locator(
+                    table.name(),
+                    row_id,
+                    &declaration.id_column,
+                    &row.stamp,
+                    &stored,
+                    declaration,
+                    &row,
+                    &remote_audience,
+                )?;
+                (RowBlobAuthority::Remote(package_authority), Some(stored))
+            }
+        };
+        let blob = BlobRef {
+            namespace: declaration.namespace.clone(),
+            id: row.blob_id.clone(),
+            scope: declaration.scope.clone(),
+            cloud_path: row.cloud_path.clone(),
+            provenance: declaration.provenance,
+            fill: declaration.fill,
+        };
+        RowBlobRef::new(
+            table.name().to_string(),
+            row_id.to_string(),
+            row.stamp,
+            declaration.id_column.clone(),
+            blob,
+            row.plaintext_size,
+            row.plaintext_hash,
+            authority,
+            stored,
+        )
+        .map_err(DbError::Message)
+    }
+
+    // ---- Row-bound blob outbox ----
+
+    pub fn enqueue_upload_on(
+        conn: &Connection,
+        root_table: &str,
+        root_id: &str,
+        row: &RowBlobRef,
+        source_path: &Path,
+        retain_pinned: bool,
         created_at: &str,
     ) -> Result<(), DbError> {
-        // Latest intent wins: queuing a delete cancels a pending upload of the same
-        // key (the mirror of `enqueue_upload_on`), so an enqueued-then-deleted blob
-        // isn't uploaded only to be tombstoned in the same cycle. It also drops a
-        // pending tombstone-cancel for the key: a fresh delete wants the blob
-        // tombstoned, so a leftover cancel (which would remove that tombstone) must
-        // not survive to undo it.
+        if row.authority() != &RowBlobAuthority::Local || row.stored().is_some() {
+            return Err(DbError::Message(
+                "cloud upload requires an exact Local row blob reference".to_string(),
+            ));
+        }
+        let source_path = source_path.to_str().ok_or_else(|| {
+            DbError::Message(format!(
+                "blob source path for {}/{}/{} is not UTF-8: {source_path:?}",
+                row.table(),
+                row.row_id(),
+                row.column()
+            ))
+        })?;
+        let encoded = serde_json::to_string(row)
+            .map_err(|error| DbError::Message(format!("serialize row blob ref: {error}")))?;
+        let pending = serde_json::to_string(&OutboxUploadState::Pending).map_err(|error| {
+            DbError::Message(format!("serialize pending blob upload state: {error}"))
+        })?;
         conn.execute(
-            "DELETE FROM cloud_outbox \
-             WHERE operation IN ('upload', 'cancel') AND cloud_key = ?1",
-            [cloud_key],
+            "INSERT INTO cloud_outbox
+             (operation, table_name, row_id, column_name, row_stamp, root_table, root_id,
+              row_ref, upload_state, source_path, retain_pinned, created_at)
+             VALUES ('upload', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(operation, table_name, row_id, column_name, row_stamp) DO UPDATE SET
+               root_table = excluded.root_table,
+               root_id = excluded.root_id,
+               source_path = excluded.source_path,
+               retain_pinned = excluded.retain_pinned,
+               attempt_count = 0,
+               last_error = NULL,
+               last_attempt_at = NULL
+             WHERE cloud_outbox.row_ref = excluded.row_ref
+               AND cloud_outbox.root_table = excluded.root_table
+               AND cloud_outbox.root_id = excluded.root_id",
+            rusqlite::params![
+                row.table(),
+                row.row_id(),
+                row.column(),
+                row.row_stamp(),
+                root_table,
+                root_id,
+                encoded,
+                pending,
+                source_path,
+                retain_pinned,
+                created_at,
+            ],
         )
-        .map_err(DbError::from)?;
+        .map_err(DbError::from)
+        .and_then(|changed| {
+            if changed == 1 {
+                Ok(())
+            } else {
+                Err(DbError::Message(format!(
+                    "upload outbox identity {}/{}/{}/{} carries different row facts",
+                    row.table(),
+                    row.row_id(),
+                    row.column(),
+                    row.row_stamp()
+                )))
+            }
+        })
+    }
+
+    pub async fn mark_cloud_upload_prepared(
+        &self,
+        entry: &OutboxEntry,
+        authority: crate::sync::audience_package::PackageAudience,
+        stored: StoredBlobRef,
+        spool_path: PathBuf,
+    ) -> Result<(), DbError> {
+        let OutboxOperation::Upload { row, state, .. } = &entry.operation else {
+            return Err(DbError::Message(
+                "only an upload outbox entry can own a prepared blob".to_string(),
+            ));
+        };
+        if state != &OutboxUploadState::Pending {
+            return Err(DbError::Message(
+                "blob upload is already prepared".to_string(),
+            ));
+        }
+        let locator = stored.locator();
+        if locator.namespace() != row.blob().namespace
+            || locator.blob_id() != row.blob().id
+            || locator.plaintext_size() != row.plaintext_size()
+            || locator.plaintext_hash() != row.plaintext_hash()
+            || locator
+                .scope()
+                .is_some_and(|scope| scope != &row.blob().scope)
+        {
+            return Err(DbError::Message(
+                "prepared blob differs from its exact Local row version".to_string(),
+            ));
+        }
+        if locator.audience() != authority.remote_audience() {
+            return Err(DbError::Message(
+                "prepared blob audience differs from its package authority".to_string(),
+            ));
+        }
+        let prepared = OutboxUploadState::Prepared {
+            authority,
+            stored,
+            spool_path,
+        };
+        let prepared_json = serde_json::to_string(&prepared).map_err(|error| {
+            DbError::Message(format!("serialize prepared blob upload: {error}"))
+        })?;
+        let pending_json = serde_json::to_string(&OutboxUploadState::Pending)
+            .map_err(|error| DbError::Message(format!("serialize pending blob upload: {error}")))?;
+        let id = entry.id;
+        let table = row.table().to_string();
+        let row_id = row.row_id().to_string();
+        let column = row.column().to_string();
+        let row_stamp = row.row_stamp().to_string();
+        self.call(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE cloud_outbox SET upload_state = ?1
+                     WHERE id = ?2 AND operation = 'upload' AND table_name = ?3
+                       AND row_id = ?4 AND column_name = ?5 AND row_stamp = ?6
+                       AND upload_state = ?7",
+                    rusqlite::params![
+                        prepared_json,
+                        id,
+                        table,
+                        row_id,
+                        column,
+                        row_stamp,
+                        pending_json,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "upload outbox entry changed before prepared-object handoff".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn mark_cloud_upload_created(&self, entry: &OutboxEntry) -> Result<(), DbError> {
+        let OutboxOperation::Upload { row, state, .. } = &entry.operation else {
+            return Err(DbError::Message(
+                "only a prepared upload outbox entry can record cloud creation".to_string(),
+            ));
+        };
+        let OutboxUploadState::Prepared {
+            authority,
+            stored,
+            spool_path,
+        } = state
+        else {
+            return Err(DbError::Message(
+                "cloud creation requires a prepared upload object".to_string(),
+            ));
+        };
+        let created_json = serde_json::to_string(&OutboxUploadState::Created {
+            authority: authority.clone(),
+            stored: stored.clone(),
+            spool_path: spool_path.clone(),
+        })
+        .map_err(|error| DbError::Message(format!("serialize created blob upload: {error}")))?;
+        let prepared_json = serde_json::to_string(state).map_err(|error| {
+            DbError::Message(format!("serialize prepared blob upload identity: {error}"))
+        })?;
+        let id = entry.id;
+        let table = row.table().to_string();
+        let row_id = row.row_id().to_string();
+        let column = row.column().to_string();
+        let row_stamp = row.row_stamp().to_string();
+        self.call(move |conn| {
+            let updated = conn
+                .execute(
+                    "UPDATE cloud_outbox SET upload_state = ?1
+                     WHERE id = ?2 AND operation = 'upload' AND table_name = ?3
+                       AND row_id = ?4 AND column_name = ?5 AND row_stamp = ?6
+                       AND upload_state = ?7",
+                    rusqlite::params![
+                        created_json,
+                        id,
+                        table,
+                        row_id,
+                        column,
+                        row_stamp,
+                        prepared_json,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "upload outbox entry changed before cloud-created handoff".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub fn enqueue_delete_on(
+        conn: &Connection,
+        stored: &StoredBlobRef,
+        created_at: &str,
+    ) -> Result<(), DbError> {
+        let encoded = serde_json::to_string(stored)
+            .map_err(|error| DbError::Message(format!("serialize stored blob ref: {error}")))?;
         conn.execute(
-            "INSERT OR IGNORE INTO cloud_outbox \
-             (operation, cloud_key, scope, created_at) \
-             VALUES ('delete', ?1, NULL, ?2)",
-            (cloud_key, created_at),
+            "INSERT INTO cloud_outbox (operation, stored_ref, created_at)
+             VALUES ('delete', ?1, ?2)
+             ON CONFLICT(stored_ref) DO UPDATE SET
+               created_at = excluded.created_at,
+               attempt_count = 0,
+               last_error = NULL,
+               last_attempt_at = NULL",
+            (encoded, created_at),
         )
         .map(|_| ())
         .map_err(DbError::from)
     }
 
-    /// Enqueue a durable tombstone-cancel for `cloud_key`: the tombstone-cancel drain
-    /// ([`crate::blob::delete::drain_tombstone_cancels`]) retries removing the
-    /// tombstone until it is gone, so a re-uploaded blob is never reclaimed by a GC
-    /// that outraces an inline cancel. Backs a failed inline cancel on every upload
-    /// path. Idempotent on `(operation, cloud_key)`.
-    pub async fn enqueue_cancel(&self, cloud_key: &str, created_at: &str) -> Result<(), DbError> {
-        let (cloud_key, created_at) = (cloud_key.to_string(), created_at.to_string());
-        self.call(move |conn| {
-            conn.execute(
-                "INSERT OR IGNORE INTO cloud_outbox (operation, cloud_key, scope, created_at) \
-                 VALUES ('cancel', ?1, NULL, ?2)",
-                (cloud_key, created_at),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
-    /// Pending upload entries, oldest first. The host reads these to drive its
-    /// own upload-status UI; coven's sync loop reads them to do the uploads.
     pub async fn get_pending_cloud_uploads(&self) -> Result<Vec<OutboxEntry>, DbError> {
         self.pending_outbox("upload").await
     }
 
-    /// Pending delete entries, oldest first.
     pub async fn get_pending_cloud_deletes(&self) -> Result<Vec<OutboxEntry>, DbError> {
         self.pending_outbox("delete").await
     }
 
-    /// Pending tombstone-cancel entries, oldest first. Each names a `cloud_key`
-    /// whose tombstone must be removed because the blob was re-uploaded; the
-    /// tombstone-cancel drain reads these and retries the removal until it lands
-    /// (see [`crate::blob::delete::drain_tombstone_cancels`]).
-    pub async fn get_pending_cloud_cancels(&self) -> Result<Vec<OutboxEntry>, DbError> {
-        self.pending_outbox("cancel").await
-    }
-
-    async fn pending_outbox(&self, op_str: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
+    async fn pending_outbox(&self, operation: &'static str) -> Result<Vec<OutboxEntry>, DbError> {
         self.call(move |conn| {
-            let mut stmt = conn
+            let mut statement = conn
                 .prepare(
-                    "SELECT id, operation, file_id, cloud_key, source_path, scope, \
-                            retain_pinned, attempt_count, last_attempt_at \
+                    "SELECT id, operation, row_ref, stored_ref, source_path, retain_pinned,
+                            upload_state, attempt_count, last_attempt_at, root_table, root_id
                      FROM cloud_outbox WHERE operation = ?1 ORDER BY id",
                 )
                 .map_err(DbError::from)?;
-            let rows = stmt
-                .query_map([op_str], row_to_outbox_entry)
+            let entries = statement
+                .query_map([operation], row_to_outbox_entry)
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
                 .map_err(DbError::from)?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row.map_err(DbError::from)?);
+            Ok(entries)
+        })
+        .await
+    }
+
+    pub async fn remove_cloud_outbox_entry(&self, entry: &OutboxEntry) -> Result<(), DbError> {
+        let entry = entry.clone();
+        self.call(move |conn| Self::remove_cloud_outbox_entry_on(conn, &entry))
+            .await
+    }
+
+    pub(crate) fn remove_cloud_outbox_entry_on(
+        conn: &Connection,
+        entry: &OutboxEntry,
+    ) -> Result<(), DbError> {
+        let identity = outbox_identity(&entry.operation)?;
+        let removed = match identity {
+            OutboxIdentity::Upload {
+                table,
+                row_id,
+                column,
+                row_stamp,
+            } => conn.execute(
+                "DELETE FROM cloud_outbox WHERE id = ?1 AND operation = 'upload'
+                 AND table_name = ?2 AND row_id = ?3 AND column_name = ?4 AND row_stamp = ?5",
+                rusqlite::params![entry.id, table, row_id, column, row_stamp],
+            ),
+            OutboxIdentity::Stored { operation, stored } => conn.execute(
+                "DELETE FROM cloud_outbox WHERE id = ?1 AND operation = ?2 AND stored_ref = ?3",
+                rusqlite::params![entry.id, operation, stored],
+            ),
+        }
+        .map_err(DbError::from)?;
+        if removed != 1 {
+            return Err(DbError::Message(
+                "cloud outbox entry changed before exact dequeue".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_cancelled_upload_on(
+        conn: &Connection,
+        entry: &OutboxEntry,
+    ) -> Result<bool, DbError> {
+        let OutboxOperation::Upload {
+            root_table,
+            root_id,
+            ..
+        } = &entry.operation
+        else {
+            return Err(DbError::Message(
+                "make_remote cleanup requires an upload entry".to_string(),
+            ));
+        };
+        if !matches!(
+            Self::make_remote_intent_state(conn, root_table, root_id)?,
+            Some(MakeRemoteIntentState::Cancelling)
+        ) {
+            return Err(DbError::Message(format!(
+                "make_remote cleanup for {root_table:?}/{root_id:?} lost cancellation ownership"
+            )));
+        }
+        Self::remove_cloud_outbox_entry_on(conn, entry)?;
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cloud_outbox
+                 WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
+                (root_table, root_id),
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if remaining != 0 {
+            return Ok(false);
+        }
+        let removed = conn
+            .execute(
+                "DELETE FROM blob_make_remote_intents
+                 WHERE root_table = ?1 AND root_id = ?2 AND state = 'cancelling'",
+                (root_table, root_id),
+            )
+            .map_err(DbError::from)?;
+        if removed != 1 {
+            return Err(DbError::Message(format!(
+                "make_remote cancellation {root_table:?}/{root_id:?} changed before completion"
+            )));
+        }
+        Ok(true)
+    }
+
+    pub async fn record_cloud_outbox_failure(
+        &self,
+        entry: &OutboxEntry,
+        error: &str,
+        attempted_at: &str,
+    ) -> Result<(), DbError> {
+        let id = entry.id;
+        let identity = outbox_identity(&entry.operation)?;
+        let error = error.to_string();
+        let attempted_at = attempted_at.to_string();
+        self.call(move |conn| {
+            let updated = match identity {
+                OutboxIdentity::Upload {
+                    table,
+                    row_id,
+                    column,
+                    row_stamp,
+                } => conn.execute(
+                    "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
+                     last_error = ?1, last_attempt_at = ?2
+                     WHERE id = ?3 AND operation = 'upload' AND table_name = ?4
+                       AND row_id = ?5 AND column_name = ?6 AND row_stamp = ?7",
+                    rusqlite::params![error, attempted_at, id, table, row_id, column, row_stamp],
+                ),
+                OutboxIdentity::Stored { operation, stored } => conn.execute(
+                    "UPDATE cloud_outbox SET attempt_count = attempt_count + 1,
+                     last_error = ?1, last_attempt_at = ?2
+                     WHERE id = ?3 AND operation = ?4 AND stored_ref = ?5",
+                    rusqlite::params![error, attempted_at, id, operation, stored],
+                ),
             }
-            Ok(out)
+            .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "cloud outbox entry changed before failure recording".to_string(),
+                ));
+            }
+            Ok(())
         })
         .await
     }
 
-    /// Remove an outbox entry by id (after the upload or delete completed).
-    pub async fn remove_cloud_outbox_entry(&self, id: i64) -> Result<(), DbError> {
-        self.call(move |conn| {
-            conn.execute("DELETE FROM cloud_outbox WHERE id = ?1", [id])
-                .map(|_| ())
-                .map_err(DbError::from)
-        })
-        .await
-    }
-
-    /// Clear the retry-backoff timestamp on failed uploads so the next cycle
-    /// retries them immediately. Backs a host "retry now" action.
-    #[cfg(any(test, feature = "test-utils"))]
     pub async fn reset_cloud_outbox_backoff(&self) -> Result<(), DbError> {
-        self.call(move |conn| {
+        self.call(|conn| {
             conn.execute(
-                "UPDATE cloud_outbox SET last_attempt_at = NULL \
-                 WHERE operation = 'upload' AND attempt_count > 0",
+                "UPDATE cloud_outbox SET last_attempt_at = NULL WHERE attempt_count > 0",
                 [],
             )
             .map(|_| ())
@@ -7266,168 +12627,69 @@ impl Database {
         .await
     }
 
-    /// Record a failed upload attempt (bumps `attempt_count`, stores the error
-    /// and the time). The entry stays queued for retry.
-    pub async fn record_cloud_upload_failure(
-        &self,
-        id: i64,
-        error: &str,
-        attempted_at: &str,
-    ) -> Result<(), DbError> {
-        let (error, attempted_at) = (error.to_string(), attempted_at.to_string());
-        self.call(move |conn| {
-            conn.execute(
-                "UPDATE cloud_outbox \
-                 SET attempt_count = attempt_count + 1, last_error = ?1, last_attempt_at = ?2 \
-                 WHERE id = ?3",
-                (error, attempted_at, id),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
-    /// Record a failed delete/cancel attempt (bumps `attempt_count`, stores the
-    /// error and the time), scoped to `operation` so an id collision with the
-    /// other kind of row cannot mutate it. Shared by
-    /// [`record_cloud_delete_failure`](Self::record_cloud_delete_failure) and
-    /// [`record_cloud_cancel_failure`](Self::record_cloud_cancel_failure), which
-    /// differ only in which operation they're scoped to.
-    async fn record_cloud_outbox_failure(
-        &self,
-        id: i64,
-        operation: &'static str,
-        error: &str,
-        attempted_at: &str,
-    ) -> Result<(), DbError> {
-        let (error, attempted_at) = (error.to_string(), attempted_at.to_string());
-        self.call(move |conn| {
-            conn.execute(
-                "UPDATE cloud_outbox \
-                 SET attempt_count = attempt_count + 1, last_error = ?1, last_attempt_at = ?2 \
-                 WHERE id = ?3 AND operation = ?4",
-                (error, attempted_at, id, operation),
-            )
-            .map(|_| ())
-            .map_err(DbError::from)
-        })
-        .await
-    }
-
-    /// Record a failed delete/tombstone attempt (bumps `attempt_count`, stores the
-    /// error and the time). Scoped to delete rows so an id collision with another
-    /// operation cannot mutate the wrong kind of outbox entry.
-    pub async fn record_cloud_delete_failure(
-        &self,
-        id: i64,
-        error: &str,
-        attempted_at: &str,
-    ) -> Result<(), DbError> {
-        self.record_cloud_outbox_failure(id, "delete", error, attempted_at)
-            .await
-    }
-
-    /// Record a failed tombstone-cancel retry (bumps `attempt_count`, stores the
-    /// error and the time). Scoped to cancel rows so an id collision with another
-    /// operation cannot mutate the wrong kind of outbox entry.
-    pub async fn record_cloud_cancel_failure(
-        &self,
-        id: i64,
-        error: &str,
-        attempted_at: &str,
-    ) -> Result<(), DbError> {
-        self.record_cloud_outbox_failure(id, "cancel", error, attempted_at)
-            .await
-    }
-
     // ---- Local blob refs (external user files) ----
 
-    /// Register an external blob ref: map `blob_id` to the user-owned file at
-    /// `path`, whose plaintext length is `size`. Insert-or-replace on `blob_id`, so
-    /// a relocate (the user picks a new folder; the host recomputes each path and
-    /// re-registers) overwrites the prior row. coven reads this file but does not
-    /// own it; a read validates it by presence + size (see
-    /// [`crate::db`]'s `local_blob_refs` and [`crate::blob::cache::read_blob`]).
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn register_external_blob(
-        &self,
-        blob_id: &str,
-        namespace: &str,
-        path: &Path,
-        size: u64,
-    ) -> Result<(), DbError> {
-        let (blob_id, namespace, path) = (
-            blob_id.to_string(),
-            namespace.to_string(),
-            path.to_path_buf(),
-        );
-        self.call(move |conn| {
-            Self::register_external_blob_on(conn, &blob_id, &namespace, &path, size)
-        })
-        .await
-    }
-
-    /// Transaction-composable form of
-    /// [`register_external_blob`](Self::register_external_blob): runs on a
-    /// connection the host already holds inside a [`call`](Self::call) closure, so
-    /// coven's `make_local` can flip a root's gate false and register the external
-    /// refs for its now-local user files in one transaction. Insert-or-replace on
-    /// `blob_id`, so a relocate overwrites the prior row.
     pub fn register_external_blob_on(
         conn: &Connection,
-        blob_id: &str,
-        namespace: &str,
+        reference: &RowBlobRef,
         path: &Path,
-        size: u64,
     ) -> Result<(), DbError> {
+        if reference.authority() != &RowBlobAuthority::Local || reference.stored().is_some() {
+            return Err(DbError::Message(
+                "external file requires an exact Local row blob reference".to_string(),
+            ));
+        }
         let path = path.to_str().ok_or_else(|| {
-            DbError::Message(format!(
-                "external blob path for {blob_id} is not valid UTF-8: {path:?}"
-            ))
+            DbError::Message(format!("external blob path is not UTF-8: {path:?}"))
+        })?;
+        let size = i64::try_from(reference.plaintext_size()).map_err(|_| {
+            DbError::Message("external blob plaintext size exceeds SQLite INTEGER".to_string())
         })?;
         conn.execute(
-            "INSERT INTO local_blob_refs (blob_id, namespace, path, size) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(blob_id) DO UPDATE SET \
-                 namespace = excluded.namespace, \
-                 path = excluded.path, \
-                 size = excluded.size",
-            (blob_id, namespace, path, size as i64),
+            "INSERT INTO local_blob_refs
+             (table_name, row_id, column_name, row_stamp, namespace, blob_id,
+              path, plaintext_size, plaintext_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(table_name, row_id, column_name, row_stamp) DO UPDATE SET
+               namespace = excluded.namespace,
+               blob_id = excluded.blob_id,
+               path = excluded.path,
+               plaintext_size = excluded.plaintext_size,
+               plaintext_hash = excluded.plaintext_hash",
+            rusqlite::params![
+                reference.table(),
+                reference.row_id(),
+                reference.column(),
+                reference.row_stamp(),
+                &reference.blob().namespace,
+                &reference.blob().id,
+                path,
+                size,
+                reference.plaintext_hash().to_string(),
+            ],
         )
         .map(|_| ())
         .map_err(DbError::from)
     }
 
-    /// Remove the external blob ref for `blob_id`, so the blob resolves through the
-    /// normal cache/cloud path again. A no-op if no ref is registered.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub async fn clear_external_blob(&self, blob_id: &str) -> Result<(), DbError> {
-        let blob_id = blob_id.to_string();
-        self.call(move |conn| Self::clear_external_blob_on(conn, &blob_id))
-            .await
+    pub fn clear_external_blob_on(
+        conn: &Connection,
+        reference: &RowBlobRef,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "DELETE FROM local_blob_refs WHERE table_name = ?1 AND row_id = ?2
+             AND column_name = ?3 AND row_stamp = ?4",
+            rusqlite::params![
+                reference.table(),
+                reference.row_id(),
+                reference.column(),
+                reference.row_stamp(),
+            ],
+        )
+        .map(|_| ())
+        .map_err(DbError::from)
     }
 
-    /// Transaction-composable form of
-    /// [`clear_external_blob`](Self::clear_external_blob): runs on a connection the
-    /// host already holds inside a [`call`](Self::call) closure, so coven's
-    /// `make_remote` completion can flip a root's gate true and drop the external
-    /// refs for its now-cloud-backed blobs in one transaction. A no-op if no ref is
-    /// registered.
-    pub fn clear_external_blob_on(conn: &Connection, blob_id: &str) -> Result<(), DbError> {
-        conn.execute("DELETE FROM local_blob_refs WHERE blob_id = ?1", [blob_id])
-            .map(|_| ())
-            .map_err(DbError::from)
-    }
-
-    // ---- Blob make-Remote intents (device-local in-flight make_remote markers) ----
-
-    /// Record an in-flight make_remote of `(root_table, root_id)` as a durable
-    /// marker. Transaction-composable: coven's `make_remote` inserts this in the same
-    /// transaction that enqueues the root's user-provided blob uploads or flips a
-    /// host-provided-only root, so an in-flight make_remote is a durable, atomic fact.
-    /// `retain_pinned` is consumed by inline host-provided uploads, which have no
-    /// upload outbox row to carry the pin choice.
     pub fn insert_make_remote_intent_on(
         conn: &Connection,
         root_table: &str,
@@ -7435,47 +12697,154 @@ impl Database {
         retain_pinned: bool,
     ) -> Result<(), DbError> {
         conn.execute(
-            "INSERT OR REPLACE INTO blob_make_remote_intents \
-             (root_table, root_id, retain_pinned) VALUES (?1, ?2, ?3)",
+            "INSERT INTO blob_make_remote_intents
+             (root_table, root_id, retain_pinned, state, write_id)
+             VALUES (?1, ?2, ?3, 'uploading', NULL)
+             ON CONFLICT(root_table, root_id) DO UPDATE SET
+               retain_pinned = excluded.retain_pinned
+             WHERE blob_make_remote_intents.state = 'uploading'",
             (root_table, root_id, retain_pinned),
         )
-        .map(|_| ())
         .map_err(DbError::from)
+        .and_then(|changed| {
+            if changed == 1 {
+                Ok(())
+            } else {
+                Err(DbError::Message(format!(
+                    "make_remote for {root_table:?}/{root_id:?} is already publishing"
+                )))
+            }
+        })
     }
 
-    /// Remove the make_remote intent for `(root_table, root_id)`.
-    /// Transaction-composable so it commits with the gate flip (on completion) or
-    /// with the cancel cleanup.
-    pub fn delete_make_remote_intent_on(
-        conn: &Connection,
-        root_table: &str,
-        root_id: &str,
-    ) -> Result<(), DbError> {
-        conn.execute(
-            "DELETE FROM blob_make_remote_intents WHERE root_table = ?1 AND root_id = ?2",
-            (root_table, root_id),
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    }
-
-    /// Whether a make_remote is in flight for `(root_table, root_id)`. Read inside
-    /// the upload drain's completion check to tell a make_remote to finish (`true`)
-    /// from an orphan upload of a cancelled make_remote to tombstone (`false`).
-    /// Synchronous (runs on a connection the caller already holds).
-    pub fn make_remote_intent_exists(
+    #[cfg(test)]
+    pub(crate) fn make_remote_intent_exists(
         conn: &Connection,
         root_table: &str,
         root_id: &str,
     ) -> Result<bool, DbError> {
         conn.query_row(
-            "SELECT 1 FROM blob_make_remote_intents \
-             WHERE root_table = ?1 AND root_id = ?2",
+            "SELECT 1 FROM blob_make_remote_intents WHERE root_table = ?1 AND root_id = ?2",
             (root_table, root_id),
             |_| Ok(()),
         )
         .optional()
         .map(|value| value.is_some())
+        .map_err(DbError::from)
+    }
+
+    pub(crate) fn make_remote_intent_state(
+        conn: &Connection,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<Option<MakeRemoteIntentState>, DbError> {
+        let encoded = conn
+            .query_row(
+                "SELECT state, write_id FROM blob_make_remote_intents
+                 WHERE root_table = ?1 AND root_id = ?2",
+                (root_table, root_id),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        encoded
+            .map(|(state, write_id)| match (state.as_str(), write_id) {
+                ("uploading", None) => Ok(MakeRemoteIntentState::Uploading),
+                ("cancelling", None) => Ok(MakeRemoteIntentState::Cancelling),
+                ("publishing", Some(write_id)) => Ok(MakeRemoteIntentState::Publishing(
+                    WriteId::from_generated(write_id),
+                )),
+                _ => Err(DbError::Message(format!(
+                    "make_remote intent {root_table:?}/{root_id:?} has invalid state {state:?}"
+                ))),
+            })
+            .transpose()
+    }
+
+    pub(crate) fn mark_make_remote_cancelling_on(
+        conn: &Connection,
+        root_table: &str,
+        root_id: &str,
+    ) -> Result<(), DbError> {
+        let updated = conn
+            .execute(
+                "UPDATE blob_make_remote_intents SET state = 'cancelling'
+                 WHERE root_table = ?1 AND root_id = ?2 AND state = 'uploading'",
+                (root_table, root_id),
+            )
+            .map_err(DbError::from)?;
+        if updated == 1 {
+            conn.execute(
+                "UPDATE cloud_outbox
+                 SET attempt_count = 0, last_error = NULL, last_attempt_at = NULL
+                 WHERE operation = 'upload' AND root_table = ?1 AND root_id = ?2",
+                (root_table, root_id),
+            )
+            .map_err(DbError::from)?;
+            return Ok(());
+        }
+        if matches!(
+            Self::make_remote_intent_state(conn, root_table, root_id)?,
+            Some(MakeRemoteIntentState::Cancelling)
+        ) {
+            return Ok(());
+        }
+        Err(DbError::Message(format!(
+            "make_remote intent {root_table:?}/{root_id:?} cannot enter cancellation"
+        )))
+    }
+
+    pub fn mark_make_remote_publishing_on(
+        conn: &Connection,
+        root_table: &str,
+        root_id: &str,
+        write_id: &WriteId,
+    ) -> Result<(), DbError> {
+        let updated = conn
+            .execute(
+                "UPDATE blob_make_remote_intents SET state = 'publishing', write_id = ?3
+                 WHERE root_table = ?1 AND root_id = ?2 AND state = 'uploading'",
+                (root_table, root_id, write_id.as_str()),
+            )
+            .map_err(DbError::from)?;
+        if updated != 1 {
+            return Err(DbError::Message(format!(
+                "make_remote intent {root_table:?}/{root_id:?} changed before publication"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn complete_make_remote_publication_on(
+        conn: &Connection,
+        write_id: &WriteId,
+    ) -> Result<(), DbError> {
+        let removed = conn
+            .execute(
+                "DELETE FROM blob_make_remote_intents
+                 WHERE write_id = ?1 AND state = 'publishing'",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+        if removed != 1 {
+            return Err(DbError::Message(format!(
+                "make_remote publication {write_id} changed before activation"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn make_remote_publication_root_on(
+        conn: &Connection,
+        write_id: &WriteId,
+    ) -> Result<Option<(String, String)>, DbError> {
+        conn.query_row(
+            "SELECT root_table, root_id FROM blob_make_remote_intents
+             WHERE write_id = ?1 AND state = 'publishing'",
+            [write_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
         .map_err(DbError::from)
     }
 
@@ -7485,77 +12854,1361 @@ impl Database {
         root_id: &str,
     ) -> Result<Option<bool>, DbError> {
         conn.query_row(
-            "SELECT retain_pinned FROM blob_make_remote_intents \
+            "SELECT retain_pinned FROM blob_make_remote_intents
              WHERE root_table = ?1 AND root_id = ?2",
             (root_table, root_id),
-            |r| r.get::<_, bool>(0),
+            |row| row.get(0),
         )
         .optional()
         .map_err(DbError::from)
     }
 
-    /// The external user-owned file `blob_id` resolves to, or `None` when no ref is
-    /// registered (the blob is host-provided local-store, cache, or cloud — not a
-    /// user-provided external file). The locality-aware read
-    /// ([`crate::blob::cache::read_blob`]) consults this before dispatching on the
-    /// blob's locality.
-    pub async fn external_blob(&self, blob_id: &str) -> Result<Option<ExternalBlob>, DbError> {
-        let blob_id = blob_id.to_string();
+    pub(crate) async fn external_blob_for_row(
+        &self,
+        reference: &RowBlobRef,
+    ) -> Result<Option<ExternalBlob>, DbError> {
+        let table = reference.table().to_string();
+        let row_id = reference.row_id().to_string();
+        let column = reference.column().to_string();
+        let row_stamp = reference.row_stamp().to_string();
+        let namespace = reference.blob().namespace.clone();
+        let blob_id = reference.blob().id.clone();
+        let expected_size = reference.plaintext_size();
+        let expected_hash = reference.plaintext_hash();
         self.call(move |conn| {
-            conn.query_row(
-                "SELECT path, size FROM local_blob_refs WHERE blob_id = ?1",
-                [blob_id],
-                |r| {
-                    Ok(ExternalBlob {
-                        path: std::path::PathBuf::from(r.get::<_, String>(0)?),
-                        size: r.get::<_, i64>(1)? as u64,
-                    })
-                },
-            )
-            .optional()
-            .map_err(DbError::from)
+            let row = conn
+                .query_row(
+                    "SELECT path, plaintext_size, plaintext_hash, namespace, blob_id
+                     FROM local_blob_refs
+                     WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
+                       AND row_stamp = ?4",
+                    rusqlite::params![table, row_id, column, row_stamp],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let Some((path, size, hash, stored_namespace, stored_blob_id)) = row else {
+                return Ok(None);
+            };
+            let size = u64::try_from(size).map_err(|_| {
+                DbError::Message(format!("external blob {blob_id} has negative size"))
+            })?;
+            let hash: ObjectHash = hash.parse().map_err(|error| {
+                DbError::Message(format!("external blob {blob_id} hash: {error}"))
+            })?;
+            if size != expected_size
+                || hash != expected_hash
+                || stored_namespace != namespace
+                || stored_blob_id != blob_id
+            {
+                return Err(DbError::Message(format!(
+                    "external blob row {table}/{row_id}/{column} differs from its row reference"
+                )));
+            }
+            Ok(Some(ExternalBlob {
+                path: PathBuf::from(path),
+                size,
+            }))
         })
         .await
     }
 }
 
-/// Map a `cloud_outbox` row to an [`OutboxEntry`]. Column order matches the
-/// SELECT in [`Database::pending_outbox`]. The flat row reads back as one
-/// [`OutboxOperation`] variant or the other, built from the columns that belong
-/// to that operation — the rest are NULL and unread.
-fn row_to_outbox_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
-    let op_tag: String = r.get(1)?;
-    let operation = match op_tag.as_str() {
-        "upload" => {
-            // A present scope must parse — a present-but-unparseable scope is a
-            // corrupt row. An upload always wrote one (the column is non-NULL
-            // for an upload), so its absence is also corruption.
-            let scope_str: String = r.get(5)?;
-            let scope = crate::blob::BlobScope::from_outbox_str(&scope_str)
-                .unwrap_or_else(|| panic!("invalid cloud_outbox.scope: {scope_str:?}"));
-            OutboxOperation::Upload {
-                file_id: r.get(2)?,
-                source_path: r.get(4)?,
-                scope,
-                retain_pinned: r.get(6)?,
+fn validate_snapshot_object_owners_on(
+    conn: &Connection,
+    root: &crate::sync::store_commit::StoreRootRef,
+    meta: &SnapshotMeta,
+) -> Result<(), DbError> {
+    let expected = crate::sync::remote_object::SnapshotObjectOwner {
+        activation: StreamActivationId::store_snapshots(root, &meta.author_registration),
+        sequence: meta.sequence,
+    };
+    if meta.successor.activation != expected.activation {
+        return Err(DbError::Message(
+            "verified snapshot successor differs from its author stream activation".to_string(),
+        ));
+    }
+    validate_snapshot_object_owner_records_on(conn, &expected)
+}
+
+fn validate_snapshot_object_owner_records_on(
+    conn: &Connection,
+    expected: &crate::sync::remote_object::SnapshotObjectOwner,
+) -> Result<(), DbError> {
+    let mut statement = conn
+        .prepare("SELECT object_id FROM remote_objects ORDER BY object_id")
+        .map_err(DbError::from)?;
+    let object_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(DbError::from)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DbError::from)?;
+    drop(statement);
+    for object_id in object_ids {
+        let parsed = object_id.parse().map_err(|error| {
+            DbError::Message(format!("snapshot remote object id {object_id:?}: {error}"))
+        })?;
+        let remote = load_remote_object_on(conn, parsed)?;
+        for owner in remote.snapshot_owners() {
+            if owner != expected {
+                return Err(DbError::Message(format!(
+                    "snapshot remote object {object_id} belongs to a different snapshot stream activation or sequence"
+                )));
             }
         }
-        "delete" => OutboxOperation::Delete,
-        "cancel" => OutboxOperation::Cancel,
-        other => panic!("invalid cloud_outbox.operation: {other:?}"),
+    }
+    Ok(())
+}
+
+fn validate_snapshot_blob_plan_on(
+    conn: &Connection,
+    gates: &Gates,
+    synced_tables: &[SyncedTable],
+    meta: &SnapshotMeta,
+    blob: &PreparedSnapshotBlob,
+) -> Result<(), DbError> {
+    blob.remote
+        .validate()
+        .map_err(|error| DbError::Message(format!("snapshot remote blob: {error}")))?;
+    let expected_owner = crate::sync::remote_object::SnapshotObjectOwner {
+        activation: meta.successor.activation,
+        sequence: meta.sequence,
+    };
+    let owners = blob.remote.snapshot_owners().collect::<Vec<_>>();
+    if owners != [&expected_owner] {
+        return Err(DbError::Message(
+            "snapshot blob owner differs from the verified snapshot stream activation".to_string(),
+        ));
+    }
+    if blob.bindings.is_empty()
+        || blob.bindings.iter().any(|binding| {
+            binding.blob().object() != blob.remote.object()
+                || binding.blob().locator().audience() != blob.authority.remote_audience()
+        })
+        || blob
+            .spool_path
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(DbError::Message(
+            "snapshot blob plan has inconsistent exact references".to_string(),
+        ));
+    }
+    for binding in &blob.bindings {
+        let table = synced_tables
+            .iter()
+            .find(|table| table.name() == binding.table())
+            .ok_or_else(|| {
+                DbError::Message(format!(
+                    "snapshot blob names undeclared table {:?}",
+                    binding.table()
+                ))
+            })?;
+        let declaration = table.blob().ok_or_else(|| {
+            DbError::Message(format!(
+                "snapshot blob names table {:?} without a blob declaration",
+                table.name()
+            ))
+        })?;
+        let row =
+            live_blob_row(conn, table.name(), binding.row_id(), declaration)?.ok_or_else(|| {
+                DbError::Message(format!(
+                    "snapshot blob row {:?}/{:?} is absent",
+                    table.name(),
+                    binding.row_id()
+                ))
+            })?;
+        let audience = gate::live_row_audience(conn, gates, table.name(), binding.row_id())
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let audience = RemoteAudience::try_from(audience)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        validate_live_blob_locator(
+            binding.table(),
+            binding.row_id(),
+            binding.column(),
+            binding.row_stamp(),
+            binding.blob(),
+            declaration,
+            &row,
+            &audience,
+        )?;
+    }
+    Ok(())
+}
+
+fn install_snapshot_blob_plan_on(
+    conn: &Connection,
+    blob: &PreparedSnapshotBlob,
+) -> Result<(), DbError> {
+    let object_id = blob.remote.object_id();
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    let merged = if exists {
+        let mut existing = load_remote_object_on(conn, object_id)?;
+        for owner in blob.remote.snapshot_owners() {
+            existing
+                .merge_snapshot_owner(blob.bindings[0].blob(), owner.clone())
+                .map_err(|error| DbError::Message(format!("merge snapshot blob owner: {error}")))?;
+        }
+        existing
+    } else {
+        blob.remote.clone()
+    };
+    let encoded = serde_json::to_string(&merged)
+        .map_err(|error| DbError::Message(format!("serialize snapshot blob: {error}")))?;
+    conn.execute(
+        "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
+         ON CONFLICT(object_id) DO UPDATE SET state = excluded.state",
+        rusqlite::params![object_id.to_string(), encoded],
+    )
+    .map_err(DbError::from)?;
+    conn.execute(
+        "INSERT INTO blob_locators (remote_object_id, locator_hash) VALUES (?1, ?2)
+         ON CONFLICT(remote_object_id) DO NOTHING",
+        rusqlite::params![
+            object_id.to_string(),
+            blob.bindings[0].blob().locator().locator_hash().to_string(),
+        ],
+    )
+    .map_err(DbError::from)?;
+    validate_stored_locator_on(conn, blob.bindings[0].blob())?;
+    let authority = serde_json::to_string(&blob.authority)
+        .map_err(|error| DbError::Message(format!("serialize snapshot blob authority: {error}")))?;
+    for binding in &blob.bindings {
+        conn.execute(
+            "INSERT INTO row_blob_locators
+         (table_name, row_id, column_name, row_stamp, audience_authority, remote_object_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(table_name, row_id, column_name, row_stamp) DO NOTHING",
+            rusqlite::params![
+                binding.table(),
+                binding.row_id(),
+                binding.column(),
+                binding.row_stamp(),
+                authority,
+                object_id.to_string(),
+            ],
+        )
+        .map_err(DbError::from)?;
+        validate_stored_row_binding_on(conn, binding, &blob.authority, object_id)?;
+    }
+    Ok(())
+}
+
+enum OutboxIdentity {
+    Upload {
+        table: String,
+        row_id: String,
+        column: String,
+        row_stamp: String,
+    },
+    Stored {
+        operation: &'static str,
+        stored: String,
+    },
+}
+
+fn upload_entry_for_identity_on(
+    conn: &Connection,
+    table: &str,
+    row_id: &str,
+    column: &str,
+    row_stamp: &str,
+) -> Result<Option<OutboxEntry>, DbError> {
+    conn.query_row(
+        "SELECT id, operation, row_ref, stored_ref, source_path, retain_pinned,
+                upload_state, attempt_count, last_attempt_at, root_table, root_id
+         FROM cloud_outbox
+         WHERE operation = 'upload' AND table_name = ?1 AND row_id = ?2
+           AND column_name = ?3 AND row_stamp = ?4",
+        rusqlite::params![table, row_id, column, row_stamp],
+        row_to_outbox_entry,
+    )
+    .optional()
+    .map_err(DbError::from)
+}
+
+fn consume_created_upload_handoff_on(
+    conn: &Connection,
+    package: &AudiencePackage,
+    binding: &RowBlobLocatorBinding,
+) -> Result<bool, DbError> {
+    let Some(entry) = upload_entry_for_identity_on(
+        conn,
+        binding.table(),
+        binding.row_id(),
+        binding.column(),
+        binding.row_stamp(),
+    )?
+    else {
+        return Ok(false);
+    };
+    let OutboxOperation::Upload {
+        row,
+        state: OutboxUploadState::Created {
+            authority, stored, ..
+        },
+        ..
+    } = &entry.operation
+    else {
+        return Err(DbError::Message(format!(
+            "activated blob binding {}/{}/{} at {} has an upload that is not Created",
+            binding.table(),
+            binding.row_id(),
+            binding.column(),
+            binding.row_stamp()
+        )));
+    };
+    if row.table() != binding.table()
+        || row.row_id() != binding.row_id()
+        || row.column() != binding.column()
+        || row.row_stamp() != binding.row_stamp()
+        || authority != package.audience()
+        || stored != binding.blob()
+    {
+        return Err(DbError::Message(format!(
+            "activated blob binding {}/{}/{} at {} differs from its Created upload handoff",
+            binding.table(),
+            binding.row_id(),
+            binding.column(),
+            binding.row_stamp()
+        )));
+    }
+    Database::remove_cloud_outbox_entry_on(conn, &entry)?;
+    Ok(true)
+}
+
+fn created_upload_handoff_on(
+    conn: &Connection,
+    table: &str,
+    row_id: &str,
+    column: &str,
+    row_stamp: &str,
+) -> Result<Option<StoreWriteRemoteBlob>, DbError> {
+    let Some(entry) = upload_entry_for_identity_on(conn, table, row_id, column, row_stamp)? else {
+        return Ok(None);
+    };
+    let OutboxOperation::Upload { row, state, .. } = entry.operation else {
+        return Err(DbError::Message(
+            "upload identity query returned a non-upload operation".to_string(),
+        ));
+    };
+    if row.table() != table
+        || row.row_id() != row_id
+        || row.column() != column
+        || row.row_stamp() != row_stamp
+    {
+        return Err(DbError::Message(format!(
+            "upload outbox row facts differ from identity {table}/{row_id}/{column} at {row_stamp}"
+        )));
+    }
+    match state {
+        OutboxUploadState::Created {
+            authority, stored, ..
+        } => Ok(Some(StoreWriteRemoteBlob { authority, stored })),
+        OutboxUploadState::Pending | OutboxUploadState::Prepared { .. } => Ok(None),
+    }
+}
+
+fn outbox_identity(operation: &OutboxOperation) -> Result<OutboxIdentity, DbError> {
+    match operation {
+        OutboxOperation::Upload { row, .. } => Ok(OutboxIdentity::Upload {
+            table: row.table().to_string(),
+            row_id: row.row_id().to_string(),
+            column: row.column().to_string(),
+            row_stamp: row.row_stamp().to_string(),
+        }),
+        OutboxOperation::Delete { stored } => Ok(OutboxIdentity::Stored {
+            operation: "delete",
+            stored: serde_json::to_string(stored).map_err(|error| {
+                DbError::Message(format!("serialize stored blob outbox identity: {error}"))
+            })?,
+        }),
+    }
+}
+
+fn row_to_outbox_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxEntry> {
+    fn invalid(index: usize, message: String) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            )),
+        )
+    }
+
+    let tag: String = row.get(1)?;
+    let operation = match tag.as_str() {
+        "upload" => {
+            let encoded: String = row.get(2)?;
+            let reference: RowBlobRef =
+                serde_json::from_str(&encoded).map_err(|error| invalid(2, error.to_string()))?;
+            let source_path: String = row.get(4)?;
+            let state_json: String = row.get(6)?;
+            let state: OutboxUploadState =
+                serde_json::from_str(&state_json).map_err(|error| invalid(6, error.to_string()))?;
+            if let OutboxUploadState::Prepared {
+                authority, stored, ..
+            }
+            | OutboxUploadState::Created {
+                authority, stored, ..
+            } = &state
+            {
+                let locator = stored.locator();
+                if locator.namespace() != reference.blob().namespace
+                    || locator.blob_id() != reference.blob().id
+                    || locator.plaintext_size() != reference.plaintext_size()
+                    || locator.plaintext_hash() != reference.plaintext_hash()
+                    || locator
+                        .scope()
+                        .is_some_and(|scope| scope != &reference.blob().scope)
+                {
+                    return Err(invalid(
+                        6,
+                        "prepared upload differs from its exact row version".to_string(),
+                    ));
+                }
+                if locator.audience() != authority.remote_audience() {
+                    return Err(invalid(
+                        6,
+                        "upload package authority differs from its stored locator".to_string(),
+                    ));
+                }
+            }
+            OutboxOperation::Upload {
+                root_table: row.get(9)?,
+                root_id: row.get(10)?,
+                row: reference,
+                source_path: PathBuf::from(source_path),
+                retain_pinned: row.get(5)?,
+                state,
+            }
+        }
+        "delete" => {
+            let encoded: String = row.get(3)?;
+            let stored: StoredBlobRef =
+                serde_json::from_str(&encoded).map_err(|error| invalid(3, error.to_string()))?;
+            OutboxOperation::Delete { stored }
+        }
+        _ => {
+            return Err(invalid(
+                1,
+                format!("invalid cloud outbox operation {tag:?}"),
+            ))
+        }
     };
     Ok(OutboxEntry {
-        id: r.get(0)?,
-        cloud_key: r.get(3)?,
-        attempt_count: r.get(7)?,
-        last_attempt_at: r.get(8)?,
+        id: row.get(0)?,
+        attempt_count: row.get(7)?,
+        last_attempt_at: row.get(8)?,
         operation,
     })
 }
 
-/// Seed the register clock from one candidate floor, if present. A present but
-/// unparseable value is a corrupt register and aborts; `None` contributes no
-/// floor.
+fn local_store_authority_on(
+    conn: &Connection,
+) -> Result<
+    (
+        crate::sync::store_commit::StoreRootRef,
+        StoreDeviceRegistrationRef,
+        StoreDeviceRegistration,
+    ),
+    DbError,
+> {
+    let root = required_store_root_authority_on(conn)?;
+    let device_id: String = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [LOCAL_DEVICE_ID_STATE_KEY],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    let (bytes, encoded): (Vec<u8>, String) = conn
+        .query_row(
+            "SELECT registration_bytes, registration_object \
+             FROM store_device_registration_activations WHERE device_id = ?1",
+            [&device_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DbError::from)?;
+    let reference: StoreDeviceRegistrationRef =
+        serde_json::from_str(&encoded).map_err(|error| {
+            DbError::Message(format!("local Store registration exact ref: {error}"))
+        })?;
+    if reference.device_id.to_string() != device_id {
+        return Err(DbError::Message(
+            "local Store device state differs from its activated registration".to_string(),
+        ));
+    }
+    let registration = StoreDeviceRegistration::parse_at(&bytes, &root, reference.device_id)
+        .map_err(|error| DbError::Message(format!("local Store registration: {error}")))?;
+    reference
+        .verify_registration(&registration)
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    Ok((root, reference, registration))
+}
+
+fn local_merge_stream_id_on(conn: &Connection) -> Result<Option<String>, DbError> {
+    let local_device_id = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [LOCAL_DEVICE_ID_STATE_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    let Some(_) = local_device_id else {
+        return Ok(None);
+    };
+    let (root, reference, _) = local_store_authority_on(conn)?;
+    Ok(Some(
+        AuthorStreamId::store_announcements(&root, &reference).to_string(),
+    ))
+}
+
+fn pin_host_device_id_on(
+    conn: &Connection,
+    expected: &str,
+    initialized: bool,
+) -> Result<(), DbError> {
+    if initialized {
+        return validate_host_device_id_on(conn, expected);
+    }
+    conn.execute(
+        "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
+        (HOST_DEVICE_ID_STATE_KEY, expected),
+    )
+    .map(|_| ())
+    .map_err(DbError::from)
+}
+
+fn validate_host_device_id_on(conn: &Connection, expected: &str) -> Result<(), DbError> {
+    let stored = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = ?1",
+            [HOST_DEVICE_ID_STATE_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .ok_or_else(|| DbError::Message("Coven host device identity is absent".to_string()))?;
+    if stored != expected {
+        return Err(DbError::Message(format!(
+            "Coven host device identity is {stored:?}, not configured identity {expected:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn store_ack_first_slot(
+    registration: &StoreDeviceRegistration,
+) -> Result<&crate::storage::cloud::ObjectSlot, DbError> {
+    match &registration.acknowledgements {
+        crate::sync::store_commit::DeviceStreamAnchor::StoreAcknowledgements { first_slot } => {
+            Ok(first_slot)
+        }
+        _ => Err(DbError::Message(
+            "local Store registration has no acknowledgement stream anchor".to_string(),
+        )),
+    }
+}
+
+fn store_snapshot_first_slot(
+    registration: &StoreDeviceRegistration,
+) -> Result<&crate::storage::cloud::ObjectSlot, DbError> {
+    match &registration.snapshots {
+        crate::sync::store_commit::DeviceStreamAnchor::StoreSnapshots { first_slot } => {
+            Ok(first_slot)
+        }
+        _ => Err(DbError::Message(
+            "local Store registration has no snapshot stream anchor".to_string(),
+        )),
+    }
+}
+
+fn load_published_store_ack_on(conn: &Connection) -> Result<Option<PublishedStoreAck>, DbError> {
+    conn.query_row(
+        "SELECT ack_ref, successor_slot FROM published_store_acks WHERE singleton = 1",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )
+    .optional()
+    .map_err(DbError::from)?
+    .map(|(reference, successor_slot)| {
+        let reference: StoreAckRef = serde_json::from_str(&reference).map_err(|error| {
+            DbError::Message(format!("published Store acknowledgement ref: {error}"))
+        })?;
+        if reference.revision == 0 {
+            return Err(DbError::Message(
+                "published Store acknowledgement uses revision zero".to_string(),
+            ));
+        }
+        Ok(PublishedStoreAck {
+            reference,
+            successor_slot: serde_json::from_str(&successor_slot).map_err(|error| {
+                DbError::Message(format!(
+                    "published Store acknowledgement successor slot: {error}"
+                ))
+            })?,
+        })
+    })
+    .transpose()
+}
+
+fn load_outbound_store_ack_on(conn: &Connection) -> Result<Option<OutboundStoreAck>, DbError> {
+    conn.query_row(
+        "SELECT ack_ref, ack_bytes, prepared_object \
+         FROM outbound_store_acks WHERE singleton = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(DbError::from)?
+    .map(|(reference, bytes, prepared)| {
+        let reference: StoreAckRef = serde_json::from_str(&reference).map_err(|error| {
+            DbError::Message(format!("outbound Store acknowledgement ref: {error}"))
+        })?;
+        let prepared: PreparedExactObject = serde_json::from_str(&prepared).map_err(|error| {
+            DbError::Message(format!("outbound prepared Store acknowledgement: {error}"))
+        })?;
+        if prepared.reference() != &reference.object {
+            return Err(DbError::Message(
+                "outbound Store acknowledgement ref differs from its prepared object".to_string(),
+            ));
+        }
+        let (root, author_ref, author) = local_store_authority_on(conn)?;
+        let value = StoreAck::parse_at(&bytes, root.store_root_hash, &reference, &author).map_err(
+            |error| DbError::Message(format!("outbound Store acknowledgement: {error}")),
+        )?;
+        if value.author_registration != author_ref {
+            return Err(DbError::Message(
+                "outbound Store acknowledgement author differs from local activation".to_string(),
+            ));
+        }
+        Ok(OutboundStoreAck {
+            reference,
+            ack: ExactProtocolObject {
+                value,
+                bytes,
+                object: prepared.reference().clone(),
+                prepared,
+            },
+        })
+    })
+    .transpose()
+}
+
+fn load_published_store_snapshot_on(
+    conn: &Connection,
+) -> Result<Option<PublishedStoreSnapshot>, DbError> {
+    conn.query_row(
+        "SELECT snapshot_ref, successor_slot, meta_bytes \
+         FROM published_store_snapshot WHERE singleton = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(DbError::from)?
+    .map(|(reference, successor_slot, bytes)| {
+        let reference: StoreSnapshotRef = serde_json::from_str(&reference)
+            .map_err(|error| DbError::Message(format!("published Store snapshot ref: {error}")))?;
+        let successor_slot = serde_json::from_str(&successor_slot).map_err(|error| {
+            DbError::Message(format!("published Store snapshot successor slot: {error}"))
+        })?;
+        let (root, author_ref, author) = local_store_authority_on(conn)?;
+        let meta = SnapshotMeta::parse_at(&bytes, root.store_root_hash, &reference, &author)
+            .map_err(|error| DbError::Message(format!("published Store snapshot: {error}")))?;
+        if meta.author_registration != author_ref || meta.successor.next_slot != successor_slot {
+            return Err(DbError::Message(
+                "published Store snapshot differs from its local stream state".to_string(),
+            ));
+        }
+        Ok(PublishedStoreSnapshot {
+            reference,
+            successor_slot,
+            meta,
+        })
+    })
+    .transpose()
+}
+
+fn load_outbound_store_snapshot_on(
+    conn: &Connection,
+) -> Result<Option<DurableSnapshotPublication>, DbError> {
+    conn.query_row(
+        "SELECT snapshot_ref, meta_prepared, image_ref, image_prepared, image_bytes, meta_bytes, blobs \
+         FROM outbound_store_snapshot WHERE singleton = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(DbError::from)?
+    .map(
+        |(reference, meta_prepared, image_reference, image_prepared, image_bytes, meta_bytes, blobs)| {
+            let reference: StoreSnapshotRef =
+                serde_json::from_str(&reference).map_err(|error| {
+                    DbError::Message(format!("outbound Store snapshot ref: {error}"))
+                })?;
+            let meta_prepared: PreparedExactObject =
+                serde_json::from_str(&meta_prepared).map_err(|error| {
+                    DbError::Message(format!(
+                        "outbound prepared Store snapshot metadata: {error}"
+                    ))
+                })?;
+            let image_reference: SnapshotImageRef = serde_json::from_str(&image_reference)
+                .map_err(|error| {
+                    DbError::Message(format!("outbound Store snapshot image ref: {error}"))
+                })?;
+            let image_prepared: PreparedExactObject = serde_json::from_str(&image_prepared)
+                .map_err(|error| {
+                    DbError::Message(format!("outbound prepared Store snapshot image: {error}"))
+                })?;
+            let blobs: Vec<PreparedSnapshotBlob> = serde_json::from_str(&blobs).map_err(|error| {
+                DbError::Message(format!("outbound prepared Store snapshot blobs: {error}"))
+            })?;
+            if meta_prepared.reference() != &reference.object
+                || image_prepared.reference() != &image_reference.object
+                || ObjectHash::digest(&image_bytes) != image_reference.image_hash
+            {
+                return Err(DbError::Message(
+                    "outbound Store snapshot exact references differ from prepared bytes"
+                        .to_string(),
+                ));
+            }
+            let (root, author_ref, author) = local_store_authority_on(conn)?;
+            let meta =
+                SnapshotMeta::parse_at(&meta_bytes, root.store_root_hash, &reference, &author)
+                    .map_err(|error| {
+                        DbError::Message(format!("outbound Store snapshot: {error}"))
+                    })?;
+            if meta.author_registration != author_ref || meta.image != image_reference {
+                return Err(DbError::Message(
+                    "outbound Store snapshot metadata differs from its exact image".to_string(),
+                ));
+            }
+            Ok(DurableSnapshotPublication {
+                reference,
+                meta: ExactProtocolObject {
+                    value: meta,
+                    bytes: meta_bytes,
+                    object: meta_prepared.reference().clone(),
+                    prepared: meta_prepared,
+                },
+                image: ExactProtocolObject {
+                    value: image_bytes.clone(),
+                    bytes: image_bytes,
+                    object: image_prepared.reference().clone(),
+                    prepared: image_prepared,
+                },
+                blobs,
+            })
+        },
+    )
+    .transpose()
+}
+
+struct LiveBlobRow {
+    stamp: String,
+    blob_id: String,
+    plaintext_size: u64,
+    plaintext_hash: ObjectHash,
+    cloud_path: Option<String>,
+}
+
+fn live_blob_row(
+    conn: &Connection,
+    table: &str,
+    row_id: &str,
+    declaration: &crate::sync::session::BlobDecl,
+) -> Result<Option<LiveBlobRow>, DbError> {
+    let cloud_path = declaration
+        .cloud_path_column
+        .as_deref()
+        .map(quote_ident)
+        .unwrap_or_else(|| "NULL".to_string());
+    let sql = format!(
+        "SELECT {}, {}, {}, {}, {} FROM {} WHERE {} = ?1",
+        quote_ident(&declaration.id_column),
+        quote_ident(&declaration.size_column),
+        quote_ident(&declaration.hash_column),
+        cloud_path,
+        quote_ident("_updated_at"),
+        quote_ident(table),
+        quote_ident("id"),
+    );
+    let raw = conn
+        .query_row(&sql, [row_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .optional()
+        .map_err(DbError::from)?;
+    let Some((blob_id, plaintext_size, plaintext_hash, cloud_path, stamp)) = raw else {
+        return Ok(None);
+    };
+    let plaintext_size = u64::try_from(plaintext_size).map_err(|_| {
+        DbError::Message(format!(
+            "winning blob row {:?}/{:?} has negative plaintext size {plaintext_size}",
+            table, row_id
+        ))
+    })?;
+    let plaintext_hash = plaintext_hash.parse().map_err(|error| {
+        DbError::Message(format!(
+            "winning blob row {:?}/{:?} has invalid plaintext hash: {error}",
+            table, row_id
+        ))
+    })?;
+    Ok(Some(LiveBlobRow {
+        stamp,
+        blob_id,
+        plaintext_size,
+        plaintext_hash,
+        cloud_path,
+    }))
+}
+
+fn validate_live_blob_row(
+    binding: &RowBlobLocatorBinding,
+    declaration: &crate::sync::session::BlobDecl,
+    row: &LiveBlobRow,
+    live_audience: &RemoteAudience,
+) -> Result<(), DbError> {
+    validate_live_blob_locator(
+        binding.table(),
+        binding.row_id(),
+        binding.column(),
+        binding.row_stamp(),
+        binding.blob(),
+        declaration,
+        row,
+        live_audience,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_live_blob_locator(
+    table: &str,
+    row_id: &str,
+    column: &str,
+    row_stamp: &str,
+    stored: &StoredBlobRef,
+    declaration: &crate::sync::session::BlobDecl,
+    row: &LiveBlobRow,
+    live_audience: &RemoteAudience,
+) -> Result<(), DbError> {
+    let locator = stored.locator();
+    let invalid = locator.namespace() != declaration.namespace
+        || locator.blob_id() != row.blob_id
+        || locator.plaintext_size() != row.plaintext_size
+        || locator.plaintext_hash() != row.plaintext_hash
+        || &locator.audience() != live_audience
+        || locator
+            .scope()
+            .is_some_and(|scope| scope != &declaration.scope)
+        || locator
+            .cloud_path()
+            .is_some_and(|path| row.cloud_path.as_deref() != Some(path));
+    if invalid {
+        return Err(DbError::Message(format!(
+            "blob locator does not match winning row values for {:?}/{:?}/{:?} at {:?}",
+            table, row_id, column, row_stamp
+        )));
+    }
+    Ok(())
+}
+
+fn validate_stored_locator_on(conn: &Connection, expected: &StoredBlobRef) -> Result<(), DbError> {
+    let locator_hash = expected.locator().locator_hash().to_string();
+    let expected_remote_object_id = remote_object_id(expected.object());
+    let stored_locator_hash: String = conn
+        .query_row(
+            "SELECT locator_hash FROM blob_locators WHERE remote_object_id = ?1",
+            [expected_remote_object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if stored_locator_hash != locator_hash {
+        return Err(DbError::Message(format!(
+            "stored blob object {expected_remote_object_id} is indexed under locator {stored_locator_hash}, expected {locator_hash}"
+        )));
+    }
+    let remote = load_remote_object_on(conn, expected_remote_object_id)?;
+    if !remote.is_activated_stored_blob() {
+        return Err(DbError::Message(format!(
+            "stored blob locator {locator_hash} does not reference activated ownership"
+        )));
+    }
+    let locator =
+        BlobLocator::parse(remote.bytes().canonical_semantic_bytes()).map_err(|error| {
+            DbError::Message(format!(
+                "stored blob locator {locator_hash} is invalid: {error}"
+            ))
+        })?;
+    let actual = StoredBlobRef::new(locator, remote.object().clone()).map_err(|error| {
+        DbError::Message(format!(
+            "stored blob reference {locator_hash} is invalid: {error}"
+        ))
+    })?;
+    if &actual != expected {
+        return Err(DbError::Message(format!(
+            "blob object {expected_remote_object_id} differs from its exact stored reference"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_stored_row_binding_on(
+    conn: &Connection,
+    binding: &RowBlobLocatorBinding,
+    expected_authority: &crate::sync::audience_package::PackageAudience,
+    expected_remote_object_id: ObjectHash,
+) -> Result<(), DbError> {
+    let (audience_authority, remote_object_id): (String, String) = conn
+        .query_row(
+            "SELECT audience_authority, remote_object_id FROM row_blob_locators
+             WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3 AND row_stamp = ?4",
+            rusqlite::params![
+                binding.table(),
+                binding.row_id(),
+                binding.column(),
+                binding.row_stamp(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DbError::from)?;
+    let actual_authority: crate::sync::audience_package::PackageAudience =
+        serde_json::from_str(&audience_authority).map_err(|error| {
+            DbError::Message(format!("parse stored row blob audience authority: {error}"))
+        })?;
+    if &actual_authority != expected_authority
+        || remote_object_id != expected_remote_object_id.to_string()
+    {
+        return Err(DbError::Message(format!(
+            "row blob binding {:?}/{:?}/{:?} at {:?} is already bound to different exact content",
+            binding.table(),
+            binding.row_id(),
+            binding.column(),
+            binding.row_stamp()
+        )));
+    }
+    Ok(())
+}
+
+fn load_prepared_audience_objects_on(
+    conn: &Connection,
+    write_id: &WriteId,
+) -> Result<PreparedAudienceObjects, DbError> {
+    let mut package_statement = conn
+        .prepare(
+            "SELECT remote_object_id FROM store_write_packages
+             WHERE write_id = ?1 ORDER BY audience",
+        )
+        .map_err(DbError::from)?;
+    let package_ids = package_statement
+        .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
+        .map_err(DbError::from)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DbError::from)?;
+    let mut blob_statement = conn
+        .prepare(
+            "SELECT remote_object_id, audience, locator_hash, spool_path FROM store_write_blobs
+             WHERE write_id = ?1 ORDER BY audience, remote_object_id",
+        )
+        .map_err(DbError::from)?;
+    let blob_rows = blob_statement
+        .query_map([write_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(DbError::from)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DbError::from)?;
+    let packages = package_ids
+        .into_iter()
+        .map(|encoded| {
+            let object_id = encoded
+                .parse()
+                .map_err(|error| DbError::Message(format!("stored remote object id: {error}")))?;
+            PreparedAudiencePackage::from_remote(load_remote_object_on(conn, object_id)?)
+        })
+        .collect::<Result<Vec<_>, DbError>>()?;
+    let blobs = blob_rows
+        .into_iter()
+        .map(|(encoded, audience, locator_hash, spool_path)| {
+            let object_id = encoded
+                .parse()
+                .map_err(|error| DbError::Message(format!("stored remote object id: {error}")))?;
+            PreparedAudienceBlob::from_remote(
+                parse_remote_audience_db(&audience)?,
+                &locator_hash,
+                load_remote_object_on(conn, object_id)?,
+                spool_path.map(PathBuf::from),
+            )
+        })
+        .collect::<Result<Vec<_>, DbError>>()?;
+    Ok(PreparedAudienceObjects { packages, blobs })
+}
+
+fn load_activated_registration_on(
+    conn: &Connection,
+    root: &crate::sync::store_commit::StoreRootRef,
+    reference: &StoreDeviceRegistrationRef,
+) -> Result<StoreDeviceRegistration, DbError> {
+    let (bytes, encoded): (Vec<u8>, String) = conn
+        .query_row(
+            "SELECT registration_bytes, registration_object \
+             FROM store_device_registration_activations \
+             WHERE device_id = ?1 AND registration_hash = ?2",
+            (
+                reference.device_id.to_string(),
+                reference.registration_hash.to_string(),
+            ),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DbError::from)?;
+    let stored: StoreDeviceRegistrationRef = serde_json::from_str(&encoded)
+        .map_err(|error| DbError::Message(format!("activated Store registration ref: {error}")))?;
+    if stored != *reference {
+        return Err(DbError::Message(
+            "activated Store registration differs from its exact reference".to_string(),
+        ));
+    }
+    let registration = StoreDeviceRegistration::parse_at(&bytes, root, reference.device_id)
+        .map_err(|error| DbError::Message(format!("activated Store registration: {error}")))?;
+    reference
+        .verify_registration(&registration)
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    Ok(registration)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn previous_row_blob_for_write_on(
+    conn: &Connection,
+    table: &str,
+    row_id: &str,
+    row_stamp: &str,
+    column: &str,
+    blob: &BlobRef,
+    plaintext_size: u64,
+    plaintext_hash: ObjectHash,
+) -> Result<Option<StoreWriteRemoteBlob>, DbError> {
+    if let Some(handoff) = created_upload_handoff_on(conn, table, row_id, column, row_stamp)? {
+        let locator = handoff.stored.locator();
+        if locator.namespace() != blob.namespace
+            || locator.blob_id() != blob.id
+            || locator.plaintext_size() != plaintext_size
+            || locator.plaintext_hash() != plaintext_hash
+            || locator.scope().is_some_and(|scope| scope != &blob.scope)
+        {
+            return Err(DbError::Message(format!(
+                "created upload {table}/{row_id}/{column} at {row_stamp} differs from its captured row"
+            )));
+        }
+        return Ok(Some(handoff));
+    }
+    let raw = conn
+        .query_row(
+            "SELECT row_blob_locators.audience_authority, blob_locators.remote_object_id
+             FROM row_blob_locators
+             JOIN blob_locators USING (remote_object_id)
+             WHERE table_name = ?1 AND row_id = ?2 AND column_name = ?3
+             ORDER BY row_stamp DESC LIMIT 1",
+            rusqlite::params![table, row_id, column],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    let Some((authority, object_id)) = raw else {
+        return Ok(None);
+    };
+    let authority: crate::sync::audience_package::PackageAudience =
+        serde_json::from_str(&authority)
+            .map_err(|error| DbError::Message(format!("prior row blob authority: {error}")))?;
+    let object_id = object_id
+        .parse()
+        .map_err(|error| DbError::Message(format!("prior row blob object id: {error}")))?;
+    let remote = load_remote_object_on(conn, object_id)?;
+    if !remote.is_activated_stored_blob() {
+        return Err(DbError::Message(format!(
+            "prior row blob {table}/{row_id}/{column} is not activated"
+        )));
+    }
+    let locator = BlobLocator::parse(remote.bytes().canonical_semantic_bytes())
+        .map_err(|error| DbError::Message(format!("prior row blob locator: {error}")))?;
+    if locator.namespace() != blob.namespace
+        || locator.blob_id() != blob.id
+        || locator.plaintext_size() != plaintext_size
+        || locator.plaintext_hash() != plaintext_hash
+        || locator.scope().is_some_and(|scope| scope != &blob.scope)
+    {
+        return Ok(None);
+    }
+    if locator.audience() != authority.remote_audience() {
+        return Err(DbError::Message(format!(
+            "prior row blob {table}/{row_id}/{column} authority differs from its locator"
+        )));
+    }
+    let stored = StoredBlobRef::new(locator, remote.object().clone())
+        .map_err(|error| DbError::Message(format!("prior row blob reference: {error}")))?;
+    Ok(Some(StoreWriteRemoteBlob { authority, stored }))
+}
+
+fn remote_audience_to_db(audience: &RemoteAudience) -> String {
+    match audience {
+        RemoteAudience::Store => "store".to_string(),
+        RemoteAudience::Circle(circle_id) => circle_id.to_string(),
+    }
+}
+
+fn parse_remote_audience_db(value: &str) -> Result<RemoteAudience, DbError> {
+    if value == "store" {
+        return Ok(RemoteAudience::Store);
+    }
+    value.parse().map(RemoteAudience::Circle).map_err(|error| {
+        DbError::Message(format!("invalid stored blob audience {value:?}: {error}"))
+    })
+}
+
+enum RemoteStoredRepresentationRef<'a> {
+    Inline(&'a [u8]),
+    Blob,
+}
+
+fn validate_remote_object_on(
+    conn: &Connection,
+    object_id: ObjectHash,
+    expected_object: &ExactObjectRef,
+    expected_semantic_bytes: &[u8],
+    expected_stored: RemoteStoredRepresentationRef<'_>,
+) -> Result<(), DbError> {
+    let remote = load_remote_object_on(conn, object_id)?;
+    let stored = remote.bytes().stored();
+    let stored_matches = match expected_stored {
+        RemoteStoredRepresentationRef::Inline(expected) => stored.inline_bytes() == Some(expected),
+        RemoteStoredRepresentationRef::Blob => stored.inline_bytes().is_none(),
+    };
+    if remote.object() != expected_object
+        || remote.bytes().canonical_semantic_bytes() != expected_semantic_bytes
+        || !stored_matches
+    {
+        return Err(DbError::Message(format!(
+            "prepared remote object {object_id} differs from its semantic index"
+        )));
+    }
+    Ok(())
+}
+
+fn load_remote_object_on(
+    conn: &Connection,
+    object_id: ObjectHash,
+) -> Result<RemoteObjectRecord, DbError> {
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM remote_objects WHERE object_id = ?1",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    let remote: RemoteObjectRecord = serde_json::from_str(&state).map_err(|error| {
+        DbError::Message(format!(
+            "prepared remote object {object_id} has invalid closed state: {error}"
+        ))
+    })?;
+    remote.validate().map_err(|error| {
+        DbError::Message(format!("prepared remote object {object_id}: {error}"))
+    })?;
+    let actual = remote_object_id(remote.object());
+    if actual != object_id {
+        return Err(DbError::Message(format!(
+            "prepared remote object key is {object_id}, exact reference hashes to {actual}"
+        )));
+    }
+    Ok(remote)
+}
+
+fn merge_prepared_remote_object(
+    existing: RemoteObjectRecord,
+    proposed: &RemoteObjectRecord,
+    owner: &StoreBatchCommitRef,
+) -> Result<RemoteObjectRecord, DbError> {
+    use crate::sync::remote_object::{OwnedObjectState, SharedLiveSetObjectDomain};
+
+    if &existing == proposed {
+        return Ok(existing);
+    }
+    let (
+        RemoteObjectRecord::SharedLiveSet(mut existing),
+        RemoteObjectRecord::SharedLiveSet(proposed),
+    ) = (existing, proposed)
+    else {
+        return Err(DbError::Message(format!(
+            "remote object {} already has different closed state",
+            proposed.object_id()
+        )));
+    };
+    if existing.identity.domain != SharedLiveSetObjectDomain::StoredBlob
+        || proposed.identity.domain != SharedLiveSetObjectDomain::StoredBlob
+        || existing.identity != proposed.identity
+        || existing.bytes != proposed.bytes
+    {
+        return Err(DbError::Message(format!(
+            "stored blob object {} already has different identity or bytes",
+            remote_object_id(&proposed.identity.object)
+        )));
+    }
+    let proposed_has_owner = match &proposed.state {
+        OwnedObjectState::Prepared { ownership } => ownership.pending.contains(owner),
+        OwnedObjectState::UploadedVerified { ownership } => ownership.pending.contains(owner),
+    };
+    if !proposed_has_owner {
+        return Err(DbError::Message(format!(
+            "stored blob object {} does not name its preparing commit",
+            remote_object_id(&proposed.identity.object)
+        )));
+    }
+    match &mut existing.state {
+        OwnedObjectState::Prepared { ownership } => {
+            ownership.pending.insert(owner.clone());
+        }
+        OwnedObjectState::UploadedVerified { ownership } => {
+            ownership.pending.insert(owner.clone());
+        }
+    }
+    let merged = RemoteObjectRecord::SharedLiveSet(existing);
+    merged.validate().map_err(|error| {
+        DbError::Message(format!(
+            "merged stored blob object {}: {error}",
+            merged.object_id()
+        ))
+    })?;
+    Ok(merged)
+}
+
+fn validate_prepared_package_on(
+    conn: &Connection,
+    write_id: &WriteId,
+    expected: &PreparedAudiencePackage,
+) -> Result<(), DbError> {
+    let audience = expected.package().audience().remote_audience();
+    let remote_object_id: String = conn
+        .query_row(
+            "SELECT remote_object_id
+             FROM store_write_packages
+             WHERE write_id = ?1 AND audience = ?2",
+            rusqlite::params![write_id.as_str(), remote_audience_to_db(&audience)],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    let remote_object_id = remote_object_id.parse().map_err(|error| {
+        DbError::Message(format!(
+            "stored prepared remote object id is invalid: {error}"
+        ))
+    })?;
+    let actual =
+        PreparedAudiencePackage::from_remote(load_remote_object_on(conn, remote_object_id)?)?;
+    if actual.package != expected.package
+        || actual.semantic_bytes != expected.semantic_bytes
+        || actual.stored_bytes != expected.stored_bytes
+        || actual.object != expected.object
+        || actual.remote_object_id != expected.remote_object_id
+    {
+        return Err(DbError::Message(format!(
+            "write {write_id} audience {audience:?} already has different prepared package bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_prepared_blob_on(
+    conn: &Connection,
+    write_id: &WriteId,
+    expected: &PreparedAudienceBlob,
+) -> Result<(), DbError> {
+    let locator_hash = expected.blob().locator().locator_hash();
+    let remote_object_id = expected.remote_object_id();
+    let (stored_locator_hash, spool_path): (String, Option<String>) = conn
+        .query_row(
+            "SELECT locator_hash, spool_path
+             FROM store_write_blobs
+             WHERE write_id = ?1 AND audience = ?2 AND remote_object_id = ?3",
+            rusqlite::params![
+                write_id.as_str(),
+                remote_audience_to_db(expected.audience()),
+                remote_object_id.to_string(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DbError::from)?;
+    if stored_locator_hash != locator_hash.to_string() {
+        return Err(DbError::Message(format!(
+            "write {write_id} audience {:?} exact object {remote_object_id} is indexed under locator {stored_locator_hash}, expected {locator_hash}",
+            expected.audience()
+        )));
+    }
+    let actual = PreparedAudienceBlob::from_remote(
+        expected.audience().clone(),
+        &locator_hash.to_string(),
+        load_remote_object_on(conn, remote_object_id)?,
+        spool_path.map(PathBuf::from),
+    )?;
+    if actual.blob() != expected.blob()
+        || actual.spool_path() != expected.spool_path()
+        || actual.remote_object_id() != expected.remote_object_id()
+    {
+        return Err(DbError::Message(format!(
+            "write {write_id} audience {:?} exact object {remote_object_id} already has different prepared blob bytes",
+            expected.audience()
+        )));
+    }
+    Ok(())
+}
+
 fn seed_from(hlc: &Hlc, value: Option<String>, context: &str) -> Result<(), DbError> {
     if let Some(stamp) = value {
         let floor = Timestamp::parse(&stamp)
@@ -7653,7 +14306,7 @@ fn open_connection_read_only(path: &Path) -> Result<Connection, DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::delete::BLOB_TOMBSTONE_GRACE;
+    use crate::blob::BLOB_TOMBSTONE_GRACE;
 
     fn notes_migration() -> Migration {
         Migration::sql(
@@ -7699,6 +14352,487 @@ mod tests {
     fn scoped_things_table() -> SyncedTable {
         SyncedTable::new("things", crate::sync::session::RowIdentity::SharedKey)
             .scoped_by("audience")
+    }
+
+    fn exact_blob_binding(row_id: &str, stamp: &str, bytes: &[u8]) -> RowBlobLocatorBinding {
+        let plaintext_hash = ObjectHash::digest(bytes);
+        let uploader_bytes = b"database test uploader registration";
+        let uploader = crate::sync::store_commit::StoreDeviceRegistrationRef {
+            device_id: "aa".repeat(32).parse().expect("valid test device id"),
+            registration_hash: ObjectHash::digest(uploader_bytes),
+            object: ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/devices/database-test-uploader.json".to_string(),
+                )
+                .expect("valid uploader registration slot"),
+                uploader_bytes.len() as u64,
+                ObjectHash::digest(uploader_bytes),
+            ),
+        };
+        let locator = BlobLocator::browsable(
+            "images",
+            row_id,
+            uploader,
+            format!("photos/{row_id}.bin"),
+            bytes.len() as u64,
+            plaintext_hash,
+        )
+        .expect("valid locator");
+        let stored = b"stored representation".to_vec();
+        let slot = crate::storage::cloud::ObjectSlot::logical(locator.semantic_key())
+            .expect("valid exact slot");
+        let object = ExactObjectRef::new(slot, stored.len() as u64, ObjectHash::digest(&stored));
+        RowBlobLocatorBinding::new(
+            "photos",
+            row_id,
+            stamp,
+            "id",
+            StoredBlobRef::new(locator, object).expect("valid stored blob"),
+        )
+        .expect("valid row binding")
+    }
+
+    #[test]
+    fn snapshot_blob_owner_rejects_other_activation_and_sequence() {
+        let conn = Connection::open_in_memory().expect("open snapshot owner database");
+        apply_coven_schema(&conn).expect("apply snapshot owner schema");
+        let binding = exact_blob_binding(
+            "snapshot-owner-photo",
+            "0000000001000-0000-owner",
+            b"snapshot owner bytes",
+        );
+        let expected = crate::sync::remote_object::SnapshotObjectOwner {
+            activation: StreamActivationId::from_hash(ObjectHash::digest(
+                b"verified snapshot activation",
+            )),
+            sequence: 7,
+        };
+        let install = |owner: crate::sync::remote_object::SnapshotObjectOwner| {
+            conn.execute("DELETE FROM remote_objects", [])
+                .expect("clear snapshot owner");
+            let remote = RemoteObjectRecord::snapshot_activated_blob(binding.blob(), owner)
+                .expect("build snapshot-owned blob");
+            conn.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                rusqlite::params![
+                    remote.object_id().to_string(),
+                    serde_json::to_string(&remote).expect("serialize snapshot-owned blob"),
+                ],
+            )
+            .expect("install snapshot-owned blob");
+        };
+
+        install(expected.clone());
+        validate_snapshot_object_owner_records_on(&conn, &expected)
+            .expect("verified snapshot owner matches");
+
+        install(crate::sync::remote_object::SnapshotObjectOwner {
+            activation: StreamActivationId::from_hash(ObjectHash::digest(
+                b"other snapshot activation",
+            )),
+            sequence: expected.sequence,
+        });
+        assert!(validate_snapshot_object_owner_records_on(&conn, &expected).is_err());
+
+        install(crate::sync::remote_object::SnapshotObjectOwner {
+            activation: expected.activation,
+            sequence: expected.sequence + 1,
+        });
+        assert!(validate_snapshot_object_owner_records_on(&conn, &expected).is_err());
+    }
+
+    fn local_row_blob(row_id: &str, stamp: &str, bytes: &[u8]) -> RowBlobRef {
+        let binding = exact_blob_binding(row_id, stamp, bytes);
+        let locator = binding.blob().locator();
+        RowBlobRef::new(
+            "photos".to_string(),
+            row_id.to_string(),
+            stamp.to_string(),
+            "id".to_string(),
+            BlobRef {
+                namespace: locator.namespace().to_string(),
+                id: locator.blob_id().to_string(),
+                scope: crate::blob::BlobScope::Master,
+                cloud_path: locator.cloud_path().map(str::to_string),
+                provenance: Provenance::HostProvided,
+                fill: crate::blob::CacheFill::CacheLazy,
+            },
+            locator.plaintext_size(),
+            locator.plaintext_hash(),
+            RowBlobAuthority::Local,
+            None,
+        )
+        .expect("valid Local row blob")
+    }
+
+    fn open_outbox_database(device_id: &str) -> Database {
+        Database::open(
+            Path::new(":memory:"),
+            Vec::new(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
+            device_id.to_string(),
+            &[],
+        )
+        .expect("open outbox database")
+        .0
+    }
+
+    fn test_candidate_family() -> crate::sync::store_commit::CandidateFamilyId {
+        crate::sync::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
+            b"database test candidate family",
+        ))
+    }
+
+    fn test_commit_coord() -> StoreCommitCoord {
+        StoreCommitCoord::MergeConcurrent {
+            stream_id: crate::sync::membership::AuthorStreamId::from_bytes([7; 32]),
+            sequence: 1,
+        }
+    }
+
+    fn test_commit_ref() -> StoreBatchCommitRef {
+        let coord = test_commit_coord();
+        let commit_hash = ObjectHash::digest(b"database test commit");
+        let StoreCommitCoord::MergeConcurrent { stream_id, .. } = &coord else {
+            unreachable!("database test coordinate is MergeConcurrent")
+        };
+        let slot = crate::storage::cloud::ObjectSlot::logical(format!(
+            "{}.json",
+            commit_semantic_prefix(&stream_id.to_string(), coord.sequence(), commit_hash)
+        ))
+        .expect("valid database test commit slot");
+        StoreBatchCommitRef {
+            coord,
+            commit_hash,
+            object: ExactObjectRef::new(slot, 1, ObjectHash::digest(b"x")),
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_retry_preserves_prepared_object_handoff() {
+        let db = open_outbox_database("prepared-upload-retry");
+        let row = local_row_blob("photo", "0000000001000-0000-a", b"photo bytes");
+        let initial_row = row.clone();
+        db.call(move |conn| {
+            Database::enqueue_upload_on(
+                conn,
+                "photos",
+                "photo",
+                &initial_row,
+                Path::new("/source/first"),
+                false,
+                "2026-07-16T10:00:00Z",
+            )
+        })
+        .await
+        .expect("enqueue upload");
+
+        let entry = db
+            .get_pending_cloud_uploads()
+            .await
+            .expect("read upload")
+            .pop()
+            .expect("upload entry");
+        let stored = exact_blob_binding("photo", "0000000001000-0000-a", b"photo bytes")
+            .blob()
+            .clone();
+        let spool_path = PathBuf::from("/spool/prepared");
+        db.mark_cloud_upload_prepared(
+            &entry,
+            crate::sync::audience_package::PackageAudience::Store,
+            stored.clone(),
+            spool_path.clone(),
+        )
+        .await
+        .expect("record prepared object");
+
+        db.call(move |conn| {
+            Database::enqueue_upload_on(
+                conn,
+                "photos",
+                "photo",
+                &row,
+                Path::new("/source/retried"),
+                true,
+                "2026-07-16T10:01:00Z",
+            )
+        })
+        .await
+        .expect("retry upload command");
+
+        let entries = db
+            .get_pending_cloud_uploads()
+            .await
+            .expect("read retried upload");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].operation,
+            OutboxOperation::Upload {
+                root_table: "photos".to_string(),
+                root_id: "photo".to_string(),
+                row: local_row_blob("photo", "0000000001000-0000-a", b"photo bytes"),
+                source_path: PathBuf::from("/source/retried"),
+                retain_pinned: true,
+                state: OutboxUploadState::Prepared {
+                    authority: crate::sync::audience_package::PackageAudience::Store,
+                    stored,
+                    spool_path,
+                },
+            }
+        );
+        db.mark_cloud_upload_created(&entries[0])
+            .await
+            .expect("record exact cloud creation");
+        let created = db
+            .get_pending_cloud_uploads()
+            .await
+            .expect("read Created upload");
+        let OutboxOperation::Upload { state, .. } = &created[0].operation else {
+            panic!("upload query returned a non-upload operation");
+        };
+        assert!(matches!(
+            state,
+            OutboxUploadState::Created {
+                authority: crate::sync::audience_package::PackageAudience::Store,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn repeated_exact_delete_resets_retry_state_without_duplication() {
+        let db = open_outbox_database("repeat-delete");
+        let stored = exact_blob_binding("photo", "0000000001000-0000-a", b"photo bytes")
+            .blob()
+            .clone();
+        let delete_stored = stored.clone();
+        db.call(move |conn| {
+            Database::enqueue_delete_on(conn, &delete_stored, "2026-07-16T10:00:00Z")
+        })
+        .await
+        .expect("enqueue delete");
+        let failed = db
+            .get_pending_cloud_deletes()
+            .await
+            .expect("read pending delete")
+            .pop()
+            .expect("delete entry");
+        db.record_cloud_outbox_failure(&failed, "provider unavailable", "2026-07-16T10:00:30Z")
+            .await
+            .expect("record delete failure");
+        let retry_stored = stored.clone();
+        db.call(move |conn| {
+            Database::enqueue_delete_on(conn, &retry_stored, "2026-07-16T10:01:00Z")
+        })
+        .await
+        .expect("repeat exact delete");
+
+        let deletes = db.get_pending_cloud_deletes().await.expect("read deletes");
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].attempt_count, 0);
+        assert_eq!(deletes[0].last_attempt_at, None);
+        assert_eq!(deletes[0].operation, OutboxOperation::Delete { stored });
+    }
+
+    #[tokio::test]
+    async fn exact_deletes_for_distinct_objects_remain_distinct() {
+        let db = open_outbox_database("distinct-deletes");
+        let first = exact_blob_binding("photo-a", "0000000001000-0000-a", b"photo a")
+            .blob()
+            .clone();
+        let second = exact_blob_binding("photo-b", "0000000001000-0000-a", b"photo b")
+            .blob()
+            .clone();
+        db.call(move |conn| Database::enqueue_delete_on(conn, &first, "2026-07-16T10:00:00Z"))
+            .await
+            .expect("enqueue first delete");
+        db.call(move |conn| Database::enqueue_delete_on(conn, &second, "2026-07-16T10:01:00Z"))
+            .await
+            .expect("enqueue second delete");
+
+        let deletes = db.get_pending_cloud_deletes().await.expect("read deletes");
+        assert_eq!(deletes.len(), 2);
+        assert_ne!(deletes[0].operation, deletes[1].operation);
+    }
+
+    fn blob_binding_table() -> SyncedTable {
+        SyncedTable::new("photos", crate::sync::session::RowIdentity::SharedKey).carries_blob(
+            crate::sync::session::BlobDecl::new(
+                "images",
+                Provenance::HostProvided,
+                crate::blob::CacheFill::CacheLazy,
+            )
+            .with_cloud_path_column("cloud_path"),
+        )
+    }
+
+    fn insert_blob_row(conn: &Connection, row_id: &str, stamp: &str, bytes: &[u8]) {
+        conn.execute(
+            "INSERT INTO photos (id, size, hash, cloud_path, _updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                row_id,
+                bytes.len() as i64,
+                ObjectHash::digest(bytes).to_string(),
+                format!("photos/{row_id}.bin"),
+                stamp,
+            ],
+        )
+        .expect("insert blob row");
+    }
+
+    #[test]
+    fn blob_bindings_install_only_for_exact_winning_row_stamps() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply_coven_schema(&conn).expect("apply coven schema");
+        conn.execute_batch(
+            "CREATE TABLE photos (
+                id TEXT PRIMARY KEY,
+                size INTEGER NOT NULL,
+                hash TEXT NOT NULL,
+                cloud_path TEXT NOT NULL,
+                _updated_at TEXT NOT NULL
+            ) STRICT;",
+        )
+        .expect("create photos");
+        let table = blob_binding_table();
+        let tables = vec![table];
+        let gates = Gates::from_tables(&conn, &tables).expect("build gates");
+        insert_blob_row(&conn, "winner", "0000000001000-0000-a", b"winner bytes");
+        insert_blob_row(&conn, "loser", "0000000002000-0000-b", b"loser bytes");
+
+        let package = AudiencePackage::store(
+            ObjectHash::digest(b"root"),
+            test_candidate_family(),
+            WriteId::from_generated("write-1".to_string()),
+            test_commit_coord(),
+            1,
+            Vec::new(),
+            vec![
+                exact_blob_binding("winner", "0000000001000-0000-a", b"winner bytes"),
+                exact_blob_binding("loser", "0000000001000-0000-b", b"loser bytes"),
+            ],
+        )
+        .expect("build package");
+        let activation = BlobActivation {
+            coord: test_commit_coord(),
+        };
+
+        let tx = conn.transaction().expect("begin");
+        Database::install_pulled_blob_activations_on(&tx, &package, &test_commit_ref())
+            .expect("install pulled blob activation");
+        let winning_rows = [crate::sync::apply::WinningRow {
+            table: "photos".to_string(),
+            row_id: "winner".to_string(),
+            row_stamp: Some("0000000001000-0000-a".to_string()),
+        }];
+        assert_eq!(
+            Database::install_winning_blob_bindings_on(
+                &tx,
+                &gates,
+                &tables,
+                &package,
+                &activation,
+                &winning_rows,
+            )
+            .expect("install winning binding"),
+            1
+        );
+        tx.commit().expect("commit");
+
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM blob_locators", [], |row| row
+                .get::<_, i64>(0))
+                .expect("count locators"),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT row_id FROM row_blob_locators", [], |row| row
+                .get::<_, String>(0))
+                .expect("read binding"),
+            "winner"
+        );
+        let resolved = Database::row_blob_ref_on(&conn, &gates, &tables[0], "winner")
+            .expect("resolve exact row blob reference");
+        assert_eq!(resolved.row_stamp(), "0000000001000-0000-a");
+        assert_eq!(
+            resolved.plaintext_hash(),
+            ObjectHash::digest(b"winner bytes")
+        );
+        assert_eq!(
+            resolved
+                .stored()
+                .expect("remote row carries exact locator")
+                .locator()
+                .blob_id(),
+            "winner"
+        );
+    }
+
+    #[test]
+    fn mismatched_blob_values_roll_back_locator_installation_with_rows() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply_coven_schema(&conn).expect("apply coven schema");
+        conn.execute_batch(
+            "CREATE TABLE photos (
+                id TEXT PRIMARY KEY,
+                size INTEGER NOT NULL,
+                hash TEXT NOT NULL,
+                cloud_path TEXT NOT NULL,
+                _updated_at TEXT NOT NULL
+            ) STRICT;",
+        )
+        .expect("create photos");
+        let tables = vec![blob_binding_table()];
+        let gates = Gates::from_tables(&conn, &tables).expect("build gates");
+        insert_blob_row(&conn, "photo", "0000000001000-0000-a", b"actual bytes");
+        let package = AudiencePackage::store(
+            ObjectHash::digest(b"root"),
+            test_candidate_family(),
+            WriteId::from_generated("write-1".to_string()),
+            test_commit_coord(),
+            1,
+            Vec::new(),
+            vec![exact_blob_binding(
+                "photo",
+                "0000000001000-0000-a",
+                b"different bytes",
+            )],
+        )
+        .expect("build package");
+        let activation = BlobActivation {
+            coord: test_commit_coord(),
+        };
+
+        let tx = conn.transaction().expect("begin");
+        Database::install_pulled_blob_activations_on(&tx, &package, &test_commit_ref())
+            .expect("install pulled blob activation");
+        let winning_rows = [crate::sync::apply::WinningRow {
+            table: "photos".to_string(),
+            row_id: "photo".to_string(),
+            row_stamp: Some("0000000001000-0000-a".to_string()),
+        }];
+        let error = Database::install_winning_blob_bindings_on(
+            &tx,
+            &gates,
+            &tables,
+            &package,
+            &activation,
+            &winning_rows,
+        )
+        .expect_err("mismatched locator must fail");
+        assert!(error
+            .to_string()
+            .contains("does not match winning row values"));
+        tx.rollback().expect("roll back");
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM blob_locators", [], |row| row
+                .get::<_, i64>(0))
+                .expect("count locators"),
+            0
+        );
     }
 
     fn assert_coven_schema_mutation_is_rejected(
@@ -7761,18 +14895,18 @@ mod tests {
         );
 
         let conn = Connection::open(&path).expect("inspect rejected database");
-        let local_device_id: String = conn
+        let host_device_id: String = conn
             .query_row(
                 "SELECT value FROM protocol_state WHERE key = ?1",
-                [LOCAL_DEVICE_ID_STATE_KEY],
+                [HOST_DEVICE_ID_STATE_KEY],
                 |row| row.get(0),
             )
-            .expect("local device id");
-        assert_eq!(local_device_id, "schema-seed", "{name} was rewritten");
+            .expect("host device id");
+        assert_eq!(host_device_id, "schema-seed", "{name} was rewritten");
     }
 
     #[tokio::test]
-    async fn required_store_root_hash_rejects_missing_and_malformed_state() {
+    async fn required_store_root_hash_rejects_missing_and_malformed_exact_authority() {
         let (db, _) = Database::open(
             Path::new(":memory:"),
             vec![SyncedTable::new(
@@ -7793,22 +14927,100 @@ mod tests {
             .expect_err("missing Store root must fail");
         assert!(matches!(missing, DbError::StoreRootHashMissing));
 
-        db.set_protocol_state(STORE_ROOT_HASH_STATE_KEY, "not-a-root-hash")
-            .await
-            .expect("write malformed Store root");
+        db.call(|conn| {
+            conn.execute(
+                "INSERT INTO store_protocol_root_authority
+                 (singleton, store_root_hash, store_protocol_root_bytes, store_root_object)
+                 VALUES (1, ?1, X'00', '{}')",
+                ["00".repeat(32)],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("write malformed exact Store root authority");
         let malformed = db
             .required_store_root_hash()
             .await
             .expect_err("malformed Store root must fail");
         assert!(matches!(
             malformed,
-            DbError::StoreRootHashInvalid { reason } if !reason.is_empty()
+            DbError::Message(reason) if !reason.is_empty()
         ));
 
-        let expected = ObjectHash::digest(b"required Store root");
-        db.set_protocol_state(STORE_ROOT_HASH_STATE_KEY, &expected.to_string())
+        db.call(|conn| {
+            conn.execute("DELETE FROM store_protocol_root_authority", [])
+                .map(|_| ())
+                .map_err(DbError::from)
+        })
+        .await
+        .expect("remove malformed authority");
+        let signer = crate::keys::UserKeypair::generate();
+        let founder_provider_admin =
+            crate::sync::test_helpers::test_founder_provider_admin("required-store-root");
+        let descriptor = crate::sync::store_commit::StoreCreationDescriptor {
+            version: crate::sync::store_commit::STORE_PROTOCOL_VERSION,
+            creation_id: crate::sync::store_commit::StoreCreationId::from_nonce(
+                "required-store-root",
+            ),
+            provider: crate::sync::storage::StoreProviderBinding::S3 {
+                endpoint: crate::sync::storage::S3EndpointBinding::Custom {
+                    origin: "https://test.invalid".to_string(),
+                },
+                region: "test-region".to_string(),
+                bucket: "required-store-root-bucket".to_string(),
+                key_prefix: None,
+            },
+            schema_version: db.schema_version(),
+            sync_routing_hash: db.sync_routing_hash(),
+            write_policy: crate::WritePolicy::MergeConcurrent,
+            founder_pubkey: crate::keys::public_key_hex(&signer),
+            founder_grant: crate::sync::test_helpers::test_membership_grant_id(
+                "required-store-root founder",
+            ),
+            root_slot: crate::storage::cloud::ObjectSlot::logical(
+                crate::sync::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string(),
+            )
+            .expect("valid Store root slot"),
+            founder_registration: crate::storage::cloud::ObjectSlot::logical(
+                "store-v1/test/required-store-root/registration.json".to_string(),
+            )
+            .expect("valid founder registration slot"),
+            founder_provider_admin,
+            membership: crate::sync::store_commit::StoreMembershipGenesis::MergeConcurrent {
+                founder_membership: crate::sync::store_commit::GrantStreamAnchor::StoreMembership {
+                    first_slot: crate::storage::cloud::ObjectSlot::logical(
+                        "store-v1/test/required-store-root/membership/1.json".to_string(),
+                    )
+                    .expect("valid membership slot"),
+                },
+            },
+            founder_recovery: crate::sync::store_commit::GrantStreamAnchor::OwnerRecovery {
+                first_slot: crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/test/required-store-root/recovery/1.json".to_string(),
+                )
+                .expect("valid recovery slot"),
+            },
+        };
+        let root = crate::sync::store_commit::StoreProtocolRoot::signed(descriptor, &signer)
+            .expect("sign Store root authority");
+        let bytes = root.to_bytes();
+        let expected = root.object_hash();
+        let reference = crate::sync::store_commit::StoreRootRef {
+            store_root_id: root.descriptor.store_root_id(),
+            store_root_hash: expected,
+            object: ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/store-protocol-root/required-store-root.json".to_string(),
+                )
+                .expect("valid Store root slot"),
+                bytes.len() as u64,
+                ObjectHash::digest(&bytes),
+            ),
+        };
+        db.install_store_root_authority(reference, bytes)
             .await
-            .expect("write Store root");
+            .expect("install exact Store root authority");
         assert_eq!(db.required_store_root_hash().await.unwrap(), expected);
     }
 
@@ -7888,7 +15100,7 @@ mod tests {
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
             crate::WritePolicy::MergeConcurrent,
-            "ordinary-second-open".to_string(),
+            "ordinary-first-open".to_string(),
             &migrations,
         )
         .expect("ordinary migration open");
@@ -7956,7 +15168,7 @@ mod tests {
             BLOB_TOMBSTONE_GRACE,
             crate::blob::TransferLimits::serial(),
             crate::WritePolicy::MergeConcurrent,
-            "routing-second-open".to_string(),
+            "routing-first-open".to_string(),
             &[v1(), v2],
         );
         let error = match result {
@@ -8548,6 +15760,244 @@ mod tests {
         assert_eq!(value, 1, "the slow DB call still returns its result");
     }
 
+    #[tokio::test]
+    async fn prepared_audience_objects_reload_the_same_verified_bytes_and_spool() {
+        let (db, _stamper) = Database::open(
+            Path::new(":memory:"),
+            Vec::new(),
+            BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::MergeConcurrent,
+            "prepared-audience-objects".to_string(),
+            &[],
+        )
+        .expect("open database");
+        let write_id = WriteId::from_generated("write-1".to_string());
+        let stored_write_id = write_id.clone();
+        db.call(move |conn| {
+            let base = serde_json::to_string(&StoreWriteBase::MergeConcurrent {
+                dependencies: BTreeMap::new(),
+            })
+            .expect("serialize base");
+            conn.execute(
+                "INSERT INTO store_writes
+                 (write_id, status, affected_rows, changeset, inverse_changeset, base, blob_facts)
+                 VALUES (?1, '\"pending\"', '[]', X'', X'', ?2, '{\"blobs\":[]}')",
+                rusqlite::params![stored_write_id.as_str(), base],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("seed write");
+
+        let binding = exact_blob_binding("photo", "0000000001000-0000-a", b"photo bytes");
+        let second_object = ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::opaque(
+                binding.blob().locator().semantic_key(),
+                "database-test-second-physical-object".to_string(),
+            )
+            .expect("second blob slot"),
+            binding.blob().object().stored_size(),
+            binding.blob().object().stored_hash(),
+        );
+        let second_blob = StoredBlobRef::new(binding.blob().locator().clone(), second_object)
+            .expect("second exact object for the same locator");
+        let second_binding = RowBlobLocatorBinding::new(
+            "photos",
+            "photo-copy",
+            "0000000001000-0000-a",
+            "id",
+            second_blob.clone(),
+        )
+        .expect("second row binding");
+        let package = AudiencePackage::store(
+            ObjectHash::digest(b"root"),
+            test_candidate_family(),
+            write_id.clone(),
+            test_commit_coord(),
+            1,
+            b"changeset".to_vec(),
+            vec![binding.clone(), second_binding],
+        )
+        .expect("build package");
+        let semantic = package.to_bytes();
+        let stored_package = b"stored package representation".to_vec();
+        let package_slot =
+            crate::storage::cloud::ObjectSlot::logical("store-v1/packages/write-1".to_string())
+                .expect("package slot");
+        let package_object = ExactObjectRef::new(
+            package_slot,
+            stored_package.len() as u64,
+            ObjectHash::digest(&stored_package),
+        );
+        let owner_object = ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(
+                "store-v1/commits/database-test-owner".to_string(),
+            )
+            .expect("owner commit slot"),
+            1,
+            ObjectHash::digest(b"owner commit"),
+        );
+        let owner = StoreBatchCommitRef {
+            coord: test_commit_coord(),
+            commit_hash: ObjectHash::digest(b"owner commit semantic bytes"),
+            object: owner_object,
+        };
+        let package_remote = crate::sync::remote_object::RemoteObjectRecord::CandidateExclusive(
+            crate::sync::remote_object::CandidateObjectRecord {
+                identity: crate::sync::remote_object::CandidateExclusiveTarget {
+                    family: package.candidate_family(),
+                    domain:
+                        crate::sync::remote_object::CandidateExclusiveObjectDomain::StorePackage,
+                    semantic_hash: ObjectHash::digest(&semantic),
+                    object: package_object.clone(),
+                },
+                bytes: crate::sync::remote_object::RemoteObjectBytes::inline(
+                    semantic.clone(),
+                    stored_package.clone(),
+                    package_object.clone(),
+                )
+                .expect("package remote bytes"),
+                state: crate::sync::remote_object::CandidateObjectState::Prepared {
+                    ownership: crate::sync::remote_object::PendingCandidateOwnership {
+                        pending: std::collections::BTreeSet::from([owner.clone()]),
+                    },
+                },
+            },
+        );
+        let package_remote_id = package_remote.object_id();
+        let prepared_package = PreparedAudiencePackage::new(
+            package_remote_id,
+            semantic,
+            stored_package.clone(),
+            package_object.clone(),
+        )
+        .expect("prepare package");
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let spool = directory.path().join("blob.spool");
+        crate::local_blob::write_atomic_durable(&spool, b"stored representation")
+            .await
+            .expect("write spool");
+        let blob_remote = crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(
+            crate::sync::remote_object::SharedObjectRecord {
+                identity: crate::sync::remote_object::SharedLiveSetObjectRef {
+                    domain: crate::sync::remote_object::SharedLiveSetObjectDomain::StoredBlob,
+                    semantic_hash: ObjectHash::digest(&binding.blob().locator().to_bytes()),
+                    object: binding.blob().object().clone(),
+                },
+                bytes: crate::sync::remote_object::RemoteObjectBytes::blob(
+                    binding.blob().locator().to_bytes(),
+                    binding.blob().object().clone(),
+                )
+                .expect("blob remote bytes"),
+                state: crate::sync::remote_object::OwnedObjectState::Prepared {
+                    ownership: crate::sync::remote_object::PendingCandidateOwnership {
+                        pending: std::collections::BTreeSet::from([owner.clone()]),
+                    },
+                },
+            },
+        );
+        let blob_remote_id = blob_remote.object_id();
+        let prepared_blob = PreparedAudienceBlob {
+            remote_object_id: blob_remote_id,
+            audience: RemoteAudience::Store,
+            blob: binding.blob().clone(),
+            spool_path: Some(spool.clone()),
+        };
+        let second_blob_remote = crate::sync::remote_object::RemoteObjectRecord::SharedLiveSet(
+            crate::sync::remote_object::SharedObjectRecord {
+                identity: crate::sync::remote_object::SharedLiveSetObjectRef {
+                    domain: crate::sync::remote_object::SharedLiveSetObjectDomain::StoredBlob,
+                    semantic_hash: ObjectHash::digest(&second_blob.locator().to_bytes()),
+                    object: second_blob.object().clone(),
+                },
+                bytes: crate::sync::remote_object::RemoteObjectBytes::blob(
+                    second_blob.locator().to_bytes(),
+                    second_blob.object().clone(),
+                )
+                .expect("second blob remote bytes"),
+                state: crate::sync::remote_object::OwnedObjectState::Prepared {
+                    ownership: crate::sync::remote_object::PendingCandidateOwnership {
+                        pending: std::collections::BTreeSet::from([owner]),
+                    },
+                },
+            },
+        );
+        let second_blob_remote_id = second_blob_remote.object_id();
+        let second_prepared_blob = PreparedAudienceBlob {
+            remote_object_id: second_blob_remote_id,
+            audience: RemoteAudience::Store,
+            blob: second_blob,
+            spool_path: Some(spool.clone()),
+        };
+        let persisted_write_id = write_id.clone();
+        let package_state = serde_json::to_string(&package_remote).expect("package remote state");
+        let blob_state = serde_json::to_string(&blob_remote).expect("blob remote state");
+        let second_blob_state =
+            serde_json::to_string(&second_blob_remote).expect("second blob remote state");
+        db.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                rusqlite::params![package_remote_id.to_string(), package_state],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                rusqlite::params![blob_remote_id.to_string(), blob_state],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                rusqlite::params![second_blob_remote_id.to_string(), second_blob_state],
+            )
+            .map_err(DbError::from)?;
+            Database::persist_prepared_audience_objects_on(
+                &tx,
+                &persisted_write_id,
+                &[prepared_package],
+                &[prepared_blob, second_prepared_blob],
+            )?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+        .expect("persist prepared objects");
+
+        let reloaded = db
+            .prepared_audience_objects(&write_id)
+            .await
+            .expect("reload prepared objects");
+        assert_eq!(reloaded.packages.len(), 1);
+        assert_eq!(reloaded.packages[0].package(), &package);
+        assert_eq!(reloaded.packages[0].remote_object_id(), package_remote_id);
+        assert_eq!(reloaded.blobs.len(), 2);
+        let reloaded_ids = reloaded
+            .blobs
+            .iter()
+            .map(PreparedAudienceBlob::remote_object_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            reloaded_ids,
+            std::collections::BTreeSet::from([blob_remote_id, second_blob_remote_id])
+        );
+        assert!(reloaded
+            .blobs
+            .iter()
+            .all(|blob| blob.spool_path() == Some(spool.as_path())));
+        assert_eq!(
+            reloaded
+                .blobs
+                .iter()
+                .map(|blob| blob.blob().locator().locator_hash())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            1,
+            "same-locator exact objects survive persistence independently",
+        );
+    }
+
     /// Dropping the last handle from inside a runtime task must not block that
     /// task on the connection thread's queue, and a job already dispatched must
     /// still run to completion. The drop detaches the thread in async context, so
@@ -8984,7 +16434,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_open_creates_canonical_make_remote_intent_retain_pinned_column() {
+    async fn fresh_open_requires_each_make_remote_intent_to_name_retain_pinned() {
         let (db, _stamper) = Database::open(
             Path::new(":memory:"),
             Vec::new(),
@@ -9024,9 +16474,8 @@ mod tests {
 
         assert_eq!(column.0, 1, "retain_pinned must be NOT NULL");
         assert_eq!(
-            column.1.as_deref(),
-            Some("0"),
-            "retain_pinned must default to 0",
+            column.1, None,
+            "retain_pinned must be supplied by every make_remote intent",
         );
     }
 
@@ -9132,7 +16581,7 @@ mod tests {
             WritePolicy::MergeConcurrent => serde_json::json!({
                 "merge_concurrent": {
                     "device_id": "restart-control-device",
-                    "stream_id": "55".repeat(16),
+                    "stream_id": "55".repeat(32),
                     "author_pubkey": "restart-owner",
                     "author_owner_grant": "11".repeat(32),
                     "seq": 1,
@@ -9184,18 +16633,15 @@ mod tests {
             &migrations,
         )
         .expect("open scoped Store");
+        crate::sync::test_helpers::TestStore::create(
+            &db,
+            name,
+            crate::keys::UserKeypair::generate(),
+        )
+        .await
+        .expect("install exact scoped Store authority");
         let control = restart_circle_coord(policy);
         db.call(move |conn| {
-            conn.execute(
-                "INSERT INTO protocol_state (key, value)
-                 VALUES (?1, ?2)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (
-                    STORE_ROOT_HASH_STATE_KEY,
-                    ObjectHash::digest(b"restart-scoped-root").to_string(),
-                ),
-            )
-            .map_err(DbError::from)?;
             conn.execute(
                 "INSERT INTO circle_control_activations
                  (circle_id, control_coord, stream_id, seq, commit_hash, control_bytes)

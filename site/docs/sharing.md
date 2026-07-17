@@ -316,7 +316,7 @@ right direction, and neither side ever types a key by hand.
 <circle class="numc" cx="24" cy="177" r="8"/>
 <text class="num" x="24" y="180.5" text-anchor="middle">4</text>
 <rect class="chip" x="30" y="164" width="180" height="26" rx="7"/>
-<text class="lbl s11" x="120" y="181" text-anchor="middle">join_from_invite_code</text>
+<text class="lbl s11" x="120" y="181" text-anchor="middle">DeviceJoinClient</text>
 </svg>
 
 The joiner runs `generate_join_request`, which mints a fresh Ed25519 keypair
@@ -334,24 +334,27 @@ coven:
    head.
 
 The cloud connection details come back packed with the store id, name, owner
-pubkey, wrapped-key author, `store_root_hash`, and policy-shaped membership floor into an
+pubkey, wrapped-key author, exact Store root, and policy-shaped membership floor into an
 [`InviteCode`](rustdoc:struct:coven::join_code::InviteCode). The owner sends
 that back.
 
-The joiner pastes the invite code, alongside the join-request code it kept
-from step 1, into
-[`join_from_invite_code`](rustdoc:fn:coven::sync::join::join_from_invite_code),
-which:
+The joiner constructs
+[`DeviceJoinClient`](rustdoc:struct:coven::DeviceJoinClient) from the invite and
+the join-request code it kept. The owner creates an offer with
+`CovenHandle::begin_device_join`. Four exact values then cross between them:
 
-1. decodes both codes and builds the cloud connection (running any OAuth flow
-   inline),
-2. unwraps the store keyring,
-3. bootstraps the local database from the latest snapshot,
-4. pulls the changesets created since that snapshot,
-5. promotes the pending identity from step 1 into this store's own identity
-   — scoped to this store alone; a device's identity in any other store it
-   belongs to is untouched,
-6. saves the new store config.
+1. The offer becomes a provider access request; the selected provider
+   administrator returns an approval.
+2. The approval becomes a registration request; the owner accepts it and
+   returns the provider-ready bootstrap.
+3. The joining device installs the snapshot database and returns its readiness
+   proof; the owner verifies provider admission and returns an activation.
+4. The joining device installs that activation, atomically saves its config,
+   moves the pending journal into the Store database, and promotes the pending
+   identity into this store's custody.
+
+Every client call resumes the durable journal. The same exchange admits a new
+member's device and another device belonging to an existing member.
 
 The join call also receives the host's expected `WritePolicy`; a mismatch is
 refused before provider access or local writes. A custom S3 `Serial` join must

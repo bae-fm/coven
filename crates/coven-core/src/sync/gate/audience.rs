@@ -917,7 +917,7 @@ fn change_parent_key(
     })
 }
 
-fn live_row_audience(
+pub(crate) fn live_row_audience(
     conn: &Connection,
     gates: &Gates,
     table: &str,
@@ -991,7 +991,7 @@ fn live_row_audience(
     }
 }
 
-fn active_circle_control(
+pub(crate) fn active_circle_control(
     conn: &Connection,
     circle_id: CircleId,
     write_policy: WritePolicy,

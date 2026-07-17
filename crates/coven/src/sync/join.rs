@@ -48,6 +48,8 @@ pub enum BootstrapError {
     StorePull(#[from] crate::sync::store_pull::StorePullError),
     #[error("Store device registration: {0}")]
     StoreRegistration(#[from] crate::sync::store_registration::StoreRegistrationError),
+    #[error("Store device join: {0}")]
+    DeviceJoin(#[from] crate::DeviceJoinError),
     #[error("storage: {0}")]
     Storage(#[from] crate::sync::storage::StorageError),
     #[error("config: {0}")]
@@ -76,10 +78,8 @@ pub enum BootstrapError {
     },
     #[error("{provider:?} cannot coordinate a Serial Store with this configuration")]
     SerialCoordinationUnavailable { provider: crate::CloudProvider },
-    #[error(
-        "{provider:?} cannot store immutable protocol and blob copies with this configuration"
-    )]
-    ImmutableCopiesUnavailable { provider: crate::CloudProvider },
+    #[error("{provider:?} cannot provide exact protocol and blob slots with this configuration")]
+    ExactSlotsUnavailable { provider: crate::CloudProvider },
     #[error("database: {0}")]
     Database(String),
     #[error("invalid signing key: {0}")]
@@ -100,22 +100,11 @@ pub enum BootstrapError {
         cleanup: String,
         cause: Box<BootstrapError>,
     },
-    #[error("bootstrap failed and its Store device retirement could not be published: {rollback} (bootstrap error: {cause})")]
-    RegistrationRollback {
-        rollback: String,
-        cause: Box<BootstrapError>,
-    },
 }
 
 impl From<InviteError> for BootstrapError {
     fn from(error: InviteError) -> Self {
         Self::Invite(Box::new(error))
-    }
-}
-
-impl BootstrapError {
-    fn preserves_registration_rollback(&self) -> bool {
-        matches!(self, Self::RegistrationRollback { .. })
     }
 }
 
@@ -134,9 +123,6 @@ pub(crate) fn cleanup_after_bootstrap_failure(
     identity_custody: &dyn DeviceIdentityCustody,
     cause: BootstrapError,
 ) -> BootstrapError {
-    if cause.preserves_registration_rollback() {
-        return cause;
-    }
     let failures = remove_bootstrap_residue(store_dir, store_keys, custody, identity_custody);
     if failures.is_empty() {
         cause
@@ -249,57 +235,51 @@ fn error_if_cancelled(cancel: &watch::Receiver<bool>) -> Result<(), BootstrapErr
     }
 }
 
-/// Both variants carry the store's signing identity, and
-/// `bootstrap_and_save_store` establishes it in the store's own custody as the
-/// last step before the config marker — so a saved config always implies a
-/// resolvable identity. What differs is where the keypair comes from and what
-/// happens to its source afterward: restore's comes from the restore code the
-/// user still holds (re-suppliable, nothing to clean up), join's comes from the
-/// pending slot its request minted — still consumable by a retry after a torn
-/// bootstrap's wipe, and discarded only once the whole join succeeds (see
-/// [`join_store`]).
-pub(crate) enum BootstrapContext<'a> {
-    /// Join pins the store owner from the invite.
-    Join {
-        owner_pubkey: &'a str,
-        keypair: &'a UserKeypair,
-    },
-    Restore {
-        founder_pubkey: &'a str,
-        keypair: &'a UserKeypair,
-    },
+/// The identity and verified authority carried by a restore code. Bootstrap
+/// installs the identity in store custody before writing the config marker.
+pub(crate) struct RestoreBootstrapContext<'a> {
+    pub founder_pubkey: &'a str,
+    pub keypair: &'a UserKeypair,
+    pub authority: &'a crate::sync::restore_code::RestoreAuthority,
+    pub continuation: Option<(
+        &'a crate::sync::restore_code::ActivatedContinuation,
+        &'a UserKeypair,
+    )>,
 }
 
-impl BootstrapContext<'_> {
+impl RestoreBootstrapContext<'_> {
     fn owner_pubkey(&self) -> &str {
-        match self {
-            BootstrapContext::Join { owner_pubkey, .. }
-            | BootstrapContext::Restore {
-                founder_pubkey: owner_pubkey,
-                ..
-            } => owner_pubkey,
-        }
+        self.founder_pubkey
     }
 
     fn keypair(&self) -> &UserKeypair {
-        match self {
-            BootstrapContext::Join { keypair, .. } | BootstrapContext::Restore { keypair, .. } => {
-                keypair
+        self.keypair
+    }
+
+    fn activated_continuation(
+        &self,
+    ) -> Option<(
+        &crate::sync::restore_code::ActivatedContinuation,
+        &UserKeypair,
+        &UserKeypair,
+    )> {
+        self.continuation
+            .map(|(continuation, device)| (continuation, self.keypair, device))
+    }
+
+    fn owner_recovery(
+        &self,
+    ) -> Option<(
+        &crate::sync::restore_code::OwnerRecoveryAuthority,
+        &UserKeypair,
+    )> {
+        match self.authority {
+            crate::sync::restore_code::RestoreAuthority::OwnerRecovery(authority) => {
+                Some((authority, self.keypair))
             }
+            crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(_) => None,
         }
     }
-}
-
-/// The invite names an OAuth provider, so joining needs a token the caller
-/// fetched via the host OAuth flow first — the same precondition restore has.
-#[cfg(feature = "oauth-providers")]
-fn require_join_oauth(
-    oauth_tokens: Option<crate::oauth::OAuthTokens>,
-    provider_name: &str,
-) -> Result<crate::oauth::OAuthTokens, BootstrapError> {
-    oauth_tokens.ok_or_else(|| {
-        BootstrapError::Provider(format!("{provider_name} join requires an OAuth token"))
-    })
 }
 
 /// Persist the caller-supplied OAuth tokens for the store `ks` is scoped to, so
@@ -316,11 +296,16 @@ pub(crate) fn persist_oauth_tokens(
     ks.set_cloud_home_oauth_tokens(tokens)
 }
 
-/// Build a CloudHome from a JoinInfo for the join flow.
-///
-/// For OAuth providers, the caller supplies the tokens — fetched via the host's
-/// OAuth flow before calling join, the same way restore does — and they are
-/// saved to the store-scoped keyring.
+#[cfg(feature = "oauth-providers")]
+fn require_join_oauth(
+    oauth_tokens: Option<crate::oauth::OAuthTokens>,
+    provider_name: &str,
+) -> Result<crate::oauth::OAuthTokens, BootstrapError> {
+    oauth_tokens.ok_or_else(|| {
+        BootstrapError::Provider(format!("{provider_name} join requires an OAuth token"))
+    })
+}
+
 struct JoinCloudHome {
     home: Arc<dyn CloudHome>,
     coordination: Option<CoordinationClients>,
@@ -332,11 +317,10 @@ async fn build_cloud_home_for_join(
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
-    custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
+    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
 ) -> Result<JoinCloudHome, BootstrapError> {
     use crate::storage::cloud::*;
 
-    // Consumed only by the oauth provider arms below.
     #[cfg(not(feature = "oauth-providers"))]
     let _ = (&lib_ks, &oauth_tokens, &clock);
 
@@ -356,7 +340,7 @@ async fn build_cloud_home_for_join(
                 access_key.clone(),
                 secret_key.clone(),
                 key_prefix.clone(),
-                custom_s3_immutable_copies,
+                custom_s3_exact_slots,
             )
             .await?;
             let s3 = Arc::new(s3);
@@ -365,11 +349,9 @@ async fn build_cloud_home_for_join(
                 coordination: Some((s3, Arc::new(peer))),
             })
         }
-
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::GoogleDrive { folder_id } => {
             let tokens = require_join_oauth(oauth_tokens, "Google Drive")?;
-            persist_oauth_tokens(lib_ks, &tokens)?;
             Ok(JoinCloudHome {
                 home: Arc::new(google_drive::GoogleDriveCloudHome::new(
                     folder_id.clone(),
@@ -380,11 +362,9 @@ async fn build_cloud_home_for_join(
                 coordination: None,
             })
         }
-
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::Dropbox { folder_path } => {
             let tokens = require_join_oauth(oauth_tokens, "Dropbox")?;
-            persist_oauth_tokens(lib_ks, &tokens)?;
             Ok(JoinCloudHome {
                 home: Arc::new(dropbox::DropboxCloudHome::new(
                     folder_path.clone(),
@@ -395,14 +375,12 @@ async fn build_cloud_home_for_join(
                 coordination: None,
             })
         }
-
         #[cfg(feature = "oauth-providers")]
         CloudHomeJoinInfo::OneDrive {
             drive_id,
             folder_id,
         } => {
             let tokens = require_join_oauth(oauth_tokens, "OneDrive")?;
-            persist_oauth_tokens(lib_ks, &tokens)?;
             Ok(JoinCloudHome {
                 home: Arc::new(onedrive::OneDriveCloudHome::new(
                     drive_id.clone(),
@@ -414,7 +392,6 @@ async fn build_cloud_home_for_join(
                 coordination: None,
             })
         }
-
         #[cfg(not(feature = "oauth-providers"))]
         CloudHomeJoinInfo::GoogleDrive { .. }
         | CloudHomeJoinInfo::Dropbox { .. }
@@ -469,273 +446,429 @@ async fn build_cloud_home_for_join(
     }
 }
 
-/// Join a shared store using an invite code string.
-///
-/// `join_request_code` is the string this device's own [`crate::generate_join_request`]
-/// returned when it asked to join — decoded here to recover the public key that
-/// names the pending identity minted for that request, which a completed join
-/// promotes into this store's own identity custody (see
-/// [`crate::keys::mint_pending_identity`]/[`crate::keys::promote_pending_identity`]).
-///
-/// Handles everything: decode invite, promote the pending identity, build cloud
-/// home (using caller-provided OAuth tokens for the providers that need them),
-/// run the join protocol, and set as active store.
-#[allow(clippy::too_many_arguments)]
-pub async fn join_from_invite_code(
-    invite_code_str: &str,
-    join_request_code: &str,
-    layout: &StoreLayout,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    expected_write_policy: crate::WritePolicy,
+/// A joining device's local half of the four-transfer admission exchange.
+/// The journal lives outside the incomplete store directory, so every method
+/// can be retried after process termination without losing its exact predecessor.
+pub struct DeviceJoinClient {
+    code: InviteCode,
+    member_pubkey: String,
+    layout: StoreLayout,
+    synced_tables: Vec<SyncedTable>,
+    migrations: Vec<Migration>,
     custom_s3_serial: Option<crate::CustomS3Serial>,
-    custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
-    key_custody: crate::custody::KeyCustody,
-    identity_custody: IdentityCustody,
+    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+    custody: Arc<dyn MasterKeyCustody>,
+    identity_custody: Arc<dyn DeviceIdentityCustody>,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
     cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
     clock: crate::clock::ClockRef,
-    ids: crate::id_provider::IdRef,
-    on_status: impl Fn(&str),
-    cancel: &watch::Receiver<bool>,
-) -> Result<Config, BootstrapError> {
-    let code = crate::join_code::decode(invite_code_str)
-        .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?;
-    let actual_write_policy = code.membership_floor.write_policy();
-    if actual_write_policy != expected_write_policy {
-        return Err(BootstrapError::WritePolicyMismatch {
-            expected: expected_write_policy,
-            actual: actual_write_policy,
-        });
-    }
-    crate::storage::cloud::setup::require_serial_coordination_join_info(
-        &code.join_info,
-        custom_s3_serial,
-        actual_write_policy,
-    )
-    .map_err(|provider| BootstrapError::SerialCoordinationUnavailable { provider })?;
-    crate::storage::cloud::setup::require_immutable_copy_capabilities_join_info(
-        &code.join_info,
-        custom_s3_immutable_copies,
-    )
-    .map_err(|provider| BootstrapError::ImmutableCopiesUnavailable { provider })?;
-    let joiner_public_key = crate::join_code::decode_join_request(join_request_code)
-        .map_err(|e| BootstrapError::InvalidCode(e.to_string()))?
-        .public_key;
+    #[cfg(test)]
+    test_home: Option<Arc<dyn CloudHome>>,
+    #[cfg(test)]
+    test_keyring: Option<MasterKeyring>,
+}
 
-    let store_dir = layout.store_dir(&code.store_id);
+struct DeviceJoinStorage {
+    storage: CloudSyncStorage,
+    exact: Arc<dyn crate::storage::cloud::ExactSlotStorage>,
+    keyring: MasterKeyring,
+}
 
-    // Hoisted here, before any durable write below, so a failure at any step —
-    // including `build_cloud_home_for_join`'s OAuth persist, which runs before
-    // `join_store` even creates the store directory — funnels through the same
-    // rollback instead of escaping via `?`. Resolving custody has no side
-    // effect, so it is safe ahead of the completion-marker guard, which itself
-    // may remove torn-bootstrap keyring residue through these handles.
-    let store_keys = StoreKeys::new(code.store_id.clone());
-    let custody = key_custody.resolve(&code.store_id, &store_dir);
-    let identity_custody = identity_custody.resolve(&code.store_id, &store_dir);
-
-    // Refuse a *completed* store (config present) and clear a torn one before
-    // any keyring or provider side effect. Re-joining a store you already have
-    // adds nothing — the existing store is the data. `join_store` below is the
-    // authoritative guard against the destructive failure-cleanup; this check
-    // exists so a refused join also leaves no residue from
-    // `build_cloud_home_for_join`, which runs first and saves OAuth tokens to
-    // the keyring and can accept a CloudKit share.
-    refuse_completed_or_clear_torn_store(
-        &store_dir,
-        &store_keys,
-        custody.as_ref(),
-        identity_custody.as_ref(),
-        &code.store_id,
-    )?;
-
-    let result = async {
-        let cloud = build_cloud_home_for_join(
+impl DeviceJoinClient {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        invite_code: &str,
+        join_request_code: &str,
+        layout: StoreLayout,
+        synced_tables: Vec<SyncedTable>,
+        migrations: Vec<Migration>,
+        expected_write_policy: crate::WritePolicy,
+        custom_s3_serial: Option<crate::CustomS3Serial>,
+        custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
+        key_custody: crate::custody::KeyCustody,
+        identity_custody: IdentityCustody,
+        oauth_tokens: Option<crate::oauth::OAuthTokens>,
+        cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
+        clock: crate::clock::ClockRef,
+    ) -> Result<Self, BootstrapError> {
+        let code = crate::join_code::decode(invite_code)
+            .map_err(|error| BootstrapError::InvalidCode(error.to_string()))?;
+        let member_pubkey = crate::join_code::decode_join_request(join_request_code)
+            .map_err(|error| BootstrapError::InvalidCode(error.to_string()))?
+            .public_key;
+        let actual_write_policy = code.membership_floor.write_policy();
+        if actual_write_policy != expected_write_policy {
+            return Err(BootstrapError::WritePolicyMismatch {
+                expected: expected_write_policy,
+                actual: actual_write_policy,
+            });
+        }
+        crate::storage::cloud::setup::require_serial_coordination_join_info(
             &code.join_info,
-            &store_keys,
-            oauth_tokens,
-            cloudkit_ops,
-            clock.clone(),
-            custom_s3_immutable_copies,
+            custom_s3_serial,
+            actual_write_policy,
         )
-        .await?;
-
-        join_store_with_coordination(
-            layout,
+        .map_err(|provider| BootstrapError::SerialCoordinationUnavailable { provider })?;
+        crate::storage::cloud::setup::require_exact_slot_capabilities_join_info(
+            &code.join_info,
+            custom_s3_exact_slots,
+        )
+        .map_err(|provider| BootstrapError::ExactSlotsUnavailable { provider })?;
+        crate::store_dir::validate_path_token(&code.store_id)
+            .map_err(|error| BootstrapError::InvalidCode(format!("invalid store id: {error}")))?;
+        let store_dir = layout.store_dir(&code.store_id);
+        let custody = key_custody.resolve(&code.store_id, &store_dir);
+        let identity_custody = identity_custody.resolve(&code.store_id, &store_dir);
+        Ok(Self {
             code,
-            &joiner_public_key,
+            member_pubkey,
+            layout,
             synced_tables,
             migrations,
-            custody.clone(),
-            identity_custody.clone(),
-            cloud.home,
-            cloud.coordination,
             custom_s3_serial,
-            custom_s3_immutable_copies,
+            custom_s3_exact_slots,
+            custody,
+            identity_custody,
+            oauth_tokens,
+            cloudkit_ops,
             clock,
-            ids.as_ref(),
-            &on_status,
+            #[cfg(test)]
+            test_home: None,
+            #[cfg(test)]
+            test_keyring: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_home(
+        mut self,
+        home: Arc<dyn CloudHome>,
+        keyring: MasterKeyring,
+    ) -> Self {
+        self.test_home = Some(home);
+        self.test_keyring = Some(keyring);
+        self
+    }
+
+    pub async fn prepare_provider_access_request(
+        &self,
+        offer: crate::DeviceJoinOffer,
+    ) -> Result<crate::DeviceProviderAccessRequest, BootstrapError> {
+        self.require_offer(&offer)?;
+        let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
+        let cloud = self.build_cloud_home().await?;
+        let exact = cloud.home.clone().exact_slot_storage().ok_or_else(|| {
+            BootstrapError::Provider("provider has no exact-slot adapter".to_string())
+        })?;
+        let binding = exact
+            .provider_binding()
+            .await
+            .map_err(BootstrapError::CloudHome)?;
+        let pending = self.open_pending_journal()?;
+        Ok(
+            crate::sync::device_join::prepare_device_provider_access_request(
+                &pending, binding, &signer, offer,
+            )
+            .await?,
+        )
+    }
+
+    pub async fn prepare_registration_request(
+        &self,
+        approval: crate::DeviceProviderAdmissionApproval,
+    ) -> Result<crate::DeviceRegistrationRequest, BootstrapError> {
+        let offer = &approval.request.offer;
+        self.require_offer(offer)?;
+        let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
+        let join = self.build_storage(&signer).await?;
+        let pending = self.open_pending_journal()?;
+        Ok(
+            crate::sync::device_join::prepare_device_registration_request(
+                &pending,
+                &join.storage,
+                Some(join.exact.as_ref()),
+                &signer,
+                approval,
+            )
+            .await?,
+        )
+    }
+
+    pub async fn bootstrap_pending_device(
+        &self,
+        bootstrap: crate::ProviderReadyDeviceBootstrap,
+        on_status: impl Fn(&str),
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<crate::sync::device_join::DeviceJoinReadiness, BootstrapError> {
+        let offer = &bootstrap.bootstrap.request.approval.request.offer;
+        self.require_offer(offer)?;
+        let attempt = &bootstrap.bootstrap.publication_authorization.attempt;
+        let pending = self.open_pending_journal()?;
+        if let Some(record) = pending.load(attempt.attempt_id, crate::DeviceJoinRole::Joiner)? {
+            if let crate::sync::device_join::DeviceJoinRoleProgress::Joiner(
+                crate::sync::device_join::JoinerJoinProgress::Ready(readiness),
+            ) = &*record.progress
+            {
+                if readiness.proof.attempt != *attempt {
+                    return Err(crate::DeviceJoinError::JournalConflict.into());
+                }
+                let store_dir = self.layout.store_dir(&self.code.store_id);
+                if store_dir.db_path().exists() {
+                    return Ok(readiness.clone());
+                }
+            }
+        }
+        error_if_cancelled(cancel)?;
+        let signer = crate::keys::peek_pending_identity(&offer.member_pubkey)?;
+        let join = self.build_storage(&signer).await?;
+        let store_dir = self.layout.store_dir(&self.code.store_id);
+        if store_dir.config_path().exists() {
+            return Err(BootstrapError::StoreExists(self.code.store_id.clone()));
+        }
+        std::fs::create_dir_all(&*store_dir)?;
+        on_status("Downloading store snapshot...");
+        let db_path = store_dir.db_path();
+        let snapshot = bootstrap_from_snapshot(
+            &join.storage,
+            &self.code.store_id,
+            offer.store_root.clone(),
+            &self.code.membership_floor,
+            supported_version(&self.migrations),
+            &db_path,
+        )
+        .await?;
+        let device_id = bootstrap
+            .bootstrap
+            .request
+            .expected_registration
+            .device_id
+            .to_string();
+        let db = snapshot
+            .open_database(
+                &self.code.store_id,
+                &db_path,
+                self.synced_tables.clone(),
+                crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                device_id,
+                &self.migrations,
+            )
+            .await?;
+        let published_at = self.clock.now().to_rfc3339();
+        on_status("Installing device registration...");
+        let readiness = crate::sync::device_join::bootstrap_pending_device(
+            &db,
+            &pending,
+            &join.storage,
+            Some(join.exact.as_ref()),
+            &signer,
+            bootstrap,
+            &published_at,
+        )
+        .await?;
+        match crate::sync::snapshot::reconcile_snapshot_blobs(
+            &db,
+            &db_path,
+            &join.storage,
+            &store_dir,
+            db.synced_tables(),
             cancel,
         )
         .await
+        .map_err(|error| BootstrapError::Database(error.to_string()))?
+        {
+            crate::sync::snapshot::SnapshotBlobReconcile::Complete => Ok(readiness),
+            crate::sync::snapshot::SnapshotBlobReconcile::Incomplete => {
+                Err(BootstrapError::Database(
+                    "snapshot blob reconciliation did not land every required eager blob"
+                        .to_string(),
+                ))
+            }
+            crate::sync::snapshot::SnapshotBlobReconcile::Cancelled => {
+                Err(BootstrapError::Cancelled)
+            }
+        }
     }
-    .await;
 
-    match result {
-        // The host records this as the active store after this returns.
-        Ok(config) => Ok(config),
-        Err(err) => Err(cleanup_after_bootstrap_failure(
+    pub async fn complete_device_join(
+        &self,
+        activation: crate::DeviceJoinActivation,
+        on_status: impl Fn(&str),
+    ) -> Result<Config, BootstrapError> {
+        let attempt_id = activation.outcome.attempt().attempt_id;
+        let pending = self.open_pending_journal()?;
+        let pending_record = pending.load(attempt_id, crate::DeviceJoinRole::Joiner)?;
+        let pending_readiness = match pending_record.as_ref().map(|record| &*record.progress) {
+            Some(crate::sync::device_join::DeviceJoinRoleProgress::Joiner(
+                crate::sync::device_join::JoinerJoinProgress::Ready(readiness),
+            )) => Some(readiness),
+            Some(_) => return Err(crate::DeviceJoinError::JournalConflict.into()),
+            None => None,
+        };
+        let store_dir = self.layout.store_dir(&self.code.store_id);
+        let completed_config = if store_dir.config_path().exists() {
+            Some(Config::load_from_config_yaml(store_dir.clone())?)
+        } else {
+            None
+        };
+        if completed_config
+            .as_ref()
+            .is_some_and(|config| config.store_id != self.code.store_id)
+        {
+            return Err(crate::DeviceJoinError::JournalConflict.into());
+        }
+        let device_id = match (pending_readiness, completed_config.as_ref()) {
+            (Some(readiness), _) => readiness.proof.registration.device_id.to_string(),
+            (None, Some(config)) => config.device_id.clone(),
+            (None, None) => return Err(crate::DeviceJoinError::JournalConflict.into()),
+        };
+        let signer = match completed_config {
+            Some(_) => crate::keys::require_identity(self.identity_custody.as_ref())?,
+            None => crate::keys::peek_pending_identity(&self.member_pubkey)?,
+        };
+        let join = self.build_storage(&signer).await?;
+        let db_path = store_dir.db_path();
+        let (db, _stamper) = Database::open(
+            &db_path,
+            self.synced_tables.clone(),
+            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            self.code.membership_floor.write_policy(),
+            device_id.clone(),
+            &self.migrations,
+        )
+        .map_err(|error| BootstrapError::Database(error.to_string()))?;
+        let joined = crate::sync::device_join::materialize_device_join_activation(
+            &db,
+            &join.storage,
+            activation.clone(),
+        )
+        .await?;
+        if pending_readiness
+            .is_some_and(|readiness| joined.registration != readiness.proof.registration)
+            || joined.registration.device_id.to_string() != device_id
+        {
+            return Err(crate::DeviceJoinError::JournalConflict.into());
+        }
+        on_status("Saving configuration...");
+        self.custody.persist(&join.keyring)?;
+        crate::keys::import_identity(self.identity_custody.as_ref(), &signer.to_keypair_bytes())?;
+        let store_keys = StoreKeys::new(self.code.store_id.clone());
+        if let Some(credentials) = derive_credentials(&self.code.join_info) {
+            store_keys.set_cloud_home_credentials(&credentials)?;
+        }
+        #[cfg(feature = "oauth-providers")]
+        if let Some(tokens) = &self.oauth_tokens {
+            persist_oauth_tokens(&store_keys, tokens)?;
+        }
+        let cipher = CloudCipher::Encrypted(join.keyring.clone().into());
+        let mut config = build_config(
+            &self.code.store_id,
+            &device_id,
             &store_dir,
-            &store_keys,
-            custody.as_ref(),
-            identity_custody.as_ref(),
-            err,
-        )),
+            &self.code.store_name,
+            &self.code.join_info,
+            &cipher,
+            self.custom_s3_serial,
+        );
+        if matches!(
+            self.code.join_info,
+            CloudHomeJoinInfo::S3 {
+                endpoint: Some(_),
+                ..
+            }
+        ) {
+            config.cloud_home.s3_exact_slots = self.custom_s3_exact_slots;
+        }
+        config.save_to_config_yaml()?;
+        crate::sync::device_join::complete_device_join(&db, &pending, &join.storage, activation)
+            .await?;
+        crate::keys::discard_pending_identity(&self.member_pubkey)?;
+        info!(store_id = %self.code.store_id, "joined Store device");
+        Ok(config)
     }
-}
 
-/// Join an existing shared store using a decoded invite code.
-///
-/// Lower-level function — caller provides pre-built `CloudHome`.
-/// Prefer `join_from_invite_code` for the full flow. `joiner_public_key_hex`
-/// is the pending identity's public key (see [`join_from_invite_code`]'s
-/// doc) — the store's own identity once a completed join promotes it.
-///
-/// `on_status` is called with progress messages for UI feedback.
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-pub(crate) async fn join_store(
-    layout: &StoreLayout,
-    code: InviteCode,
-    joiner_public_key_hex: &str,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    custody: Arc<dyn MasterKeyCustody>,
-    identity_custody: Arc<dyn DeviceIdentityCustody>,
-    cloud_home: Box<dyn CloudHome>,
-    ids: &dyn crate::id_provider::IdProvider,
-    on_status: impl Fn(&str),
-    cancel: &watch::Receiver<bool>,
-) -> Result<Config, BootstrapError> {
-    join_store_with_coordination(
-        layout,
-        code,
-        joiner_public_key_hex,
-        synced_tables,
-        migrations,
-        custody,
-        identity_custody,
-        Arc::from(cloud_home),
-        None,
-        None,
-        None,
-        Arc::new(crate::clock::SystemClock),
-        ids,
-        on_status,
-        cancel,
-    )
-    .await
-}
+    fn require_offer(&self, offer: &crate::DeviceJoinOffer) -> Result<(), BootstrapError> {
+        if offer.store_root != self.code.store_root || offer.member_pubkey != self.member_pubkey {
+            return Err(crate::DeviceJoinError::OfferMismatch.into());
+        }
+        Ok(())
+    }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn join_store_with_coordination(
-    layout: &StoreLayout,
-    code: InviteCode,
-    joiner_public_key_hex: &str,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    custody: Arc<dyn MasterKeyCustody>,
-    identity_custody: Arc<dyn DeviceIdentityCustody>,
-    cloud_home: Arc<dyn CloudHome>,
-    coordination: Option<CoordinationClients>,
-    custom_s3_serial: Option<crate::CustomS3Serial>,
-    custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
-    clock: crate::clock::ClockRef,
-    ids: &dyn crate::id_provider::IdProvider,
-    on_status: impl Fn(&str),
-    cancel: &watch::Receiver<bool>,
-) -> Result<Config, BootstrapError> {
-    let provider = code.join_info.cloud_provider();
-    crate::storage::cloud::setup::require_immutable_copy_capabilities_home(
-        cloud_home.clone(),
-        Some(provider),
-    )
-    .map_err(|error| match error {
-        crate::storage::cloud::setup::StorageSetupError::ImmutableCopiesUnavailable {
-            provider,
-        } => BootstrapError::ImmutableCopiesUnavailable { provider },
-        other => BootstrapError::Provider(other.to_string()),
-    })?;
-    // Guard the destructive `stores/<id>` create/delete against any direct
-    // caller, independent of the decode-time check on untrusted input.
-    crate::store_dir::validate_path_token(&code.store_id)
-        .map_err(|e| BootstrapError::InvalidCode(format!("invalid store id: {e}")))?;
+    fn open_pending_journal(&self) -> Result<crate::DeviceJoinJournalDatabase, BootstrapError> {
+        let directory = self.layout.stores_root().join(".pending-device-joins");
+        std::fs::create_dir_all(&directory)?;
+        Ok(crate::DeviceJoinJournalDatabase::open(
+            directory.join(format!("{}.sqlite", self.code.store_id)),
+        )?)
+    }
 
-    let store_dir = layout.store_dir(&code.store_id);
+    async fn build_cloud_home(&self) -> Result<JoinCloudHome, BootstrapError> {
+        #[cfg(test)]
+        if let Some(home) = &self.test_home {
+            return Ok(JoinCloudHome {
+                home: home.clone(),
+                coordination: None,
+            });
+        }
+        build_cloud_home_for_join(
+            &self.code.join_info,
+            &StoreKeys::new(self.code.store_id.clone()),
+            self.oauth_tokens.clone(),
+            self.cloudkit_ops.clone(),
+            self.clock.clone(),
+            self.custom_s3_exact_slots,
+        )
+        .await
+    }
 
-    // Hoisted here, before any durable write below, so every step through the
-    // end of this function — keypair load, invitation accept, directory
-    // creation, bootstrap — funnels a failure through the same rollback
-    // instead of a bare `?` escaping it.
-    let store_keys = StoreKeys::new(code.store_id.clone());
-
-    // Refuse a *completed* store (config present) and clear a torn one,
-    // independent of whatever `join_from_invite_code` (or any other caller)
-    // already checked. Re-joining a store you already have adds nothing — the
-    // existing store is the data — and letting the join proceed would, on any
-    // bootstrap failure below, delete that store's database and blobs during
-    // cleanup. This is the authoritative guard: it makes the failure-cleanup
-    // below only ever remove a directory this invocation created.
-    refuse_completed_or_clear_torn_store(
-        &store_dir,
-        &store_keys,
-        custody.as_ref(),
-        identity_custody.as_ref(),
-        &code.store_id,
-    )?;
-
-    let result = async {
-        // Load the pending identity this join's request minted (the inviter
-        // wrapped the store key for this public key, so join never mints one
-        // of its own). Read without consuming: the pending slot must survive a
-        // torn bootstrap's wipe so a retry can re-establish the identity, and
-        // is discarded only once the whole join succeeds, below.
-        on_status("Loading keypair...");
-        let user_keypair = crate::keys::peek_pending_identity(joiner_public_key_hex)?;
-
-        // Accept the invitation to get the store encryption key. The joiner
-        // authenticates it against the current Owner set derived from the
-        // membership chain anchored to the owner the invite pins (the chain
-        // founder), so any current Owner's invite is joinable yet a bucket
-        // writer still can't substitute a key. The chain is sealed under the
-        // store key, so `Arc` the home once and reuse it for the sync storage
-        // below.
-        on_status("Accepting invitation...");
-        let encryption = match &code.membership_floor {
+    async fn build_storage(
+        &self,
+        signer: &UserKeypair,
+    ) -> Result<DeviceJoinStorage, BootstrapError> {
+        let cloud = self.build_cloud_home().await?;
+        #[cfg(test)]
+        if let Some(keyring) = &self.test_keyring {
+            let exact = cloud.home.clone().exact_slot_storage().ok_or_else(|| {
+                BootstrapError::Provider("provider has no exact-slot adapter".to_string())
+            })?;
+            let storage = CloudSyncStorage::new(
+                cloud.home,
+                CloudCipher::Encrypted(keyring.clone().into()),
+                BlobPathScheme::for_storage(HomeStorage::Opaque),
+                self.code.store_id.clone(),
+                signer.clone(),
+            )?;
+            return Ok(DeviceJoinStorage {
+                storage,
+                exact,
+                keyring: keyring.clone(),
+            });
+        }
+        let encryption = match &self.code.membership_floor {
             MembershipFloor::MergeConcurrent(floor) => {
                 unwrap_store_keyring(
-                    cloud_home.clone(),
-                    &user_keypair,
-                    code.store_root_hash,
-                    &code.store_id,
-                    &code.owner_pubkey,
+                    cloud.home.clone(),
+                    signer,
+                    &self.code.store_root,
+                    &self.code.store_id,
+                    &self.code.owner_pubkey,
                     floor,
                 )
                 .await?
             }
-            MembershipFloor::Serial(Some(position)) => {
-                if coordination.is_none() {
+            MembershipFloor::Serial(Some(reference)) => {
+                if cloud.coordination.is_none() {
                     return Err(BootstrapError::Membership(
                         "Serial invite provider has no coordination capability".to_string(),
                     ));
                 }
                 unwrap_serial_store_keyring(
-                    cloud_home.clone(),
-                    &user_keypair,
-                    &code.store_id,
-                    &code.key_author_pubkey,
-                    position,
+                    cloud.home.clone(),
+                    signer,
+                    &self.code.store_id,
+                    &self.code.key_author_pubkey,
+                    &reference.position(),
                 )
                 .await?
             }
@@ -745,95 +878,31 @@ pub(crate) async fn join_store_with_coordination(
                 ));
             }
         };
-        let master_key = MasterKeyring::from(encryption.clone());
-
-        // Create the sync storage with the real encryption key. Joining a
-        // shared store only makes sense over an opaque home — the invite wraps
-        // the store key — so the home is always opaque here: the cipher is
-        // `Encrypted` and the blob-path scheme is `Hashed`, matching what the
-        // owner writes.
-        let cipher = CloudCipher::Encrypted(encryption);
-        let blob_paths = BlobPathScheme::for_storage(HomeStorage::Opaque);
-        // The device's signing identity signs the head/min_schema control
-        // objects it writes; it's the same keypair the invite wrapped the
-        // store key for.
+        let exact = cloud.home.clone().exact_slot_storage().ok_or_else(|| {
+            BootstrapError::Provider("provider has no exact-slot adapter".to_string())
+        })?;
+        let keyring = MasterKeyring::from(encryption.clone());
         let storage = CloudSyncStorage::new(
-            cloud_home,
-            cipher.clone(),
-            blob_paths,
-            code.store_id.clone(),
-            user_keypair.clone(),
-            std::sync::Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
+            cloud.home,
+            CloudCipher::Encrypted(encryption),
+            BlobPathScheme::for_storage(HomeStorage::Opaque),
+            self.code.store_id.clone(),
+            signer.clone(),
         )?;
-        let storage = match coordination {
+        let storage = match cloud.coordination {
             Some((primary, peer)) => storage.with_serial_coordination_clients(primary, peer),
             None => storage,
         };
-
-        // Create the store directory under `stores/`, named by the invite's id
-        // (its non-existence was checked up front, so this create and the
-        // failure-cleanup below own it entirely).
-        let device_id = ids.new_id();
-        std::fs::create_dir_all(&*store_dir)?;
-
-        bootstrap_and_save_store(
-            &storage,
-            &cipher,
-            Some(&master_key),
-            &store_dir,
-            &code.store_id,
-            &device_id,
-            code.store_root_hash,
-            BootstrapContext::Join {
-                owner_pubkey: &code.owner_pubkey,
-                keypair: &user_keypair,
-            },
-            &code.membership_floor,
-            synced_tables,
-            migrations,
-            &code.join_info,
-            &code.store_name,
-            custom_s3_serial,
-            custom_s3_immutable_copies,
-            &store_keys,
-            custody.as_ref(),
-            identity_custody.as_ref(),
-            clock.as_ref(),
-            &on_status,
-            cancel,
-        )
-        .await
-    }
-    .await;
-
-    match result {
-        Ok(config) => {
-            // The store's identity was established in its own custody before
-            // the config marker (see `bootstrap_and_save_store`), so the join
-            // is complete — the pending slot is now a consumed source. Discard
-            // it best-effort: a failed delete leaves a harmless leftover
-            // pending entry (the established identity is what every reader
-            // resolves), never a store whose identity is missing.
-            if let Err(e) = crate::keys::discard_pending_identity(joiner_public_key_hex) {
-                warn!(
-                    "failed to discard the consumed pending identity {joiner_public_key_hex}: {e}"
-                );
-            }
-            info!("Joined store {} at {}", code.store_id, store_dir.display());
-            Ok(config)
-        }
-        Err(err) => Err(cleanup_after_bootstrap_failure(
-            &store_dir,
-            &store_keys,
-            custody.as_ref(),
-            identity_custody.as_ref(),
-            err,
-        )),
+        Ok(DeviceJoinStorage {
+            storage,
+            exact,
+            keyring,
+        })
     }
 }
 
-/// Inner bootstrap + save logic for join and restore, separated so callers can
-/// clean up the store directory on failure.
+/// Inner restore bootstrap logic, separated so callers can clean up the store
+/// directory on failure.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn bootstrap_and_save_store(
     storage: &CloudSyncStorage,
@@ -842,19 +911,18 @@ pub(crate) async fn bootstrap_and_save_store(
     store_dir: &StoreDir,
     store_id: &str,
     device_id: &str,
-    store_root_hash: crate::sync::store_commit::ObjectHash,
-    context: BootstrapContext<'_>,
+    store_root: crate::sync::store_commit::StoreRootRef,
+    context: RestoreBootstrapContext<'_>,
     membership_floor: &MembershipFloor,
     synced_tables: &[SyncedTable],
     migrations: &[Migration],
     join_info: &CloudHomeJoinInfo,
     store_name: &str,
     custom_s3_serial: Option<crate::CustomS3Serial>,
-    custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
+    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
     key_service: &StoreKeys,
     custody: &dyn MasterKeyCustody,
     identity_custody: &dyn DeviceIdentityCustody,
-    clock: &dyn crate::clock::Clock,
     on_status: &impl Fn(&str),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Config, BootstrapError> {
@@ -871,12 +939,10 @@ pub(crate) async fn bootstrap_and_save_store(
     let db_path = store_dir.db_path();
     let bucket_dyn: &dyn SyncStorage = storage;
     let binary_schema_version = supported_version(migrations);
-    let owner_pubkey = context.owner_pubkey();
     let bootstrap_result = bootstrap_from_snapshot(
         bucket_dyn,
         store_id,
-        store_root_hash,
-        owner_pubkey,
+        store_root.clone(),
         membership_floor,
         binary_schema_version,
         &db_path,
@@ -888,7 +954,6 @@ pub(crate) async fn bootstrap_and_save_store(
         bootstrap_result.coverage_count()
     );
 
-    let published_at = clock.now().to_rfc3339();
     let coordination =
         if bootstrap_result.write_policy() == crate::WritePolicy::Serial {
             Some(storage.serial_coordination().map_err(|error| {
@@ -908,20 +973,24 @@ pub(crate) async fn bootstrap_and_save_store(
             synced_tables,
             migrations,
             device_id,
-            owner_pubkey,
-            Some(context.keypair()),
+            context.owner_pubkey(),
+            store_root.clone(),
+            context.activated_continuation(),
+            context.owner_recovery(),
             membership_floor,
             storage,
             coordination,
-            Some(&published_at),
             bootstrap_result,
             store_dir,
             cancel,
         )
         .await?;
 
-        if changesets_applied > 0 {
-            info!("Applied {changesets_applied} changesets since snapshot");
+        if changesets_applied.changesets_applied > 0 {
+            info!(
+                "Applied {} changesets since snapshot",
+                changesets_applied.changesets_applied
+            );
         }
 
         // Persist the master key via custody.
@@ -938,12 +1007,9 @@ pub(crate) async fn bootstrap_and_save_store(
         // Establish the store's signing identity BEFORE the config save, so
         // the saved config — the completion marker — always implies a
         // resolvable identity. A crash before the save is a torn bootstrap the
-        // retry clears and re-establishes: from the restore code the user
-        // still holds, or from join's pending slot, which the torn-bootstrap
-        // wipe leaves in place (it is keyed by the request, not the store) and
-        // which is discarded only once the whole join succeeds (see
-        // `join_store`). Inside the unit, so a later failure deletes the
-        // bootstrap reader the same as any other.
+        // retry clears and re-establishes from the restore code the user still
+        // holds. Inside the unit, so a later failure deletes the bootstrap
+        // reader the same as any other.
         crate::keys::import_identity(identity_custody, &context.keypair().to_keypair_bytes())?;
 
         // Create and save config — the last durable write and the
@@ -964,82 +1030,14 @@ pub(crate) async fn bootstrap_and_save_store(
                 ..
             }
         ) {
-            config.cloud_home.s3_immutable_copies = custom_s3_immutable_copies;
+            config.cloud_home.s3_exact_slots = custom_s3_exact_slots;
         }
         config.save_to_config_yaml()?;
         Ok(config)
     }
     .await;
 
-    match committed {
-        Ok(config) => Ok(config),
-        Err(cause) => {
-            match finish_failed_bootstrap_registration_rollback(
-                &db_path,
-                synced_tables,
-                migrations,
-                membership_floor.write_policy(),
-                device_id,
-                storage,
-                coordination,
-                context.keypair(),
-                &published_at,
-            )
-            .await
-            {
-                Ok(()) => Err(cause),
-                Err(rollback) => Err(BootstrapError::RegistrationRollback {
-                    rollback,
-                    cause: Box::new(cause),
-                }),
-            }
-        }
-    }
-}
-
-pub(crate) async fn finish_failed_bootstrap_registration_rollback(
-    db_path: &Path,
-    synced_tables: &[SyncedTable],
-    migrations: &[Migration],
-    write_policy: crate::WritePolicy,
-    device_id: &str,
-    storage: &dyn SyncStorage,
-    coordination: Option<&dyn crate::sync::storage::CoordinationStorage>,
-    signer: &UserKeypair,
-    published_at: &str,
-) -> Result<(), String> {
-    if !db_path.exists() {
-        return Ok(());
-    }
-    let (db, _stamper) = Database::open(
-        db_path,
-        synced_tables.to_vec(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        write_policy,
-        device_id.to_string(),
-        migrations,
-    )
-    .map_err(|error| format!("open durable registration rollback outbox: {error}"))?;
-    let membership = match write_policy {
-        crate::WritePolicy::MergeConcurrent => Some(
-            crate::sync::pull::load_cycle_membership(storage, &db)
-                .await
-                .map_err(|error| format!("load registration rollback membership: {error}"))?,
-        ),
-        crate::WritePolicy::Serial => None,
-    };
-    crate::sync::store_registration::retire_registration_with_coordination(
-        &db,
-        storage,
-        coordination,
-        signer,
-        membership.as_ref().and_then(|loaded| loaded.chain.as_ref()),
-        published_at,
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| error.to_string())
+    committed
 }
 
 /// Open a [`crate::database::Database`] over the bootstrapped db file and pull changesets since
@@ -1054,15 +1052,23 @@ pub(crate) async fn open_db_and_pull(
     migrations: &[Migration],
     device_id: &str,
     owner_pubkey: &str,
-    registration_signer: Option<&UserKeypair>,
+    store_root: crate::sync::store_commit::StoreRootRef,
+    activated_continuation: Option<(
+        &crate::sync::restore_code::ActivatedContinuation,
+        &UserKeypair,
+        &UserKeypair,
+    )>,
+    owner_recovery: Option<(
+        &crate::sync::restore_code::OwnerRecoveryAuthority,
+        &UserKeypair,
+    )>,
     membership_floor: &MembershipFloor,
     storage: &dyn SyncStorage,
     coordination: Option<&dyn crate::sync::storage::CoordinationStorage>,
-    registration_published_at: Option<&str>,
     bootstrap: BootstrapResult,
     store_dir: &StoreDir,
     cancel: &watch::Receiver<bool>,
-) -> Result<u64, BootstrapError> {
+) -> Result<OpenDbPullOutcome, BootstrapError> {
     let db = bootstrap
         .open_database(
             store_id,
@@ -1143,84 +1149,118 @@ pub(crate) async fn open_db_and_pull(
         ),
         MembershipFloor::Serial(_) => None,
     };
-    let store_root_hash = db
-        .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
-        .await
-        .map_err(|error| BootstrapError::Database(error.to_string()))?
-        .ok_or_else(|| BootstrapError::Database("store protocol root hash is absent".to_string()))?
-        .parse()
-        .map_err(|error| BootstrapError::Database(format!("store protocol root hash: {error}")))?;
     if db.write_policy() == crate::WritePolicy::Serial && coordination.is_none() {
         return Err(BootstrapError::Membership(
             "Serial coordination capability is absent".to_string(),
         ));
     }
-    let pull_result = crate::sync::store_pull::pull_store_commits_with_coordination(
-        &db,
-        db.synced_tables(),
-        storage,
-        coordination,
-        store_root_hash,
-        device_id,
-        store_dir,
-        membership.as_ref().and_then(|loaded| loaded.chain.as_ref()),
+    let pull_result = Box::pin(
+        crate::sync::store_pull::pull_store_commits_with_coordination(
+            &db,
+            db.synced_tables(),
+            storage,
+            coordination,
+            store_root.store_root_hash,
+            store_dir,
+            membership.as_ref().and_then(|loaded| loaded.chain.as_ref()),
+        ),
     )
     .await?;
 
-    if let Some(signer) = registration_signer {
-        let published_at = registration_published_at.ok_or_else(|| {
-            BootstrapError::Database(
-                "registration signer has no registration publication timestamp".to_string(),
+    if let Some((continuation, identity_signer, device_signer)) = activated_continuation {
+        let registration = crate::sync::store_commit::StoreDeviceRegistration::parse_at(
+            &continuation.registration_bytes,
+            &store_root,
+            continuation.registration.device_id,
+        )
+        .map_err(|error| BootstrapError::Database(error.to_string()))?;
+        let latest_ack = crate::sync::store_objects::load_store_ack_ref(
+            storage,
+            &store_root,
+            &continuation.latest_ack,
+            &registration,
+        )
+        .await
+        .map_err(|error| BootstrapError::Database(error.to_string()))?;
+        let mut ack_chain = vec![(continuation.latest_ack.clone(), latest_ack.value)];
+        while let Some(predecessor) = ack_chain
+            .last()
+            .and_then(|(_, acknowledgement)| acknowledgement.predecessor.clone())
+        {
+            let loaded = crate::sync::store_objects::load_store_ack_ref(
+                storage,
+                &store_root,
+                &predecessor,
+                &registration,
             )
-        })?;
-        let signer_pubkey = crate::keys::public_key_hex(signer);
-        let authorized = match membership_floor {
-            MembershipFloor::MergeConcurrent(_) => membership
-                .as_ref()
-                .and_then(|loaded| loaded.chain.as_ref())
-                .is_some_and(|chain| {
-                    chain
-                        .current_members()
-                        .iter()
-                        .any(|(pubkey, _)| pubkey == &signer_pubkey)
-                }),
-            MembershipFloor::Serial(Some(floor)) => {
-                let exact = crate::sync::store_objects::load_serial_commit_at_position(
+            .await
+            .map_err(|error| BootstrapError::Database(error.to_string()))?;
+            ack_chain.push((predecessor, loaded.value));
+        }
+        let latest_snapshot = match &continuation.latest_snapshot {
+            Some(reference) => Some(
+                crate::sync::store_snapshot::load_store_snapshot_ref(
                     storage,
-                    store_root_hash,
-                    floor,
+                    &store_root,
+                    &continuation.registration,
+                    &registration,
+                    reference,
                 )
                 .await
-                .map_err(|error| BootstrapError::Membership(error.to_string()))?
-                .is_some();
-                exact
-                    && db
-                        .serial_membership_state()
-                        .await
-                        .map_err(|error| BootstrapError::Database(error.to_string()))?
-                        .is_some_and(|state| {
-                            state
-                                .current_members()
-                                .iter()
-                                .any(|(pubkey, _)| pubkey == &signer_pubkey)
-                        })
-            }
-            MembershipFloor::Serial(None) => false,
+                .map_err(|error| BootstrapError::Database(error.to_string()))?,
+            ),
+            None => None,
         };
-        if !authorized {
-            return Err(BootstrapError::Membership(format!(
-                "Store device registration author {signer_pubkey} is not an active member at the invite floor"
-            )));
-        }
-        crate::sync::store_registration::ensure_active_registration_with_coordination(
-            &db,
-            storage,
-            coordination,
-            signer,
-            membership.as_ref().and_then(|loaded| loaded.chain.as_ref()),
-            published_at,
+        db.install_activated_device_continuation(
+            continuation.clone(),
+            identity_signer,
+            device_signer,
+            ack_chain,
+            latest_snapshot,
         )
-        .await?;
+        .await
+        .map_err(|error| BootstrapError::Database(error.to_string()))?;
+    }
+
+    if let Some((authority, identity_signer)) = owner_recovery {
+        match membership_floor {
+            MembershipFloor::MergeConcurrent(_) => {
+                let membership = membership
+                    .as_ref()
+                    .and_then(|loaded| loaded.chain.as_ref())
+                    .ok_or_else(|| {
+                        BootstrapError::Membership(
+                            "Owner recovery requires resolved MergeConcurrent membership"
+                                .to_string(),
+                        )
+                    })?;
+                Box::pin(crate::sync::store_registration::recover_owner_device_merge(
+                    &db,
+                    storage,
+                    identity_signer,
+                    authority,
+                    membership,
+                ))
+                .await?;
+            }
+            MembershipFloor::Serial(_) => {
+                let coordination = coordination.ok_or_else(|| {
+                    BootstrapError::Membership(
+                        "Serial Owner recovery requires coordination".to_string(),
+                    )
+                })?;
+                Box::pin(
+                    crate::sync::store_registration::recover_owner_device_serial(
+                        &db,
+                        storage,
+                        coordination,
+                        identity_signer,
+                        authority,
+                    ),
+                )
+                .await?;
+            }
+        }
     }
 
     // Bootstrap installed the snapshot's position vector before pulling anything
@@ -1231,7 +1271,14 @@ pub(crate) async fn open_db_and_pull(
         .await
         .map_err(|e| BootstrapError::Database(format!("Failed to persist snapshot_seq: {e}")))?;
 
-    Ok(pull_result.changesets_applied)
+    Ok(OpenDbPullOutcome {
+        changesets_applied: pull_result.changesets_applied,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct OpenDbPullOutcome {
+    pub changesets_applied: u64,
 }
 
 /// The credentials to persist for this join, or `None` when the provider needs

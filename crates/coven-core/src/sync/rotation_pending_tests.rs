@@ -6,7 +6,7 @@
 //! the superseded generation in the meantime is readable to them.
 //!
 //! These drive the real [`CloudSyncStorage`] over an [`InMemoryCloudHome`] (not
-//! the plaintext-shaped `MockSyncStorage` other sync tests use), because the
+//! the plaintext-shaped `TestStore` other sync tests use), because the
 //! point here is to observe actual sealed bytes at rest: whether an object
 //! reaches the cloud at all, and whether the removed member's superseded key
 //! can open it.
@@ -20,8 +20,7 @@ use crate::encryption::EncryptionService;
 use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
 use crate::storage::cloud::{
-    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
-    CloudHomeJoinInfo, SequentialCopyIdGenerator,
+    BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError, CloudHomeJoinInfo,
 };
 use crate::sync::cloud_storage::{
     BlobPathScheme, CloudCipher, CloudCipherAccess, CloudSyncStorage,
@@ -33,12 +32,11 @@ use crate::sync::membership_ops::{
     invite_member, invite_member_with_coordination, remove_member, remove_member_with_coordination,
     MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
 };
-use crate::sync::storage::{ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
-use crate::sync::store_commit::ObjectHash;
+use crate::sync::store_commit::{
+    StoreBatchCommitRef, StoreDeviceRegistration, StoreRootRef, StoreSerialHeadState,
+};
 use crate::sync::test_helpers::{
-    host_exec, open_serial_test_db, open_test_db, pubkey_hex, publish_test_founder_membership,
-    publish_test_serial_store_protocol_root, publish_test_store_protocol_root, temp_store_dir,
-    TestCustody,
+    host_exec, open_serial_test_db, open_test_db, pubkey_hex, temp_store_dir, TestCustody,
 };
 
 const LIB_ID: &str = "rotation-pending-test";
@@ -51,9 +49,39 @@ fn storage_for(home: &InMemoryCloudHome, key: [u8; 32], keypair: &UserKeypair) -
         BlobPathScheme::Hashed,
         LIB_ID,
         keypair.clone(),
-        Arc::new(SequentialCopyIdGenerator::new("rotation-pending-copy")),
     )
-    .expect("test cloud storage supports immutable copies")
+    .expect("build exact test cloud storage")
+}
+
+async fn create_test_store(
+    db: &crate::database::Database,
+    storage: &CloudSyncStorage,
+    owner: &UserKeypair,
+) -> StoreRootRef {
+    crate::sync::store_protocol_root::create_store(db, storage, LIB_ID, owner)
+        .await
+        .expect("create exact test Store");
+    db.local_store_root_ref()
+        .await
+        .expect("read exact test Store root")
+        .expect("created test Store root is present")
+}
+
+async fn local_store_device_id(db: &crate::database::Database) -> String {
+    db.get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read local Store device id")
+        .expect("local Store device registration is active")
+}
+
+async fn founder_registration(
+    storage: &CloudSyncStorage,
+    root: &StoreRootRef,
+) -> StoreDeviceRegistration {
+    crate::sync::store_objects::load_founder_registration(storage, root)
+        .await
+        .expect("load exact founder Store device registration")
+        .value
 }
 
 /// `InMemoryCloudHome` refuses `grant_access` — it models a backend with no
@@ -123,8 +151,9 @@ async fn public_serial_invite_activates_one_control_only_commit() {
     let storage =
         storage_for(&home, key, &owner).with_test_serial_coordination(Arc::new(home.clone()));
     let db = open_serial_test_db();
-    let root =
-        publish_test_serial_store_protocol_root(&db, &storage, LIB_ID, DEVICE_ID, &owner).await;
+    let root = create_test_store(&db, &storage, &owner).await;
+    let device_id = local_store_device_id(&db).await;
+    let registration = founder_registration(&storage, &root).await;
     let granting_home = GrantingCloudHome(home.clone());
     let code = invite_member_with_coordination(
         &storage,
@@ -140,13 +169,13 @@ async fn public_serial_invite_activates_one_control_only_commit() {
         &db,
         Some(crate::sync::membership_ops::SerialMembershipContext {
             coordination: storage.serial_coordination().unwrap(),
-            device_id: DEVICE_ID.to_string(),
+            device_id: device_id.clone(),
         }),
     )
     .await
     .expect("public Serial invitation");
-    let position = match code.membership_floor {
-        crate::join_code::MembershipFloor::Serial(Some(position)) => position,
+    let commit_ref = match code.membership_floor {
+        crate::join_code::MembershipFloor::Serial(Some(reference)) => reference,
         crate::join_code::MembershipFloor::Serial(None) => {
             panic!("Serial invitation returned the root floor")
         }
@@ -160,23 +189,36 @@ async fn public_serial_invite_activates_one_control_only_commit() {
         .read_head(crate::sync::store_commit::serial_head_key())
         .await
         .unwrap();
-    let head = crate::sync::store_commit::StoreSerialHead::parse(&head.bytes, root).unwrap();
-    assert_eq!(head.commit.as_ref(), Some(&position));
-    let commit =
-        crate::sync::store_objects::load_serial_commit_at_position(&storage, root, &position)
-            .await
-            .unwrap()
-            .unwrap()
-            .value;
-    assert_eq!(commit.position(), position);
+    let head = crate::sync::store_commit::StoreSerialHead::parse(
+        &head.bytes,
+        root.store_root_hash,
+        &registration,
+    )
+    .unwrap();
+    assert!(matches!(
+        &head.state,
+        StoreSerialHeadState::Commit { commit, .. } if commit == &commit_ref
+    ));
+    let commit = crate::sync::store_objects::load_commit_ref(
+        &storage,
+        root.store_root_hash,
+        &commit_ref,
+        &registration,
+    )
+    .await
+    .unwrap()
+    .value;
+    assert_eq!(commit.position(), commit_ref.position());
     assert!(matches!(
         commit.control.as_ref(),
         Some(crate::sync::store_commit::StoreControl::SerialMembership { .. })
     ));
-    assert!(crate::sync::store_objects::load_package(&storage, &commit)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        crate::sync::store_objects::load_store_package(&storage, &commit_ref, &commit)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(commit.store_package.is_none());
     assert!(db
         .serial_membership_state()
@@ -203,7 +245,7 @@ async fn public_serial_invite_activates_one_control_only_commit() {
         &db,
         Some(crate::sync::membership_ops::SerialMembershipContext {
             coordination: storage.serial_coordination().unwrap(),
-            device_id: DEVICE_ID.to_string(),
+            device_id,
         }),
     )
     .await
@@ -221,16 +263,27 @@ async fn public_serial_invite_activates_one_control_only_commit() {
         .read_head(crate::sync::store_commit::serial_head_key())
         .await
         .unwrap();
-    let head = crate::sync::store_commit::StoreSerialHead::parse(&head.bytes, root).unwrap();
-    let removal_position = head.commit.unwrap();
-    assert_eq!(removal_position.seq, 2);
-    let removal = crate::sync::store_objects::load_serial_commit_at_position(
+    let head = crate::sync::store_commit::StoreSerialHead::parse(
+        &head.bytes,
+        root.store_root_hash,
+        &registration,
+    )
+    .unwrap();
+    let StoreSerialHeadState::Commit {
+        commit: removal_ref,
+        ..
+    } = head.state
+    else {
+        panic!("Serial removal did not publish a commit head")
+    };
+    assert_eq!(removal_ref.coord.sequence(), 2);
+    let removal = crate::sync::store_objects::load_commit_ref(
         &storage,
-        root,
-        &removal_position,
+        root.store_root_hash,
+        &removal_ref,
+        &registration,
     )
     .await
-    .unwrap()
     .unwrap()
     .value;
     assert!(matches!(
@@ -242,10 +295,12 @@ async fn public_serial_invite_activates_one_control_only_commit() {
             }
         )
     ));
-    assert!(crate::sync::store_objects::load_package(&storage, &removal)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        crate::sync::store_objects::load_store_package(&storage, &removal_ref, &removal)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 async fn insert_shareable_row(db: &crate::database::Database, id: &str, stamp: &str) {
@@ -260,20 +315,9 @@ async fn insert_shareable_row(db: &crate::database::Database, id: &str, stamp: &
 }
 
 async fn mark_snapshot_floor(db: &crate::database::Database) {
-    db.set_protocol_state(
-        crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
-        &crate::sync::store_commit::ObjectHash::digest(b"snapshot-floor").to_string(),
-    )
-    .await
-    .expect("persist snapshot floor");
-}
-
-/// Every immutable Store package object currently in `home`.
-fn changeset_keys(home: &InMemoryCloudHome) -> Vec<String> {
-    home.appended_keys()
-        .into_iter()
-        .filter(|k| k.starts_with("store-v1/packages/"))
-        .collect()
+    db.set_protocol_state("snapshot_seq", "0")
+        .await
+        .expect("persist snapshot floor");
 }
 
 /// Found a store with `owner` as its sole owner, add `member`, then remove
@@ -288,11 +332,9 @@ async fn found_add_and_fail_to_adopt_a_removal(
     member: &UserKeypair,
     custody: &TestCustody,
     old_key: [u8; 32],
-) -> (CloudSyncStorage, Hlc, ObjectHash) {
+) -> (CloudSyncStorage, Hlc, StoreRootRef) {
     let storage = storage_for(home, old_key, owner);
-    let store_root_hash =
-        publish_test_store_protocol_root(db, &storage, LIB_ID, DEVICE_ID, owner).await;
-    publish_test_founder_membership(&storage, LIB_ID, owner).await;
+    let store_root = create_test_store(db, &storage, owner).await;
     db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(owner))
         .await
         .expect("pin test Store founder");
@@ -341,7 +383,7 @@ async fn found_add_and_fail_to_adopt_a_removal(
         "the failure is the rotation-committed/adoption-failed variant, got {err:?}",
     );
 
-    (storage, hlc, store_root_hash)
+    (storage, hlc, store_root)
 }
 
 /// The defect this closes: today, a device whose adoption fails keeps sealing
@@ -361,6 +403,7 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
 
     let (storage, hlc, _store_root_hash) =
         found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
+    let device_id = local_store_device_id(&db).await;
 
     db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
         .await
@@ -378,7 +421,7 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
     let result = run_single_sync_cycle(
         &storage,
         LIB_ID,
-        DEVICE_ID,
+        &device_id,
         &hlc,
         &SystemClock,
         &db,
@@ -399,11 +442,6 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
     assert_eq!(pending.committed_generation, 2);
     assert_eq!(pending.live_generation, 1);
 
-    assert!(
-        changeset_keys(&home).is_empty(),
-        "no changeset reaches the cloud while adoption is pending: {:?}",
-        changeset_keys(&home),
-    );
     assert_eq!(
         db.get_protocol_state("local_seq").await.unwrap(),
         None,
@@ -424,8 +462,9 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     let home = InMemoryCloudHome::new();
     let db = open_test_db();
 
-    let (storage, hlc, store_root_hash) =
+    let (storage, hlc, store_root) =
         found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
+    let device_id = local_store_device_id(&db).await;
 
     db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
         .await
@@ -445,7 +484,7 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     run_single_sync_cycle(
         &storage,
         LIB_ID,
-        DEVICE_ID,
+        &device_id,
         &hlc,
         &SystemClock,
         &db,
@@ -459,7 +498,11 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     )
     .await
     .expect("still-pending cycle");
-    assert!(changeset_keys(&home).is_empty(), "still nothing sealed");
+    assert_eq!(
+        db.latest_local_store_position().await.unwrap(),
+        None,
+        "the queued Store write has no published commit while rotation is pending",
+    );
 
     // Retry the removal now that custody is writable again.
     custody.allow_writes();
@@ -488,7 +531,7 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     let result = run_single_sync_cycle(
         &storage,
         LIB_ID,
-        DEVICE_ID,
+        &device_id,
         &hlc,
         &SystemClock,
         &db,
@@ -504,14 +547,19 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     .expect("cycle after adoption");
     assert!(result.rotation_pending.is_none());
 
-    let keys = changeset_keys(&home);
-    assert_eq!(keys.len(), 1, "the pending Store write publishes: {keys:?}");
+    let commit_ref = db
+        .latest_local_store_position()
+        .await
+        .expect("read published Store position")
+        .expect("published Store write has an exact commit reference");
+    let registration = founder_registration(&storage, &store_root).await;
     assert_generation_two_opens_but_generation_one_does_not(
         &home,
-        &keys[0],
         &cipher_lock,
         old_key,
-        store_root_hash,
+        &store_root,
+        &commit_ref,
+        &registration,
         &owner,
         &member,
     )
@@ -530,8 +578,9 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     let home = InMemoryCloudHome::new();
     let db = open_test_db();
 
-    let (storage, hlc, store_root_hash) =
+    let (storage, hlc, store_root) =
         found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
+    let device_id = local_store_device_id(&db).await;
 
     db.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &pubkey_hex(&owner))
         .await
@@ -550,7 +599,7 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     run_single_sync_cycle(
         &storage,
         LIB_ID,
-        DEVICE_ID,
+        &device_id,
         &hlc,
         &SystemClock,
         &db,
@@ -564,7 +613,11 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     )
     .await
     .expect("still-pending cycle");
-    assert!(changeset_keys(&home).is_empty(), "still nothing sealed");
+    assert_eq!(
+        db.latest_local_store_position().await.unwrap(),
+        None,
+        "the queued Store write has no published commit while rotation is pending",
+    );
 
     // No retried removal — custody just becomes writable again, and the next
     // cycle's own refresh adopts the rotation.
@@ -572,7 +625,7 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     let result = run_single_sync_cycle(
         &storage,
         LIB_ID,
-        DEVICE_ID,
+        &device_id,
         &hlc,
         &SystemClock,
         &db,
@@ -589,59 +642,59 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     assert!(result.rotation_pending.is_none());
     assert_eq!(pending_rotation.pending_generation(), None);
 
-    let keys = changeset_keys(&home);
-    assert_eq!(keys.len(), 1, "the pending Store write publishes: {keys:?}");
+    let commit_ref = db
+        .latest_local_store_position()
+        .await
+        .expect("read published Store position")
+        .expect("published Store write has an exact commit reference");
+    let registration = founder_registration(&storage, &store_root).await;
     assert_generation_two_opens_but_generation_one_does_not(
         &home,
-        &keys[0],
         &cipher_lock,
         old_key,
-        store_root_hash,
+        &store_root,
+        &commit_ref,
+        &registration,
         &owner,
         &member,
     )
     .await;
 }
 
-/// The removed member's generation-one key must not open the changeset now at
-/// `key`, while the current (post-rotation) cipher does — and this is checked
-/// against the one and only changeset object either test produced, so there is
-/// no generation-one object in between for the removed member to have read.
+/// The removed member's generation-one key must not open the exact commit that
+/// published the queued package, while the current cipher does. The package may
+/// already be reclaimed after this device acknowledges its materialized commit.
 async fn assert_generation_two_opens_but_generation_one_does_not(
     home: &InMemoryCloudHome,
-    key: &str,
     cipher: &dyn CloudCipherAccess,
     old_key: [u8; 32],
-    store_root_hash: ObjectHash,
+    store_root: &StoreRootRef,
+    commit_ref: &StoreBatchCommitRef,
+    registration: &StoreDeviceRegistration,
     current_reader: &UserKeypair,
     removed_reader: &UserKeypair,
 ) {
-    let semantic_prefix = key
-        .split_once("/copies/")
-        .map(|(prefix, _)| prefix)
-        .expect("Store package copy path");
-    let context = ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StorePackage);
     let current_storage = CloudSyncStorage::new(
         Arc::new(home.clone()),
         cipher.snapshot(),
         BlobPathScheme::Hashed,
         LIB_ID,
         current_reader.clone(),
-        Arc::new(SequentialCopyIdGenerator::new("current-reader")),
     )
-    .expect("test cloud storage supports immutable copies");
-    let object = current_storage
-        .list_protocol_objects(semantic_prefix)
-        .await
-        .expect("list Store package copies")
-        .objects
-        .into_iter()
-        .find(|object| object.physical().logical_key() == key)
-        .expect("Store package object present at rest");
-    current_storage
-        .read_protocol_object(&context, &object, semantic_prefix)
-        .await
-        .expect("the current (post-rotation) cipher opens the changeset");
+    .expect("build current-reader exact storage");
+    let commit = crate::sync::store_objects::load_commit_ref(
+        &current_storage,
+        store_root.store_root_hash,
+        commit_ref,
+        registration,
+    )
+    .await
+    .expect("the current cipher opens the exact Store commit")
+    .value;
+    assert!(
+        commit.store_package.is_some(),
+        "the published Store commit names the queued package",
+    );
 
     let removed_member_storage = CloudSyncStorage::new(
         Arc::new(home.clone()),
@@ -649,14 +702,17 @@ async fn assert_generation_two_opens_but_generation_one_does_not(
         BlobPathScheme::Hashed,
         LIB_ID,
         removed_reader.clone(),
-        Arc::new(SequentialCopyIdGenerator::new("removed-reader")),
     )
-    .expect("test cloud storage supports immutable copies");
+    .expect("build removed-reader exact storage");
     assert!(
-        removed_member_storage
-            .read_protocol_object(&context, &object, semantic_prefix)
-            .await
-            .is_err(),
+        crate::sync::store_objects::load_commit_ref(
+            &removed_member_storage,
+            store_root.store_root_hash,
+            commit_ref,
+            registration,
+        )
+        .await
+        .is_err(),
         "the removed member's generation-one key must not open post-adoption content",
     );
 }

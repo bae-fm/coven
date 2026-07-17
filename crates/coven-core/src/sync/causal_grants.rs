@@ -66,7 +66,7 @@ const AUTHOR_STREAM_ID_DOMAIN: &[u8] = b"coven.author-stream-id.v1\0";
 
 /// Generated identity of one causal author stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AuthorStreamId([u8; 16]);
+pub struct AuthorStreamId([u8; 32]);
 
 impl AuthorStreamId {
     pub(crate) fn generate(ids: &dyn crate::id_provider::IdProvider) -> Self {
@@ -78,15 +78,34 @@ impl AuthorStreamId {
     }
 
     pub(crate) fn from_digest(digest: ObjectHash) -> Self {
-        Self(
-            digest.as_bytes()[..16]
-                .try_into()
-                .expect("SHA-256 prefix has fixed length"),
-        )
+        Self(*digest.as_bytes())
+    }
+
+    pub(crate) fn store_announcements(
+        root: &super::store_commit::StoreRootRef,
+        registration: &super::store_commit::StoreDeviceRegistrationRef,
+    ) -> Self {
+        #[derive(Serialize)]
+        struct Fields<'a> {
+            root: &'a super::store_commit::StoreRootRef,
+            anchor: &'static str,
+            registration: &'a super::store_commit::StoreDeviceRegistrationRef,
+        }
+
+        let mut material = AUTHOR_STREAM_ID_DOMAIN.to_vec();
+        material.extend(
+            serde_json::to_vec(&Fields {
+                root,
+                anchor: "store_announcements",
+                registration,
+            })
+            .expect("Store announcement stream identity serialization cannot fail"),
+        );
+        Self::from_digest(ObjectHash::digest(&material))
     }
 
     #[cfg(test)]
-    pub(crate) fn from_bytes(bytes: [u8; 16]) -> Self {
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 }
@@ -101,13 +120,13 @@ impl FromStr for AuthorStreamId {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 32
+        if value.len() != 64
             || value
                 .bytes()
                 .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
         {
             return Err(format!(
-                "author stream id must be exactly 32 lowercase hexadecimal characters: {value:?}"
+                "author stream id must be exactly 64 lowercase hexadecimal characters: {value:?}"
             ));
         }
         let bytes = hex::decode(value)
@@ -223,6 +242,7 @@ pub(crate) enum CausalChange<C: CausalCoordinate, A: CausalAssignment> {
         removes: BTreeSet<MembershipGrantId>,
         owner_barriers: BTreeMap<MembershipGrantId, OwnerGrantBarrier<C>>,
     },
+    Control,
     ResolutionActivation,
 }
 
@@ -244,7 +264,7 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalChange<C, A> {
                 owner_barriers,
                 ..
             } => Some((removes, owner_barriers)),
-            Self::Founder { .. } | Self::ResolutionActivation => None,
+            Self::Founder { .. } | Self::Control | Self::ResolutionActivation => None,
         }
     }
 
@@ -463,7 +483,7 @@ impl<C: CausalCoordinate, A: CausalAssignment> CausalState<C, A> {
                 removes,
                 ..
             } => self.remove(index, member_pubkey, removes, true, validate_exact_grants)?,
-            CausalChange::ResolutionActivation => {}
+            CausalChange::Control | CausalChange::ResolutionActivation => {}
         }
         Ok(())
     }

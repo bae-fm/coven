@@ -237,6 +237,8 @@ async fn lww_later_update_wins() {
 
 #[tokio::test]
 async fn lww_earlier_update_loses() {
+    use crate::sync::apply::resolve_and_apply_changeset;
+
     // Source builds an UPDATE changeset from base ts=1 to ts=3 (older).
     let src = open_test_db();
     exec(
@@ -266,6 +268,28 @@ async fn lww_earlier_update_loses() {
     assert_eq!(
         query_text(&target, "SELECT title FROM notes WHERE id = 'n1'").await,
         "LOCAL"
+    );
+
+    let target = open_test_db();
+    exec(
+        &target,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'LOCAL', NULL, '0000000005000-0000-t', '2026-01-01')",
+    )
+    .await;
+    let bytes = cs.clone();
+    let tables = test_synced_tables();
+    let receiver_wall_ms = target.receive_wall_ms();
+    let winners = target
+        .call(move |conn| {
+            resolve_and_apply_changeset(conn, &bytes, &tables, receiver_wall_ms)
+                .map(|result| result.winning_rows)
+        })
+        .await
+        .expect("apply local-winning update");
+    assert!(
+        winners.is_empty(),
+        "a local-winning row must not authorize replacement of its exact blob binding"
     );
 }
 

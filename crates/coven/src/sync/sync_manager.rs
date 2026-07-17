@@ -67,6 +67,8 @@ pub enum SyncError {
     Membership(Box<crate::sync::membership_ops::MembershipOpsError>),
     #[error("circle operation: {0}")]
     Circle(#[from] crate::sync::circle_ops::CircleOperationError),
+    #[error("device join: {0}")]
+    DeviceJoin(#[from] crate::DeviceJoinError),
     #[error("{0}")]
     Database(#[from] DbError),
     #[error("blob upload drain failed: {0}")]
@@ -212,7 +214,7 @@ impl SyncManager {
 
     pub(crate) async fn prepare_serial_resolution(
         &self,
-        branch_base: Option<crate::sync::store_commit::CommitPosition>,
+        branch_base: Option<crate::sync::store_commit::StoreBatchCommitRef>,
         store_dir: &crate::store_dir::StoreDir,
     ) -> Result<crate::sync::store_pull::SerialResolutionPlan, SyncError> {
         let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
@@ -222,11 +224,10 @@ impl SyncManager {
             .map_err(|error| SyncError::Protocol(error.to_string()))?;
         let store_root_hash = self
             .db
-            .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
+            .local_store_root_ref()
             .await?
-            .ok_or_else(|| SyncError::Protocol("store protocol root is absent".to_string()))?
-            .parse()
-            .map_err(|error| SyncError::Protocol(format!("store protocol root: {error}")))?;
+            .ok_or_else(|| SyncError::Protocol("exact Store root authority is absent".to_string()))?
+            .store_root_hash;
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
         crate::sync::store_pull::prepare_serial_resolution(
             &self.db,
@@ -291,7 +292,7 @@ impl SyncManager {
         }
 
         self.require_configured_coordination(&config)?;
-        crate::storage::cloud::setup::require_immutable_copy_capabilities_config(&config)
+        crate::storage::cloud::setup::require_exact_slot_capabilities_config(&config)
             .map_err(SyncError::StorageSetup)?;
 
         let routing_encryption = self.routing_encryption()?;
@@ -431,7 +432,7 @@ impl SyncManager {
         coordination: Option<std::sync::Arc<dyn crate::storage::cloud::CloudHeadStorage>>,
     ) -> Result<(), SyncError> {
         let config = (self.config_provider)();
-        crate::storage::cloud::setup::require_immutable_copy_capabilities_home(
+        crate::storage::cloud::setup::require_exact_slot_capabilities_home(
             home.clone(),
             config.cloud_home.provider.clone(),
         )
@@ -451,7 +452,6 @@ impl SyncManager {
             blob_paths,
             config.store_id.clone(),
             keypair,
-            Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
         )?;
         if let Some(coordination) = coordination {
             storage = storage.with_test_serial_coordination(coordination);
@@ -476,28 +476,11 @@ impl SyncManager {
     async fn store_initialization(
         &self,
     ) -> Result<crate::sync::cycle::StoreInitialization, SyncError> {
-        let Some(raw_hash) = self
-            .db
-            .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
-            .await?
-        else {
+        let Some(expected_store_root) = self.db.local_store_root_ref().await? else {
             return Ok(crate::sync::cycle::StoreInitialization::CreateStore);
         };
-        let expected_store_root_hash = raw_hash
-            .parse()
-            .map_err(|error| SyncError::Protocol(format!("store protocol root hash: {error}")))?;
-        let expected_founder = self
-            .db
-            .get_protocol_state(crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY)
-            .await?
-            .ok_or_else(|| {
-                SyncError::Protocol(
-                    "store protocol root is pinned but its founder is absent".to_string(),
-                )
-            })?;
         Ok(crate::sync::cycle::StoreInitialization::OpenStore {
-            expected_store_root_hash,
-            expected_founder,
+            expected_store_root,
         })
     }
 
@@ -594,8 +577,7 @@ impl SyncManager {
             .ok_or(MakeRemoteError::SyncNotReady)?;
         transition::make_remote(
             &self.db,
-            sync_loop.blob_path_scheme(),
-            &sync_loop.self_uploader(),
+            sync_loop.store_dir(),
             sync_loop.hlc(),
             root_table,
             root_id,
@@ -617,19 +599,7 @@ impl SyncManager {
         if !self.is_sync_ready() {
             return Err(MakeRemoteError::SyncNotReady);
         }
-        let sync_loop = self
-            .sync_loop_handle()
-            .ok_or(MakeRemoteError::SyncNotReady)?;
-        transition::cancel_make_remote(
-            &self.db,
-            sync_loop.store_dir(),
-            sync_loop.blob_path_scheme(),
-            &sync_loop.self_uploader(),
-            sync_loop.hlc(),
-            root_table,
-            root_id,
-        )
-        .await?;
+        transition::cancel_make_remote(&self.db, root_table, root_id).await?;
         self.trigger_sync();
         Ok(())
     }
@@ -661,7 +631,6 @@ impl SyncManager {
             &self.db,
             storage,
             sync_loop.store_dir(),
-            sync_loop.blob_path_scheme(),
             sync_loop.hlc(),
             routing_encryption,
             self.observer.as_deref(),
@@ -736,19 +705,16 @@ impl SyncManager {
         let founder_pubkey = pinned_owner.clone().ok_or_else(|| {
             SyncError::from(crate::sync::membership_ops::MembershipOpsError::NoFounderChain)
         })?;
-        let store_root_hash = self
-            .db
-            .get_protocol_state(crate::database::STORE_ROOT_HASH_STATE_KEY)
-            .await?
-            .ok_or_else(|| SyncError::Protocol("store protocol root hash is absent".to_string()))?
-            .parse()
-            .map_err(|error| SyncError::Protocol(format!("store protocol root hash: {error}")))?;
+        let store_root =
+            self.db.local_store_root_ref().await?.ok_or_else(|| {
+                SyncError::Protocol("store protocol root hash is absent".to_string())
+            })?;
         let membership_floor = match self.db.write_policy() {
             crate::WritePolicy::MergeConcurrent => {
                 crate::join_code::MembershipFloor::MergeConcurrent(
                     crate::sync::membership_ops::current_membership_floor(
                         &*storage,
-                        store_root_hash,
+                        &store_root,
                         pinned_owner.as_deref(),
                         Some(&self.db),
                     )
@@ -760,96 +726,109 @@ impl SyncManager {
                 let coordination = storage.serial_coordination().map_err(|error| {
                     SyncError::Protocol(format!("Serial coordination: {error}"))
                 })?;
-                let position = crate::sync::store_outbound::current_serial_head_position(
-                    &self.db,
-                    coordination,
-                )
-                .await
-                .map_err(|error| SyncError::Protocol(error.to_string()))?;
-                crate::join_code::MembershipFloor::Serial(position)
+                let reference =
+                    crate::sync::store_outbound::current_serial_head_ref(&self.db, coordination)
+                        .await
+                        .map_err(|error| SyncError::Protocol(error.to_string()))?;
+                crate::join_code::MembershipFloor::Serial(reference)
             }
         };
+        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let authority = crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(
+            self.db
+                .export_activated_device_continuation(&identity)
+                .await?,
+        );
 
         crate::storage::cloud::setup::generate_restore_code(
             &config,
             &self.key_service,
             self.custody.as_ref(),
-            self.identity_custody.as_ref(),
-            store_root_hash,
+            store_root,
             founder_pubkey,
             membership_floor,
+            authority,
         )
         .map_err(SyncError::from)
     }
 
-    pub(crate) async fn invite_member(
-        &self,
-        public_key_hex: &str,
-        invitee_email: Option<&str>,
+    pub(crate) fn invite_member<'a>(
+        &'a self,
+        public_key_hex: &'a str,
+        invitee_email: Option<&'a str>,
         role: MemberRole,
-    ) -> Result<String, SyncError> {
-        // Serialize with any other key-minting/rotating member op on this device.
-        let _member_ops = self.member_ops_lock.lock().await;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, SyncError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // Serialize with any other key-minting/rotating member op on this device.
+            let _member_ops = self.member_ops_lock.lock().await;
 
-        let sync_loop = self
-            .sync_loop_handle
-            .read()
-            .unwrap()
-            .clone()
-            .ok_or(SyncError::LoopNotRunning)?;
+            let sync_loop = self
+                .sync_loop_handle
+                .read()
+                .unwrap()
+                .clone()
+                .ok_or(SyncError::LoopNotRunning)?;
 
-        // Inviting a member wraps the store key to them, which only an encrypted
-        // home has. Refuse before touching the membership chain.
-        if sync_loop.current_encryption().is_none() {
-            return Err(SyncError::NotEncryptedHome);
-        }
-        let store_name = sync_loop.config().store_name.clone();
-        let invite_code = sync_loop
-            .invite_member(public_key_hex, invitee_email, role, &store_name)
-            .await
-            .map_err(SyncError::from)?;
+            // Inviting a member wraps the store key to them, which only an encrypted
+            // home has. Refuse before touching the membership chain.
+            if sync_loop.current_encryption().is_none() {
+                return Err(SyncError::NotEncryptedHome);
+            }
+            let store_name = sync_loop.config().store_name.clone();
+            let invite_code = sync_loop
+                .invite_member(public_key_hex, invitee_email, role, &store_name)
+                .await
+                .map_err(SyncError::from)?;
 
-        Ok(crate::join_code::encode(&invite_code))
+            Ok(crate::join_code::encode(&invite_code))
+        })
     }
 
-    pub(crate) async fn remove_member(&self, public_key_hex: &str) -> Result<String, SyncError> {
-        // Serialize with any other key-minting/rotating member op on this device,
-        // so a second removal builds on this one's committed state rather than
-        // cloning the same base cipher and overwriting its wraps.
-        let _member_ops = self.member_ops_lock.lock().await;
+    pub(crate) fn remove_member<'a>(
+        &'a self,
+        public_key_hex: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, SyncError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // Serialize with any other key-minting/rotating member op on this device,
+            // so a second removal builds on this one's committed state rather than
+            // cloning the same base cipher and overwriting its wraps.
+            let _member_ops = self.member_ops_lock.lock().await;
 
-        let sync_loop = self
-            .sync_loop_handle
-            .read()
-            .unwrap()
-            .clone()
-            .ok_or(SyncError::LoopNotRunning)?;
+            let sync_loop = self
+                .sync_loop_handle
+                .read()
+                .unwrap()
+                .clone()
+                .ok_or(SyncError::LoopNotRunning)?;
 
-        // Removing a member rotates the store key, which only an encrypted home
-        // has. Refuse up front so a plaintext home never mutates the membership
-        // chain or re-wraps keys before the rotation fails.
-        if sync_loop.current_encryption().is_none() {
-            return Err(SyncError::NotEncryptedHome);
-        }
+            // Removing a member rotates the store key, which only an encrypted home
+            // has. Refuse up front so a plaintext home never mutates the membership
+            // chain or re-wraps keys before the rotation fails.
+            if sync_loop.current_encryption().is_none() {
+                return Err(SyncError::NotEncryptedHome);
+            }
 
-        // Removing a member commits the cloud key rotation and then adopts the
-        // rotated key into this device's keyring and live cipher. The host records
-        // the returned fingerprint and that a key is stored in its own config; an
-        // adoption failure surfaces as its own membership variant naming the
-        // half-applied state and its remedies — and, structurally, this device
-        // seals nothing new for the cloud until one of those remedies adopts it
-        // (`pending_rotation`, shared with the sync loop this same store runs).
-        let outcome = sync_loop.remove_member(public_key_hex).await;
+            // Removing a member commits the cloud key rotation and then adopts the
+            // rotated key into this device's keyring and live cipher. The host records
+            // the returned fingerprint and that a key is stored in its own config; an
+            // adoption failure surfaces as its own membership variant naming the
+            // half-applied state and its remedies — and, structurally, this device
+            // seals nothing new for the cloud until one of those remedies adopts it
+            // (`pending_rotation`, shared with the sync loop this same store runs).
+            let outcome = sync_loop.remove_member(public_key_hex).await;
 
-        // Durably record the marker's state whether adoption succeeded or failed:
-        // on a failed adoption the rotation is committed on the cloud but this
-        // device is still sealing under the superseded generation, so a restart
-        // must remember the pause; on success the marker is already cleared and
-        // this deletes the durable record.
-        sync_loop.persist_pending_rotation().await?;
+            // Durably record the marker's state whether adoption succeeded or failed:
+            // on a failed adoption the rotation is committed on the cloud but this
+            // device is still sealing under the superseded generation, so a restart
+            // must remember the pause; on success the marker is already cleared and
+            // this deletes the durable record.
+            sync_loop.persist_pending_rotation().await?;
 
-        let fingerprint = outcome.map_err(SyncError::from)?;
-        Ok(fingerprint)
+            let fingerprint = outcome.map_err(SyncError::from)?;
+            Ok(fingerprint)
+        })
     }
 
     pub(crate) async fn create_circle(&self, name: &str) -> Result<crate::CircleId, SyncError> {
@@ -1142,7 +1121,7 @@ mod tests {
             let mut config = config.write().expect("write config");
             config.cloud_home.provider = Some(CloudProvider::S3);
             config.cloud_home.s3_endpoint = Some("https://objects.example".to_string());
-            config.cloud_home.s3_immutable_copies = None;
+            config.cloud_home.s3_exact_slots = None;
         }
         let error = manager
             .start_sync()
@@ -1151,7 +1130,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            SyncError::StorageSetup(StorageSetupError::ImmutableCopiesUnavailable {
+            SyncError::StorageSetup(StorageSetupError::ExactSlotsUnavailable {
                 provider: CloudProvider::S3,
             })
         ));
@@ -1164,7 +1143,7 @@ mod tests {
             .expect_err("injected home without immutable-copy storage is refused");
         assert!(matches!(
             error,
-            SyncError::StorageSetup(StorageSetupError::ImmutableCopiesUnavailable {
+            SyncError::StorageSetup(StorageSetupError::ExactSlotsUnavailable {
                 provider: CloudProvider::S3,
             })
         ));
@@ -1368,18 +1347,17 @@ mod tests {
             BlobPathScheme::Plain,
             store_id,
             attacker.clone(),
-            Arc::new(crate::storage::cloud::SequentialCopyIdGenerator::new(
-                "foreign-founder",
-            )),
         )
         .expect("build attacker storage");
-        crate::sync::test_helpers::publish_test_protocol_roots(
+        let attacker_db = crate::sync::test_helpers::open_test_db();
+        crate::sync::store_protocol_root::create_store(
+            &attacker_db,
             &attacker_storage,
             store_id,
             &attacker,
-            "0000000001000-0000-attacker",
         )
-        .await;
+        .await
+        .expect("publish attacker Store root");
 
         let victim = crate::keys::UserKeypair::generate();
         let db = crate::sync::test_helpers::open_test_db();

@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use crate::blob::cache::BlobCacheError;
-use crate::blob::BlobRef;
+use crate::blob::{BlobRef, RowBlobRef};
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::{CovenError, CovenResult};
@@ -143,6 +143,16 @@ impl CovenReadHandle {
         Ok(Some(Arc::new(storage)))
     }
 
+    /// Capture the exact current blob-bearing row version from this reader's
+    /// database snapshot.
+    pub async fn row_blob_ref(
+        &self,
+        table: &str,
+        row_id: &str,
+    ) -> Result<RowBlobRef, crate::database::DbError> {
+        self.db.row_blob_ref(table, row_id).await
+    }
+
     /// Read a blob's whole plaintext through coven's locality-aware read: served from
     /// the user's file (Local user-provided), coven's local store (Local
     /// host-provided), the pinned/evictable cache on a Remote hit, or fetched from
@@ -152,22 +162,21 @@ impl CovenReadHandle {
     /// A cloud fetch writes the fetched bytes into the per-device cache
     /// (`storage/cache/`) with an atomic temp-then-rename — device scratch, no synced
     /// state touched — so a File Provider materializing remote content works through a
-    /// read-only handle. It records no db rows: the uploader-index write the writer's
-    /// read path makes to skip a later listing scan is skipped for a read-only handle,
-    /// which re-scans instead.
-    pub async fn read_blob(&self, blob: &BlobRef) -> Result<Vec<u8>, BlobCacheError> {
+    /// read-only handle. The supplied [`RowBlobRef`] already carries the exact stored
+    /// object and authority, so the read performs no database write or cloud listing.
+    pub async fn read_blob(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
         crate::blob::cache::read_blob(&self.db, &self.store_dir, storage.as_deref(), blob).await
     }
 
-    /// Serve `len` plaintext bytes of a blob starting at `offset`, for streaming or
-    /// seeking without loading the whole file. The ranged sibling of
+    /// Serve `len` plaintext bytes of an exact row blob starting at `offset`, for
+    /// streaming or seeking without loading the whole file. The [`RowBlobRef`]
+    /// carries the plaintext length used to bound the range. The ranged sibling of
     /// [`read_blob`](Self::read_blob); a Remote-miss range read fetches from the cloud
     /// but writes no cache file (only a whole-file read populates).
     pub async fn open_blob_stream(
         &self,
-        blob: &BlobRef,
-        source_size: u64,
+        blob: &RowBlobRef,
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, BlobCacheError> {
@@ -177,7 +186,6 @@ impl CovenReadHandle {
             &self.store_dir,
             storage.as_deref(),
             blob,
-            source_size,
             offset,
             len,
         )

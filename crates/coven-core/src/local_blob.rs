@@ -106,6 +106,211 @@ struct AtomicTempFile {
     armed: bool,
 }
 
+/// A provider download path that becomes visible at its destination only after
+/// the caller has verified the completed file.
+pub struct AtomicStagedFile {
+    destination: PathBuf,
+    staged: PathBuf,
+    armed: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CommitNewFileError {
+    #[error("destination already exists: {0}")]
+    DestinationExists(PathBuf),
+    #[error("commit new file: {0}")]
+    Filesystem(String),
+    #[error("{operation}; rollback failed: {rollback}")]
+    RollbackFailed { operation: String, rollback: String },
+}
+
+impl AtomicStagedFile {
+    pub fn path(&self) -> &Path {
+        &self.staged
+    }
+
+    pub async fn commit(mut self) -> Result<(), String> {
+        commit_staged_file(&self.staged, &self.destination, |path| {
+            let path = path.to_path_buf();
+            async move { sync_parent_dir(&path).await }
+        })
+        .await?;
+        self.armed = false;
+        Ok(())
+    }
+
+    /// Publish a verified user-owned destination without replacing an existing
+    /// path. The staged file is a sibling, so the hard link exposes one complete
+    /// inode atomically and fails if another file already owns the name.
+    pub async fn commit_new(self) -> Result<(), CommitNewFileError> {
+        self.commit_new_with_sync(|path| {
+            let path = path.to_path_buf();
+            async move { sync_parent_dir(&path).await }
+        })
+        .await
+    }
+
+    async fn commit_new_with_sync<F, Fut>(
+        mut self,
+        mut sync_committed_parent: F,
+    ) -> Result<(), CommitNewFileError>
+    where
+        F: FnMut(&Path) -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
+        match tokio::fs::hard_link(&self.staged, &self.destination).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(CommitNewFileError::DestinationExists(
+                    self.destination.clone(),
+                ));
+            }
+            Err(error) => {
+                return Err(CommitNewFileError::Filesystem(format!(
+                    "link verified blob {} -> {}: {error}",
+                    self.staged.display(),
+                    self.destination.display()
+                )));
+            }
+        }
+
+        if let Err(operation) = sync_committed_parent(&self.destination).await {
+            rollback_new_destination(&self.destination, &operation).await?;
+            return Err(CommitNewFileError::Filesystem(operation));
+        }
+        if let Err(error) = tokio::fs::remove_file(&self.staged).await {
+            let operation = format!(
+                "remove linked staging file {}: {error}",
+                self.staged.display()
+            );
+            rollback_new_destination(&self.destination, &operation).await?;
+            return Err(CommitNewFileError::Filesystem(operation));
+        }
+        self.armed = false;
+        if let Err(operation) = sync_committed_parent(&self.destination).await {
+            return Err(CommitNewFileError::Filesystem(operation));
+        }
+        Ok(())
+    }
+}
+
+async fn commit_staged_file<F, Fut>(
+    staged: &Path,
+    destination: &Path,
+    sync_committed_parent: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    tokio::fs::rename(staged, destination)
+        .await
+        .map_err(|error| {
+            format!(
+                "rename verified blob {} -> {}: {error}",
+                staged.display(),
+                destination.display()
+            )
+        })?;
+    if let Err(operation) = sync_committed_parent(destination).await {
+        tokio::fs::rename(destination, staged)
+            .await
+            .map_err(|rollback| {
+                format!(
+                    "{operation}; rollback rename {} -> {} failed: {rollback}",
+                    destination.display(),
+                    staged.display()
+                )
+            })?;
+        sync_parent_dir(staged).await.map_err(|rollback| {
+            format!("{operation}; rollback directory sync failed: {rollback}")
+        })?;
+        return Err(operation);
+    }
+    Ok(())
+}
+
+/// Fill an unpublished staged destination from a plaintext stream and fsync the
+/// completed file. The caller verifies any higher-level content facts before it
+/// publishes the stage with [`AtomicStagedFile::commit`] or
+/// [`AtomicStagedFile::commit_new`].
+pub async fn write_stream_to_stage(
+    staged: &AtomicStagedFile,
+    source: &mut dyn PlaintextChunkReader,
+) -> Result<u64, StreamWriteError> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(staged.path())
+        .await
+        .map_err(|error| {
+            StreamWriteError::Local(format!(
+                "create staged blob {}: {error}",
+                staged.path().display()
+            ))
+        })?;
+    let mut written = 0u64;
+    loop {
+        let chunk = source.next_chunk(1 << 20).await?;
+        if chunk.is_empty() {
+            break;
+        }
+        file.write_all(&chunk).await.map_err(|error| {
+            StreamWriteError::Local(format!(
+                "write staged blob {}: {error}",
+                staged.path().display()
+            ))
+        })?;
+        written += chunk.len() as u64;
+    }
+    file.sync_all().await.map_err(|error| {
+        StreamWriteError::Local(format!(
+            "fsync staged blob {}: {error}",
+            staged.path().display()
+        ))
+    })?;
+    Ok(written)
+}
+
+async fn rollback_new_destination(
+    destination: &Path,
+    operation: &str,
+) -> Result<(), CommitNewFileError> {
+    tokio::fs::remove_file(destination).await.map_err(|error| {
+        CommitNewFileError::RollbackFailed {
+            operation: operation.to_string(),
+            rollback: format!("remove new destination {}: {error}", destination.display()),
+        }
+    })?;
+    sync_parent_dir(destination)
+        .await
+        .map_err(|rollback| CommitNewFileError::RollbackFailed {
+            operation: operation.to_string(),
+            rollback,
+        })
+}
+
+impl Drop for AtomicStagedFile {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match std::fs::remove_file(&self.staged) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %self.staged.display(),
+                    %error,
+                    "could not remove unverified staged blob"
+                );
+            }
+        }
+    }
+}
+
 impl AtomicTempFile {
     fn create(path: PathBuf) -> Result<Self, String> {
         let file = std::fs::OpenOptions::new()
@@ -193,6 +398,76 @@ pub async fn file_len(path: &Path) -> Result<u64, String> {
         .await
         .map(|metadata| metadata.len())
         .map_err(|e| format!("stat local blob {}: {e}", path.display()))
+}
+
+/// Stream the exact stored size and SHA-256 identity of a local file.
+pub(crate) async fn exact_file_facts(
+    path: &Path,
+) -> Result<(u64, crate::sync::store_commit::ObjectHash), String> {
+    use sha2::{Digest, Sha256};
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("open exact file {}: {error}", path.display()))?;
+    let mut size = 0_u64;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1 << 20];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("read exact file {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        size = size
+            .checked_add(read as u64)
+            .ok_or_else(|| format!("exact file size overflow: {}", path.display()))?;
+        hasher.update(&buffer[..read]);
+    }
+    Ok((
+        size,
+        crate::sync::store_commit::ObjectHash::from_digest(hasher.finalize().into()),
+    ))
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ExactFileVerificationError {
+    #[error("inspect exact file: {0}")]
+    Filesystem(String),
+    #[error("{0}")]
+    IdentityMismatch(String),
+}
+
+pub(crate) async fn verify_exact_file(
+    object: &crate::sync::storage::ExactObjectRef,
+    path: &Path,
+) -> Result<(), ExactFileVerificationError> {
+    let (size, hash) = exact_file_facts(path)
+        .await
+        .map_err(ExactFileVerificationError::Filesystem)?;
+    if size != object.stored_size() || hash != object.stored_hash() {
+        return Err(ExactFileVerificationError::IdentityMismatch(format!(
+            "exact file {} does not match stored identity for {}",
+            path.display(),
+            object.slot().logical_key()
+        )));
+    }
+    Ok(())
+}
+
+pub async fn stage_atomic_destination(path: &Path) -> Result<AtomicStagedFile, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("blob path has no parent dir: {}", path.display()))?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| format!("create parent dir for {}: {error}", path.display()))?;
+    Ok(AtomicStagedFile {
+        destination: path.to_path_buf(),
+        staged: temp_sibling(parent),
+        armed: true,
+    })
 }
 
 pub async fn copy_atomic(src: &Path, dst: &Path) -> Result<(), String> {
@@ -384,6 +659,50 @@ pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 pub async fn write_atomic_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {
     write_atomic(path, bytes).await?;
     sync_parent_dir(path).await
+}
+
+/// Blocking atomic file installation for synchronous persistence boundaries.
+/// The temp file is a unique sibling, so the rename cannot cross filesystems.
+pub fn write_atomic_durable_blocking(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("path has no parent directory: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create parent directory {}: {error}", parent.display()))?;
+    let temp = temp_sibling(parent);
+    let write = (|| {
+        let mut file = std::fs::File::create(&temp)
+            .map_err(|error| format!("create temp file {}: {error}", temp.display()))?;
+        file.write_all(bytes)
+            .map_err(|error| format!("write temp file {}: {error}", temp.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("fsync temp file {}: {error}", temp.display()))?;
+        drop(file);
+        std::fs::rename(&temp, path).map_err(|error| {
+            format!(
+                "rename temp file {} to {}: {error}",
+                temp.display(),
+                path.display()
+            )
+        })?;
+        std::fs::File::open(parent)
+            .map_err(|error| format!("open parent directory {}: {error}", parent.display()))?
+            .sync_all()
+            .map_err(|error| format!("fsync parent directory {}: {error}", parent.display()))
+    })();
+    if let Err(operation) = write {
+        return match std::fs::remove_file(&temp) {
+            Ok(()) => Err(operation),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(operation),
+            Err(cleanup) => Err(format!(
+                "{operation}; remove failed temp file {}: {cleanup}",
+                temp.display()
+            )),
+        };
+    }
+    Ok(())
 }
 
 pub async fn exists(path: &Path) -> Result<bool, String> {
@@ -595,6 +914,131 @@ mod tests {
         assert_eq!(read(&renamed).await.expect("read renamed"), bytes);
         assert!(remove_file(&renamed).await.expect("remove renamed"));
         assert!(!remove_file(&renamed).await.expect("renamed already absent"));
+    }
+
+    #[tokio::test]
+    async fn staged_file_is_invisible_until_verified_commit() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let destination = tmp.path().join("blob.bin");
+        write_atomic(&destination, b"prior")
+            .await
+            .expect("seed destination");
+        let staged = stage_atomic_destination(&destination)
+            .await
+            .expect("allocate staging path");
+        write_atomic(staged.path(), b"verified")
+            .await
+            .expect("write staged file");
+
+        assert_eq!(read(&destination).await.unwrap(), b"prior");
+        staged.commit().await.expect("commit staged file");
+        assert_eq!(read(&destination).await.unwrap(), b"verified");
+        assert!(temp_entries(tmp.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn staged_file_publish_rolls_back_when_directory_sync_fails() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let destination = tmp.path().join("blob.bin");
+        let staged = stage_atomic_destination(&destination)
+            .await
+            .expect("allocate staging path");
+        write_atomic(staged.path(), b"verified")
+            .await
+            .expect("write staged file");
+        let staged_path = staged.path().to_path_buf();
+
+        let error = commit_staged_file(&staged_path, &destination, |_| async {
+            Err("injected directory sync failure".to_string())
+        })
+        .await
+        .expect_err("directory sync failure must reject publication");
+
+        assert_eq!(error, "injected directory sync failure");
+        assert!(!destination.exists());
+        assert_eq!(
+            read(&staged_path).await.expect("read restored stage"),
+            b"verified"
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_new_file_refuses_to_replace_an_existing_user_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let destination = tmp.path().join("blob.bin");
+        write_atomic(&destination, b"user file")
+            .await
+            .expect("seed user destination");
+        let staged = stage_atomic_destination(&destination)
+            .await
+            .expect("allocate staging path");
+        write_atomic(staged.path(), b"downloaded")
+            .await
+            .expect("write verified staged file");
+
+        assert_eq!(
+            staged.commit_new().await,
+            Err(CommitNewFileError::DestinationExists(destination.clone()))
+        );
+        assert_eq!(read(&destination).await.unwrap(), b"user file");
+        assert!(temp_entries(tmp.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn staged_new_file_publishes_complete_verified_bytes() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let destination = tmp.path().join("blob.bin");
+        let staged = stage_atomic_destination(&destination)
+            .await
+            .expect("allocate staging path");
+        write_atomic(staged.path(), b"downloaded")
+            .await
+            .expect("write verified staged file");
+
+        staged.commit_new().await.expect("publish new user file");
+
+        assert_eq!(read(&destination).await.unwrap(), b"downloaded");
+        assert!(temp_entries(tmp.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn staged_new_file_preserves_destination_when_final_directory_sync_fails() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let destination = tmp.path().join("blob.bin");
+        let staged = stage_atomic_destination(&destination)
+            .await
+            .expect("allocate staging path");
+        write_atomic(staged.path(), b"downloaded")
+            .await
+            .expect("write verified staged file");
+        let staged_path = staged.path().to_path_buf();
+        let sync_count = Arc::new(AtomicUsize::new(0));
+        let sync_count_for_call = sync_count.clone();
+
+        let error = staged
+            .commit_new_with_sync(move |_| {
+                let invocation = sync_count_for_call.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if invocation == 1 {
+                        Err("injected final directory sync failure".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await
+            .expect_err("final directory sync failure must be reported");
+
+        assert_eq!(
+            error,
+            CommitNewFileError::Filesystem("injected final directory sync failure".to_string())
+        );
+        assert_eq!(sync_count.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            read(&destination).await.expect("read destination"),
+            b"downloaded"
+        );
+        assert!(!staged_path.exists());
     }
 
     #[tokio::test]

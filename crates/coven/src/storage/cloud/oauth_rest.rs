@@ -118,8 +118,26 @@ pub(super) async fn rest_read_range<T: OAuthRestHome + ?Sized>(
     start: u64,
     end: u64,
 ) -> Result<Vec<u8>, CloudHomeError> {
+    let context = format!("read range {key}");
     let resp = home.send_read(key, Some((start, end))).await?;
-    let resp = ensure_ok(resp, &format!("read range {key}"), home.not_found()).await?;
+    let resp = ensure_ok(resp, &context, home.not_found()).await?;
+    validated_range_bytes(resp, &context, start, end).await
+}
+
+pub(super) async fn validated_range_bytes(
+    resp: reqwest::Response,
+    context: &str,
+    start: u64,
+    end: u64,
+) -> Result<Vec<u8>, CloudHomeError> {
+    let expected_len = end
+        .checked_sub(start)
+        .filter(|length| *length > 0)
+        .ok_or_else(|| {
+            CloudHomeError::Transport(format!(
+                "{context}: invalid half-open range [{start}, {end})"
+            ))
+        })?;
     // A ranged GET is honored only with 206 Partial Content. A 200 means the
     // provider ignored `Range` (or OneDrive's 302-to-download-URL redirect
     // dropped it) and returned the whole object from byte 0; serving those
@@ -128,10 +146,38 @@ pub(super) async fn rest_read_range<T: OAuthRestHome + ?Sized>(
     let status = resp.status();
     if !is_range_success(status.as_u16()) {
         return Err(CloudHomeError::Transport(format!(
-            "read range {key}: expected 206 Partial Content, got HTTP {status}"
+            "{context}: expected 206 Partial Content, got HTTP {status}"
         )));
     }
-    ok_bytes(resp, &format!("read range body for {key}")).await
+    let content_range = resp
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .ok_or_else(|| {
+            CloudHomeError::Transport(format!("{context}: 206 response omitted Content-Range"))
+        })?
+        .to_str()
+        .map_err(|error| {
+            CloudHomeError::Transport(format!("{context}: invalid Content-Range header: {error}"))
+        })?;
+    let expected_last = end - 1;
+    let expected_prefix = format!("bytes {start}-{expected_last}/");
+    let total = content_range
+        .strip_prefix(&expected_prefix)
+        .and_then(|total| total.parse::<u64>().ok())
+        .filter(|total| *total >= end)
+        .ok_or_else(|| {
+            CloudHomeError::Transport(format!(
+                "{context}: expected Content-Range {expected_prefix}<total >= {end}>, got {content_range:?}"
+            ))
+        })?;
+    let bytes = ok_bytes(resp, &format!("{context} body")).await?;
+    if bytes.len() as u64 != expected_len {
+        return Err(CloudHomeError::Transport(format!(
+            "{context}: Content-Range declared {expected_len} bytes of {total}, body contained {}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// Delete `key`; an absent key is success.
@@ -161,6 +207,7 @@ pub(super) async fn rest_list<T: OAuthRestHome + ?Sized>(
 ) -> Result<Vec<String>, CloudHomeError> {
     let mut keys = Vec::new();
     let mut cursor: Option<String> = None;
+    let mut page_tokens = PageTokenTracker::new("OAuth REST listing");
     loop {
         let resp = home.send_list_page(prefix, cursor.as_deref()).await?;
         let resp = match ensure_ok(resp, &format!("list {prefix}"), home.not_found()).await {
@@ -178,7 +225,7 @@ pub(super) async fn rest_list<T: OAuthRestHome + ?Sized>(
         let page = home.parse_list_page(&body, prefix)?;
         keys.extend(page.keys);
         match page.next {
-            Some(c) => cursor = Some(c),
+            Some(token) => cursor = Some(page_tokens.record(&token)?),
             None => break,
         }
     }
@@ -275,6 +322,7 @@ mod tests {
     struct MockRangeHome {
         status: u16,
         body: &'static str,
+        content_range: Option<&'static str>,
     }
 
     #[async_trait]
@@ -289,7 +337,13 @@ mod tests {
             range: Option<(u64, u64)>,
         ) -> Result<reqwest::Response, CloudHomeError> {
             assert!(range.is_some(), "a range read must carry a range");
-            Ok(response(self.status, self.body))
+            let mut builder = HttpResponse::builder().status(self.status);
+            if let Some(content_range) = self.content_range {
+                builder = builder.header(reqwest::header::CONTENT_RANGE, content_range);
+            }
+            Ok(reqwest::Response::from(
+                builder.body(self.body.to_string()).unwrap(),
+            ))
         }
 
         async fn send_delete(&self, _key: &str) -> Result<reqwest::Response, CloudHomeError> {
@@ -318,6 +372,7 @@ mod tests {
         let home = MockRangeHome {
             status: 200,
             body: "WHOLE-OBJECT-FROM-BYTE-0",
+            content_range: None,
         };
         let err = rest_read_range(&home, "storage/audio", 8, 16)
             .await
@@ -331,10 +386,65 @@ mod tests {
         let home = MockRangeHome {
             status: 206,
             body: "RANGE",
+            content_range: Some("bytes 8-12/20"),
         };
         let bytes = rest_read_range(&home, "storage/audio", 8, 13)
             .await
             .expect("a 206 Partial Content response is the honored range");
         assert_eq!(bytes, b"RANGE");
+    }
+
+    #[tokio::test]
+    async fn read_range_rejects_missing_content_range() {
+        let home = MockRangeHome {
+            status: 206,
+            body: "RANGE",
+            content_range: None,
+        };
+
+        let error = rest_read_range(&home, "storage/audio", 8, 13)
+            .await
+            .expect_err("a range response must identify the returned byte interval");
+
+        assert!(
+            matches!(error, CloudHomeError::Transport(_)),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_range_rejects_mismatched_content_range() {
+        let home = MockRangeHome {
+            status: 206,
+            body: "RANGE",
+            content_range: Some("bytes 0-4/20"),
+        };
+
+        let error = rest_read_range(&home, "storage/audio", 8, 13)
+            .await
+            .expect_err("a response for another range must be rejected");
+
+        assert!(
+            matches!(error, CloudHomeError::Transport(_)),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_range_rejects_short_body() {
+        let home = MockRangeHome {
+            status: 206,
+            body: "RANG",
+            content_range: Some("bytes 8-12/20"),
+        };
+
+        let error = rest_read_range(&home, "storage/audio", 8, 13)
+            .await
+            .expect_err("a partial range body must be rejected");
+
+        assert!(
+            matches!(error, CloudHomeError::Transport(_)),
+            "got {error:?}"
+        );
     }
 }

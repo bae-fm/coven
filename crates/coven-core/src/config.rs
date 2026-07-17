@@ -28,13 +28,13 @@ pub enum CustomS3Serial {
     ConditionalPutAndStrongReads,
 }
 
-/// Local operator assertion required before a custom S3 endpoint may store
-/// immutable protocol and blob copies. This is local configuration and is never
+/// Local operator assertion required before a custom S3 endpoint may provide
+/// exact protocol and blob slots. This is local configuration and is never
 /// accepted from invite or restore data.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum CustomS3ImmutableCopies {
-    ConditionalCreateStrongReadsCompleteListing,
+pub enum CustomS3ExactSlots {
+    StandardConditionalRequests,
 }
 
 impl CloudProvider {
@@ -105,7 +105,7 @@ pub struct CloudHomeConfig {
     #[serde(default)]
     pub s3_serial: Option<CustomS3Serial>,
     #[serde(default)]
-    pub s3_immutable_copies: Option<CustomS3ImmutableCopies>,
+    pub s3_exact_slots: Option<CustomS3ExactSlots>,
     #[serde(default)]
     pub google_drive_folder_id: Option<String>,
     #[serde(default)]
@@ -133,7 +133,7 @@ impl Default for CloudHomeConfig {
             s3_endpoint: None,
             s3_key_prefix: None,
             s3_serial: None,
-            s3_immutable_copies: None,
+            s3_exact_slots: None,
             google_drive_folder_id: None,
             dropbox_folder_path: None,
             onedrive_drive_id: None,
@@ -195,18 +195,20 @@ impl Config {
 
     /// Persist the sync config to `store_dir/config.yaml`.
     pub fn save_to_config_yaml(&self) -> Result<(), ConfigError> {
-        std::fs::create_dir_all(&*self.store_dir)?;
         let yaml: ConfigYaml = self.into();
         let text =
             serde_yaml::to_string(&yaml).map_err(|e| ConfigError::Serialization(e.to_string()))?;
-        std::fs::write(self.store_dir.config_path(), text)?;
-        Ok(())
+        crate::local_blob::write_atomic_durable_blocking(
+            &self.store_dir.config_path(),
+            text.as_bytes(),
+        )
+        .map_err(ConfigError::Config)
     }
 
     /// Read `store_dir/config.yaml` back into a runtime `Config`; `store_dir`
     /// is supplied by the caller, since it is not itself persisted (see the
     /// module doc). A missing or unparseable file is a loud [`ConfigError`]
-    /// naming the path — there is no legacy shape to tolerate.
+    /// naming the path.
     pub fn load_from_config_yaml(store_dir: StoreDir) -> Result<Config, ConfigError> {
         let path = store_dir.config_path();
         let text = std::fs::read_to_string(&path)
@@ -285,9 +287,7 @@ mod tests {
             provider: Some(CloudProvider::S3),
             s3_bucket: Some("bucket".to_string()),
             s3_region: Some("us-east-1".to_string()),
-            s3_immutable_copies: Some(
-                CustomS3ImmutableCopies::ConditionalCreateStrongReadsCompleteListing,
-            ),
+            s3_exact_slots: Some(CustomS3ExactSlots::StandardConditionalRequests),
             storage: HomeStorage::Opaque,
             ..CloudHomeConfig::default()
         };
@@ -295,7 +295,7 @@ mod tests {
         config.save_to_config_yaml().expect("save");
         let config_yaml = std::fs::read_to_string(config.store_dir.config_path())
             .expect("read saved local config");
-        assert!(config_yaml.contains("s3_immutable_copies"));
+        assert!(config_yaml.contains("s3_exact_slots"));
         let loaded = Config::load_from_config_yaml(store_dir).expect("load");
 
         assert_eq!(loaded, config);
@@ -309,7 +309,7 @@ mod tests {
             key_prefix: None,
         };
         let shared_wire = serde_json::to_string(&join_info).expect("serialize shared join info");
-        assert!(!shared_wire.contains("s3_immutable_copies"));
+        assert!(!shared_wire.contains("s3_exact_slots"));
         assert!(!shared_wire.contains("strong_reads"));
     }
 

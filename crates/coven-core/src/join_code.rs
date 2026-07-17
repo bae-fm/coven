@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::code_envelope::{self, EnvelopeError};
 use crate::storage::cloud::CloudHomeJoinInfo;
-use crate::sync::membership::MembershipCoord;
+use crate::sync::membership::MembershipHeadRef;
 #[cfg(test)]
-use crate::sync::membership::MembershipGrantId;
+use crate::sync::membership::{MembershipCoord, MembershipGrantId};
 #[cfg(test)]
 use crate::sync::store_commit::ObjectHash;
 
@@ -13,8 +13,8 @@ pub const INVITE_CODE_VERSION: u8 = 3;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MembershipFloor {
-    MergeConcurrent(Vec<MembershipCoord>),
-    Serial(Option<crate::sync::store_commit::CommitPosition>),
+    MergeConcurrent(Vec<MembershipHeadRef>),
+    Serial(Option<crate::sync::store_commit::StoreBatchCommitRef>),
 }
 
 impl MembershipFloor {
@@ -42,10 +42,10 @@ pub struct InviteCode {
     pub join_info: CloudHomeJoinInfo,
     pub owner_pubkey: String,
     pub key_author_pubkey: String,
-    pub store_root_hash: crate::sync::store_commit::ObjectHash,
+    pub store_root: crate::sync::store_commit::StoreRootRef,
     /// The exact membership state the joiner must observe: causal author
-    /// coordinates for MergeConcurrent stores, or the global commit position
-    /// for Serial stores.
+    /// heads for MergeConcurrent stores, or the exact global commit for Serial
+    /// stores.
     pub membership_floor: MembershipFloor,
 }
 
@@ -84,15 +84,19 @@ pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
             if floor.is_empty() {
                 return Err(JoinCodeError::EmptyMembershipFloor);
             }
-            crate::sync::membership_ops::membership_floor_by_grant(floor)
+            crate::sync::membership_ops::validate_membership_floor(floor)
                 .map_err(JoinCodeError::InvalidMembershipFloor)?;
         }
         MembershipFloor::Serial(None) => {
             return Err(JoinCodeError::EmptyMembershipFloor);
         }
-        MembershipFloor::Serial(Some(position)) if position.seq == 0 => {
+        MembershipFloor::Serial(Some(reference))
+            if reference.coord.policy() != crate::WritePolicy::Serial
+                || reference.coord.sequence() == 0 =>
+        {
             return Err(JoinCodeError::InvalidMembershipFloor(
-                "Serial membership floor has sequence zero".to_string(),
+                "Serial membership floor is not an exact nonzero Serial commit reference"
+                    .to_string(),
             ));
         }
         MembershipFloor::Serial(Some(_)) => {}
@@ -153,7 +157,7 @@ pub fn decode_invite_code_info(code: &str) -> Result<InviteCodeInfo, JoinCodeErr
         store_id: invite.store_id,
         store_name: invite.store_name,
         owner_pubkey: invite.owner_pubkey,
-        store_root_hash: invite.store_root_hash,
+        store_root_hash: invite.store_root.store_root_hash,
         needs_oauth: cloud_provider.needs_oauth(),
         cloud_provider,
     })
@@ -209,13 +213,26 @@ mod tests {
         hex::encode([0xAB_u8; 32])
     }
 
-    fn test_membership_floor() -> Vec<MembershipCoord> {
-        vec![MembershipCoord {
+    fn test_membership_floor() -> Vec<MembershipHeadRef> {
+        let coord = MembershipCoord {
             author_pubkey: test_owner_pubkey(),
             author_owner_grant: MembershipGrantId(ObjectHash::digest(b"test owner grant")),
-            stream_id: crate::sync::membership::AuthorStreamId::from_bytes([1; 16]),
+            stream_id: crate::sync::membership::AuthorStreamId::from_bytes([1; 32]),
             seq: 1,
             entry_hash: ObjectHash::digest(b"test membership entry"),
+        };
+        let stored = b"test membership head";
+        vec![MembershipHeadRef {
+            coord,
+            head_hash: ObjectHash::digest(b"test membership head semantic bytes"),
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/membership/heads/test-owner/1.json".to_string(),
+                )
+                .expect("valid test membership-head slot"),
+                stored.len() as u64,
+                ObjectHash::digest(stored),
+            ),
         }]
     }
 
@@ -234,10 +251,37 @@ mod tests {
             },
             owner_pubkey: test_owner_pubkey(),
             key_author_pubkey: test_owner_pubkey(),
-            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
-                b"invite store protocol root",
-            ),
+            store_root: crate::sync::store_commit::StoreRootRef {
+                store_root_id: crate::sync::store_commit::ObjectHash::digest(
+                    b"invite store protocol root",
+                ),
+                store_root_hash: ObjectHash::digest(b"root"),
+                object: crate::sync::storage::ExactObjectRef::new(
+                    crate::storage::cloud::ObjectSlot::logical(
+                        "store-v1/protocol/root/test.json".to_string(),
+                    )
+                    .expect("valid test Store-root slot"),
+                    4,
+                    ObjectHash::digest(b"root"),
+                ),
+            },
             membership_floor: MembershipFloor::MergeConcurrent(test_membership_floor()),
+        }
+    }
+
+    fn test_serial_commit_ref() -> crate::sync::store_commit::StoreBatchCommitRef {
+        let stored = b"invite Serial floor commit";
+        crate::sync::store_commit::StoreBatchCommitRef {
+            coord: crate::sync::store_commit::StoreCommitCoord::Serial { sequence: 7 },
+            commit_hash: ObjectHash::digest(b"invite Serial floor semantic bytes"),
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/commits/serial/7/invite-floor.json".to_string(),
+                )
+                .expect("valid test Store-commit slot"),
+                stored.len() as u64,
+                ObjectHash::digest(stored),
+            ),
         }
     }
 
@@ -251,6 +295,7 @@ mod tests {
         assert_eq!(decoded.store_id, "lib-123");
         assert_eq!(decoded.store_name, "My Store");
         assert_eq!(decoded.owner_pubkey, test_owner_pubkey());
+        assert_eq!(decoded.store_root, code.store_root);
         assert_eq!(
             decoded.membership_floor,
             MembershipFloor::MergeConcurrent(test_membership_floor())
@@ -273,6 +318,18 @@ mod tests {
             }
             _ => panic!("expected S3 variant"),
         }
+    }
+
+    #[test]
+    fn serial_invite_round_trips_the_exact_commit_floor() {
+        let mut code = sample_s3_code("serial-store");
+        let reference = test_serial_commit_ref();
+        code.membership_floor = MembershipFloor::Serial(Some(reference.clone()));
+        let decoded = decode(&encode(&code)).unwrap();
+        assert_eq!(
+            decoded.membership_floor,
+            MembershipFloor::Serial(Some(reference))
+        );
     }
 
     #[test]

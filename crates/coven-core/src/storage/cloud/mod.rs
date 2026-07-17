@@ -13,14 +13,9 @@ pub mod test_utils;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use rand::RngCore;
-use serde::{Deserialize, Serialize};
-#[cfg(any(test, feature = "test-utils"))]
-use sha2::{Digest, Sha256};
-use std::fmt;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
 use std::pin::Pin;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use futures_util::Stream;
@@ -51,110 +46,93 @@ pub enum CloudHomeError {
         operation: Box<CloudHomeError>,
         cleanup: Box<CloudHomeError>,
     },
+    #[error("{operation}; exact response-loss readback failed: {readback}")]
+    UnresolvedOutcome {
+        #[source]
+        operation: Box<CloudHomeError>,
+        readback: Box<CloudHomeError>,
+    },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
 
-/// A fresh physical-copy id for one append attempt.
-///
-/// Copy ids are runtime storage coordinates, never signed protocol data. Their
-/// 32 random bytes are rendered as exactly 64 lowercase hexadecimal characters.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CopyId([u8; 32]);
-
-impl CopyId {
-    pub fn random() -> Self {
-        let mut bytes = [0u8; 32];
-        rand::rng().fill_bytes(&mut bytes);
-        Self(bytes)
-    }
+/// Provider-specific physical address for a caller-reserved immutable slot.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum PhysicalObjectLocator {
+    LogicalKey,
+    Opaque(String),
 }
 
-impl fmt::Debug for CopyId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, formatter)
-    }
+/// Exact logical and physical location persisted before an immutable write.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectSlot {
+    logical_key: String,
+    physical: PhysicalObjectLocator,
 }
 
-impl fmt::Display for CopyId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&hex::encode(self.0))
-    }
-}
-
-impl FromStr for CopyId {
-    type Err = CloudHomeError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 64
-            || value
-                .bytes()
-                .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
-        {
-            return Err(CloudHomeError::Configuration(format!(
-                "copy id must be 64 lowercase hexadecimal characters: {value:?}"
-            )));
+impl<'de> Deserialize<'de> for ObjectSlot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            logical_key: String,
+            physical: PhysicalObjectLocator,
         }
-        let decoded = hex::decode(value).map_err(|error| {
-            CloudHomeError::Configuration(format!("decode copy id {value:?}: {error}"))
-        })?;
-        let bytes = decoded.try_into().map_err(|_| {
-            CloudHomeError::Configuration(format!("copy id has wrong length: {value:?}"))
-        })?;
-        Ok(Self(bytes))
+
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(fields.logical_key, fields.physical).map_err(serde::de::Error::custom)
     }
 }
 
-/// Injected source of copy ids. Storage asks for ids; it never reads ambient
-/// randomness while deciding protocol paths.
-pub trait CopyIdGenerator: Send + Sync {
-    fn next_copy_id(&self) -> CopyId;
-}
-
-pub type CopyIdRef = Arc<dyn CopyIdGenerator>;
-
-pub struct RandomCopyIdGenerator;
-
-impl CopyIdGenerator for RandomCopyIdGenerator {
-    fn next_copy_id(&self) -> CopyId {
-        CopyId::random()
+impl ObjectSlot {
+    pub fn logical(logical_key: String) -> Result<Self, CloudHomeError> {
+        Self::new(logical_key, PhysicalObjectLocator::LogicalKey)
     }
-}
 
-#[cfg(any(test, feature = "test-utils"))]
-pub struct SequentialCopyIdGenerator {
-    prefix: String,
-    next: std::sync::atomic::AtomicU64,
-}
+    pub fn opaque(logical_key: String, provider_id: String) -> Result<Self, CloudHomeError> {
+        Self::new(logical_key, PhysicalObjectLocator::Opaque(provider_id))
+    }
 
-#[cfg(any(test, feature = "test-utils"))]
-impl SequentialCopyIdGenerator {
-    pub fn new(prefix: &str) -> Self {
-        Self {
-            prefix: prefix.to_string(),
-            next: std::sync::atomic::AtomicU64::new(0),
+    fn new(logical_key: String, physical: PhysicalObjectLocator) -> Result<Self, CloudHomeError> {
+        let slot = Self {
+            logical_key,
+            physical,
+        };
+        slot.validate()?;
+        Ok(slot)
+    }
+
+    pub fn validate(&self) -> Result<(), CloudHomeError> {
+        if self.logical_key.is_empty() {
+            return Err(CloudHomeError::Configuration(
+                "object slot logical key is empty".to_string(),
+            ));
         }
+        if matches!(&self.physical, PhysicalObjectLocator::Opaque(value) if value.is_empty()) {
+            return Err(CloudHomeError::Configuration(
+                "object slot provider locator is empty".to_string(),
+            ));
+        }
+        Ok(())
     }
-}
 
-#[cfg(any(test, feature = "test-utils"))]
-impl CopyIdGenerator for SequentialCopyIdGenerator {
-    fn next_copy_id(&self) -> CopyId {
-        use std::sync::atomic::Ordering;
-
-        let sequence = self.next.fetch_add(1, Ordering::SeqCst);
-        let mut digest = Sha256::new();
-        digest.update(self.prefix.as_bytes());
-        digest.update(sequence.to_be_bytes());
-        CopyId(digest.finalize().into())
+    pub fn logical_key(&self) -> &str {
+        &self.logical_key
     }
-}
 
-/// Whether a listing is authoritative enough to justify deletion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ListingCoverage {
-    CompleteAtScan,
-    BestEffort,
+    pub fn physical(&self) -> &PhysicalObjectLocator {
+        &self.physical
+    }
 }
 
 /// Opaque provider revision returned by an authoritative coordination read.
@@ -220,53 +198,6 @@ pub trait CloudHeadStorage: Send + Sync {
     async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError>;
 }
 
-/// One physical object returned by an append or listing operation.
-///
-/// The provider id is intentionally opaque. Protocol objects may retain this
-/// value only long enough to read or delete the exact physical copy.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AppendedObject {
-    logical_key: String,
-    opaque_provider_id: String,
-}
-
-impl AppendedObject {
-    /// Build the exact physical identity returned by a provider append or scan.
-    pub fn from_provider(
-        logical_key: String,
-        opaque_provider_id: String,
-    ) -> Result<Self, CloudHomeError> {
-        if logical_key.is_empty() {
-            return Err(CloudHomeError::Configuration(
-                "appended object logical key is empty".to_string(),
-            ));
-        }
-        if opaque_provider_id.is_empty() {
-            return Err(CloudHomeError::Transport(
-                "appended object provider id is empty".to_string(),
-            ));
-        }
-        Ok(Self {
-            logical_key,
-            opaque_provider_id,
-        })
-    }
-
-    pub fn logical_key(&self) -> &str {
-        &self.logical_key
-    }
-
-    pub fn opaque_provider_id(&self) -> &str {
-        &self.opaque_provider_id
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AppendedListing {
-    pub objects: Vec<AppendedObject>,
-    pub coverage: ListingCoverage,
-}
-
 pub type CloudObjectStream =
     Pin<Box<dyn Stream<Item = Result<Bytes, CloudHomeError>> + Send + 'static>>;
 
@@ -303,7 +234,8 @@ impl CloudHomeError {
     pub fn is_retryable(&self) -> bool {
         match self {
             CloudHomeError::Transport(_) | CloudHomeError::Io(_) => true,
-            CloudHomeError::CleanupFailed { operation, .. } => operation.is_retryable(),
+            CloudHomeError::CleanupFailed { operation, .. }
+            | CloudHomeError::UnresolvedOutcome { operation, .. } => operation.is_retryable(),
             CloudHomeError::NotFound(_)
             | CloudHomeError::AlreadyExists(_)
             | CloudHomeError::Configuration(_) => false,
@@ -640,6 +572,12 @@ impl BlobBody {
         }
     }
 
+    pub async fn from_file(path: &Path) -> Result<Self, String> {
+        let len = crate::local_blob::file_len(path).await?;
+        let reader = crate::local_blob::open_reader(path).await?;
+        Ok(Self::from_file_with_prefix(len, reader, None, Vec::new()))
+    }
+
     #[cfg(feature = "test-utils")]
     pub fn from_test_reader(len: u64, reader: PlaintextReader) -> Self {
         Self::from_file_with_prefix(len, reader, None, Vec::new())
@@ -735,8 +673,8 @@ pub trait PartSink: Send {
     ) -> Result<(), CloudHomeError>;
 
     /// Cancel the open upload and remove its unpublished provider state. The
-    /// sink remains armed until cancellation succeeds, so dropping it after an
-    /// error retries cleanup and terminates the process if cleanup still fails.
+    /// upload owner awaits this operation and returns any cleanup failure to its
+    /// caller; `Drop` must never block or terminate the process.
     async fn abort(&mut self) -> Result<(), CloudHomeError>;
 
     /// Commit the upload (e.g. S3 `complete_multipart_upload`); a no-op where the
@@ -748,6 +686,9 @@ pub trait PartSink: Send {
 pub type BoxPartSink<'a> = Box<dyn PartSink + 'a>;
 
 async fn abort_part_sink(sink: &mut dyn PartSink, operation: CloudHomeError) -> CloudHomeError {
+    if matches!(&operation, CloudHomeError::CleanupFailed { .. }) {
+        return operation;
+    }
     match sink.abort().await {
         Ok(()) => operation,
         Err(cleanup) => CloudHomeError::CleanupFailed {
@@ -795,7 +736,9 @@ async fn write_blob<C: CloudHome + ?Sized>(
         };
         let n = part.len() as u64;
         let is_last = offset + n >= total;
-        sink.send_part(part, offset, is_last).await?;
+        if let Err(operation) = sink.send_part(part, offset, is_last).await {
+            return Err(abort_part_sink(sink.as_mut(), operation).await);
+        }
         offset += n;
         progress(offset);
     }
@@ -807,30 +750,69 @@ async fn write_blob<C: CloudHome + ?Sized>(
 /// All methods deal in raw bytes. No encryption or path layout logic.
 ///
 #[async_trait]
-pub trait ImmutableCopyStorage: Send + Sync {
-    async fn append_object(
+pub trait ExactSlotStorage: Send + Sync {
+    async fn provider_binding(
         &self,
-        full_logical_key: &str,
+    ) -> Result<crate::sync::storage::ResolvedProviderBinding, CloudHomeError>;
+
+    async fn cross_principal_evidence(
+        &self,
+    ) -> Result<crate::sync::provider::CrossPrincipalProviderEvidence, CloudHomeError> {
+        use crate::sync::provider::CrossPrincipalProviderEvidence;
+        use crate::sync::storage::{GoogleDriveCorpus, StoreProviderBinding};
+
+        match self.provider_binding().await?.store {
+            StoreProviderBinding::GoogleDrive {
+                corpus: GoogleDriveCorpus::SharedDrive { .. },
+            } => Ok(CrossPrincipalProviderEvidence::GoogleSharedDrive),
+            StoreProviderBinding::Dropbox { .. } => {
+                Ok(CrossPrincipalProviderEvidence::DropboxSharedNamespace)
+            }
+            StoreProviderBinding::OneDrive { .. } => {
+                Ok(CrossPrincipalProviderEvidence::OneDriveSharedFolder)
+            }
+            StoreProviderBinding::CloudKit { .. } => Err(CloudHomeError::Configuration(
+                "CloudKit exact-slot adapter did not supply accepted-share evidence".to_string(),
+            )),
+            StoreProviderBinding::GoogleDrive { .. } => Err(CloudHomeError::Configuration(
+                "Google Drive cross-principal access requires a shared drive".to_string(),
+            )),
+            StoreProviderBinding::S3 { .. } => Err(CloudHomeError::Configuration(
+                "S3 has no cross-principal provider evidence".to_string(),
+            )),
+        }
+    }
+
+    async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError>;
+
+    async fn create_at(
+        &self,
+        slot: &ObjectSlot,
         body: BlobBody,
         progress: &UploadProgress<'_>,
-    ) -> Result<AppendedObject, CloudHomeError>;
+    ) -> Result<(), CloudHomeError>;
 
-    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError>;
+    async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
 
-    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError>;
-
-    async fn read_appended_to_file(
+    async fn read_range_at(
         &self,
-        object: &AppendedObject,
+        slot: &ObjectSlot,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, CloudHomeError>;
+
+    async fn read_at_to_file(
+        &self,
+        slot: &ObjectSlot,
         destination: &Path,
     ) -> Result<(), CloudFileReadError>;
 
-    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError>;
+    async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError>;
 }
 
 #[async_trait]
 pub trait CloudHome: Send + Sync {
-    fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn ImmutableCopyStorage>> {
+    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>> {
         None
     }
 
@@ -898,6 +880,23 @@ pub trait CloudHome: Send + Sync {
         &self,
         desired: CloudAccessState,
     ) -> Result<CloudAccessOutcome, CloudHomeError>;
+}
+
+#[cfg(test)]
+mod object_slot_tests {
+    use super::*;
+
+    #[test]
+    fn deserialization_rejects_empty_slot_components() {
+        assert!(serde_json::from_str::<ObjectSlot>(
+            r#"{"logical_key":"","physical":{"kind":"logical_key"}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<ObjectSlot>(
+            r#"{"logical_key":"object","physical":{"kind":"opaque","value":""}}"#
+        )
+        .is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1277,6 +1276,121 @@ mod streaming_tests {
         );
         assert_eq!(home.abort_calls.load(Ordering::SeqCst), 1);
         assert!(!home.store.lock().unwrap().contains_key("short"));
+    }
+
+    struct FailingPartHome {
+        abort_calls: AtomicUsize,
+    }
+
+    struct FailingPartSink<'a> {
+        home: &'a FailingPartHome,
+    }
+
+    #[async_trait]
+    impl PartSink for FailingPartSink<'_> {
+        fn part_size(&self) -> usize {
+            2
+        }
+
+        async fn send_part(
+            &mut self,
+            _part: Bytes,
+            _offset: u64,
+            _is_last: bool,
+        ) -> Result<(), CloudHomeError> {
+            Err(CloudHomeError::Transport(
+                "injected part failure".to_string(),
+            ))
+        }
+
+        async fn abort(&mut self) -> Result<(), CloudHomeError> {
+            self.home.abort_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CloudHomeError::Transport(
+                "injected abort failure".to_string(),
+            ))
+        }
+
+        async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
+            panic!("a failed part must not finish")
+        }
+    }
+
+    #[async_trait]
+    impl CloudHome for FailingPartHome {
+        async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
+            panic!("multipart test must not use put_object")
+        }
+
+        async fn open_multipart<'a>(
+            &'a self,
+            _key: &str,
+            _total_len: u64,
+        ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+            Ok(Box::new(FailingPartSink { home: self }))
+        }
+
+        fn multipart_threshold(&self) -> u64 {
+            1
+        }
+
+        async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
+            unimplemented!()
+        }
+
+        async fn read_range(
+            &self,
+            _key: &str,
+            _start: u64,
+            _end: u64,
+        ) -> Result<Vec<u8>, CloudHomeError> {
+            unimplemented!()
+        }
+
+        async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+            unimplemented!()
+        }
+
+        async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
+            unimplemented!()
+        }
+
+        async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
+            unimplemented!()
+        }
+
+        async fn set_access(
+            &self,
+            _desired: CloudAccessState,
+        ) -> Result<CloudAccessOutcome, CloudHomeError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn write_blob_aborts_and_preserves_cleanup_failure_when_a_part_fails() {
+        let home = FailingPartHome {
+            abort_calls: AtomicUsize::new(0),
+        };
+
+        let error = home
+            .write(
+                "part-failure",
+                BlobBody::from_bytes(vec![1, 2, 3]),
+                &no_progress(),
+            )
+            .await
+            .expect_err("a failed multipart part must abort its session");
+
+        assert_eq!(home.abort_calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(error, CloudHomeError::CleanupFailed { .. }));
+        assert!(
+            error.to_string().contains("injected part failure"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("injected abort failure"),
+            "{error}"
+        );
     }
 
     /// A blob at or below the threshold goes through `put_object` as one request.

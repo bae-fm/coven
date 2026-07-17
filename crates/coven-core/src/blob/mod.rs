@@ -97,6 +97,8 @@
 //! just succeeded.
 
 pub mod cache;
+#[cfg(test)]
+mod cache_tests;
 pub mod decl;
 pub mod delete;
 #[doc(hidden)]
@@ -105,6 +107,8 @@ pub mod local_files;
 pub mod locator;
 pub mod transition;
 pub mod upload;
+
+pub use delete::BLOB_TOMBSTONE_GRACE;
 
 use sha2::{Digest, Sha256};
 
@@ -181,11 +185,9 @@ impl TransferLimits {
     }
 }
 
-// The cache's own tests: real `Database` + `MockSyncStorage` over a temp store
+// The cache's own tests: real `Database` + `TestStore` over a temp store
 // dir, asserting hits/misses, the pinned/cache folder split, and pin/unpin/clear.
 // These drive a real temp directory on the filesystem. See [`cache`].
-#[cfg(test)]
-mod cache_tests;
 // The upload drain's tests: real `Database` (the `cloud_outbox` queue) driven
 // against `InMemoryCloudHome`/`FailingCloudHome`, asserting record-and-continue,
 // per-entry backoff, scope-resolved sealing, and the observer callbacks. See
@@ -194,7 +196,7 @@ mod cache_tests;
 mod upload_tests;
 // The coven-owned make-Remote / make-Local transition tests: multi-device
 // make_remote + make_local through the real cycle, cancel both directions, the
-// drain's completion flip + cancel-in-gap, crash-idempotency at each commit
+// drain's completion flip, durable cancellation, crash-idempotency at each commit
 // boundary, and a round-trip. Uses a `watch` cancel signal + `run_single_sync_cycle`,
 // See [`transition`].
 #[cfg(test)]
@@ -205,9 +207,9 @@ mod transition_tests;
 #[cfg(test)]
 mod local_files_tests;
 // The delete half's tests: tombstone signing, the drain that writes tombstones,
-// the graced GC that reclaims blobs, upload-cancels-delete at both layers, and the
-// shared `cloud_outbox` row shape. Driven against `InMemoryCloudHome` and
-// `MockSyncStorage`. See [`delete`].
+// the graced GC that reclaims exact immutable objects, and the delete-outbox row
+// shape. Driven against `InMemoryCloudHome` and
+// `TestStore`. See [`delete`].
 #[cfg(test)]
 mod delete_tests;
 
@@ -366,6 +368,184 @@ pub struct BlobRef {
     /// cache right away ([`CacheFill::CacheEager`]) or on first read
     /// ([`CacheFill::CacheLazy`]). See [`CacheFill`].
     pub fill: CacheFill,
+}
+
+/// One exact blob-bearing row version. A reference becomes stale when the live
+/// row stamp or any declared blob value changes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RowBlobRef {
+    table: String,
+    row_id: String,
+    row_stamp: String,
+    column: String,
+    blob: BlobRef,
+    plaintext_size: u64,
+    plaintext_hash: crate::sync::store_commit::ObjectHash,
+    authority: RowBlobAuthority,
+    stored: Option<locator::StoredBlobRef>,
+}
+
+/// The authority state that determines where one row version's blob lives.
+/// A remote-audience blob remains `PendingRemote` while its verified plaintext
+/// is local and no cloud object has been created; `Remote` carries the exact
+/// package authority needed to open its committed object.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RowBlobAuthority {
+    Local,
+    PendingRemote(locator::RemoteAudience),
+    Remote(crate::sync::audience_package::PackageAudience),
+}
+
+impl<'de> serde::Deserialize<'de> for RowBlobRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            table: String,
+            row_id: String,
+            row_stamp: String,
+            column: String,
+            blob: BlobRef,
+            plaintext_size: u64,
+            plaintext_hash: crate::sync::store_commit::ObjectHash,
+            authority: RowBlobAuthority,
+            stored: Option<locator::StoredBlobRef>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(
+            fields.table,
+            fields.row_id,
+            fields.row_stamp,
+            fields.column,
+            fields.blob,
+            fields.plaintext_size,
+            fields.plaintext_hash,
+            fields.authority,
+            fields.stored,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl RowBlobAuthority {
+    pub fn audience(&self) -> crate::sync::circle::Audience {
+        match self {
+            Self::Local => crate::sync::circle::Audience::Local,
+            Self::PendingRemote(locator::RemoteAudience::Store) => {
+                crate::sync::circle::Audience::Store
+            }
+            Self::PendingRemote(locator::RemoteAudience::Circle(circle_id)) => {
+                crate::sync::circle::Audience::Circle(*circle_id)
+            }
+            Self::Remote(crate::sync::audience_package::PackageAudience::Store) => {
+                crate::sync::circle::Audience::Store
+            }
+            Self::Remote(crate::sync::audience_package::PackageAudience::Circle {
+                circle_id,
+                ..
+            }) => crate::sync::circle::Audience::Circle(*circle_id),
+        }
+    }
+}
+
+impl RowBlobRef {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        table: String,
+        row_id: String,
+        row_stamp: String,
+        column: String,
+        blob: BlobRef,
+        plaintext_size: u64,
+        plaintext_hash: crate::sync::store_commit::ObjectHash,
+        authority: RowBlobAuthority,
+        stored: Option<locator::StoredBlobRef>,
+    ) -> Result<Self, String> {
+        let remote = match &authority {
+            RowBlobAuthority::Local => None,
+            RowBlobAuthority::PendingRemote(audience) => Some(audience.clone()),
+            RowBlobAuthority::Remote(package) => Some(package.remote_audience()),
+        };
+        match (&authority, remote.as_ref(), stored.as_ref()) {
+            (RowBlobAuthority::Local, None, None)
+            | (RowBlobAuthority::PendingRemote(_), Some(_), None) => {}
+            (RowBlobAuthority::Remote(_), Some(expected), Some(stored))
+                if &stored.locator().audience() == expected => {}
+            (RowBlobAuthority::Local, None, Some(_)) => {
+                return Err("Local row blob carries a remote locator".to_string());
+            }
+            (RowBlobAuthority::PendingRemote(_), Some(_), Some(_)) => {
+                return Err("pending remote row blob carries a cloud locator".to_string());
+            }
+            (RowBlobAuthority::Remote(_), Some(_), None) => {
+                return Err("remote row blob has no exact locator".to_string());
+            }
+            (RowBlobAuthority::Remote(_), Some(expected), Some(stored)) => {
+                return Err(format!(
+                    "row audience {expected:?} differs from locator audience {:?}",
+                    stored.locator().audience()
+                ));
+            }
+            _ => unreachable!("authority determines whether a remote audience exists"),
+        }
+        Ok(Self {
+            table,
+            row_id,
+            row_stamp,
+            column,
+            blob,
+            plaintext_size,
+            plaintext_hash,
+            authority,
+            stored,
+        })
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn row_id(&self) -> &str {
+        &self.row_id
+    }
+
+    pub fn row_stamp(&self) -> &str {
+        &self.row_stamp
+    }
+
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+
+    pub fn blob(&self) -> &BlobRef {
+        &self.blob
+    }
+
+    pub fn plaintext_size(&self) -> u64 {
+        self.plaintext_size
+    }
+
+    pub fn plaintext_hash(&self) -> crate::sync::store_commit::ObjectHash {
+        self.plaintext_hash
+    }
+
+    pub fn authority(&self) -> &RowBlobAuthority {
+        &self.authority
+    }
+
+    pub fn audience(&self) -> crate::sync::circle::Audience {
+        self.authority.audience()
+    }
+
+    pub fn stored(&self) -> Option<&locator::StoredBlobRef> {
+        self.stored.as_ref()
+    }
 }
 
 /// Notified about coven's blob transitions, for host-specific bookkeeping and UI:

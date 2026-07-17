@@ -1,52 +1,17 @@
-/// Storage access for immutable Store protocol objects and mutable blob/key data.
-///
-/// Layout:
-/// ```text
-/// store-v1/...                                   -- immutable protocol copies
-/// {namespace}/{uploader}/{ab}/{cd}/{id}          -- blobs, hashed scheme (opaque home)
-/// {namespace}/{cloud_path}                       -- blobs, plain scheme (browsable home)
-/// membership/{author_pubkey}/{seq}{suffix}       -- membership entries
-/// membership/{author_pubkey}/head{suffix}        -- that author's signed head
-/// keys/{owner_pubkey}/{recipient_pubkey}{suffix} -- store key wrapped by an owner for a member
-/// ```
-///
-/// The layout is aligned to one storage-access rule a provider ACL can enforce:
-/// **a member writes (and deletes) only under its own public key; an owner may
-/// write and delete anywhere.** Signed immutable Store objects bind each object
-/// to its semantic slot; blobs and wrapped keys retain their dedicated mutable
-/// paths.
-///
-/// A read that must span writers dispatches on where the object lives, never a
-/// blind search: a member resolving its rotated store key reads
-/// `keys/{owner}/{self}` across the current owners and adopts the
-/// highest-generation wrap an owner's signature authenticates; a blob read keys
-/// under the uploader recorded in the device-local `blob_uploaders` index (written
-/// at pull from the changeset author, and at the device's own upload), falling
-/// back for an unrecorded blob to a one-time listing scan that records what it
-/// finds. The browsable plain scheme keeps human-readable `{namespace}/{cloud_path}`
-/// keys with no uploader segment. It still has an owner-anchored membership chain;
-/// plain object naming does not use the per-member encrypted-home path layout.
-///
-/// Blob keys follow the home's
-/// [`BlobPathScheme`](crate::sync::cloud_storage::BlobPathScheme): the default
-/// hashed scheme keys each blob under its uploader and shards by its id
-/// (`{namespace}/{uploader}/{ab}/{cd}/{id}`); the plain scheme keys it at the
-/// consumer-supplied readable path (`{namespace}/{cloud_path}`) so the bucket is
-/// browsable. A device only ever writes blobs it authored, so a write keys under
-/// itself; a read resolves the uploader (which may be a peer) and keys under it.
-/// The blob-path scheme is independent of the at-rest cipher below.
-///
-/// An encrypted home seals every object under the store key before upload and
-/// opens it after download; a plaintext home stores and serves objects verbatim.
-/// The trait is async and mockable for testing.
+//! Exact storage access for signed protocol objects and stored blob bodies.
+//!
+//! Every remote object is addressed by an [`ExactObjectRef`]. The logical key
+//! supplies domain separation and the physical locator selects the one provider
+//! object whose stored size and hash the signed reference authenticates. Prefix
+//! enumeration and provider names never select protocol authority.
 use async_trait::async_trait;
 use std::path::Path;
 
-use crate::storage::cloud::{AppendedObject, CloudHeadVersion, CopyId, ListingCoverage};
+use crate::storage::cloud::{CloudHeadVersion, ObjectSlot};
 use crate::sync::store_commit::{
     ObjectHash, STORE_ACK_PREFIX, STORE_COMMIT_PREFIX, STORE_DEVICE_REGISTRATION_PREFIX,
     STORE_HEAD_PREFIX, STORE_MEMBERSHIP_ENTRY_PREFIX, STORE_MEMBERSHIP_HEAD_PREFIX,
-    STORE_PACKAGE_PREFIX, STORE_PROTOCOL_ROOT_PREFIX, STORE_SNAPSHOT_IMAGE_PREFIX,
+    STORE_PACKAGE_PREFIX, STORE_PROTOCOL_ROOT_SEMANTIC_PATH, STORE_SNAPSHOT_IMAGE_PREFIX,
     STORE_SNAPSHOT_META_PREFIX,
 };
 
@@ -59,6 +24,14 @@ pub(crate) enum ProtectedObjectDomain {
     StoreHead,
     StoreAck,
     StoreDeviceRegistration,
+    StoreDeviceSelfRetirement,
+    DeviceJoinAttempt,
+    DeviceJoinOutcome,
+    DeviceJoinAbandonment,
+    DeviceJoinCleanupReceipt,
+    ProviderAccessGrant,
+    ProviderAccessWithdrawal,
+    OwnerRecoveryNode,
     StoreSnapshotMeta,
     StoreSnapshotImage,
     StoreMembershipEntry,
@@ -69,6 +42,7 @@ pub(crate) enum ProtectedObjectDomain {
     CircleRoster,
     CircleRosterResolution,
     CircleMetadata,
+    CirclePackage,
     CircleAccessLeaf,
     CircleAccessEnvelope,
 }
@@ -86,7 +60,7 @@ impl ProtectedObjectDomain {
         match self {
             Self::StoreProtocolRoot => ProtocolObjectMetadata {
                 aad_label: b"store-protocol-root",
-                path_prefix: STORE_PROTOCOL_ROOT_PREFIX,
+                path_prefix: STORE_PROTOCOL_ROOT_SEMANTIC_PATH,
                 path_segment: None,
                 extension: ".json",
             },
@@ -111,6 +85,54 @@ impl ProtectedObjectDomain {
             Self::StoreDeviceRegistration => ProtocolObjectMetadata {
                 aad_label: b"store-device-registration",
                 path_prefix: STORE_DEVICE_REGISTRATION_PREFIX,
+                path_segment: None,
+                extension: ".json",
+            },
+            Self::StoreDeviceSelfRetirement => ProtocolObjectMetadata {
+                aad_label: b"store-device-self-retirement",
+                path_prefix: crate::sync::store_commit::STORE_DEVICE_SELF_RETIREMENT_PREFIX,
+                path_segment: None,
+                extension: ".json",
+            },
+            Self::DeviceJoinAttempt => ProtocolObjectMetadata {
+                aad_label: b"device-join-attempt",
+                path_prefix: crate::sync::store_commit::STORE_DEVICE_JOIN_ATTEMPT_PREFIX,
+                path_segment: None,
+                extension: ".json",
+            },
+            Self::DeviceJoinOutcome => ProtocolObjectMetadata {
+                aad_label: b"device-join-outcome",
+                path_prefix: crate::sync::store_commit::STORE_DEVICE_JOIN_OUTCOME_PREFIX,
+                path_segment: None,
+                extension: ".json",
+            },
+            Self::DeviceJoinAbandonment => ProtocolObjectMetadata {
+                aad_label: b"device-join-abandonment",
+                path_prefix: crate::sync::store_commit::STORE_DEVICE_JOIN_ATTEMPT_PREFIX,
+                path_segment: None,
+                extension: ".json",
+            },
+            Self::DeviceJoinCleanupReceipt => ProtocolObjectMetadata {
+                aad_label: b"device-join-cleanup-receipt",
+                path_prefix: crate::sync::store_commit::STORE_DEVICE_JOIN_CLEANUP_RECEIPT_PREFIX,
+                path_segment: None,
+                extension: ".json",
+            },
+            Self::ProviderAccessGrant => ProtocolObjectMetadata {
+                aad_label: b"provider-access-grant",
+                path_prefix: crate::sync::store_commit::STORE_PROVIDER_ACCESS_GRANT_PREFIX,
+                path_segment: None,
+                extension: ".json",
+            },
+            Self::ProviderAccessWithdrawal => ProtocolObjectMetadata {
+                aad_label: b"provider-access-withdrawal",
+                path_prefix: crate::sync::store_commit::STORE_PROVIDER_ACCESS_WITHDRAWAL_PREFIX,
+                path_segment: None,
+                extension: ".json",
+            },
+            Self::OwnerRecoveryNode => ProtocolObjectMetadata {
+                aad_label: b"owner-recovery-node",
+                path_prefix: crate::sync::store_commit::STORE_OWNER_RECOVERY_PREFIX,
                 path_segment: None,
                 extension: ".json",
             },
@@ -174,6 +196,12 @@ impl ProtectedObjectDomain {
                 path_segment: Some("/metadata/"),
                 extension: ".json",
             },
+            Self::CirclePackage => ProtocolObjectMetadata {
+                aad_label: b"circle-package",
+                path_prefix: "circles/",
+                path_segment: Some("/packages/"),
+                extension: ".pkg",
+            },
             Self::CircleAccessLeaf => ProtocolObjectMetadata {
                 aad_label: b"circle-access-leaf",
                 path_prefix: crate::sync::circle::CIRCLE_ACCESS_LEAF_PREFIX,
@@ -222,6 +250,22 @@ impl ProtocolObjectDomain {
         StoreProtocolObjectDomain(ProtectedObjectDomain::StoreAck);
     pub const StoreDeviceRegistration: StoreProtocolObjectDomain =
         StoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceRegistration);
+    pub const StoreDeviceSelfRetirement: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceSelfRetirement);
+    pub const DeviceJoinAttempt: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAttempt);
+    pub const DeviceJoinOutcome: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinOutcome);
+    pub const DeviceJoinAbandonment: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAbandonment);
+    pub const DeviceJoinCleanupReceipt: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinCleanupReceipt);
+    pub const ProviderAccessGrant: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessGrant);
+    pub const ProviderAccessWithdrawal: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessWithdrawal);
+    pub const OwnerRecoveryNode: StoreProtocolObjectDomain =
+        StoreProtocolObjectDomain(ProtectedObjectDomain::OwnerRecoveryNode);
     pub const StoreSnapshotMeta: StoreProtocolObjectDomain =
         StoreProtocolObjectDomain(ProtectedObjectDomain::StoreSnapshotMeta);
     pub const StoreSnapshotImage: StoreProtocolObjectDomain =
@@ -244,6 +288,8 @@ impl ProtocolObjectDomain {
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleRosterResolution);
     pub const CircleMetadata: CircleProtocolObjectDomain =
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleMetadata);
+    pub const CirclePackage: CircleProtocolObjectDomain =
+        CircleProtocolObjectDomain(ProtectedObjectDomain::CirclePackage);
 }
 
 /// Authenticated storage context for one immutable semantic object.
@@ -352,46 +398,29 @@ impl ProtocolObjectContext {
         Ok(())
     }
 
-    pub fn validate_locator(
+    pub fn validate_reference(
         &self,
-        object: &ImmutableObjectLocator,
+        object: &ExactObjectRef,
+        semantic_prefix: &str,
+    ) -> Result<(), StorageError> {
+        self.validate_slot(object.slot(), semantic_prefix)
+    }
+
+    pub fn validate_slot(
+        &self,
+        slot: &ObjectSlot,
         semantic_prefix: &str,
     ) -> Result<(), StorageError> {
         self.validate_path(semantic_prefix)?;
-        let copy_prefix = format!("{semantic_prefix}/copies/");
-        let copy_key_with_extension =
-            object
-                .logical_key()
-                .strip_prefix(&copy_prefix)
-                .ok_or_else(|| {
-                    StorageError::Parse(format!(
-                        "protocol object {:?} is not a copy of semantic path {semantic_prefix:?}",
-                        object.logical_key()
-                    ))
-                })?;
-        let copy_key = copy_key_with_extension
-            .strip_suffix(self.domain.extension())
-            .ok_or_else(|| {
-                StorageError::Parse(format!(
-                    "protocol object {:?} lacks expected extension {:?}",
-                    object.logical_key(),
-                    self.domain.extension()
-                ))
-            })?;
-        copy_key.parse::<CopyId>().map_err(|error| {
-            StorageError::Parse(format!(
-                "protocol object {:?} has a non-canonical copy id: {error}",
-                object.logical_key()
-            ))
-        })?;
+        let expected = format!("{semantic_prefix}{}", self.domain.extension());
+        if slot.logical_key() != expected {
+            return Err(StorageError::Parse(format!(
+                "protocol object {:?} does not match semantic path {semantic_prefix:?}",
+                slot.logical_key()
+            )));
+        }
         Ok(())
     }
-}
-
-pub(crate) fn is_protocol_listing_prefix(prefix: &str) -> bool {
-    prefix.starts_with(crate::sync::store_commit::protocol_prefix())
-        || prefix.starts_with(crate::sync::circle::CIRCLE_CONTROL_PREFIX)
-        || prefix.starts_with(crate::sync::circle::CIRCLE_ROSTER_PREFIX)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -407,10 +436,435 @@ impl VersionToken {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl serde::Serialize for VersionToken {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.0.as_provider())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for VersionToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        CloudHeadVersion::from_provider(value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VersionedObject {
     pub bytes: Vec<u8>,
     pub version: VersionToken,
+}
+
+/// Protection selected by the audience authority that prepares a blob spool.
+#[derive(Clone)]
+pub enum BlobSpoolProtection {
+    Opaque(crate::encryption::EncryptionService),
+    Browsable,
+}
+
+#[derive(Clone, Copy)]
+pub struct BlobWriteAuthority<'a> {
+    pub reference: &'a crate::sync::store_commit::StoreDeviceRegistrationRef,
+    pub registration: &'a crate::sync::store_commit::StoreDeviceRegistration,
+}
+
+impl<'a> BlobWriteAuthority<'a> {
+    pub fn new(
+        reference: &'a crate::sync::store_commit::StoreDeviceRegistrationRef,
+        registration: &'a crate::sync::store_commit::StoreDeviceRegistration,
+    ) -> Result<Self, StorageError> {
+        reference
+            .verify_registration(registration)
+            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+        Ok(Self {
+            reference,
+            registration,
+        })
+    }
+}
+
+/// Provider namespace/corpus facts signed once by the Store root.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreProviderBinding {
+    S3 {
+        endpoint: S3EndpointBinding,
+        region: String,
+        bucket: String,
+        key_prefix: Option<String>,
+    },
+    GoogleDrive {
+        corpus: GoogleDriveCorpus,
+    },
+    Dropbox {
+        namespace_id: String,
+    },
+    OneDrive {
+        drive_id: String,
+        folder_id: String,
+    },
+    CloudKit {
+        container_id: String,
+        environment: CloudKitEnvironment,
+        owner_name: String,
+        zone_name: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum S3EndpointBinding {
+    Aws { partition: String },
+    Custom { origin: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "corpus", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GoogleDriveCorpus {
+    MyDrive { folder_id: String },
+    SharedDrive { drive_id: String, folder_id: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudKitEnvironment {
+    Development,
+    Production,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderPrincipalId {
+    Aws {
+        account_id: String,
+        principal: AwsPrincipal,
+    },
+    CustomS3Credential {
+        access_key_id_hash: ObjectHash,
+    },
+    GoogleDrive {
+        permission_id: String,
+    },
+    Dropbox {
+        account_id: String,
+    },
+    OneDrive {
+        user_id: String,
+    },
+    CloudKitPrivateZoneOwner {
+        record_name: String,
+    },
+    CloudKitSharedZoneParticipant {
+        record_name: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AwsPrincipal {
+    Root,
+    User { arn: String, user_id: String },
+    Role { role_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderDeviceBinding {
+    pub principal: ProviderPrincipalId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedProviderBinding {
+    pub store: StoreProviderBinding,
+    pub device: ProviderDeviceBinding,
+}
+
+impl StoreProviderBinding {
+    pub fn validate(&self) -> Result<(), StorageError> {
+        fn present(label: &str, value: &str) -> Result<(), StorageError> {
+            if value.is_empty() {
+                Err(StorageError::Configuration(format!("{label} is empty")))
+            } else {
+                Ok(())
+            }
+        }
+
+        match self {
+            Self::S3 {
+                endpoint,
+                region,
+                bucket,
+                key_prefix,
+            } => {
+                present("S3 region", region)?;
+                present("S3 bucket", bucket)?;
+                if key_prefix.as_deref().is_some_and(str::is_empty) {
+                    return Err(StorageError::Configuration(
+                        "S3 key prefix is empty instead of absent".to_string(),
+                    ));
+                }
+                match endpoint {
+                    S3EndpointBinding::Aws { partition } => present("AWS partition", partition),
+                    S3EndpointBinding::Custom { origin } => {
+                        let canonical = super::provider::canonical_custom_s3_origin(origin)?;
+                        if canonical != *origin {
+                            return Err(StorageError::Configuration(
+                                "custom S3 origin is not canonical".to_string(),
+                            ));
+                        }
+                        Ok(())
+                    }
+                }
+            }
+            Self::GoogleDrive { corpus } => match corpus {
+                GoogleDriveCorpus::MyDrive { folder_id } => {
+                    present("Google Drive folder id", folder_id)
+                }
+                GoogleDriveCorpus::SharedDrive {
+                    drive_id,
+                    folder_id,
+                } => {
+                    present("Google Drive id", drive_id)?;
+                    present("Google Drive folder id", folder_id)
+                }
+            },
+            Self::Dropbox { namespace_id } => present("Dropbox namespace id", namespace_id),
+            Self::OneDrive {
+                drive_id,
+                folder_id,
+            } => {
+                present("OneDrive drive id", drive_id)?;
+                present("OneDrive folder id", folder_id)
+            }
+            Self::CloudKit {
+                container_id,
+                owner_name,
+                zone_name,
+                ..
+            } => {
+                present("CloudKit container id", container_id)?;
+                present("CloudKit owner name", owner_name)?;
+                present("CloudKit zone name", zone_name)
+            }
+        }
+    }
+}
+
+impl ProviderDeviceBinding {
+    pub fn validate_for(&self, store: &StoreProviderBinding) -> Result<(), StorageError> {
+        fn present(label: &str, value: &str) -> Result<(), StorageError> {
+            if value.is_empty() {
+                Err(StorageError::Configuration(format!("{label} is empty")))
+            } else {
+                Ok(())
+            }
+        }
+
+        let compatible = matches!(
+            (store, &self.principal),
+            (
+                StoreProviderBinding::S3 {
+                    endpoint: S3EndpointBinding::Aws { .. },
+                    ..
+                },
+                ProviderPrincipalId::Aws { .. }
+            ) | (
+                StoreProviderBinding::S3 {
+                    endpoint: S3EndpointBinding::Custom { .. },
+                    ..
+                },
+                ProviderPrincipalId::CustomS3Credential { .. }
+            ) | (
+                StoreProviderBinding::GoogleDrive { .. },
+                ProviderPrincipalId::GoogleDrive { .. }
+            ) | (
+                StoreProviderBinding::Dropbox { .. },
+                ProviderPrincipalId::Dropbox { .. }
+            ) | (
+                StoreProviderBinding::OneDrive { .. },
+                ProviderPrincipalId::OneDrive { .. }
+            ) | (
+                StoreProviderBinding::CloudKit { .. },
+                ProviderPrincipalId::CloudKitPrivateZoneOwner { .. }
+                    | ProviderPrincipalId::CloudKitSharedZoneParticipant { .. }
+            )
+        );
+        if !compatible {
+            return Err(StorageError::Configuration(
+                "provider principal is incompatible with the Store provider binding".to_string(),
+            ));
+        }
+        match &self.principal {
+            ProviderPrincipalId::Aws {
+                account_id,
+                principal,
+            } => {
+                if account_id.len() != 12 || !account_id.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(StorageError::Configuration(
+                        "AWS account id must contain exactly 12 decimal digits".to_string(),
+                    ));
+                }
+                match principal {
+                    AwsPrincipal::Root => Ok(()),
+                    AwsPrincipal::User { arn, user_id } => {
+                        present("AWS user id", user_id)?;
+                        let fields: Vec<_> = arn.splitn(6, ':').collect();
+                        let StoreProviderBinding::S3 {
+                            endpoint: S3EndpointBinding::Aws { partition },
+                            ..
+                        } = store
+                        else {
+                            return Err(StorageError::Configuration(
+                                "AWS user principal is bound to non-AWS S3".to_string(),
+                            ));
+                        };
+                        if fields.len() != 6
+                            || fields[0] != "arn"
+                            || fields[1] != partition
+                            || fields[2] != "iam"
+                            || !fields[3].is_empty()
+                            || fields[4] != account_id
+                            || !fields[5].starts_with("user/")
+                            || fields[5].len() == "user/".len()
+                        {
+                            return Err(StorageError::Configuration(
+                                "AWS IAM user ARN is malformed or differs from its Store binding"
+                                    .to_string(),
+                            ));
+                        }
+                        Ok(())
+                    }
+                    AwsPrincipal::Role { role_id } => {
+                        present("AWS role id", role_id)?;
+                        if role_id.contains(':') {
+                            return Err(StorageError::Configuration(
+                                "AWS role id must be the stable prefix before the session separator"
+                                    .to_string(),
+                            ));
+                        }
+                        Ok(())
+                    }
+                }
+            }
+            ProviderPrincipalId::CustomS3Credential { .. } => Ok(()),
+            ProviderPrincipalId::GoogleDrive { permission_id } => {
+                present("Google Drive permission id", permission_id)
+            }
+            ProviderPrincipalId::Dropbox { account_id } => {
+                present("Dropbox account id", account_id)
+            }
+            ProviderPrincipalId::OneDrive { user_id } => present("OneDrive user id", user_id),
+            ProviderPrincipalId::CloudKitPrivateZoneOwner { record_name } => {
+                present("CloudKit private-zone owner record name", record_name)
+            }
+            ProviderPrincipalId::CloudKitSharedZoneParticipant { record_name } => {
+                present("CloudKit shared-zone participant record name", record_name)
+            }
+        }
+    }
+}
+
+impl ResolvedProviderBinding {
+    pub fn validate(&self) -> Result<(), StorageError> {
+        self.store.validate()?;
+        self.device.validate_for(&self.store)
+    }
+}
+
+/// Exact stored representation of one immutable object.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
+pub struct ExactObjectRef {
+    slot: ObjectSlot,
+    stored_size: u64,
+    stored_hash: ObjectHash,
+}
+
+impl ExactObjectRef {
+    pub fn new(slot: ObjectSlot, stored_size: u64, stored_hash: ObjectHash) -> Self {
+        Self {
+            slot,
+            stored_size,
+            stored_hash,
+        }
+    }
+
+    pub fn slot(&self) -> &ObjectSlot {
+        &self.slot
+    }
+
+    pub fn stored_size(&self) -> u64 {
+        self.stored_size
+    }
+
+    pub fn stored_hash(&self) -> ObjectHash {
+        self.stored_hash
+    }
+
+    pub fn verify(&self, bytes: &[u8]) -> Result<(), StorageError> {
+        if bytes.len() as u64 != self.stored_size || ObjectHash::digest(bytes) != self.stored_hash {
+            return Err(StorageError::InvalidContent(format!(
+                "exact object {} does not match stored size/hash",
+                self.slot.logical_key()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Immutable stored bytes and the exact reference derived from them.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedExactObject {
+    reference: ExactObjectRef,
+    stored_bytes: Vec<u8>,
+}
+
+impl<'de> serde::Deserialize<'de> for PreparedExactObject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            reference: ExactObjectRef,
+            stored_bytes: Vec<u8>,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(fields.reference, fields.stored_bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+impl PreparedExactObject {
+    pub fn new(reference: ExactObjectRef, stored_bytes: Vec<u8>) -> Result<Self, StorageError> {
+        reference.verify(&stored_bytes)?;
+        Ok(Self {
+            reference,
+            stored_bytes,
+        })
+    }
+
+    pub fn reference(&self) -> &ExactObjectRef {
+        &self.reference
+    }
+
+    pub fn stored_bytes(&self) -> &[u8] {
+        &self.stored_bytes
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -444,6 +898,8 @@ pub enum ReplaceHeadError {
 /// Mandatory compare-and-swap operations exposed only by eligible adapters.
 #[async_trait]
 pub trait CoordinationStorage: Send + Sync {
+    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, CoordinationError>;
+
     async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError>;
 
     async fn create_head(
@@ -462,169 +918,6 @@ pub trait CoordinationStorage: Send + Sync {
     async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError>;
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum CoordinationProbeError {
-    #[error("serial coordination probe at {key:?} failed: {reason}")]
-    Failed { key: String, reason: String },
-    #[error("serial coordination probe cleanup failed; object remains at {key:?}: {reason}")]
-    Cleanup { key: String, reason: String },
-}
-
-/// Exercise the exact operations used by the serial head. The reserved key is
-/// caller-generated and must be fresh for this probe.
-pub async fn probe_serial_coordination(
-    first: &dyn CoordinationStorage,
-    second: &dyn CoordinationStorage,
-    key: String,
-) -> Result<(), CoordinationProbeError> {
-    async fn cleanup(
-        storage: &dyn CoordinationStorage,
-        key: &str,
-    ) -> Result<(), CoordinationProbeError> {
-        storage
-            .delete_probe_head(key)
-            .await
-            .map_err(|error| CoordinationProbeError::Cleanup {
-                key: key.to_string(),
-                reason: error.to_string(),
-            })
-    }
-
-    let exercise = async {
-        let (left, right) = tokio::join!(
-            first.create_head(&key, b"create-left"),
-            second.create_head(&key, b"create-right"),
-        );
-        let created = match (left, right) {
-            (Ok(winner), Err(CreateHeadError::AlreadyExists))
-            | (Err(CreateHeadError::AlreadyExists), Ok(winner)) => winner,
-            (left, right) => {
-                return Err(format!(
-                    "create race did not produce one winner and one precondition failure: left={left:?}, right={right:?}"
-                ));
-            }
-        };
-        let observed = first
-            .read_head(&key)
-            .await
-            .map_err(|error| format!("read after create: {error}"))?;
-        if observed != created {
-            return Err("authoritative read after create did not return winner bytes/version".into());
-        }
-
-        let (left, right) = tokio::join!(
-            first.replace_head(&key, &created.version, b"replace-left"),
-            second.replace_head(&key, &created.version, b"replace-right"),
-        );
-        let replaced = match (left, right) {
-            (Ok(winner), Err(ReplaceHeadError::VersionMismatch))
-            | (Err(ReplaceHeadError::VersionMismatch), Ok(winner)) => winner,
-            (left, right) => {
-                return Err(format!(
-                    "replace race did not produce one winner and one precondition failure: left={left:?}, right={right:?}"
-                ));
-            }
-        };
-        let observed = second
-            .read_head(&key)
-            .await
-            .map_err(|error| format!("read after replace: {error}"))?;
-        if observed != replaced {
-            return Err("authoritative read after replace did not return winner bytes/version".into());
-        }
-        Ok::<(), String>(())
-    }
-    .await;
-
-    cleanup(first, &key).await?;
-    exercise.map_err(|reason| CoordinationProbeError::Failed { key, reason })
-}
-
-/// Runtime locator for one physical copy of an immutable object.
-///
-/// The raw provider locator is deliberately private and never serialized into a
-/// signed object or database row. Protocol and blob validation remain separate
-/// because their logical paths carry different meaning.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImmutableObjectLocator {
-    logical_key: String,
-    physical: AppendedObject,
-}
-
-impl ImmutableObjectLocator {
-    pub(crate) fn new(logical_key: String, physical: AppendedObject) -> Self {
-        Self {
-            logical_key,
-            physical,
-        }
-    }
-
-    pub fn logical_key(&self) -> &str {
-        &self.logical_key
-    }
-
-    pub(crate) fn physical(&self) -> &AppendedObject {
-        &self.physical
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImmutableObjectListing {
-    pub objects: Vec<ImmutableObjectLocator>,
-    pub coverage: ListingCoverage,
-}
-
-pub(crate) fn blob_copy_prefix(
-    locator: &crate::blob::locator::BlobLocator,
-) -> Result<String, StorageError> {
-    locator
-        .validate()
-        .map_err(|error| StorageError::Parse(error.to_string()))?;
-    Ok(format!("{}/copies/", locator.semantic_key()))
-}
-
-pub(crate) fn blob_copy_key(
-    locator: &crate::blob::locator::BlobLocator,
-    copy_id: CopyId,
-) -> Result<String, StorageError> {
-    Ok(format!(
-        "{}{copy_id}{}",
-        blob_copy_prefix(locator)?,
-        locator.storage_suffix()
-    ))
-}
-
-pub(crate) fn validate_blob_copy_locator(
-    locator: &crate::blob::locator::BlobLocator,
-    copy: &ImmutableObjectLocator,
-) -> Result<(), StorageError> {
-    let logical_key = copy.logical_key();
-    let prefix = blob_copy_prefix(locator)?;
-    let suffix = locator.storage_suffix();
-    let copy_id_with_suffix = logical_key.strip_prefix(&prefix).ok_or_else(|| {
-        StorageError::Parse(format!(
-            "blob copy {logical_key:?} is outside locator slot {:?}",
-            locator.semantic_key()
-        ))
-    })?;
-    let copy_id = copy_id_with_suffix.strip_suffix(suffix).ok_or_else(|| {
-        StorageError::Parse(format!(
-            "blob copy {logical_key:?} lacks expected storage suffix {suffix:?}"
-        ))
-    })?;
-    copy_id.parse::<CopyId>().map_err(|error| {
-        StorageError::Parse(format!(
-            "blob copy {logical_key:?} has a non-canonical copy id: {error}"
-        ))
-    })?;
-    if format!("{prefix}{copy_id}{suffix}") != logical_key {
-        return Err(StorageError::Parse(format!(
-            "blob copy path is not canonical: {logical_key:?}"
-        )));
-    }
-    Ok(())
-}
-
 /// Error type for storage operations.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StorageError {
@@ -636,6 +929,12 @@ pub enum StorageError {
         operation: Box<StorageError>,
         cleanup: Box<StorageError>,
     },
+    #[error("{operation}; exact response-loss readback failed: {readback}")]
+    UnresolvedOutcome {
+        #[source]
+        operation: Box<StorageError>,
+        readback: Box<StorageError>,
+    },
     #[error("storage configuration is invalid: {0}")]
     Configuration(String),
     #[error("storage object parse failed: {0}")]
@@ -644,6 +943,8 @@ pub enum StorageError {
     NotFound(String),
     #[error("storage object already exists: {0}")]
     AlreadyExists(String),
+    #[error("reserved storage slot contains different bytes: {0}")]
+    SlotCollision(String),
     #[error("decryption failed: {0}")]
     Decryption(String),
     #[error("remote blob content is invalid: {0}")]
@@ -673,6 +974,13 @@ impl From<crate::storage::cloud::CloudHomeError> for StorageError {
                     cleanup: Box::new(StorageError::from(*cleanup)),
                 }
             }
+            crate::storage::cloud::CloudHomeError::UnresolvedOutcome {
+                operation,
+                readback,
+            } => StorageError::UnresolvedOutcome {
+                operation: Box::new(StorageError::from(*operation)),
+                readback: Box::new(StorageError::from(*readback)),
+            },
             crate::storage::cloud::CloudHomeError::Io(io_err) => {
                 StorageError::Storage(format!("I/O error: {io_err}"))
             }
@@ -684,7 +992,9 @@ impl StorageError {
     pub fn is_transport(&self) -> bool {
         match self {
             Self::Storage(_) => true,
-            Self::CleanupFailed { operation, .. } => operation.is_transport(),
+            Self::CleanupFailed { operation, .. } | Self::UnresolvedOutcome { operation, .. } => {
+                operation.is_transport()
+            }
             _ => false,
         }
     }
@@ -712,203 +1022,134 @@ impl From<crate::store_dir::PathTokenError> for StorageError {
 
 #[async_trait]
 pub trait SyncStorage: Send + Sync {
-    /// Append one physical copy beneath a signed semantic prefix. `extension`
-    /// includes the leading dot (`.json`, `.pkg`, or `.db`). The implementation
-    /// injects a fresh copy id and applies its at-rest suffix below this API.
-    async fn append_protocol_object(
+    /// Return the cloud home's fixed Store blob opening protection. Circle blobs
+    /// use their exact activated Circle key instead.
+    fn store_blob_protection(&self) -> Result<BlobSpoolProtection, StorageError>;
+
+    /// Resolve the provider corpus and authenticated principal used by this
+    /// adapter. Registrations bind the principal before allocating descendants.
+    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, StorageError>;
+
+    /// Reserve the exact provider slot for a protocol object.
+    async fn allocate_protocol_slot(
         &self,
         context: &ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
-        data: Vec<u8>,
-    ) -> Result<ImmutableObjectLocator, StorageError>;
+    ) -> Result<ObjectSlot, StorageError>;
 
-    /// List all physical Store protocol copies under `prefix`, preserving
-    /// duplicate provider ids.
-    async fn list_protocol_objects(
+    /// Seal canonical protocol bytes once and bind their exact stored size/hash.
+    fn prepare_protocol_object(
         &self,
-        prefix: &str,
-    ) -> Result<ImmutableObjectListing, StorageError>;
+        context: &ProtocolObjectContext,
+        slot: ObjectSlot,
+        semantic_prefix: &str,
+        data: Vec<u8>,
+    ) -> Result<PreparedExactObject, StorageError>;
 
-    /// Read and open one exact physical Store protocol copy using the signed
+    /// Create the prepared bytes at their reserved slot, settling lost responses
+    /// by exact readback and refusing different bytes at an occupied slot.
+    async fn create_protocol_object(
+        &self,
+        prepared: &PreparedExactObject,
+    ) -> Result<(), StorageError>;
+
+    /// Read and open one exact Store protocol object using the signed
     /// semantic prefix as encryption AAD.
     async fn read_protocol_object(
         &self,
         context: &ProtocolObjectContext,
-        object: &ImmutableObjectLocator,
+        object: &ExactObjectRef,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError>;
 
-    /// Delete one exact physical Store protocol copy.
-    async fn delete_protocol_object(
+    /// Read one predecessor-reserved successor slot and return both its opened
+    /// bytes and the completed exact reference derived from the stored bytes.
+    async fn read_protocol_slot(
         &self,
-        object: &ImmutableObjectLocator,
-    ) -> Result<(), StorageError>;
+        context: &ProtocolObjectContext,
+        slot: &ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, ExactObjectRef), StorageError>;
 
-    /// Append one already-final stored blob file as a fresh immutable physical
-    /// copy beneath the locator's semantic slot. The storage layer never seals,
-    /// opens, or rewrites these bytes.
-    async fn append_blob_copy_from_file(
+    /// Read one predecessor-reserved successor slot while retaining its exact
+    /// stored representation for a durable retry journal.
+    async fn read_prepared_protocol_slot(
+        &self,
+        context: &ProtocolObjectContext,
+        slot: &ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, PreparedExactObject), StorageError>;
+
+    /// Delete one exact Store protocol object and verify absence.
+    async fn delete_protocol_object(&self, object: &ExactObjectRef) -> Result<(), StorageError>;
+
+    /// Reserve the exact provider slot for a stored blob body.
+    async fn allocate_blob_slot(
         &self,
         locator: &crate::blob::locator::BlobLocator,
+        authority: &BlobWriteAuthority<'_>,
+    ) -> Result<ObjectSlot, StorageError>;
+
+    /// Verify one plaintext source against its locator and write the exact stored
+    /// representation to an atomically committed, directory-synced spool file.
+    async fn seal_blob_to_spool(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &BlobWriteAuthority<'_>,
+        protection: BlobSpoolProtection,
+        plaintext_file: &Path,
+        spool_file: &Path,
+    ) -> Result<(), StorageError>;
+
+    /// Derive an exact reference from an immutable stored blob file.
+    async fn prepare_blob_object(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &BlobWriteAuthority<'_>,
+        slot: ObjectSlot,
         stored_file: &Path,
-    ) -> Result<ImmutableObjectLocator, StorageError>;
+    ) -> Result<crate::blob::locator::StoredBlobRef, StorageError>;
 
-    /// List every physical copy beneath one immutable blob locator. Incomplete
-    /// provider coverage is returned in [`ImmutableObjectListing::coverage`] as a
-    /// successful listing state; a provider failure remains an error.
-    async fn list_blob_copies(
+    /// Create the exact stored blob body from its immutable local file.
+    async fn create_blob_object_from_file(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
-    ) -> Result<ImmutableObjectListing, StorageError>;
+        blob: &crate::blob::locator::StoredBlobRef,
+        authority: &BlobWriteAuthority<'_>,
+        stored_file: &Path,
+        progress: &crate::storage::cloud::UploadProgress<'_>,
+    ) -> Result<(), StorageError>;
 
-    /// Read one exact physical blob copy into an atomically committed local file,
-    /// preserving the stored bytes unchanged.
-    async fn read_blob_copy_to_file(
+    /// Read one exact stored blob body and verify its signed size/hash reference.
+    async fn verify_blob_object(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
-        copy: &ImmutableObjectLocator,
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), StorageError>;
+
+    /// Read and verify one exact stored blob body into an unpublished sibling.
+    /// The caller commits it with overwrite semantics for coven-owned paths or
+    /// no-replace semantics for user-owned destinations.
+    async fn stage_exact_blob_download(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
         dest: &Path,
-    ) -> Result<(), StorageError>;
+    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError>;
 
-    /// Delete one exact physical blob copy. The locator is required so a copy
-    /// returned for one semantic slot cannot be deleted through another.
-    async fn delete_blob_copy(
+    /// Download and exact-verify the stored object, open it under the
+    /// audience-owned protection, and return an unpublished plaintext file only
+    /// after its locator size and hash have also been verified.
+    async fn stage_verified_blob_plaintext(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
-        copy: &ImmutableObjectLocator,
-    ) -> Result<(), StorageError>;
-
-    /// Upload a blob. Under the hashed (default) scheme it is keyed
-    /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}` under this device's own
-    /// public key (`cloud_path` ignored); under the plain scheme it is keyed
-    /// `{namespace}/{cloud_path}` verbatim, so the bucket is browsable, and a
-    /// missing `cloud_path` is an error. A device only ever uploads blobs it
-    /// authored, so a write always keys under itself.
-    /// On an encrypted home the plaintext is sealed with the key `scope` selects
-    /// (master, or a per-scope derived key); on a plaintext home it is stored
-    /// verbatim (scope ignored).
-    async fn put_blob(
-        &self,
-        namespace: &str,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError>;
-
-    /// Upload a blob from a local plaintext file without reading the whole file
-    /// into memory. Same keying, scope, and at-rest protection as [`Self::put_blob`].
-    async fn put_blob_from_file(
-        &self,
-        namespace: &str,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_path: &Path,
-    ) -> Result<(), StorageError>;
-
-    /// Download and open a blob, keyed
-    /// `{namespace}/{uploader}/{id[0..2]}/{id[2..4]}/{id}` under the hashed scheme
-    /// or `{namespace}/{cloud_path}` under the plain one, using the key the
-    /// resolved `scope` selects on an encrypted home (verbatim on a plaintext one).
-    /// `uploader` is the hex public key of the device that uploaded the blob (the
-    /// caller resolves it — a peer's, not necessarily this device's); it is
-    /// required by the hashed scheme and ignored by the plain one (a browsable home
-    /// carries no uploader segment). A plain-scheme home with no `cloud_path` is an
-    /// error.
-    async fn get_blob(
-        &self,
-        namespace: &str,
-        uploader: Option<&str>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-    ) -> Result<Vec<u8>, StorageError>;
-
-    /// Check whether a blob object exists at the same key [`Self::put_blob`] and
-    /// [`Self::get_blob`] use. This does not read or open the blob; publish
-    /// preflights use it to prove a row about to be published will not point at a
-    /// missing remote object.
-    async fn blob_exists(
-        &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<bool, StorageError>;
-
-    /// Serve `len` plaintext bytes of a blob starting at `offset`, without
-    /// downloading the whole object — the ranged sibling of [`Self::get_blob`].
-    /// Keyed the same way `get_blob` keys it (hashed shard or `cloud_path`), and
-    /// decrypted under the key the resolved `scope` selects on an encrypted home
-    /// (read verbatim on a plaintext one).
-    ///
-    /// `source_size` is the blob's plaintext length, which the caller knows (the
-    /// host row that owns the blob carries it) and the implementation needs to
-    /// validate the range and locate the covering encrypted chunks — the object's
-    /// stored length alone doesn't give it (the nonce header and per-chunk
-    /// authentication tags pad it). An out-of-range request (`offset + len` past
-    /// `source_size`, or an overflow) errors rather than truncating; `len == 0` is
-    /// an empty result. The cache layer ([`crate::blob::cache::open_blob_stream`])
-    /// uses this only on a miss — a cache hit reads the local plaintext file
-    /// directly.
-    async fn read_blob_range(
-        &self,
-        namespace: &str,
-        uploader: Option<&str>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, StorageError>;
-
-    /// Download and open a blob into `dest` without holding the whole plaintext in
-    /// memory. Same keying, scope, and validation as [`Self::read_blob_range`],
-    /// writing exactly `source_size` bytes or failing.
-    ///
-    /// `expected_hash` is the blob's author-signed content hash (see
-    /// [`crate::blob::content_hash`]); the implementation streams the decrypted
-    /// plaintext through an incremental hasher and refuses to commit the file
-    /// unless the whole-blob hash matches — so a tampered or rolled-back object
-    /// never lands in the cache. The cheap `source_size` length check stays as the
-    /// early-out; the hash is the authority.
-    async fn read_blob_to_file(
-        &self,
-        namespace: &str,
-        uploader: Option<&str>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        expected_hash: &str,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: BlobSpoolProtection,
         dest: &Path,
-    ) -> Result<(), StorageError>;
+    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError>;
 
-    /// The blob-path scheme this home uses. The read dispatch consults it to decide
-    /// whether a blob key needs an uploader segment (hashed) or not (plain).
-    fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme;
-
-    /// The cloud object key this home stores `(namespace, id, cloud_path)` under — the
-    /// same key [`Self::put_blob_from_file`] writes and beside which a tombstone for the
-    /// blob is keyed. The inline host-provided upload path uses it to cancel a pending
-    /// tombstone at the exact key its (re-)upload wrote, rather than re-deriving the
-    /// scheme (which the home alone authoritatively knows).
-    fn blob_cloud_key(
+    /// Delete one exact stored blob body.
+    async fn delete_blob_object(
         &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<String, StorageError>;
-
-    /// This device's own `{uploader}` segment — the hex public key its blob uploads
-    /// key under on a hashed home, or `None` on a browsable home (which carries no
-    /// uploader segment). The upload path records it in the local uploader index as
-    /// this device's own authoritative uploader for the blobs it introduces, so a
-    /// later self-read (after a cache eviction) resolves the blob straight from that
-    /// index.
-    fn own_uploader(&self) -> Option<String>;
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), StorageError>;
 
     /// Upload a wrapped store key that `owner_pubkey` sealed for `recipient_pubkey`.
     /// Writes to `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`. An owner

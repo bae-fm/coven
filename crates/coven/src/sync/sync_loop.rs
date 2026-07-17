@@ -30,7 +30,6 @@ use super::cloud_storage::{BlobPathScheme, CloudSyncStorage};
 use super::cycle::SyncComponents;
 use super::hlc::Hlc;
 use super::loop_policy::{self, LoopWait, SyncLoopReport, SyncLoopSuccess};
-use super::storage::SyncStorage;
 
 /// Why starting or stopping the background sync loop failed.
 #[derive(Debug, thiserror::Error)]
@@ -265,8 +264,10 @@ impl SyncLoopHandle {
                         let reachable = inner
                             .components
                             .storage()
-                            .list_protocol_objects(crate::sync::store_commit::protocol_prefix())
-                            .await;
+                            .cloud_home()
+                            .probe()
+                            .await
+                            .map_err(crate::sync::storage::StorageError::from);
                         let (decision, status) = match reachable {
                             Err(error) => {
                                 let status = storage_check_failure_status(&error);

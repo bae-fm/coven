@@ -16,75 +16,48 @@ use crate::keys::UserKeypair;
 use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::{Hlc, Timestamp, HIGHWATER_STATE_KEY};
-use crate::sync::membership::{MemberRole, MembershipChain};
+use crate::sync::membership::MemberRole;
 /// The synthetic test db opens with a single migration, so its
 /// [`crate::database::Database::schema_version`] is 1. Changesets are stored at
 /// that version.
 const SCHEMA_VERSION: u32 = 1;
+
+async fn create_store(db: &crate::database::Database) -> TestStore {
+    TestStore::create(db, "test-store", UserKeypair::generate())
+        .await
+        .expect("create exact test Store for the test database")
+}
 use crate::sync::test_helpers::*;
 
-/// Store an immutable Store commit signed by `author` into the mock storage.
-fn store_signed_changeset(
-    storage: &MockSyncStorage,
-    device_id: &str,
-    seq: u64,
-    changeset_bytes: &[u8],
-    author: &UserKeypair,
-    _transport_timestamp: &str,
-) {
-    storage.store_changeset_signed_as(
-        device_id,
-        seq,
-        changeset_bytes,
-        SCHEMA_VERSION,
-        None,
-        author,
-        author,
-    );
-}
-
-/// The causality-under-skew guarantee, driven through the real sync cycle.
-/// Device B runs a full [`run_single_sync_cycle`] that pulls A's edit of `n1`;
-/// the cycle must advance B's HLC from the applied row's `_updated_at` so B's
+/// The causality-under-skew guarantee, driven through the Store pull path.
+/// Device B's join bootstrap pulls A's edit of `n1`; applying that row must
+/// advance B's HLC from its `_updated_at` so B's
 /// next stamp is causally greater than A's — *even with B's wall clock set far
 /// behind A's*. A plain wall-clock `_updated_at` would let A win here.
 ///
-/// The cycle is the unit under test: its advance source must be the max
+/// The pull is the unit under test: its advance source must be the max
 /// applied-row `_updated_at`, not a transport/head timestamp (which the HLC
 /// cannot parse).
 #[tokio::test]
 async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
-    let storage = MockSyncStorage::new();
-
     // A's wall clock reads far ahead of B's (A in the "future").
     let a_hlc = Arc::new(Hlc::with_wall_clock("dev-a".into(), || 9_000));
     let b_hlc = Arc::new(Hlc::with_wall_clock("dev-b".into(), || 1_000));
 
-    // A stamps and publishes an edit of n1 through the real cycle so its
-    // registration, commit, and local materialized frontier advance together.
+    // A stamps and publishes an edit of n1 through the Store outbox so its
+    // registration, commit, and local materialized frontier advance together
+    // without publishing a snapshot that already contains the row.
     let a_stamp = a_hlc.now().to_string();
     let db_a = open_test_db_with_hlc(a_hlc.clone(), |_conn| Ok(()));
+    let keypair = UserKeypair::generate();
+    let storage = TestStore::create(&db_a, "test-store", keypair.clone())
+        .await
+        .expect("create exact HLC test Store");
     let (_a_temp, a_store_dir) = temp_store_dir();
-    let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [3u8; 32],
-    )));
-    let keypair = storage.protocol_founder_keypair();
-    bind_mock_store_protocol(&db_a, &storage, "dev-a").await;
-    db_a.set_protocol_state(
-        crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
-        &crate::sync::store_commit::ObjectHash::digest(b"existing-hlc-register-snapshot")
-            .to_string(),
-    )
-    .await
-    .expect("seed existing Store snapshot");
-    crate::sync::cycle::ensure_owner_anchored_chain(
-        &storage,
-        &db_a,
-        &storage.store_protocol_root(),
-        &keypair,
-    )
-    .await
-    .expect("initialize A's MergeConcurrent test membership");
+    storage
+        .open_into(&db_a)
+        .await
+        .expect("open exact test Store");
     host_exec(
         &db_a,
         &format!(
@@ -98,71 +71,45 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         1,
         "A's shared insert must enter the Store outbox"
     );
-    run_single_sync_cycle(
-        &storage,
-        "test-lib",
-        "dev-a",
-        &a_hlc,
-        &SystemClock,
-        &db_a,
-        &encryption,
-        &PendingRotation::none(),
-        &keypair,
-        None,
-        &a_store_dir,
-        None,
-        None,
-    )
-    .await
-    .expect("A publishes its initial edit");
+    assert!(
+        storage
+            .publish_pending(&db_a, &a_store_dir)
+            .await
+            .expect("publish A's initial edit"),
+        "A's Store outbox must publish one write"
+    );
     assert!(
         db_a.pending_writes().await.unwrap().is_empty(),
-        "A's real cycle must finish publishing its initial edit"
+        "A's Store publication must finish its initial edit"
     );
 
-    // B runs a real sync cycle over its own Database (clock = b_hlc): it pulls A's
-    // edit and advances b_hlc from the applied row's `_updated_at`.
+    // B's join bootstrap pulls the signed cut into its own Database (clock =
+    // b_hlc), including A's edit, before it activates the local registration.
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
     let (_t, ld) = temp_store_dir();
-    bind_mock_store_protocol(&db_b, &storage, "dev-b").await;
-    crate::sync::cycle::ensure_owner_anchored_chain(
-        &storage,
-        &db_b,
-        &storage.store_protocol_root(),
-        &storage.protocol_founder_keypair(),
-    )
-    .await
-    .expect("initialize MergeConcurrent test membership");
-
-    let result = run_single_sync_cycle(
-        &storage,
-        "test-lib",
-        "dev-b",
-        &b_hlc,
-        &SystemClock,
-        &db_b,
-        &encryption,
-        &PendingRotation::none(),
-        &keypair,
-        None,
-        &ld,
-        None,
-        None,
-    )
-    .await
-    .expect("B's sync cycle completes");
-
-    assert_eq!(
-        result.changesets_applied, 2,
-        "B must apply A's registration and data commits"
-    );
+    install_active_device_fixture(&storage, &db_a, &db_b, &keypair, "0000000001000-0000-dev-b")
+        .await
+        .expect("install B's active exact device fixture");
+    let active_device_count = db_a
+        .call(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM store_device_registration_activations",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("count A's activated devices");
+    assert_eq!(active_device_count, 2, "A must activate B's registration");
     assert_eq!(
         query_text(&db_b, "SELECT title FROM notes WHERE id = 'n1'").await,
         "A wrote this",
-        "A's row must be present on B after the cycle",
+        "A's row must be present when B's registration activates",
     );
 
-    // B now edits the same row. The cycle advanced b_hlc from A's applied stamp,
+    // B now edits the same row. The pull advanced b_hlc from A's applied stamp,
     // so B's next stamp sorts after A's despite B's wall clock being far behind.
     let b_stamp = b_hlc.now().to_string();
     assert!(
@@ -180,30 +127,31 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
         ),
     )
     .await;
-    run_single_sync_cycle(
-        &storage,
-        "test-lib",
-        "dev-b",
-        &b_hlc,
-        &SystemClock,
-        &db_b,
-        &encryption,
-        &PendingRotation::none(),
-        &keypair,
-        None,
-        &ld,
-        None,
-        None,
-    )
-    .await
-    .expect("B publishes its post-pull edit");
+    assert!(
+        storage
+            .publish_pending(&db_b, &ld)
+            .await
+            .expect("publish B's post-pull edit"),
+        "B's Store outbox must publish its post-pull edit"
+    );
 
     // A pulls B's edit; B wins on LWW because b_stamp > a_stamp.
-    pull_into(&db_a, &storage, "dev-a", &temp_store_dir().1).await;
+    let (_, first_pull) = pull_into(&db_a, &storage, &temp_store_dir().1).await;
+    assert!(
+        first_pull.held_positions.is_empty(),
+        "A held B's post-pull edit: {:?}",
+        first_pull.held_positions
+    );
+    let (_, second_pull) = pull_into(&db_a, &storage, &temp_store_dir().1).await;
+    assert!(
+        second_pull.held_positions.is_empty(),
+        "A held B's post-activation stream: {:?}",
+        second_pull.held_positions
+    );
     assert_eq!(
         query_text(&db_a, "SELECT title FROM notes WHERE id = 'n1'").await,
         "B wrote this",
-        "B's causally-later edit must win the merge on A",
+        "B's causally-later edit must win the merge on A; pulls: {first_pull:?}, {second_pull:?}",
     );
 }
 
@@ -220,8 +168,6 @@ async fn b_edit_after_pulling_a_wins_even_with_b_clock_behind() {
 /// wrapping the pull.
 #[tokio::test]
 async fn pull_advances_register_as_each_changeset_applies() {
-    let storage = MockSyncStorage::new();
-
     // A's wall clock reads far ahead of B's, so only the pull's advance can lift
     // B's clock above A's applied stamp.
     let a_hlc = Hlc::with_wall_clock("dev-a".into(), || 9_000);
@@ -229,6 +175,7 @@ async fn pull_advances_register_as_each_changeset_applies() {
 
     let a_stamp = a_hlc.now().to_string();
     let db_a = open_test_db();
+    let storage = create_store(&db_a).await;
     let cs_a = capture_bytes(
         &db_a,
         &[&format!(
@@ -237,12 +184,15 @@ async fn pull_advances_register_as_each_changeset_applies() {
         )],
     )
     .await;
-    storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
+    storage
+        .publish_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION)
+        .await
+        .expect("publish A changeset");
 
     // B pulls A's Store commit directly — no cycle wraps it, so
     // the only advance that can fire is the per-changeset one.
     let db_b = open_test_db_with_hlc(b_hlc.clone(), |_conn| Ok(()));
-    let (_positions, result) = pull_into(&db_b, &storage, "dev-b", &temp_store_dir().1).await;
+    let (_positions, result) = pull_into(&db_b, &storage, &temp_store_dir().1).await;
     assert_eq!(result.changesets_applied, 1, "B must apply A's changeset");
 
     // A host write on B now mints off the shared clock the pull advanced. It must
@@ -258,10 +208,10 @@ async fn pull_advances_register_as_each_changeset_applies() {
 
 #[tokio::test]
 async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row() {
-    let storage = Arc::new(MockSyncStorage::new());
     let remote_hlc = Hlc::with_wall_clock("dev-a".into(), || 9_000);
     let remote_stamp = remote_hlc.now().to_string();
     let source = open_test_db();
+    let storage = Arc::new(create_store(&source).await);
     let changeset = capture_bytes(
         &source,
         &[&format!(
@@ -270,22 +220,34 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
         )],
     )
     .await;
-    storage.store_changeset("dev-a", 1, &changeset, SCHEMA_VERSION);
+    let expected_commit = storage
+        .publish_changeset("dev-a", 1, &changeset, SCHEMA_VERSION)
+        .await
+        .expect("publish remote changeset");
+    let expected_stream = match expected_commit.coord {
+        crate::sync::store_commit::StoreCommitCoord::MergeConcurrent { stream_id, .. } => {
+            stream_id.to_string()
+        }
+        crate::sync::store_commit::StoreCommitCoord::Serial { .. } => {
+            panic!("test Store must use MergeConcurrent commits")
+        }
+    };
 
     let local_hlc = Arc::new(Hlc::with_wall_clock("dev-b".into(), || 1_000));
     let target = open_test_db_with_hlc(local_hlc, |_conn| Ok(()));
     let (_tmp, store_dir) = temp_store_dir();
     let (commit_reached, _resume_pull) =
         target.arm_test_pause(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
-            device_id: "dev-a".to_string(),
+            device_id: expected_stream.clone(),
             seq: 1,
         });
     let pull_db = target.clone();
     let pull_storage = storage.clone();
     let pull_store_dir = store_dir.clone();
-    let pull = tokio::spawn(async move {
-        pull_into(&pull_db, pull_storage.as_ref(), "dev-b", &pull_store_dir).await
-    });
+    let pull =
+        tokio::spawn(
+            async move { pull_into(&pull_db, pull_storage.as_ref(), &pull_store_dir).await },
+        );
 
     commit_reached.notified().await;
     let tables = target.synced_tables().to_vec();
@@ -322,14 +284,13 @@ async fn a_host_write_queued_after_remote_commit_stamps_past_the_committed_row()
          {remote_stamp}",
     );
     assert!(row_exists(&target, "SELECT 1 FROM notes WHERE id = 'remote-boundary'").await);
-    let expected_position = storage.store_commit_position("dev-a", 1);
     assert_eq!(
         target
             .materialized_frontier()
             .await
             .expect("read materialized frontier")
-            .get("dev-a"),
-        Some(&expected_position),
+            .get(&expected_stream),
+        Some(&expected_commit),
         "cancellation after the commit leaves its row and position durable",
     );
 }
@@ -363,80 +324,108 @@ fn reconstructed_clock_does_not_regress_below_persisted_high_water() {
     );
 }
 
-/// Revocation is enforced by current membership, not by when a changeset claims
-/// to have been authored. A removed member signs a changeset whose transport
-/// timestamp falls between their Add and Remove entries; pull must still reject it
-/// because the author lacks an exact current membership grant. Pull examines every
-/// verified head so a newly-added member's stream is not lost before its grant is
-/// discovered, then rejects this commit against the current chain and advances
-/// past it. Authorization is keyed on current membership rather than the
-/// author-supplied transport timestamp.
+/// Revocation is enforced by current membership, not by when a changeset was
+/// committed. A member publishes a changeset while their grant is active, then an
+/// owner removes them before another device pulls it. The pull must reject the
+/// earlier commit because its author lacks a current membership grant.
 #[tokio::test]
 async fn removed_member_changeset_is_rejected_despite_in_window_timestamp() {
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
-    let storage = MockSyncStorage::with_keypair(owner.clone());
+    let owner_db = open_test_db();
+    let storage = TestStore::create(&owner_db, "test-store", owner.clone())
+        .await
+        .expect("create exact revocation test Store");
+    let encryption = EncryptionService::from_key([42; 32]);
+    crate::sync::membership_ops::invite_member(
+        &storage.storage,
+        storage.home.as_ref(),
+        &owner,
+        &Hlc::with_wall_clock("owner".to_string(), || 2_000),
+        &pubkey_hex(&member),
+        None,
+        MemberRole::Member,
+        &encryption,
+        "test-store",
+        "Test Store",
+        &owner_db,
+    )
+    .await
+    .expect("invite exact member identity");
 
-    let owner_pk = pubkey_hex(&owner);
-    let mut chain = MembershipChain::new();
-    let founder = storage.store_protocol_root().founder.clone();
-    append_membership_entry(&storage, &mut chain, &owner_pk, 1, founder).await;
-    let add_member = chain
-        .signed_set_member(
-            &owner,
-            pubkey_hex(&member),
-            None,
-            MemberRole::Member,
-            "0000000002000-0000-owner".to_string(),
-        )
-        .expect("active Owner signs membership grant");
-    append_membership_entry(&storage, &mut chain, &owner_pk, 2, add_member).await;
-    let remove_member = chain
-        .signed_remove_member(
-            &owner,
-            pubkey_hex(&member),
-            "0000000004000-0000-owner".to_string(),
-        )
-        .expect("active Owner removes membership grant");
-    append_membership_entry(&storage, &mut chain, &owner_pk, 3, remove_member).await;
-    publish_membership_chain_head(&storage, &chain, &owner).await;
-    assert!(
-        !chain.can_write_now(&hex::encode(member.public_key())),
-        "removed member must not be a current writer",
-    );
+    let receiver_db = open_test_db();
+    storage
+        .open_into(&receiver_db)
+        .await
+        .expect("open exact Store on receiving device");
+    let member_db = open_test_db();
+    install_active_device_fixture(
+        &storage,
+        &owner_db,
+        &member_db,
+        &member,
+        "0000000002500-0000-member",
+    )
+    .await
+    .expect("install member's active exact device fixture");
+    let member_device_id = member_db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read member device id")
+        .expect("member device registration is active");
 
-    // Member signs a changeset with an in-window transport timestamp (t=3000).
-    let db1 = open_test_db();
-    let cs = capture_bytes(
-        &db1,
-        &[
-            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
-           VALUES ('n1', 'Stale writer', NULL, '0000000003000-0000-member', '2026-01-01')",
-        ],
+    host_exec(
+        &member_db,
+        "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+         VALUES ('n1', 'Stale writer', NULL, 1, '0000000003000-0000-member', '2026-01-01')",
     )
     .await;
-    store_signed_changeset(
-        &storage,
-        "member-device",
-        1,
-        &cs,
-        &member,
-        "0000000003000-0000-member",
+    let membership = crate::sync::pull::load_cycle_membership(&storage.storage, &member_db)
+        .await
+        .expect("load membership while member grant is active");
+    let (_member_temp, member_store_dir) = temp_store_dir();
+    assert!(
+        crate::sync::store_outbound::prepare_pending_store_write(
+            &member_db,
+            &storage.storage,
+            &member_device_id,
+            "0000000003000-0000-member",
+            &member,
+            &member_store_dir,
+            membership.chain.as_ref(),
+        )
+        .await
+        .expect("prepare member commit while grant is active"),
+        "member write must prepare while its grant is active",
     );
+    crate::sync::store_outbound::drain_store_writes(&member_db, &storage.storage)
+        .await
+        .expect("publish member commit while grant is active");
 
-    let db2 = open_test_db();
-    let (updated, result) = pull_into(&db2, &storage, "dev2", &temp_store_dir().1).await;
+    let custody = TestCustody::default();
+    custody.set_initial_key([42; 32]);
+    let cipher = storage.cipher_state().clone();
+    let pending_rotation = storage.shared_pending_rotation();
+    crate::sync::membership_ops::remove_member(
+        &storage.storage,
+        storage.home.as_ref(),
+        &owner,
+        &Hlc::with_wall_clock("owner".to_string(), || 4_000),
+        &pubkey_hex(&member),
+        "test-store",
+        &encryption,
+        &custody,
+        cipher.as_ref(),
+        pending_rotation.as_ref(),
+        &owner_db,
+    )
+    .await
+    .expect("remove exact member identity");
 
-    assert_eq!(
-        result.changesets_applied, 0,
-        "a removed member's changeset must be rejected",
-    );
-    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
-    // Every verified head is examined so a newly-added member stream cannot be
-    // discarded before its grant is discovered. This commit lacks an exact
-    // current grant, so it is held without applying its row or advancing the
-    // durable materialization frontier.
-    assert_eq!(updated.get("member-device"), None);
+    let (updated, _result) = pull_into(&receiver_db, &storage, &temp_store_dir().1).await;
+
+    assert!(!row_exists(&receiver_db, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+    assert_eq!(updated.get(&member_device_id), None);
 }
 
 /// `Database::open` seeds the register from the persisted high-water mark, so the
@@ -452,7 +441,7 @@ async fn register_seeds_from_persisted_high_water() {
     let (before_restart, _stamper) = crate::database::Database::open(
         &path,
         test_synced_tables(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
         crate::WritePolicy::MergeConcurrent,
         "dev-a".to_string(),
@@ -468,7 +457,7 @@ async fn register_seeds_from_persisted_high_water() {
     let (db, _stamper) = crate::database::Database::open_with_hlc(
         &path,
         test_synced_tables(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
         crate::WritePolicy::MergeConcurrent,
         Arc::new(Hlc::new("dev-a".into())),
@@ -604,7 +593,7 @@ async fn returned_stamper_shares_seeded_clock() {
     let (db, stamper) = crate::database::Database::open_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
         crate::WritePolicy::MergeConcurrent,
         Arc::new(Hlc::with_wall_clock("dev-a".into(), || 9_000_000_000_000)),
@@ -638,8 +627,6 @@ async fn returned_stamper_shares_seeded_clock() {
 /// must stay near wall time rather than jumping ten years ahead.
 #[tokio::test]
 async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
-    let storage = MockSyncStorage::new();
-
     // B's wall clock is pinned at t = 1_700_000_000_000 (a 2023 millis).
     let b_wall: u64 = 1_700_000_000_000;
     let b_hlc = Arc::new(Hlc::with_wall_clock("dev-b".into(), move || b_wall));
@@ -661,6 +648,7 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
     let a_future_ms = b_wall + 10 * 365 * 24 * 60 * 60 * 1000;
     let a_future_stamp = format!("{a_future_ms:013}-0000-dev-a");
     let db_a = open_test_db();
+    let storage = create_store(&db_a).await;
     let cs_a = capture_bytes(
         &db_a,
         &[&format!(
@@ -669,10 +657,13 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
         )],
     )
     .await;
-    storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
+    storage
+        .publish_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION)
+        .await
+        .expect("publish grossly-future changeset");
 
     // B pulls A's changeset.
-    let (_positions, _result) = pull_into(&db_b, &storage, "dev-b", &temp_store_dir().1).await;
+    let (_positions, _result) = pull_into(&db_b, &storage, &temp_store_dir().1).await;
 
     // (a) LWW: the grossly-future row must NOT win — B's honest local edit stands.
     assert_eq!(
@@ -699,8 +690,6 @@ async fn grossly_future_incoming_neither_wins_lww_nor_ratchets_hlc() {
 /// (well inside the allowance). A's edit must win LWW and advance B's clock.
 #[tokio::test]
 async fn legitimately_skewed_incoming_still_wins_and_advances() {
-    let storage = MockSyncStorage::new();
-
     let b_wall: u64 = 1_700_000_000_000;
     let b_hlc = Arc::new(Hlc::with_wall_clock("dev-b".into(), move || b_wall));
 
@@ -721,6 +710,7 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
     let a_ms = b_wall + 3 * 24 * 60 * 60 * 1000;
     let a_stamp = format!("{a_ms:013}-0000-dev-a");
     let db_a = open_test_db();
+    let storage = create_store(&db_a).await;
     let cs_a = capture_bytes(
         &db_a,
         &[&format!(
@@ -729,9 +719,12 @@ async fn legitimately_skewed_incoming_still_wins_and_advances() {
         )],
     )
     .await;
-    storage.store_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION);
+    storage
+        .publish_changeset("dev-a", 1, &cs_a, SCHEMA_VERSION)
+        .await
+        .expect("publish within-bound changeset");
 
-    let (_positions, _result) = pull_into(&db_b, &storage, "dev-b", &temp_store_dir().1).await;
+    let (_positions, _result) = pull_into(&db_b, &storage, &temp_store_dir().1).await;
 
     // A's causally-later (within-allowance) edit wins.
     assert_eq!(
@@ -770,13 +763,22 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     let (db, _stamper) = crate::database::Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
         crate::WritePolicy::MergeConcurrent,
         "dev-self".to_string(),
         &migrations,
     )
     .expect("open database before installing protocol_state fault");
+    let keypair = UserKeypair::generate();
+    let storage = TestStore::create(&db, "test-store", keypair.clone())
+        .await
+        .expect("create exact Store before installing protocol_state fault");
+    let device_id = db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read exact local device id")
+        .expect("founder device registration is active");
     exec(
         &db,
         "CREATE TRIGGER block_protocol_state_insert BEFORE INSERT ON protocol_state \
@@ -794,18 +796,16 @@ async fn cycle_error_mid_cycle_still_captures_host_writes() {
     )
     .await;
 
-    let storage = MockSyncStorage::new();
     let (_t, ld) = temp_store_dir();
     let encryption = std::sync::RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [7u8; 32],
+        [42; 32],
     )));
-    let keypair = storage.protocol_founder_keypair();
     let hlc = db.hlc();
 
     let result = run_single_sync_cycle(
-        &storage,
+        &storage.storage,
         "test-lib",
-        "dev-self",
+        &device_id,
         &hlc,
         &SystemClock,
         &db,

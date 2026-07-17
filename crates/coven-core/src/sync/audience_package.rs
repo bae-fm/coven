@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::blob::locator::{BlobLocator, BlobLocatorError, RemoteAudience};
+use crate::blob::locator::{RemoteAudience, StoredBlobRef};
 use crate::encryption::KeyFingerprint;
-use crate::store_dir::validate_path_token;
 use crate::sync::circle::CircleId;
 use crate::sync::circle_control::CircleControlCoord;
-use crate::sync::store_commit::{ObjectHash, STORE_PROTOCOL_VERSION};
+use crate::sync::store_commit::{
+    CandidateFamilyId, ObjectHash, StoreCommitCoord, StoreDeviceRegistrationRef,
+    STORE_PROTOCOL_VERSION,
+};
 use crate::{WriteId, WritePolicy};
 
 /// The Store or Circle whose exact package bytes carry a changeset.
@@ -37,7 +39,7 @@ pub struct RowBlobLocatorBinding {
     row_id: String,
     row_stamp: String,
     column: String,
-    locator: BlobLocator,
+    blob: StoredBlobRef,
 }
 
 impl RowBlobLocatorBinding {
@@ -46,14 +48,14 @@ impl RowBlobLocatorBinding {
         row_id: impl Into<String>,
         row_stamp: impl Into<String>,
         column: impl Into<String>,
-        locator: BlobLocator,
+        blob: StoredBlobRef,
     ) -> Result<Self, AudiencePackageError> {
         let binding = Self {
             table: table.into(),
             row_id: row_id.into(),
             row_stamp: row_stamp.into(),
             column: column.into(),
-            locator,
+            blob,
         };
         binding.validate()?;
         Ok(binding)
@@ -75,8 +77,8 @@ impl RowBlobLocatorBinding {
         &self.column
     }
 
-    pub fn locator(&self) -> &BlobLocator {
-        &self.locator
+    pub fn blob(&self) -> &StoredBlobRef {
+        &self.blob
     }
 
     fn sort_key(&self) -> (&str, &str, &str, &str) {
@@ -98,9 +100,7 @@ impl RowBlobLocatorBinding {
                 return Err(AudiencePackageError::EmptyBindingField(field));
             }
         }
-        self.locator
-            .validate()
-            .map_err(AudiencePackageError::Locator)
+        Ok(())
     }
 }
 
@@ -110,9 +110,9 @@ impl RowBlobLocatorBinding {
 pub struct AudiencePackage {
     version: u32,
     store_root_hash: ObjectHash,
+    candidate_family: CandidateFamilyId,
     write_id: WriteId,
-    stream_id: String,
-    seq: u64,
+    commit_coord: StoreCommitCoord,
     schema_version: u32,
     audience: PackageAudience,
     changeset: Vec<u8>,
@@ -123,18 +123,18 @@ impl AudiencePackage {
     #[allow(clippy::too_many_arguments)]
     pub fn store(
         store_root_hash: ObjectHash,
+        candidate_family: CandidateFamilyId,
         write_id: WriteId,
-        stream_id: impl Into<String>,
-        seq: u64,
+        commit_coord: StoreCommitCoord,
         schema_version: u32,
         changeset: Vec<u8>,
         blob_bindings: Vec<RowBlobLocatorBinding>,
     ) -> Result<Self, AudiencePackageError> {
         Self::new(
             store_root_hash,
+            candidate_family,
             write_id,
-            stream_id.into(),
-            seq,
+            commit_coord,
             schema_version,
             PackageAudience::Store,
             changeset,
@@ -145,9 +145,9 @@ impl AudiencePackage {
     #[allow(clippy::too_many_arguments)]
     pub fn circle(
         store_root_hash: ObjectHash,
+        candidate_family: CandidateFamilyId,
         write_id: WriteId,
-        stream_id: impl Into<String>,
-        seq: u64,
+        commit_coord: StoreCommitCoord,
         schema_version: u32,
         circle_id: CircleId,
         control: CircleControlCoord,
@@ -157,9 +157,9 @@ impl AudiencePackage {
     ) -> Result<Self, AudiencePackageError> {
         Self::new(
             store_root_hash,
+            candidate_family,
             write_id,
-            stream_id.into(),
-            seq,
+            commit_coord,
             schema_version,
             PackageAudience::Circle {
                 circle_id,
@@ -174,9 +174,9 @@ impl AudiencePackage {
     #[allow(clippy::too_many_arguments)]
     fn new(
         store_root_hash: ObjectHash,
+        candidate_family: CandidateFamilyId,
         write_id: WriteId,
-        stream_id: String,
-        seq: u64,
+        commit_coord: StoreCommitCoord,
         schema_version: u32,
         audience: PackageAudience,
         changeset: Vec<u8>,
@@ -186,9 +186,9 @@ impl AudiencePackage {
         let package = Self {
             version: STORE_PROTOCOL_VERSION,
             store_root_hash,
+            candidate_family,
             write_id,
-            stream_id,
-            seq,
+            commit_coord,
             schema_version,
             audience,
             changeset,
@@ -220,12 +220,12 @@ impl AudiencePackage {
         &self.write_id
     }
 
-    pub fn stream_id(&self) -> &str {
-        &self.stream_id
+    pub fn candidate_family(&self) -> CandidateFamilyId {
+        self.candidate_family
     }
 
-    pub fn seq(&self) -> u64 {
-        self.seq
+    pub fn commit_coord(&self) -> &StoreCommitCoord {
+        &self.commit_coord
     }
 
     pub fn schema_version(&self) -> u32 {
@@ -254,15 +254,33 @@ impl AudiencePackage {
         }
     }
 
+    /// Require every exact blob locator in this package to name the registration
+    /// that authored the enclosing Store commit.
+    pub fn validate_blob_uploader(
+        &self,
+        author: &StoreDeviceRegistrationRef,
+    ) -> Result<(), AudiencePackageError> {
+        for binding in &self.blob_bindings {
+            let actual = binding.blob().locator().uploader();
+            if actual != author {
+                return Err(AudiencePackageError::LocatorUploaderMismatch {
+                    table: binding.table.clone(),
+                    row_id: binding.row_id.clone(),
+                    expected: Box::new(author.clone()),
+                    actual: Box::new(actual.clone()),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), AudiencePackageError> {
         if self.version != STORE_PROTOCOL_VERSION {
             return Err(AudiencePackageError::UnsupportedVersion(self.version));
         }
-        validate_path_token(&self.stream_id)
-            .map_err(|error| AudiencePackageError::UnsafeStreamId(error.to_string()))?;
-        if self.seq == 0 {
-            return Err(AudiencePackageError::InvalidSequence(0));
-        }
+        self.commit_coord
+            .validate()
+            .map_err(|error| AudiencePackageError::InvalidCommitCoord(error.to_string()))?;
         if let PackageAudience::Circle { control, .. } = &self.audience {
             control
                 .validate()
@@ -273,12 +291,12 @@ impl AudiencePackage {
         let mut identities = std::collections::BTreeSet::new();
         for binding in &self.blob_bindings {
             binding.validate()?;
-            if binding.locator.audience() != expected_audience {
+            if binding.blob.locator().audience() != expected_audience {
                 return Err(AudiencePackageError::LocatorAudienceMismatch {
                     table: binding.table.clone(),
                     row_id: binding.row_id.clone(),
                     expected: expected_audience.clone(),
-                    actual: binding.locator.audience(),
+                    actual: binding.blob.locator().audience(),
                 });
             }
             if let PackageAudience::Circle {
@@ -286,7 +304,8 @@ impl AudiencePackage {
             } = &self.audience
             {
                 if let Some(actual) = binding
-                    .locator
+                    .blob
+                    .locator()
                     .key_fingerprint()
                     .filter(|actual| *actual != *key_fingerprint)
                 {
@@ -322,16 +341,12 @@ impl AudiencePackage {
 pub enum AudiencePackageError {
     #[error("unsupported audience package version {0}")]
     UnsupportedVersion(u32),
-    #[error("unsafe audience package stream id: {0}")]
-    UnsafeStreamId(String),
-    #[error("invalid audience package sequence {0}")]
-    InvalidSequence(u64),
+    #[error("invalid audience package Store commit coordinate: {0}")]
+    InvalidCommitCoord(String),
     #[error("invalid Circle control coordinate: {0}")]
     InvalidCircleControl(String),
     #[error("row blob binding has empty {0}")]
     EmptyBindingField(&'static str),
-    #[error("row blob binding locator: {0}")]
-    Locator(#[from] BlobLocatorError),
     #[error(
         "row blob locator audience mismatch for {table:?}/{row_id:?}: expected {expected:?}, found {actual:?}"
     )]
@@ -349,6 +364,15 @@ pub enum AudiencePackageError {
         row_id: String,
         expected: KeyFingerprint,
         actual: KeyFingerprint,
+    },
+    #[error(
+        "row blob locator uploader mismatch for {table:?}/{row_id:?}: expected {expected:?}, found {actual:?}"
+    )]
+    LocatorUploaderMismatch {
+        table: String,
+        row_id: String,
+        expected: Box<StoreDeviceRegistrationRef>,
+        actual: Box<StoreDeviceRegistrationRef>,
     },
     #[error(
         "duplicate row blob locator binding for {table:?}/{row_id:?}/{column:?} at {row_stamp:?}"
@@ -370,22 +394,69 @@ pub enum AudiencePackageError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::locator::{BlobLocator, RemoteAudience};
+    use crate::blob::locator::{BlobLocator, RemoteAudience, StoredBlobRef};
+    use crate::storage::cloud::ObjectSlot;
     use crate::sync::circle::CircleId;
     use crate::sync::circle_control::CircleControlCoord;
-    use crate::sync::store_commit::ObjectHash;
+    use crate::sync::membership::AuthorStreamId;
+    use crate::sync::storage::ExactObjectRef;
+    use crate::sync::store_commit::{
+        CandidateFamilyId, ObjectHash, StoreCommitCoord, StoreDeviceRegistrationRef,
+    };
     use crate::{BlobScope, KeyFingerprint, WriteId, WritePolicy};
+
+    fn uploader() -> StoreDeviceRegistrationRef {
+        let bytes = b"audience-package uploader registration";
+        StoreDeviceRegistrationRef {
+            device_id: "11".repeat(32).parse().unwrap(),
+            registration_hash: ObjectHash::digest(bytes),
+            object: ExactObjectRef::new(
+                ObjectSlot::logical("store-v1/devices/audience-package-uploader.json".to_string())
+                    .unwrap(),
+                bytes.len() as u64,
+                ObjectHash::digest(bytes),
+            ),
+        }
+    }
+
+    fn candidate_family() -> CandidateFamilyId {
+        CandidateFamilyId::from_hash(ObjectHash::digest(b"audience-package candidate family"))
+    }
+
+    fn merge_coord() -> StoreCommitCoord {
+        StoreCommitCoord::MergeConcurrent {
+            stream_id: AuthorStreamId::from_bytes([3; 32]),
+            sequence: 3,
+        }
+    }
+
+    fn serial_coord() -> StoreCommitCoord {
+        StoreCommitCoord::Serial { sequence: 4 }
+    }
 
     fn locator(id: &str, audience: RemoteAudience) -> BlobLocator {
         BlobLocator::opaque(
             "covers",
             id,
-            "11".repeat(32),
+            uploader(),
             audience,
             BlobScope::Master,
             KeyFingerprint::from_bytes([4; 8]),
             7,
             ObjectHash::digest(id.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    fn stored(locator: BlobLocator) -> StoredBlobRef {
+        let key = locator.semantic_key();
+        StoredBlobRef::new(
+            locator,
+            ExactObjectRef::new(
+                ObjectSlot::logical(key).unwrap(),
+                6,
+                ObjectHash::digest(b"stored"),
+            ),
         )
         .unwrap()
     }
@@ -396,7 +467,7 @@ mod tests {
             row,
             "0000000001000-0000-device",
             "blob_id",
-            locator,
+            stored(locator),
         )
         .unwrap()
     }
@@ -405,9 +476,9 @@ mod tests {
     fn store_package_sorts_bindings_and_round_trips_canonical_bytes() {
         let package = AudiencePackage::store(
             ObjectHash::digest(b"root"),
+            candidate_family(),
             WriteId::from_generated("write-a".to_string()),
-            "device-a",
-            3,
+            merge_coord(),
             8,
             b"changeset".to_vec(),
             vec![
@@ -428,9 +499,9 @@ mod tests {
         let root = ObjectHash::digest(b"root");
         let package = AudiencePackage::store(
             root,
+            candidate_family(),
             WriteId::from_generated("write-a".to_string()),
-            "device-a",
-            3,
+            merge_coord(),
             8,
             b"cs".to_vec(),
             Vec::new(),
@@ -440,7 +511,9 @@ mod tests {
         assert_eq!(
             String::from_utf8(package.to_bytes()).unwrap(),
             format!(
-                "{{\"version\":1,\"store_root_hash\":\"{root}\",\"write_id\":\"write-a\",\"stream_id\":\"device-a\",\"seq\":3,\"schema_version\":8,\"audience\":\"store\",\"changeset\":[99,115],\"blob_bindings\":[]}}"
+                "{{\"version\":1,\"store_root_hash\":\"{root}\",\"candidate_family\":\"{}\",\"write_id\":\"write-a\",\"commit_coord\":{{\"merge_concurrent\":{{\"stream_id\":\"{}\",\"sequence\":3}}}},\"schema_version\":8,\"audience\":\"store\",\"changeset\":[99,115],\"blob_bindings\":[]}}",
+                candidate_family().as_hash(),
+                AuthorStreamId::from_bytes([3; 32]),
             )
         );
     }
@@ -452,9 +525,9 @@ mod tests {
         assert!(matches!(
             AudiencePackage::store(
                 ObjectHash::digest(b"root"),
+                candidate_family(),
                 WriteId::from_generated("write-a".to_string()),
-                "device-a",
-                3,
+                merge_coord(),
                 8,
                 Vec::new(),
                 vec![one, two],
@@ -469,9 +542,9 @@ mod tests {
         assert!(matches!(
             AudiencePackage::store(
                 ObjectHash::digest(b"root"),
+                candidate_family(),
                 WriteId::from_generated("write-a".to_string()),
-                "device-a",
-                3,
+                merge_coord(),
                 8,
                 Vec::new(),
                 vec![binding(
@@ -489,7 +562,7 @@ mod tests {
         let browsable = BlobLocator::browsable(
             "audio",
             "abcd-track",
-            "22".repeat(32),
+            uploader(),
             "Artist/Album/track.flac",
             7,
             ObjectHash::digest(b"track"),
@@ -499,9 +572,9 @@ mod tests {
         assert!(matches!(
             AudiencePackage::circle(
                 ObjectHash::digest(b"root"),
+                candidate_family(),
                 WriteId::from_generated("write-a".to_string()),
-                "serial",
-                4,
+                serial_coord(),
                 8,
                 circle,
                 CircleControlCoord::Serial {
@@ -523,7 +596,7 @@ mod tests {
         let wrong_key_locator = BlobLocator::opaque(
             "covers",
             "a1b2-blob",
-            "11".repeat(32),
+            uploader(),
             RemoteAudience::Circle(circle),
             BlobScope::Master,
             KeyFingerprint::from_bytes([5; 8]),
@@ -535,9 +608,9 @@ mod tests {
         assert!(matches!(
             AudiencePackage::circle(
                 ObjectHash::digest(b"root"),
+                candidate_family(),
                 WriteId::from_generated("write-a".to_string()),
-                "serial",
-                4,
+                serial_coord(),
                 8,
                 circle,
                 CircleControlCoord::Serial {
@@ -557,9 +630,9 @@ mod tests {
     fn package_rejects_unknown_shape_and_noncanonical_bytes() {
         let package = AudiencePackage::store(
             ObjectHash::digest(b"root"),
+            candidate_family(),
             WriteId::from_generated("write-a".to_string()),
-            "device-a",
-            3,
+            merge_coord(),
             8,
             b"changeset".to_vec(),
             Vec::new(),
@@ -594,9 +667,9 @@ mod tests {
         let circle = CircleId::from_bytes([8; 16]);
         let package = AudiencePackage::circle(
             ObjectHash::digest(b"root"),
+            candidate_family(),
             WriteId::from_generated("write-a".to_string()),
-            "serial",
-            4,
+            serial_coord(),
             8,
             circle,
             CircleControlCoord::Serial {

@@ -35,7 +35,7 @@ use tracing::{debug, error, info};
 use crate::blob::cache::BlobCacheError;
 use crate::blob::transition::{MakeLocalError, MakeRemoteError};
 use crate::blob::upload::DrainOutcome;
-use crate::blob::{BlobRef, BlobTransitionObserver};
+use crate::blob::{BlobRef, BlobTransitionObserver, RowBlobRef};
 use crate::clock::ClockRef;
 use crate::config::Config;
 use crate::coven::StoreOpenGuard;
@@ -111,8 +111,8 @@ pub(crate) fn routing_encryption_from_custody(
 /// handle's read/store methods; sync is optional.
 ///
 /// ```no_run
-/// # use coven::{BlobRef, CovenHandle};
-/// # async fn use_store(handle: &CovenHandle, cover: &BlobRef)
+/// # use coven::{CovenHandle, RowBlobRef};
+/// # async fn use_store(handle: &CovenHandle, cover: &RowBlobRef)
 /// #     -> Result<(), Box<dyn std::error::Error>> {
 /// // Rows: run app SQL on the connection coven owns.
 /// let note_count = handle
@@ -123,8 +123,8 @@ pub(crate) fn routing_encryption_from_custody(
 ///     .await?;
 /// let note_count: i64 = note_count.value;
 ///
-/// // Blobs: read by descriptor. coven resolves locality — the user's own file,
-/// // its local store, the cache, or a cloud fetch — and hands back plaintext.
+/// // Blobs: read an exact row version. coven resolves locality — the user's own
+/// // file, its local store, the cache, or a cloud fetch — and returns plaintext.
 /// let bytes: Vec<u8> = handle.read_blob(cover).await?;
 ///
 /// // Sync is optional. Connect a provider, then drive it; a store with no
@@ -450,7 +450,7 @@ impl CovenHandle {
             self.open_guard.clone(),
             self.sync_status_tx.clone(),
         ));
-        start(manager.clone()).await?;
+        Box::pin(start(manager.clone())).await?;
         *self.sync.write().unwrap() = Some(manager.clone());
         Ok(manager)
     }
@@ -794,24 +794,30 @@ impl CovenHandle {
         Ok(Some(Arc::new(storage)))
     }
 
+    /// Capture the exact current blob-bearing row version. Blob operations use
+    /// this row-bound value so a later row replacement cannot redirect a read.
+    pub async fn row_blob_ref(&self, table: &str, row_id: &str) -> Result<RowBlobRef, DbError> {
+        self.db.row_blob_ref(table, row_id).await
+    }
+
     /// Read a blob's whole plaintext through coven's locality-aware read: served
     /// from the user's file (Local user-provided), coven's local store (Local
     /// host-provided), the pinned/evictable cache on a Remote hit, or fetched
-    /// from the cloud (into the cache) on a Remote miss. The host passes only the
-    /// [`BlobRef`]; coven holds the database, the directory, and the storage.
-    pub async fn read_blob(&self, blob: &BlobRef) -> Result<Vec<u8>, BlobCacheError> {
+    /// from the cloud (into the cache) on a Remote miss. The host passes the
+    /// [`RowBlobRef`] captured from [`row_blob_ref`](Self::row_blob_ref); coven
+    /// holds the database, directory, and storage.
+    pub async fn read_blob(&self, blob: &RowBlobRef) -> Result<Vec<u8>, BlobCacheError> {
         let storage = self.blob_storage().await?;
         crate::blob::cache::read_blob(&self.db, &self.store_dir, storage.as_deref(), blob).await
     }
 
-    /// Serve `len` plaintext bytes of a blob starting at `offset`, for streaming
-    /// or seeking without loading the whole file. `source_size` is the blob's
-    /// plaintext length (the row that owns the blob carries it), used to bound the
-    /// range. The ranged sibling of [`read_blob`](Self::read_blob).
+    /// Serve `len` plaintext bytes of an exact row blob starting at `offset`, for
+    /// streaming or seeking without loading the whole file. The [`RowBlobRef`]
+    /// carries the plaintext length used to bound the range. The ranged sibling
+    /// of [`read_blob`](Self::read_blob).
     pub async fn open_blob_stream(
         &self,
-        blob: &BlobRef,
-        source_size: u64,
+        blob: &RowBlobRef,
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, BlobCacheError> {
@@ -821,7 +827,6 @@ impl CovenHandle {
             &self.store_dir,
             storage.as_deref(),
             blob,
-            source_size,
             offset,
             len,
         )
@@ -831,14 +836,14 @@ impl CovenHandle {
     /// Pin a Remote blob set for offline: coven fetches each into the protected
     /// cache (`storage/pinned/`) — from the evictable cache if already there, else
     /// the cloud — exempt from the size budget. Idempotent.
-    pub async fn pin(&self, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
+    pub async fn pin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
         let storage = self.blob_storage().await?;
         crate::blob::cache::pin(&self.db, &self.store_dir, storage.as_deref(), blobs).await
     }
 
     /// Unpin a Remote blob set: coven moves each from `storage/pinned/` to the
     /// evictable `storage/cache/` (still readable, now droppable). No cloud read.
-    pub async fn unpin(&self, blobs: &[BlobRef]) -> Result<(), BlobCacheError> {
+    pub async fn unpin(&self, blobs: &[RowBlobRef]) -> Result<(), BlobCacheError> {
         crate::blob::cache::unpin(&self.store_dir, blobs).await
     }
 
@@ -1013,6 +1018,195 @@ impl CovenHandle {
         manager.get_members().await
     }
 
+    pub async fn begin_device_join(
+        &self,
+        member_pubkey: &str,
+        provider_administrator: crate::ProviderAdminGrantId,
+    ) -> Result<crate::DeviceJoinOffer, SyncError> {
+        let storage = self.device_join_storage()?;
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let authorization = self.device_join_authorization(&storage).await?;
+        Ok(crate::sync::device_join::begin_device_join(
+            &self.db,
+            storage.as_ref(),
+            &authorization,
+            &signer,
+            member_pubkey,
+            provider_administrator,
+        )
+        .await?)
+    }
+
+    pub async fn authorize_device_provider_access(
+        &self,
+        request: crate::DeviceProviderAccessRequest,
+        access_administrator: Option<&dyn crate::DeviceProviderAccessAdministrator>,
+    ) -> Result<crate::DeviceProviderAdmissionApproval, SyncError> {
+        let storage = self.device_join_storage()?;
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let authorization = self.device_join_authorization(&storage).await?;
+        let exact = self.device_join_exact_storage()?;
+        let coordination = self.device_join_coordination(&storage)?;
+        Ok(crate::sync::device_join::authorize_device_provider_access(
+            &self.db,
+            storage.as_ref(),
+            coordination,
+            Some(exact.as_ref()),
+            access_administrator,
+            &authorization,
+            &signer,
+            request,
+        )
+        .await?)
+    }
+
+    pub async fn accept_device_registration_request(
+        &self,
+        request: crate::DeviceRegistrationRequest,
+    ) -> Result<crate::ProvisionalDeviceBootstrap, SyncError> {
+        let storage = self.device_join_storage()?;
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let authorization = self.device_join_authorization(&storage).await?;
+        let coordination = self.device_join_coordination(&storage)?;
+        Ok(
+            crate::sync::device_join::accept_device_registration_request(
+                &self.db,
+                storage.as_ref(),
+                coordination,
+                &authorization,
+                &signer,
+                request,
+            )
+            .await?,
+        )
+    }
+
+    pub async fn publish_device_provider_challenge(
+        &self,
+        bootstrap: crate::ProvisionalDeviceBootstrap,
+    ) -> Result<crate::ProviderReadyDeviceBootstrap, SyncError> {
+        let storage = self.device_join_storage()?;
+        let exact = self.device_join_exact_storage()?;
+        Ok(crate::sync::device_join::publish_device_provider_challenge(
+            &self.db,
+            storage.as_ref(),
+            Some(exact.as_ref()),
+            bootstrap,
+        )
+        .await?)
+    }
+
+    pub async fn complete_device_provider_admission(
+        &self,
+        readiness: crate::DeviceJoinReadiness,
+    ) -> Result<crate::DeviceProviderAdmissionCompletion, SyncError> {
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let exact = self.device_join_exact_storage()?;
+        Ok(
+            crate::sync::device_join::complete_device_provider_admission(
+                &self.db,
+                Some(exact.as_ref()),
+                &signer,
+                readiness,
+            )
+            .await?,
+        )
+    }
+
+    pub async fn finalize_device_join(
+        &self,
+        completion: crate::DeviceProviderAdmissionCompletion,
+    ) -> Result<crate::DeviceJoinActivation, SyncError> {
+        let storage = self.device_join_storage()?;
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let authorization = self.device_join_authorization(&storage).await?;
+        let coordination = self.device_join_coordination(&storage)?;
+        Ok(crate::sync::device_join::finalize_device_join(
+            &self.db,
+            storage.as_ref(),
+            coordination,
+            &authorization,
+            &signer,
+            completion,
+        )
+        .await?)
+    }
+
+    pub async fn cancel_device_join(
+        &self,
+        attempt: crate::DeviceJoinAttemptRef,
+    ) -> Result<crate::DeviceJoinCancellation, SyncError> {
+        let storage = self.device_join_storage()?;
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let authorization = self.device_join_authorization(&storage).await?;
+        let coordination = self.device_join_coordination(&storage)?;
+        Ok(crate::sync::device_join::cancel_device_join(
+            &self.db,
+            storage.as_ref(),
+            coordination,
+            &authorization,
+            &signer,
+            attempt,
+        )
+        .await?)
+    }
+
+    pub async fn device_join_status(
+        &self,
+        attempt_id: crate::DeviceJoinAttemptId,
+        role: crate::DeviceJoinRole,
+    ) -> Result<Option<crate::DeviceJoinStatus>, SyncError> {
+        Ok(
+            crate::sync::device_join::load_store_device_join_status(&self.db, attempt_id, role)
+                .await?,
+        )
+    }
+
+    fn device_join_storage(&self) -> Result<Arc<CloudSyncStorage>, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
+        let loop_handle = manager
+            .sync_loop_handle()
+            .ok_or(SyncError::LoopNotRunning)?;
+        Ok(loop_handle.storage().clone())
+    }
+
+    fn device_join_exact_storage(
+        &self,
+    ) -> Result<Arc<dyn crate::storage::cloud::ExactSlotStorage>, SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
+        let home = manager.cloud_home().ok_or(SyncError::NotConfigured)?;
+        home.exact_slot_storage()
+            .ok_or_else(|| SyncError::Protocol("provider has no exact-slot adapter".to_string()))
+    }
+
+    fn device_join_coordination<'a>(
+        &self,
+        storage: &'a CloudSyncStorage,
+    ) -> Result<Option<&'a dyn crate::sync::storage::CoordinationStorage>, SyncError> {
+        match self.db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => Ok(None),
+            crate::WritePolicy::Serial => storage
+                .serial_coordination()
+                .map(Some)
+                .map_err(|error| SyncError::Protocol(error.to_string())),
+        }
+    }
+
+    async fn device_join_authorization(
+        &self,
+        storage: &CloudSyncStorage,
+    ) -> Result<crate::DeviceJoinAuthorization, SyncError> {
+        let coordination = self.device_join_coordination(storage)?;
+        Ok(
+            crate::sync::device_join::load_current_device_join_authorization(
+                &self.db,
+                storage,
+                coordination,
+            )
+            .await?,
+        )
+    }
+
     pub async fn invite_member(
         &self,
         public_key_hex: &str,
@@ -1074,21 +1268,23 @@ impl CovenHandle {
 mod tests {
     use super::*;
 
-    use crate::blob::{BlobScope, CacheFill, Provenance};
+    use crate::blob::{CacheFill, Provenance};
     use crate::clock::SystemClock;
     use crate::config::{CloudProvider, Config, HomeStorage};
     use crate::encryption::EncryptionService;
     use crate::keys::{test_keyring, StoreKeys};
     use crate::storage::cloud::cloudkit::{
-        CloudKitAtomicCreateBatch, CloudKitChangeToken, CloudKitOps, CloudKitRecordChange,
-        CloudKitRecordChangesContinuation, CloudKitRecordChangesPage, CloudKitRecordCreate,
-        CloudKitRecordVersion, CloudKitScope, CloudKitShare,
+        CloudKitAcceptedShareRecord, CloudKitAtomicCreateBatch, CloudKitOps,
+        CloudKitProviderIdentity, CloudKitRecordCreate, CloudKitRecordVersion, CloudKitScope,
+        CloudKitShare,
     };
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::CloudHomeError;
     use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::sync_manager::{ConfigProvider, SyncError};
-    use crate::sync::test_helpers::{plant_blob_row, read_test_db, temp_store_dir};
+    use crate::sync::test_helpers::{
+        open_test_db_with_blob, plant_blob_row, read_test_db, temp_store_dir, TestStore,
+    };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -1126,10 +1322,148 @@ mod tests {
             )
     }
 
+    fn host_blob_test_db(namespace: &str) -> Database {
+        open_test_db_with_blob(
+            crate::sync::session::BlobDecl::new(
+                namespace,
+                Provenance::HostProvided,
+                CacheFill::CacheLazy,
+            )
+            .with_cloud_path_column("cloud_path"),
+        )
+    }
+
+    struct PausedUploadDrain {
+        paused: std::sync::atomic::AtomicBool,
+        reached: tokio::sync::Notify,
+    }
+
+    impl PausedUploadDrain {
+        fn new() -> Self {
+            Self {
+                paused: std::sync::atomic::AtomicBool::new(true),
+                reached: tokio::sync::Notify::new(),
+            }
+        }
+
+        fn resume(&self) {
+            self.paused
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::blob::BlobTransitionObserver for PausedUploadDrain {
+        async fn on_blob_upload_started(&self, _blob_id: &str) {}
+
+        async fn on_blob_uploaded(&self, _blob_id: &str) {}
+
+        async fn on_blob_upload_failed(&self, _blob_id: &str, _error: &str) {}
+
+        fn should_skip_uploads(&self) -> bool {
+            let paused = self.paused.load(std::sync::atomic::Ordering::SeqCst);
+            if paused {
+                self.reached.notify_one();
+            }
+            paused
+        }
+    }
+
+    async fn queue_host_blob(
+        handle: &CovenHandle,
+        id: &str,
+        cloud_path: &str,
+        bytes: &[u8],
+        remote: bool,
+    ) -> coven_core::WriteId {
+        let note_id = format!("note-{id}");
+        let id = id.to_string();
+        let cloud_path = cloud_path.to_string();
+        let bytes = bytes.to_vec();
+        let size = bytes.len() as i64;
+        let hash = crate::blob::content_hash(&bytes);
+        let write = handle
+            .write(
+                {
+                    let id = id.clone();
+                    let bytes = bytes.clone();
+                    move |batch| {
+                        batch.put_blob("images", id, bytes);
+                        Ok(())
+                    }
+                },
+                {
+                    let id = id.clone();
+                    move |sql| {
+                        let stamp = sql.stamp();
+                        sql.execute(
+                            "INSERT INTO notes \
+                             (id, title, shared, _updated_at, created_at) \
+                             VALUES (?1, 'blob owner', ?2, ?3, '2026-01-01')",
+                            rusqlite::params![note_id, remote as i64, stamp],
+                        )?;
+                        sql.execute(
+                            "INSERT INTO note_photos \
+                             (id, note_id, kind, size, hash, _updated_at, created_at, cloud_path) \
+                             VALUES (?1, ?2, 'cover', ?3, ?4, ?5, '2026-01-01', ?6)",
+                            rusqlite::params![id, note_id, size, hash, stamp, cloud_path],
+                        )?;
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .expect("queue host blob write");
+        write.write_id
+    }
+
+    async fn wait_for_host_blob_publication(
+        handle: &CovenHandle,
+        id: &str,
+        write_id: &coven_core::WriteId,
+    ) -> RowBlobRef {
+        let mut status = handle
+            .subscribe_write_status(write_id)
+            .await
+            .expect("subscribe to host blob publication");
+        handle.sync_now();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let current = status.borrow().clone();
+                match current {
+                    coven_core::WriteStatus::Published(_) => break,
+                    coven_core::WriteStatus::Pending | coven_core::WriteStatus::Publishing => {
+                        status
+                            .changed()
+                            .await
+                            .expect("write status channel remains open")
+                    }
+                    other => panic!("host blob write did not publish: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("host blob publishes");
+        handle
+            .row_blob_ref("note_photos", id)
+            .await
+            .expect("capture published host blob row")
+    }
+
+    async fn publish_host_blob(
+        handle: &CovenHandle,
+        id: &str,
+        cloud_path: &str,
+        bytes: &[u8],
+    ) -> RowBlobRef {
+        let write_id = queue_host_blob(handle, id, cloud_path, bytes, true).await;
+        wait_for_host_blob_publication(handle, id, &write_id).await
+    }
+
     #[tokio::test]
     async fn read_blob_with_unbuildable_storage_is_a_typed_setup_error_not_io() {
         let (_tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
+        let db = host_blob_test_db("images");
         let mut config = Config::with_defaults(
             "lib-setup-error".to_string(),
             "device".to_string(),
@@ -1160,14 +1494,11 @@ mod tests {
             StoreOpenGuard::acquire_for_test(&store_dir),
         );
 
-        let blob = BlobRef {
-            namespace: "release_files".to_string(),
-            id: "anyblob0".to_string(),
-            scope: BlobScope::Master,
-            cloud_path: None,
-            provenance: Provenance::HostProvided,
-            fill: CacheFill::CacheLazy,
-        };
+        plant_blob_row(&db, "anyblob0", false, b"typed setup error").await;
+        let blob = db
+            .row_blob_ref("note_photos", "anyblob0")
+            .await
+            .expect("capture local blob row");
         let err = handle
             .read_blob(&blob)
             .await
@@ -1226,6 +1557,35 @@ mod tests {
     }
 
     impl CloudKitOps for TestCloudKitOps {
+        fn provider_identity(
+            &self,
+            scope: &CloudKitScope,
+        ) -> Result<CloudKitProviderIdentity, CloudHomeError> {
+            let (owner_name, zone_name) = match scope {
+                CloudKitScope::Private => ("test-owner", "test-zone"),
+                CloudKitScope::Shared {
+                    owner_name,
+                    zone_name,
+                } => (owner_name.as_str(), zone_name.as_str()),
+            };
+            Ok(CloudKitProviderIdentity {
+                container_id: "iCloud.test.coven".to_string(),
+                environment: crate::CloudKitEnvironment::Development,
+                owner_name: owner_name.to_string(),
+                zone_name: zone_name.to_string(),
+                current_user_record_name: "test-user".to_string(),
+            })
+        }
+
+        fn accepted_read_write_share(
+            &self,
+            _scope: &CloudKitScope,
+        ) -> Result<CloudKitAcceptedShareRecord, CloudHomeError> {
+            Err(CloudHomeError::NotFound(
+                "accepted CloudKit share".to_string(),
+            ))
+        }
+
         fn write_record(
             &self,
             scope: &CloudKitScope,
@@ -1417,37 +1777,6 @@ mod tests {
             })
         }
 
-        fn record_changes(
-            &self,
-            scope: &CloudKitScope,
-            after: Option<&CloudKitChangeToken>,
-        ) -> Result<CloudKitRecordChangesPage, CloudHomeError> {
-            if after.is_some() {
-                return Err(CloudHomeError::Transport(
-                    "handle CloudKit mock received an unexpected continuation token".to_string(),
-                ));
-            }
-            let store = self.store.lock().unwrap();
-            let changes = store
-                .iter()
-                .filter(|((record_scope, _), _)| record_scope == scope)
-                .map(|((_, key), (_, version))| {
-                    Ok(CloudKitRecordChange::Present(CloudKitRecordVersion {
-                        key: key.clone(),
-                        version: crate::storage::cloud::CloudHeadVersion::from_provider(
-                            version.to_string(),
-                        )?,
-                    }))
-                })
-                .collect::<Result<Vec<_>, CloudHomeError>>()?;
-            Ok(CloudKitRecordChangesPage {
-                changes,
-                continuation: CloudKitRecordChangesContinuation::Complete(
-                    CloudKitChangeToken::from_provider("handle-scan".to_string())?,
-                ),
-            })
-        }
-
         fn delete_record_versions(
             &self,
             scope: &CloudKitScope,
@@ -1507,33 +1836,51 @@ mod tests {
     }
 
     /// `connect_sync_with_test_home` stands a real `SyncManager` over an injected
-    /// `InMemoryCloudHome` and routes BOTH the upload drain and the read path
-    /// through it: a blob enqueued for upload drains to the home through the
-    /// handle, and a subsequent `read_blob` resolves the Remote miss back out of
-    /// the same home — end to end, with the host supplying only the home + cipher.
+    /// `InMemoryCloudHome`. A host write creates a pending exact Store row/blob;
+    /// the public drain uploads its prepared blob object, the next cycle publishes
+    /// the row with its exact locator, and `read_blob` uses that row-bound locator
+    /// to read the same object through the handle.
     #[tokio::test]
     async fn test_home_drives_drain_and_read_through_the_handle() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(run_test_home_drives_drain_and_read_through_the_handle())
+                    .await
+                    .expect("test-home handle task");
+            })
+            .await;
+    }
+
+    async fn run_test_home_drives_drain_and_read_through_the_handle() {
         test_keyring::install();
 
-        let (tmp, store_dir) = temp_store_dir();
+        let (_tmp, store_dir) = temp_store_dir();
         // `note_photos` carries a blob in the `images` namespace so the read path can
         // resolve a planted row up to its gated `notes` root (the gate that decides
         // Local vs Remote).
-        let db = read_test_db("images");
+        let db = host_blob_test_db("images");
 
-        // A browsable home: plaintext at rest, readable `{namespace}/{cloud_path}`
-        // blob keys. The cipher passed below is the matching `Plaintext`.
+        // Pre-create the exact Store in the same home the handle will connect to,
+        // with the same signing identity and cipher.
         let mut config = Config::with_defaults(
             "lib-test".to_string(),
             "test-device".to_string(),
             store_dir.clone(),
             "Test Store".to_string(),
         );
-        config.cloud_home.storage = HomeStorage::Browsable;
+        config.cloud_home.storage = HomeStorage::Opaque;
         let config_provider: ConfigProvider = {
             let config = config.clone();
             Arc::new(move || config.clone())
         };
+        let upload_pause = Arc::new(PausedUploadDrain::new());
+        let signer = crate::keys::UserKeypair::generate();
+        let store = TestStore::create(&db, "lib-test", signer.clone())
+            .await
+            .expect("create exact test Store");
+        let identity_custody = crate::identity_custody::IdentityCustody::InMemory(signer)
+            .resolve("lib-test", &store_dir);
 
         let stamper = db.stamper();
         let handle = CovenHandle::new(
@@ -1547,69 +1894,76 @@ mod tests {
             config_provider,
             StoreKeys::new("lib-test".to_string()),
             test_key_custody(),
-            test_identity_custody(),
+            identity_custody,
             Arc::new(SystemClock),
             None,
-            None,
+            Some(upload_pause.clone()),
             StoreOpenGuard::acquire_for_test(&store_dir),
         );
 
         // Inject the mock home; the host hands over only the home + cipher.
-        let home = Arc::new(InMemoryCloudHome::new());
+        let home = store.home.clone();
         handle
-            .connect_sync_with_test_home(home.clone(), CloudCipher::Plaintext)
+            .connect_sync_with_test_home(
+                home.clone(),
+                CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+            )
             .await
             .expect("connect over the injected test home");
 
-        // A blob's plaintext on disk, enqueued for upload through coven's real
-        // queue API (drives the same enqueue path production make_remote uses; no
-        // backing row, so the drain's completion check finds no gated root and just
-        // clears the row — a plain upload).
+        // The loop prepares the exact blob upload from the pending Store write,
+        // then the observer pauses before it can drain the queue itself.
         let plaintext = b"cover-art-bytes-for-the-test-home".to_vec();
-        let source = tmp.path().join("cover-source.jpg");
-        std::fs::write(&source, &plaintext).expect("write source file");
-        // {namespace}/{cloud_path} under the plain scheme. The readable path names the blob
-        // it carries, which is what keeps a cloud object from ever being rewritten.
-        let cloud_key = "images/cover-cover-1.jpg";
-        db.enqueue_upload(
-            "cover-1",
-            cloud_key,
-            Some(source.to_str().expect("temp source path is valid UTF-8")),
-            BlobScope::Master,
-            false,
-            "2024-01-01T00:00:00Z",
-        )
-        .await
-        .expect("enqueue the upload");
+        queue_host_blob(&handle, "cover-1", "cover-cover-1.jpg", &plaintext, false).await;
+        handle
+            .make_remote("notes", "note-cover-1", false)
+            .await
+            .expect("queue the exact row/blob transition");
+        tokio::time::timeout(Duration::from_secs(20), upload_pause.reached.notified())
+            .await
+            .expect("the loop reaches the paused upload drain");
+        let local = handle
+            .row_blob_ref("note_photos", "cover-1")
+            .await
+            .expect("capture Local row while upload is paused");
+        assert!(
+            matches!(local.authority(), crate::blob::RowBlobAuthority::Local),
+            "the row stays Local until the exact upload completes",
+        );
+        assert!(local.stored().is_none());
 
-        // Drain through the handle: the upload lands in the injected home verbatim.
+        upload_pause.resume();
         let outcome = handle
             .drain_uploads()
             .await
-            .expect("drain through the handle");
-        assert_eq!(outcome.uploaded, 1, "the one queued blob uploaded");
-        assert_eq!(
-            home.get(cloud_key).as_deref(),
-            Some(plaintext.as_slice()),
-            "the blob landed in the injected home at its readable key, plaintext at rest",
+            .expect("drain the prepared exact blob through the public handle");
+        assert_eq!(outcome.uploaded, 1);
+        assert!(outcome.yielded_for_publish);
+        assert!(outcome.failures.failures().is_empty());
+
+        let blob = handle
+            .row_blob_ref("note_photos", "cover-1")
+            .await
+            .expect("capture Remote row after exact upload");
+        let object = blob
+            .stored()
+            .expect("published blob has exact storage")
+            .object();
+        let exact = home
+            .clone()
+            .exact_slot_storage()
+            .expect("test home supports exact object slots");
+        let at_rest = exact
+            .read_at(object.slot())
+            .await
+            .expect("the exact blob object exists");
+        assert!(
+            !at_rest.is_empty(),
+            "the exact blob object contains its sealed payload",
         );
 
-        // The drain above ran the plain-upload path (no backing row) deliberately. A
-        // real read happens after a make_remote flipped the blob's gated root Remote,
-        // so plant that Remote state now (a gated `notes` root with the `note_photos`
-        // child carrying this id) so the read resolves the blob's locality to Remote
-        // and fetches it back out of the home (rather than failing locality resolution).
-        plant_blob_row(&db, "cover-1", true, &plaintext).await;
-
-        // Read through the handle: a Remote miss resolves back out of the same home.
-        let blob = BlobRef {
-            namespace: "images".to_string(),
-            id: "cover-1".to_string(),
-            scope: BlobScope::Master,
-            cloud_path: Some("cover-cover-1.jpg".to_string()),
-            provenance: Provenance::UserProvided,
-            fill: CacheFill::CacheLazy,
-        };
+        // The published `RowBlobRef` carries the exact remote object and authority;
+        // the read resolves it through the same connected home.
         let read = handle
             .read_blob(&blob)
             .await
@@ -1625,7 +1979,7 @@ mod tests {
         test_keyring::install();
 
         let (_tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
+        let db = host_blob_test_db("images");
 
         let mut config = Config::with_defaults(
             "lib-cloudkit-home-reuse".to_string(),
@@ -1678,20 +2032,30 @@ mod tests {
     }
 
     /// A read-only handle holds no sync loop, so every cloud-miss read builds
-    /// storage fresh from config via the `cipher: None` fallback
-    /// (`create_sync_storage_with_cloudkit` → `build_cloud_cipher`) — which
-    /// must resolve the same cipher a writer sealed under. Sealing directly
-    /// through storage built the identical way (bypassing the local-store
-    /// staging a `CovenHandle::write` would leave, which a same-store-dir
-    /// reader could serve from without ever touching the cloud) forces the
-    /// read through an actual cloud GET + decrypt.
+    /// storage fresh from config via the `cipher: None` path. The writer publishes
+    /// a host-provided row and exact encrypted blob through the normal Store path;
+    /// publication releases its local staging bytes, forcing the reader to use the
+    /// row's exact cloud locator and resolve the same cipher through custody.
     #[tokio::test]
     async fn read_only_handle_resolves_an_encrypted_cipher_through_custody() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(
+                    run_read_only_handle_resolves_an_encrypted_cipher_through_custody(),
+                )
+                .await
+                .expect("encrypted read-only handle task");
+            })
+            .await;
+    }
+
+    async fn run_read_only_handle_resolves_an_encrypted_cipher_through_custody() {
         test_keyring::install();
 
         let store_id = "ro-encrypted-custody-test";
         let (_tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
+        let db = host_blob_test_db("images");
 
         let mut config = Config::with_defaults(
             store_id.to_string(),
@@ -1707,9 +2071,8 @@ mod tests {
             .persist(&crate::encryption::MasterKeyring::generate())
             .expect("establish a master key");
 
-        // The hashed (opaque) layout keys a blob under its uploader's signing key,
-        // so the writer storage needs this store's signing identity to seal under
-        // its own prefix — establish it before building that storage.
+        // Exact opaque blob locators bind their uploader registration, so establish
+        // the writer's signing identity before connecting storage.
         let identity_custody =
             crate::identity_custody::IdentityCustody::Keyring.resolve(store_id, &store_dir);
         identity_custody
@@ -1718,41 +2081,30 @@ mod tests {
 
         let ops = Arc::new(TestCloudKitOps::new());
         let key_service = StoreKeys::new(store_id.to_string());
-
-        // Seal and upload directly through storage built the same way a
-        // production write path would build it — resolving the cipher from
-        // custody via the `cipher: None` fallback.
-        let writer_storage = crate::storage::cloud::setup::create_sync_storage_with_cloudkit(
-            &config,
-            &key_service,
-            custody.as_ref(),
-            identity_custody.as_ref(),
-            None,
+        let config_provider: ConfigProvider = {
+            let config = config.clone();
+            Arc::new(move || config.clone())
+        };
+        let writer = CovenHandle::new(
+            db.clone(),
+            db.clone(),
+            db.stamper(),
+            store_dir.clone(),
+            config_provider,
+            key_service.clone(),
+            custody.clone(),
+            identity_custody.clone(),
             Arc::new(SystemClock),
             Some(ops.clone()),
-        )
-        .await
-        .expect("build cloud storage resolving the cipher from custody");
-        let plaintext = b"encrypted-cloud-blob-for-the-read-only-handle".to_vec();
-        crate::sync::storage::SyncStorage::put_blob(
-            &writer_storage,
-            "images",
-            "cover-1",
-            BlobScope::Master,
             None,
-            plaintext.clone(),
-        )
-        .await
-        .expect("seal and upload the blob");
-
-        plant_blob_row(&db, "cover-1", true, &plaintext).await;
-        // The blob was sealed straight into the cloud by the writer storage (no
-        // signed-changeset pull to record its author, and the listing scan is gone),
-        // so record the writer as its uploader — the read resolves this prefix to
-        // fetch it back out of the hashed layout.
-        let uploader = crate::sync::storage::SyncStorage::own_uploader(&writer_storage)
-            .expect("hashed home has an uploader");
-        crate::sync::test_helpers::record_blob_uploader(&db, "images", "cover-1", &uploader).await;
+            StoreOpenGuard::acquire_for_test(&store_dir),
+        );
+        writer
+            .connect_sync_with_cloudkit(ops.clone())
+            .await
+            .expect("connect encrypted CloudKit writer");
+        let plaintext = b"encrypted-cloud-blob-for-the-read-only-handle".to_vec();
+        let blob = publish_host_blob(&writer, "cover-1", "cover-cover-1.jpg", &plaintext).await;
 
         let config_provider: ConfigProvider = {
             let config = config.clone();
@@ -1769,14 +2121,6 @@ mod tests {
             Some(ops),
         );
 
-        let blob = BlobRef {
-            namespace: "images".to_string(),
-            id: "cover-1".to_string(),
-            scope: BlobScope::Master,
-            cloud_path: None,
-            provenance: Provenance::UserProvided,
-            fill: CacheFill::CacheLazy,
-        };
         let read = reader
             .read_blob(&blob)
             .await
@@ -1840,10 +2184,23 @@ mod tests {
     /// upload makes both hold.
     #[tokio::test]
     async fn initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(Box::pin(
+                    run_initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back(),
+                ))
+                .await
+                .expect("master-key cloud traffic test task");
+            })
+            .await;
+    }
+
+    async fn run_initialize_master_key_seals_cloud_traffic_the_custody_path_reads_back() {
         test_keyring::install();
 
-        let (tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
+        let (_tmp, store_dir) = temp_store_dir();
+        let db = host_blob_test_db("images");
         let store_id = "lib-init-master-key-seals-traffic";
 
         // Opaque storage: the master key established below seals every object at
@@ -1896,38 +2253,20 @@ mod tests {
             .await
             .expect("connect over the injected opaque home, resolving the cipher from custody");
 
-        // Enqueue this device's own blob under the hashed key an opaque home uses
-        // (`{namespace}/{uploader}/{ab}/{cd}/{id}`) so the drain seals it and the
-        // read resolves the same uploader to fetch it back.
-        let uploader = handle
-            .get_user_pubkey()
-            .expect("read this store's identity")
-            .expect("this store's identity is established");
-        let cloud_key = StoreDir::uploader_hashed_key("images", &uploader, "cover-1")
-            .expect("build the hashed cloud key");
+        // Publish a host-provided row and exact blob under the opaque home. The
+        // resulting row reference carries its uploader authority and stored slot.
         let plaintext = b"cover-art-sealed-under-the-established-master-key".to_vec();
-        let source = tmp.path().join("cover-source.jpg");
-        std::fs::write(&source, &plaintext).expect("write source file");
-        db.enqueue_upload(
-            "cover-1",
-            &cloud_key,
-            Some(source.to_str().expect("temp source path is valid UTF-8")),
-            BlobScope::Master,
-            false,
-            "2024-01-01T00:00:00Z",
-        )
-        .await
-        .expect("enqueue the upload");
-
-        let outcome = handle
-            .drain_uploads()
-            .await
-            .expect("drain through the handle");
-        assert_eq!(outcome.uploaded, 1, "the one queued blob uploaded");
+        let blob = publish_host_blob(&handle, "cover-1", "cover-cover-1.jpg", &plaintext).await;
+        let cloud_key = blob
+            .stored()
+            .expect("published blob has exact storage")
+            .object()
+            .slot()
+            .logical_key();
 
         // At rest the object is ciphertext: the stored bytes are not the
         // plaintext, and no object in the home holds the plaintext verbatim.
-        let at_rest = home.get(&cloud_key).expect("the blob landed in the home");
+        let at_rest = home.get(cloud_key).expect("the blob landed in the home");
         assert_ne!(
             at_rest, plaintext,
             "the master key sealed the upload — the bytes at rest are not the plaintext",
@@ -1939,21 +2278,8 @@ mod tests {
             "no object in the home holds the plaintext",
         );
 
-        // Plant the Remote locality, then read back: the read resolves the
-        // uploader off the recorded index and decrypts through the same
-        // custody-resolved cipher. The blob was seeded straight into the home by
-        // the drain (no signed-changeset pull to record its author), so record
-        // this device as its uploader explicitly.
-        plant_blob_row(&db, "cover-1", true, &plaintext).await;
-        crate::sync::test_helpers::record_blob_uploader(&db, "images", "cover-1", &uploader).await;
-        let blob = BlobRef {
-            namespace: "images".to_string(),
-            id: "cover-1".to_string(),
-            scope: BlobScope::Master,
-            cloud_path: None,
-            provenance: Provenance::UserProvided,
-            fill: CacheFill::CacheLazy,
-        };
+        // Read back through the row's activated exact locator and the same
+        // custody-resolved cipher.
         let read = handle
             .read_blob(&blob)
             .await
@@ -2277,149 +2603,191 @@ mod tests {
 
     #[tokio::test]
     async fn plaintext_membership_operations_are_typed() {
-        test_keyring::install();
-
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
-        let handle = test_handle("lib-plaintext-membership", store_dir, db);
-        handle
-            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
-            .await
-            .expect("connect plaintext home");
-
-        let public_key_hex = hex::encode(crate::keys::UserKeypair::generate().public_key());
-        let invite = handle
-            .invite_member(&public_key_hex, None, MemberRole::Member)
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(run_plaintext_membership_operations_are_typed())
+                    .await
+                    .expect("plaintext membership test task");
+            })
             .await;
-        let remove = handle.remove_member(&public_key_hex).await;
-        let circle = handle.create_circle("Household").await;
+    }
 
-        assert!(matches!(invite, Err(SyncError::NotEncryptedHome)));
-        assert!(matches!(remove, Err(SyncError::NotEncryptedHome)));
-        assert!(matches!(
-            circle,
-            Err(SyncError::Circle(
-                crate::sync::circle_ops::CircleOperationError::BrowsableStorage
-            ))
-        ));
+    async fn run_plaintext_membership_operations_are_typed() {
+        await_test_orchestration(tokio::spawn(async {
+            test_keyring::install();
+
+            let (_tmp, store_dir) = temp_store_dir();
+            let db = read_test_db("images");
+            let handle = test_handle("lib-plaintext-membership", store_dir, db);
+            handle
+                .connect_sync_with_test_home(
+                    Arc::new(InMemoryCloudHome::new()),
+                    CloudCipher::Plaintext,
+                )
+                .await
+                .expect("connect plaintext home");
+
+            let public_key_hex = hex::encode(crate::keys::UserKeypair::generate().public_key());
+            let invite = handle
+                .invite_member(&public_key_hex, None, MemberRole::Member)
+                .await;
+            let remove = handle.remove_member(&public_key_hex).await;
+            let circle = handle.create_circle("Household").await;
+
+            assert!(matches!(invite, Err(SyncError::NotEncryptedHome)));
+            assert!(matches!(remove, Err(SyncError::NotEncryptedHome)));
+            assert!(matches!(
+                circle,
+                Err(SyncError::Circle(
+                    crate::sync::circle_ops::CircleOperationError::BrowsableStorage
+                ))
+            ));
+        }))
+        .await;
+    }
+
+    async fn await_test_orchestration(task: tokio::task::JoinHandle<()>) {
+        task.await.expect("test orchestration task completes");
     }
 
     #[tokio::test]
     async fn create_circle_returns_after_merge_activation_is_materialized() {
-        test_keyring::install();
+        await_test_orchestration(tokio::spawn(async {
+            test_keyring::install();
 
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
-        let keyring = crate::encryption::MasterKeyring::generate();
-        let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
-            .resolve("lib-create-circle-merge", &store_dir);
-        let handle =
-            test_handle_with_custody("lib-create-circle-merge", store_dir, db.clone(), custody);
-        handle
-            .connect_sync_with_test_home(
-                Arc::new(InMemoryCloudHome::new()),
-                CloudCipher::Encrypted(EncryptionService::from(keyring)),
-            )
-            .await
-            .expect("connect encrypted Merge home");
+            let (_tmp, store_dir) = temp_store_dir();
+            let db = read_test_db("images");
+            let keyring = crate::encryption::MasterKeyring::generate();
+            let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
+                .resolve("lib-create-circle-merge", &store_dir);
+            let handle =
+                test_handle_with_custody("lib-create-circle-merge", store_dir, db.clone(), custody);
+            handle
+                .connect_sync_with_test_home(
+                    Arc::new(InMemoryCloudHome::new()),
+                    CloudCipher::Encrypted(EncryptionService::from(keyring)),
+                )
+                .await
+                .expect("connect encrypted Merge home");
 
-        let circle_id = handle
-            .create_circle("Household")
-            .await
-            .expect("create and activate circle");
+            let circle_id = handle
+                .create_circle("Household")
+                .await
+                .expect("create and activate circle");
 
-        assert_eq!(
-            handle.get_circles().await.expect("read active circles"),
-            vec![crate::CircleInfo {
-                id: circle_id,
-                name: "Household".to_string(),
-                role: crate::CircleRole::Owner,
-            }]
-        );
-        assert!(handle
-            .get_circle_operations()
-            .await
-            .expect("read completed circle operations")
-            .is_empty());
+            assert_eq!(
+                handle.get_circles().await.expect("read active circles"),
+                vec![crate::CircleInfo {
+                    id: circle_id,
+                    name: "Household".to_string(),
+                    role: crate::CircleRole::Owner,
+                }]
+            );
+            assert!(handle
+                .get_circle_operations()
+                .await
+                .expect("read completed circle operations")
+                .is_empty());
 
-        let circle = circle_id.to_string();
-        db.call(move |conn| {
-            let activated: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
-                [&circle],
-                |row| row.get(0),
-            )?;
-            let active_access: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM circle_access_cache
+            let circle = circle_id.to_string();
+            db.call(move |conn| {
+                let activated: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                    [&circle],
+                    |row| row.get(0),
+                )?;
+                let active_access: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM circle_access_cache
                  WHERE circle_id = ?1 AND disposition = 'active'",
-                [&circle],
-                |row| row.get(0),
-            )?;
-            let pending: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM circle_operations WHERE circle_id = ?1",
-                [&circle],
-                |row| row.get(0),
-            )?;
-            assert_eq!((activated, active_access, pending), (1, 1, 0));
-            Ok::<_, crate::DbError>(())
-        })
-        .await
-        .expect("read activated circle state");
+                    [&circle],
+                    |row| row.get(0),
+                )?;
+                let pending: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM circle_operations WHERE circle_id = ?1",
+                    [&circle],
+                    |row| row.get(0),
+                )?;
+                assert_eq!((activated, active_access, pending), (1, 1, 0));
+                Ok::<_, crate::DbError>(())
+            })
+            .await
+            .expect("read activated circle state");
+        }))
+        .await;
     }
 
     #[tokio::test]
     async fn create_circle_returns_after_serial_activation_is_materialized() {
-        test_keyring::install();
+        await_test_orchestration(tokio::spawn(async {
+            test_keyring::install();
 
-        let (_tmp, store_dir) = temp_store_dir();
-        let db = crate::sync::test_helpers::open_serial_test_db();
-        let keyring = crate::encryption::MasterKeyring::generate();
-        let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
-            .resolve("lib-create-circle-serial", &store_dir);
-        let handle =
-            test_handle_with_custody("lib-create-circle-serial", store_dir, db.clone(), custody);
-        let home = Arc::new(InMemoryCloudHome::new());
-        handle
-            .connect_sync_with_test_home_and_coordination(
-                home.clone(),
-                home,
-                CloudCipher::Encrypted(EncryptionService::from(keyring)),
-            )
+            let (_tmp, store_dir) = temp_store_dir();
+            let db = crate::sync::test_helpers::open_serial_test_db();
+            let keyring = crate::encryption::MasterKeyring::generate();
+            let custody = crate::custody::KeyCustody::InMemory(keyring.clone())
+                .resolve("lib-create-circle-serial", &store_dir);
+            let handle = test_handle_with_custody(
+                "lib-create-circle-serial",
+                store_dir,
+                db.clone(),
+                custody,
+            );
+            let home = Arc::new(InMemoryCloudHome::new());
+            handle
+                .connect_sync_with_test_home_and_coordination(
+                    home.clone(),
+                    home,
+                    CloudCipher::Encrypted(EncryptionService::from(keyring)),
+                )
+                .await
+                .expect("connect encrypted Serial home");
+
+            let circle_id = handle
+                .create_circle("Household")
+                .await
+                .expect("create and activate Serial circle");
+
+            let circle = circle_id.to_string();
+            db.call(move |conn| {
+                let activated: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
+                    [&circle],
+                    |row| row.get(0),
+                )?;
+                let pending: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM circle_operations WHERE circle_id = ?1",
+                    [&circle],
+                    |row| row.get(0),
+                )?;
+                let serial_positions: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM materialized_commits WHERE device_id = 'serial'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!((activated, pending), (1, 0));
+                assert!(serial_positions >= 1);
+                Ok::<_, crate::DbError>(())
+            })
             .await
-            .expect("connect encrypted Serial home");
-
-        let circle_id = handle
-            .create_circle("Household")
-            .await
-            .expect("create and activate Serial circle");
-
-        let circle = circle_id.to_string();
-        db.call(move |conn| {
-            let activated: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM circle_control_activations WHERE circle_id = ?1",
-                [&circle],
-                |row| row.get(0),
-            )?;
-            let pending: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM circle_operations WHERE circle_id = ?1",
-                [&circle],
-                |row| row.get(0),
-            )?;
-            let serial_positions: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM materialized_commits WHERE device_id = 'serial'",
-                [],
-                |row| row.get(0),
-            )?;
-            assert_eq!((activated, pending), (1, 0));
-            assert!(serial_positions >= 1);
-            Ok::<_, crate::DbError>(())
-        })
-        .await
-        .expect("read activated Serial circle state");
+            .expect("read activated Serial circle state");
+        }))
+        .await;
     }
 
     #[tokio::test]
     async fn reconnect_sync_stops_the_previous_loop() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(run_reconnect_sync_stops_the_previous_loop())
+                    .await
+                    .expect("sync reconnect test task");
+            })
+            .await;
+    }
+
+    async fn run_reconnect_sync_stops_the_previous_loop() {
         test_keyring::install();
 
         let (_tmp, store_dir) = temp_store_dir();
@@ -2486,6 +2854,17 @@ mod tests {
 
     #[tokio::test]
     async fn stopped_installed_loop_blocks_blob_transitions() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(run_stopped_installed_loop_blocks_blob_transitions())
+                    .await
+                    .expect("stopped-loop readiness test task");
+            })
+            .await;
+    }
+
+    async fn run_stopped_installed_loop_blocks_blob_transitions() {
         test_keyring::install();
 
         let (_tmp, store_dir) = temp_store_dir();
@@ -2539,10 +2918,23 @@ mod tests {
 
     #[tokio::test]
     async fn encrypted_session_keeps_its_binding_after_config_changes() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(
+                    run_encrypted_session_keeps_its_binding_after_config_changes(),
+                )
+                .await
+                .expect("encrypted-session binding test task");
+            })
+            .await;
+    }
+
+    async fn run_encrypted_session_keeps_its_binding_after_config_changes() {
         test_keyring::install();
 
         let (tmp, store_dir) = temp_store_dir();
-        let db = read_test_db("images");
+        let db = host_blob_test_db("images");
 
         let config = Config::with_defaults(
             "lib-test".to_string(),
@@ -2621,26 +3013,13 @@ mod tests {
         );
 
         let plaintext = b"encrypted-drain-bytes-after-key-rotation".to_vec();
-        let source = tmp.path().join("plain-source.jpg");
-        std::fs::write(&source, &plaintext).expect("write source file");
-        let cloud_key = "images/ab/cd/plain-cover";
-        db.enqueue_upload(
-            "plain-cover",
-            cloud_key,
-            Some(source.to_str().expect("temp source path is valid UTF-8")),
-            BlobScope::Master,
-            false,
-            "2024-01-01T00:00:00Z",
-        )
-        .await
-        .expect("enqueue the upload");
-
-        let outcome = handle
-            .drain_uploads()
-            .await
-            .expect("drain through the handle");
-        assert_eq!(outcome.uploaded, 1, "the queued blob uploaded");
-
+        let blob = publish_host_blob(&handle, "plain-cover", "plain-cover", &plaintext).await;
+        let cloud_key = blob
+            .stored()
+            .expect("published blob has exact storage")
+            .object()
+            .slot()
+            .logical_key();
         let stored = home.get(cloud_key).expect("uploaded cloud object");
         assert_ne!(
             stored.as_slice(),
@@ -2710,6 +3089,19 @@ mod tests {
     /// publication, then reports synchronization.
     #[tokio::test]
     async fn subscribed_host_sees_offline_checking_publishing_then_synchronized() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(
+                    run_subscribed_host_sees_offline_checking_publishing_then_synchronized(),
+                )
+                .await
+                .expect("sync status sequence test task");
+            })
+            .await;
+    }
+
+    async fn run_subscribed_host_sees_offline_checking_publishing_then_synchronized() {
         test_keyring::install();
 
         let (_tmp, handle) = status_test_handle("lib-status-syncing");
@@ -2717,33 +3109,36 @@ mod tests {
         assert_eq!(format!("{:?}", *rx.borrow()), "Offline");
 
         let home = InMemoryCloudHome::new();
+        let (probe_reached, release_probe) = home.pause_next_probe();
         handle
             .connect_sync_with_test_home(Arc::new(home.clone()), CloudCipher::Plaintext)
             .await
             .expect("connect over injected home");
-        let (storage_check_reached, release_storage_check) = home.pause_next_appended_listing();
 
-        tokio::time::timeout(Duration::from_secs(20), storage_check_reached.notified())
+        tokio::time::timeout(Duration::from_secs(20), probe_reached.notified())
             .await
-            .expect("the provider operation reaches its test pause");
-        tokio::time::timeout(Duration::from_secs(20), rx.changed())
-            .await
-            .expect("a start status arrives within the timeout")
-            .expect("the status channel is open");
+            .expect("the reachability probe reaches its test pause");
         assert_eq!(format!("{:?}", *rx.borrow()), "CheckingStorage");
 
-        release_storage_check.notify_one();
-        tokio::time::timeout(Duration::from_secs(20), rx.changed())
+        let (publication_reached, release_publication) = home.pause_after_exact_create_call(1);
+        release_probe.notify_one();
+        tokio::time::timeout(Duration::from_secs(20), publication_reached.notified())
             .await
-            .expect("a publication status arrives within the timeout")
-            .expect("the status channel is open");
+            .expect("publication reaches its test pause");
         let publishing = rx.borrow().clone();
         assert_eq!(format!("{publishing:?}"), "Publishing");
 
-        tokio::time::timeout(Duration::from_secs(20), rx.changed())
-            .await
-            .expect("a synchronized status arrives within the timeout")
-            .expect("the status channel is open");
+        release_publication.notify_one();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if matches!(&*rx.borrow(), SyncLoopStatus::Synchronized(_)) {
+                    break;
+                }
+                rx.changed().await.expect("the status channel remains open");
+            }
+        })
+        .await
+        .expect("a synchronized status arrives within the timeout");
         let done = rx.borrow().clone();
         assert!(
             format!("{done:?}").starts_with("Synchronized("),
@@ -2753,23 +3148,36 @@ mod tests {
 
     #[tokio::test]
     async fn transport_failure_after_reachability_probe_returns_to_offline() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(
+                    run_transport_failure_after_reachability_probe_returns_to_offline(),
+                )
+                .await
+                .expect("transport failure status test task");
+            })
+            .await;
+    }
+
+    async fn run_transport_failure_after_reachability_probe_returns_to_offline() {
         test_keyring::install();
 
         let (_tmp, handle) = status_test_handle("lib-status-cycle-transport");
         let mut rx = handle.subscribe_sync_status();
         let home = InMemoryCloudHome::new();
+        let (probe_reached, release_probe) = home.pause_next_probe();
         handle
             .connect_sync_with_test_home(Arc::new(home.clone()), CloudCipher::Plaintext)
             .await
             .expect("connect over injected home");
-        let (storage_check_reached, release_storage_check) = home.pause_next_appended_listing();
 
-        tokio::time::timeout(Duration::from_secs(20), storage_check_reached.notified())
+        tokio::time::timeout(Duration::from_secs(20), probe_reached.notified())
             .await
             .expect("the reachability probe reaches the provider");
         assert_eq!(format!("{:?}", *rx.borrow()), "CheckingStorage");
         home.arm_write_failures();
-        release_storage_check.notify_one();
+        release_probe.notify_one();
 
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
@@ -2793,6 +3201,17 @@ mod tests {
     /// `Closed` after the reconnect dropped the first loop's sender.
     #[tokio::test]
     async fn subscription_survives_a_reconnect() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(run_subscription_survives_a_reconnect())
+                    .await
+                    .expect("status subscription reconnect test task");
+            })
+            .await;
+    }
+
+    async fn run_subscription_survives_a_reconnect() {
         test_keyring::install();
 
         let (_tmp, handle) = status_test_handle("lib-status-reconnect");
@@ -2838,6 +3257,19 @@ mod tests {
     /// `sync_manager.rs` pins that re-resolution).
     #[tokio::test]
     async fn disconnect_sync_drops_the_installed_manager_not_just_the_loop() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(
+                    run_disconnect_sync_drops_the_installed_manager_not_just_the_loop(),
+                )
+                .await
+                .expect("disconnect-manager test task");
+            })
+            .await;
+    }
+
+    async fn run_disconnect_sync_drops_the_installed_manager_not_just_the_loop() {
         test_keyring::install();
 
         let (_tmp, store_dir) = temp_store_dir();

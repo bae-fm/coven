@@ -18,18 +18,79 @@ use crate::code_envelope::{self, EnvelopeError};
 use crate::join_code::MembershipFloor;
 use crate::storage::cloud::CloudHomeJoinInfo;
 #[cfg(test)]
-use crate::sync::membership::MembershipCoord;
-#[cfg(test)]
-use crate::sync::membership::MembershipGrantId;
+use crate::sync::membership::{MembershipCoord, MembershipGrantId, MembershipHeadRef};
 #[cfg(test)]
 use crate::sync::store_commit::ObjectHash;
 
-pub const RESTORE_CODE_VERSION: u8 = 3;
+pub const RESTORE_CODE_VERSION: u8 = 4;
+
+/// The closed authority a restore operation may exercise.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RestoreAuthority {
+    /// Continue one exact, already-activated Store device.
+    ActivatedContinuation(ActivatedContinuation),
+    /// Recover an Owner identity at its exact root-anchored recovery cursor.
+    OwnerRecovery(OwnerRecoveryAuthority),
+}
+
+/// Exact durable state required to continue an activated Store device.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivatedContinuation {
+    pub identity_signing_secret: String,
+    pub device_signing_secret: String,
+    pub registration: super::store_commit::StoreDeviceRegistrationRef,
+    pub registration_bytes: Vec<u8>,
+    pub registration_prepared: super::storage::PreparedExactObject,
+    pub initial_ack: super::store_commit::StoreAckRef,
+    pub initial_ack_bytes: Vec<u8>,
+    pub initial_ack_prepared: super::storage::PreparedExactObject,
+    pub activation: super::store_commit::StoreDeviceRegistrationActivation,
+    pub latest_ack: super::store_commit::StoreAckRef,
+    pub latest_snapshot: Option<super::store_commit::StoreSnapshotRef>,
+    pub latest_position: Option<super::store_commit::StoreBatchCommitRef>,
+}
+
+/// Exact Owner grant and recovery-stream authority used to create a replacement
+/// device when no activated device continuation survives.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerRecoveryAuthority {
+    pub owner_identity_secret: String,
+    pub owner_grant: super::membership::MembershipGrantId,
+    pub recovery: super::store_commit::OwnerRecoveryCursor,
+    pub published_at: String,
+}
+
+impl std::fmt::Debug for RestoreAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ActivatedContinuation(value) => f
+                .debug_struct("ActivatedContinuation")
+                .field("identity_signing_secret", &"<redacted>")
+                .field("device_signing_secret", &"<redacted>")
+                .field("registration", &value.registration)
+                .field("initial_ack", &value.initial_ack)
+                .field("activation", &value.activation)
+                .field("latest_ack", &value.latest_ack)
+                .field("latest_snapshot", &value.latest_snapshot)
+                .field("latest_position", &value.latest_position)
+                .finish(),
+            Self::OwnerRecovery(value) => f
+                .debug_struct("OwnerRecovery")
+                .field("owner_identity_secret", &"<redacted>")
+                .field("owner_grant", &value.owner_grant)
+                .field("recovery", &value.recovery)
+                .finish(),
+        }
+    }
+}
 
 /// Everything needed to restore a store from cloud storage.
 ///
-/// `Debug` is hand-written: `ek` (encryption keyring) and `sk` (Ed25519 signing
-/// key) are secrets and print as `<redacted>` so `{:?}` in an error path
+/// `Debug` is hand-written: the encryption keyring and signing keys are
+/// secrets and print as `<redacted>` so `{:?}` in an error path
 /// cannot leak key material.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RestoreCode {
@@ -51,14 +112,13 @@ pub struct RestoreCode {
     /// recovers your own zone, not one shared to you, so
     /// [`decode_restore_code`] rejects it.
     pub provider: CloudHomeJoinInfo,
-    /// Ed25519 signing key, hex-encoded, 64 bytes. Required.
-    pub sk: String,
-    pub store_root_hash: super::store_commit::ObjectHash,
+    pub store_root: super::store_commit::StoreRootRef,
     pub founder_pubkey: String,
     /// The exact membership state the restorer must observe: causal author
-    /// coordinates for MergeConcurrent stores, or the global commit position
-    /// for Serial stores.
+    /// heads for MergeConcurrent stores, or the exact global commit for Serial
+    /// stores.
     pub membership_floor: MembershipFloor,
+    pub authority: RestoreAuthority,
 }
 
 impl std::fmt::Debug for RestoreCode {
@@ -71,10 +131,10 @@ impl std::fmt::Debug for RestoreCode {
             .field("ek", &self.ek.as_ref().map(|_| "<redacted>"))
             .field("name", &self.name)
             .field("provider", &self.provider)
-            .field("sk", &"<redacted>")
-            .field("store_root_hash", &self.store_root_hash)
+            .field("store_root", &self.store_root)
             .field("founder_pubkey", &self.founder_pubkey)
             .field("membership_floor", &self.membership_floor)
+            .field("authority", &self.authority)
             .finish()
     }
 }
@@ -101,8 +161,14 @@ pub enum RestoreCodeError {
     InvalidStoreId(crate::store_dir::PathTokenError),
     #[error("The encryption key in this restore code is invalid. Regenerate it on the source device. ({0})")]
     InvalidEncryptionKey(String),
-    #[error("The signing key in this restore code is invalid. Regenerate it on the source device. ({0})")]
+    #[error(
+        "A signing key in this restore code is invalid. Regenerate it on the source device. ({0})"
+    )]
     InvalidSigningKey(String),
+    #[error("The activated device continuation in this restore code is invalid. Regenerate it on the source device. ({0})")]
+    InvalidContinuationAuthority(String),
+    #[error("The Owner recovery authority in this restore code is invalid. Regenerate it on the source device. ({0})")]
+    InvalidRecoveryAuthority(String),
     #[error("The founder key in this restore code is invalid. Regenerate it on the source device. ({0})")]
     InvalidFounderKey(String),
     #[error("The restore code has no membership floor. Regenerate it on the source device.")]
@@ -156,7 +222,35 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
         crate::encryption::EncryptionService::new(serialized_keyring)
             .map_err(|e| RestoreCodeError::InvalidEncryptionKey(e.to_string()))?;
     }
-    decode_hex_bytes("signing key", &code.sk, 64).map_err(RestoreCodeError::InvalidSigningKey)?;
+    match &code.authority {
+        RestoreAuthority::ActivatedContinuation(continuation) => {
+            decode_hex_bytes(
+                "identity signing key",
+                &continuation.identity_signing_secret,
+                64,
+            )
+            .map_err(RestoreCodeError::InvalidSigningKey)?;
+            decode_hex_bytes(
+                "device signing key",
+                &continuation.device_signing_secret,
+                64,
+            )
+            .map_err(RestoreCodeError::InvalidSigningKey)?;
+        }
+        RestoreAuthority::OwnerRecovery(recovery) => {
+            decode_hex_bytes(
+                "Owner identity signing key",
+                &recovery.owner_identity_secret,
+                64,
+            )
+            .map_err(RestoreCodeError::InvalidSigningKey)?;
+            if recovery.recovery.owner_grant != recovery.owner_grant {
+                return Err(RestoreCodeError::InvalidRecoveryAuthority(
+                    "Owner recovery cursor belongs to another grant".to_string(),
+                ));
+            }
+        }
+    }
     decode_hex_bytes("founder public key", &code.founder_pubkey, 32)
         .map_err(RestoreCodeError::InvalidFounderKey)?;
     match &code.membership_floor {
@@ -164,13 +258,15 @@ pub fn decode_restore_code(s: &str) -> Result<RestoreCode, RestoreCodeError> {
             if floor.is_empty() {
                 return Err(RestoreCodeError::EmptyMembershipFloor);
             }
-            super::membership_ops::membership_floor_by_grant(floor)
+            super::membership_ops::validate_membership_floor(floor)
                 .map_err(RestoreCodeError::InvalidMembershipFloor)?;
         }
-        MembershipFloor::Serial(Some(position)) => {
-            if position.seq == 0 {
+        MembershipFloor::Serial(Some(reference)) => {
+            if reference.coord.policy() != crate::WritePolicy::Serial
+                || reference.coord.sequence() == 0
+            {
                 return Err(RestoreCodeError::InvalidMembershipFloor(
-                    "Serial floor sequence must be nonzero".to_string(),
+                    "Serial floor must be an exact nonzero Serial commit reference".to_string(),
                 ));
             }
         }
@@ -213,8 +309,6 @@ pub struct RestoreCodeInfo {
     pub store_name: String,
     pub cloud_provider: crate::config::CloudProvider,
     pub needs_oauth: bool,
-    /// Ed25519 signing key bytes (always 64 bytes).
-    pub signing_key: Vec<u8>,
 }
 
 /// Decode a restore code and return UI-ready info.
@@ -223,15 +317,11 @@ pub fn decode_restore_code_info(code: &str) -> Result<RestoreCodeInfo, RestoreCo
 
     let cloud_provider = parsed.provider.cloud_provider();
 
-    let signing_key = decode_hex_bytes("signing key", &parsed.sk, 64)
-        .map_err(RestoreCodeError::InvalidSigningKey)?;
-
     Ok(RestoreCodeInfo {
         store_id: parsed.sid,
         store_name: parsed.name,
         cloud_provider,
         needs_oauth: provider_needs_oauth(&parsed.provider),
-        signing_key,
     })
 }
 
@@ -252,14 +342,87 @@ mod tests {
         .to_serialized()
     }
 
+    fn test_store_root() -> crate::sync::store_commit::StoreRootRef {
+        let stored = b"restore protocol root object";
+        crate::sync::store_commit::StoreRootRef {
+            store_root_id: ObjectHash::digest(b"restore protocol root identity"),
+            store_root_hash: ObjectHash::digest(stored),
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/protocol/root/restore-code-test.json".to_string(),
+                )
+                .expect("valid test Store-root slot"),
+                stored.len() as u64,
+                ObjectHash::digest(stored),
+            ),
+        }
+    }
+
+    fn test_serial_commit_ref() -> crate::sync::store_commit::StoreBatchCommitRef {
+        let stored = b"restore Serial floor commit";
+        crate::sync::store_commit::StoreBatchCommitRef {
+            coord: crate::sync::store_commit::StoreCommitCoord::Serial { sequence: 7 },
+            commit_hash: ObjectHash::digest(b"restore Serial floor semantic bytes"),
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/commits/serial/7/restore-floor.json".to_string(),
+                )
+                .expect("valid test Store-commit slot"),
+                stored.len() as u64,
+                ObjectHash::digest(stored),
+            ),
+        }
+    }
+
     fn test_membership_floor() -> MembershipFloor {
-        MembershipFloor::MergeConcurrent(vec![MembershipCoord {
+        let coord = MembershipCoord {
             author_pubkey: hex::encode([0xCDu8; 32]),
             author_owner_grant: MembershipGrantId(ObjectHash::digest(b"test owner grant")),
-            stream_id: crate::sync::membership::AuthorStreamId::from_bytes([1; 16]),
+            stream_id: crate::sync::membership::AuthorStreamId::from_bytes([1; 32]),
             seq: 1,
             entry_hash: ObjectHash::digest(b"test membership entry"),
+        };
+        let stored = b"test restore membership head";
+        MembershipFloor::MergeConcurrent(vec![MembershipHeadRef {
+            coord,
+            head_hash: ObjectHash::digest(b"test restore membership head semantic bytes"),
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(
+                    "store-v1/membership/heads/test-restore-owner/1.json".to_string(),
+                )
+                .expect("valid restore membership-head slot"),
+                stored.len() as u64,
+                ObjectHash::digest(stored),
+            ),
         }])
+    }
+
+    fn test_authority() -> RestoreAuthority {
+        let owner_grant = MembershipGrantId(ObjectHash::digest(b"test owner grant"));
+        let first_slot = crate::storage::cloud::ObjectSlot::logical(
+            "store-v1/recovery/test-owner/first.json".to_string(),
+        )
+        .expect("valid recovery slot");
+        let anchor = crate::sync::store_commit::GrantStreamAnchor::OwnerRecovery { first_slot };
+        let owner_pubkey = hex::encode([0xCDu8; 32]);
+        let activation = crate::sync::store_commit::OwnerRecoveryActivationId::derive(
+            &test_store_root(),
+            &owner_pubkey,
+            &owner_grant,
+            &anchor,
+        )
+        .expect("valid recovery activation");
+        RestoreAuthority::OwnerRecovery(OwnerRecoveryAuthority {
+            owner_identity_secret: test_sk(),
+            owner_grant: owner_grant.clone(),
+            recovery: crate::sync::store_commit::OwnerRecoveryCursor {
+                owner_grant,
+                position: crate::sync::store_commit::OwnerRecoveryPosition::BeforeFirst {
+                    activation,
+                },
+            },
+            published_at: "2026-07-17T00:00:00Z".to_string(),
+        })
     }
 
     fn sample_s3_code() -> RestoreCode {
@@ -276,12 +439,10 @@ mod tests {
                 access_key: "AKIAIOSFODNN7EXAMPLE".to_string(),
                 secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
             },
-            sk: test_sk(),
-            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
-                b"restore protocol root",
-            ),
+            store_root: test_store_root(),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
+            authority: test_authority(),
         }
     }
 
@@ -295,8 +456,12 @@ mod tests {
         assert_eq!(decoded.v, RESTORE_CODE_VERSION);
         assert_eq!(decoded.sid, code.sid);
         assert_eq!(decoded.ek, code.ek);
-        assert_eq!(decoded.sk, code.sk);
+        assert_eq!(
+            serde_json::to_value(&decoded.authority).unwrap(),
+            serde_json::to_value(&code.authority).unwrap()
+        );
         assert_eq!(decoded.name, "Test Store");
+        assert_eq!(decoded.store_root, code.store_root);
         assert_eq!(decoded.membership_floor, code.membership_floor);
         match &decoded.provider {
             CloudHomeJoinInfo::S3 {
@@ -327,6 +492,18 @@ mod tests {
     }
 
     #[test]
+    fn serial_store_round_trips_the_exact_commit_floor() {
+        let mut code = sample_s3_code();
+        let reference = test_serial_commit_ref();
+        code.membership_floor = MembershipFloor::Serial(Some(reference.clone()));
+        let decoded = decode_restore_code(&encode_restore_code(&code)).unwrap();
+        assert_eq!(
+            decoded.membership_floor,
+            MembershipFloor::Serial(Some(reference))
+        );
+    }
+
+    #[test]
     fn roundtrip_cloudkit() {
         let code = RestoreCode {
             v: RESTORE_CODE_VERSION,
@@ -334,10 +511,8 @@ mod tests {
             ek: Some(test_keyring(0xbb)),
             name: "CloudKit Store".to_string(),
             provider: CloudHomeJoinInfo::CloudKit,
-            sk: test_sk(),
-            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
-                b"restore protocol root",
-            ),
+            authority: test_authority(),
+            store_root: test_store_root(),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -357,10 +532,8 @@ mod tests {
             provider: CloudHomeJoinInfo::GoogleDrive {
                 folder_id: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs".to_string(),
             },
-            sk: test_sk(),
-            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
-                b"restore protocol root",
-            ),
+            authority: test_authority(),
+            store_root: test_store_root(),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -383,10 +556,8 @@ mod tests {
             provider: CloudHomeJoinInfo::Dropbox {
                 folder_path: "/Apps/your-app/My Store".to_string(),
             },
-            sk: test_sk(),
-            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
-                b"restore protocol root",
-            ),
+            authority: test_authority(),
+            store_root: test_store_root(),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -410,10 +581,8 @@ mod tests {
                 drive_id: "drive-id-123".to_string(),
                 folder_id: "folder-id-456".to_string(),
             },
-            sk: test_sk(),
-            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
-                b"restore protocol root",
-            ),
+            authority: test_authority(),
+            store_root: test_store_root(),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -444,10 +613,8 @@ mod tests {
                 owner_name: "owner".to_string(),
                 zone_name: "zone".to_string(),
             },
-            sk: test_sk(),
-            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
-                b"restore protocol root",
-            ),
+            authority: test_authority(),
+            store_root: test_store_root(),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -500,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_version_is_rejected_before_field_validation() {
+    fn lower_unsupported_version_is_rejected_before_field_validation() {
         let mut code = sample_s3_code();
         code.v = 0;
         let encoded = encode_restore_code(&code);
@@ -534,10 +701,8 @@ mod tests {
                 access_key: "ak".to_string(),
                 secret_key: "sk-cred".to_string(),
             },
-            sk: test_sk(),
-            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
-                b"restore protocol root",
-            ),
+            authority: test_authority(),
+            store_root: test_store_root(),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -566,10 +731,8 @@ mod tests {
                 access_key: "ak".to_string(),
                 secret_key: "sk-cred".to_string(),
             },
-            sk: test_sk(),
-            store_root_hash: crate::sync::store_commit::ObjectHash::digest(
-                b"restore protocol root",
-            ),
+            authority: test_authority(),
+            store_root: test_store_root(),
             founder_pubkey: hex::encode([0xCDu8; 32]),
             membership_floor: test_membership_floor(),
         };
@@ -638,18 +801,18 @@ mod tests {
         assert!(invalid_json.contains("Regenerate"), "{invalid_json}");
         assert!(invalid_json.contains("trailing comma"), "{invalid_json}");
 
-        let old_version = RestoreCodeError::UnsupportedVersion(0).to_string();
-        assert!(old_version.contains("v0"), "{old_version}");
+        let lower_version = RestoreCodeError::UnsupportedVersion(0).to_string();
+        assert!(lower_version.contains("v0"), "{lower_version}");
         assert!(
-            old_version.contains("Generate a new restore code"),
-            "{old_version}"
+            lower_version.contains("Generate a new restore code"),
+            "{lower_version}"
         );
 
-        let newer_version = RestoreCodeError::UnsupportedVersion(99).to_string();
-        assert!(newer_version.contains("v99"), "{newer_version}");
+        let higher_version = RestoreCodeError::UnsupportedVersion(99).to_string();
+        assert!(higher_version.contains("v99"), "{higher_version}");
         assert!(
-            newer_version.contains("Generate a new restore code"),
-            "{newer_version}"
+            higher_version.contains("Generate a new restore code"),
+            "{higher_version}"
         );
     }
 
@@ -675,7 +838,10 @@ mod tests {
     #[test]
     fn invalid_signing_key_rejected_at_decode() {
         let mut code = sample_s3_code();
-        code.sk = "not hex".to_string();
+        let RestoreAuthority::OwnerRecovery(authority) = &mut code.authority else {
+            panic!("test authority is Owner recovery")
+        };
+        authority.owner_identity_secret = "not hex".to_string();
         let encoded = encode_restore_code(&code);
         assert!(matches!(
             decode_restore_code(&encoded),
@@ -683,7 +849,10 @@ mod tests {
         ));
 
         let mut code = sample_s3_code();
-        code.sk = hex::encode([0u8; 63]);
+        let RestoreAuthority::OwnerRecovery(authority) = &mut code.authority else {
+            panic!("test authority is Owner recovery")
+        };
+        authority.owner_identity_secret = hex::encode([0u8; 63]);
         let encoded = encode_restore_code(&code);
         assert!(matches!(
             decode_restore_code(&encoded),
@@ -729,7 +898,13 @@ mod tests {
         // The encryption keyring and signing key never appear.
         let ek_hex = code.ek.as_deref().expect("sample has ek");
         assert!(!debug.contains(ek_hex), "encryption key leaked: {debug}");
-        assert!(!debug.contains(&code.sk), "signing key leaked: {debug}");
+        let RestoreAuthority::OwnerRecovery(authority) = &code.authority else {
+            panic!("test authority is Owner recovery")
+        };
+        assert!(
+            !debug.contains(&authority.owner_identity_secret),
+            "signing key leaked: {debug}"
+        );
         // ek presence (the storage mode) is still observable.
         assert!(debug.contains("ek: Some"), "{debug}");
     }

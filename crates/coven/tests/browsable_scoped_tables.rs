@@ -64,7 +64,7 @@ fn assert_browsable_scoped_tables_are_rejected(policy: WritePolicy) {
     assert!(!store_dir.config_path().exists());
     assert!(!temp.path().join(".coven-lock").exists());
     assert!(cloud.is_empty());
-    assert!(cloud.appended_keys().is_empty());
+    assert!(cloud.keys().is_empty());
 }
 
 #[test]

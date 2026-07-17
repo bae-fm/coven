@@ -14,14 +14,16 @@ use tokio::sync::OnceCell;
 use tracing::warn;
 
 use super::storage::{
-    blob_copy_key, blob_copy_prefix, validate_blob_copy_locator, CoordinationError,
-    CoordinationStorage, CreateHeadError, ImmutableObjectListing, ImmutableObjectLocator,
-    ProtocolObjectContext, ProtocolObjectProtection, ReplaceHeadError, StorageError, SyncStorage,
-    VersionToken, VersionedObject,
+    CoordinationError, CoordinationStorage, CreateHeadError, ExactObjectRef, PreparedExactObject,
+    ProtocolObjectContext, ProtocolObjectProtection, ReplaceHeadError, ResolvedProviderBinding,
+    StorageError, SyncStorage, VersionToken, VersionedObject,
 };
 use crate::encryption::{chunked_encrypted_len, EncryptionError, EncryptionService};
 use crate::keys::UserKeypair;
-use crate::storage::cloud::{BlobBody, CloudFileReadError, CloudHeadStorage, CloudHome, CopyIdRef};
+use crate::storage::cloud::{
+    BlobBody, CloudFileReadError, CloudHeadStorage, CloudHome, ExactSlotStorage, ObjectSlot,
+};
+use crate::sync::store_commit::ObjectHash;
 
 /// Every encrypted object carries this cleartext prefix naming the key it was
 /// sealed under, by 8-byte fingerprint: magic, then the fingerprint. A read
@@ -466,7 +468,8 @@ pub struct CloudSyncStorage {
     /// the life of a stream and reads across awaits, so the home is genuinely
     /// shared between this storage and the readers it spawns, not owned by one.
     home: Arc<dyn CloudHome>,
-    immutable: Arc<dyn crate::storage::cloud::ImmutableCopyStorage>,
+    exact: Arc<dyn ExactSlotStorage>,
+    exact_probe_peer: Arc<dyn ExactSlotStorage>,
     cipher: Arc<CloudCipherState>,
     /// Whether a committed rotation is outstanding — see [`PendingRotation`].
     /// Shared the same way `cipher` is, so a member removal or a refresh cycle
@@ -477,7 +480,6 @@ pub struct CloudSyncStorage {
     /// over a home's life, so it is a plain field with no lock.
     blob_paths: BlobPathScheme,
     store_id: String,
-    copy_ids: CopyIdRef,
     coordination: Option<Arc<dyn CloudHeadStorage>>,
     coordination_probe_peer: Option<Arc<dyn CloudHeadStorage>>,
     /// The device's signing identity. The control objects this storage writes
@@ -494,22 +496,26 @@ impl CloudSyncStorage {
         blob_paths: BlobPathScheme,
         store_id: impl Into<String>,
         keypair: UserKeypair,
-        copy_ids: CopyIdRef,
     ) -> Result<Self, crate::storage::cloud::CloudHomeError> {
-        let immutable = home.clone().immutable_copy_storage().ok_or_else(|| {
+        let exact = home.clone().exact_slot_storage().ok_or_else(|| {
             crate::storage::cloud::CloudHomeError::Configuration(
-                "CloudSyncStorage requires immutable-copy storage".to_string(),
+                "CloudSyncStorage requires exact-slot storage".to_string(),
+            )
+        })?;
+        let exact_probe_peer = home.clone().exact_slot_storage().ok_or_else(|| {
+            crate::storage::cloud::CloudHomeError::Configuration(
+                "CloudSyncStorage requires a second exact-slot probe client".to_string(),
             )
         })?;
         Ok(CloudSyncStorage {
             home,
-            immutable,
+            exact,
+            exact_probe_peer,
             cipher: Arc::new(CloudCipherState::new(cipher)),
             pending_rotation: Arc::new(PendingRotation::none()),
             blob_paths,
             store_id: store_id.into(),
             keypair,
-            copy_ids,
             coordination: None,
             coordination_probe_peer: None,
         })
@@ -562,6 +568,12 @@ impl CloudSyncStorage {
         ))
     }
 
+    pub(crate) fn exact_slot_probe_clients(
+        &self,
+    ) -> (&dyn ExactSlotStorage, &dyn ExactSlotStorage) {
+        (self.exact.as_ref(), self.exact_probe_peer.as_ref())
+    }
+
     fn primary_coordination_client(
         &self,
     ) -> Result<CloudCoordinationClient<'_>, CoordinationError> {
@@ -571,13 +583,6 @@ impl CloudSyncStorage {
             )
         })?;
         Ok(CloudCoordinationClient { storage: self, raw })
-    }
-
-    pub(crate) fn next_coordination_probe_key(&self) -> Result<String, CoordinationError> {
-        Ok(format!(
-            "coven-probes-v1/serial-coordination/{}/head",
-            self.copy_ids.next_copy_id()
-        ))
     }
 
     pub(crate) fn blob_path_scheme(&self) -> BlobPathScheme {
@@ -613,40 +618,38 @@ impl CloudSyncStorage {
         Ok(())
     }
 
-    fn validate_blob_append_authority(
+    async fn validate_blob_append_authority(
         &self,
         locator: &crate::blob::locator::BlobLocator,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
     ) -> Result<(), StorageError> {
-        if locator.uploader() != self.self_uploader() {
+        authority
+            .reference
+            .verify_registration(authority.registration)
+            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+        if locator.uploader() != authority.reference {
             return Err(StorageError::InvalidContent(format!(
-                "blob locator uploader {:?} is not this device",
+                "blob locator uploader {:?} differs from its exact write authority",
                 locator.uploader()
             )));
         }
+        if authority.registration.author_pubkey != hex::encode(self.keypair.public_key()) {
+            return Err(StorageError::InvalidContent(
+                "blob write authority is not this device's identity key".to_string(),
+            ));
+        }
+        let live = self
+            .exact
+            .provider_binding()
+            .await
+            .map_err(StorageError::from)?;
+        if live.device != authority.registration.provider {
+            return Err(StorageError::InvalidContent(
+                "blob write authority differs from the authenticated provider principal"
+                    .to_string(),
+            ));
+        }
         Ok(())
-    }
-
-    async fn bind_appended_object(
-        &self,
-        logical_key: String,
-        expected_physical_key: &str,
-        physical: crate::storage::cloud::AppendedObject,
-    ) -> Result<ImmutableObjectLocator, StorageError> {
-        if physical.logical_key() == expected_physical_key {
-            return Ok(ImmutableObjectLocator::new(logical_key, physical));
-        }
-
-        let operation = StorageError::Parse(format!(
-            "immutable append returned physical key {:?} for requested key {expected_physical_key:?}",
-            physical.logical_key()
-        ));
-        match self.immutable.delete_appended(&physical).await {
-            Ok(()) => Err(operation),
-            Err(cleanup) => Err(StorageError::CleanupFailed {
-                operation: Box::new(operation),
-                cleanup: Box::new(cleanup.into()),
-            }),
-        }
     }
 
     pub(crate) fn user_keypair(&self) -> &UserKeypair {
@@ -729,37 +732,6 @@ impl CloudSyncStorage {
         cloud_aad_context(&self.store_id, key)
     }
 
-    async fn write_blob_sealed(
-        &self,
-        key: &str,
-        scope: crate::blob::BlobScope,
-        plaintext: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let stored = self
-            .cipher_for_seal()?
-            .seal_scoped(scope, plaintext, &self.aad_context(key));
-        self.home
-            .write(
-                key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn read_blob_sealed(
-        &self,
-        key: &str,
-        scope: crate::blob::BlobScope,
-        label: &str,
-    ) -> Result<Vec<u8>, StorageError> {
-        let stored = self.home.read(key).await?;
-        self.cipher()
-            .open_scoped(scope, stored, &self.aad_context(key))
-            .map_err(|e| StorageError::Decryption(format!("{label}: {e}")))
-    }
-
     /// The cloud object key for a blob under the home's [`BlobPathScheme`].
     ///
     /// **A cloud object is never rewritten with different bytes, so no two blobs ever
@@ -832,7 +804,8 @@ fn coordination_home_error(error: crate::storage::cloud::CloudHomeError) -> Coor
         crate::storage::cloud::CloudHomeError::Io(error) => {
             CoordinationError::Storage(format!("I/O error: {error}"))
         }
-        error @ crate::storage::cloud::CloudHomeError::CleanupFailed { .. }
+        error @ (crate::storage::cloud::CloudHomeError::CleanupFailed { .. }
+        | crate::storage::cloud::CloudHomeError::UnresolvedOutcome { .. })
             if error.is_retryable() =>
         {
             CoordinationError::Storage(error.to_string())
@@ -840,31 +813,11 @@ fn coordination_home_error(error: crate::storage::cloud::CloudHomeError) -> Coor
         crate::storage::cloud::CloudHomeError::AlreadyExists(key) => {
             CoordinationError::Unavailable(format!("coordination object already exists: {key}"))
         }
-        error @ crate::storage::cloud::CloudHomeError::CleanupFailed { .. } => {
+        error @ (crate::storage::cloud::CloudHomeError::CleanupFailed { .. }
+        | crate::storage::cloud::CloudHomeError::UnresolvedOutcome { .. }) => {
             CoordinationError::Unavailable(error.to_string())
         }
     }
-}
-
-/// The cache namespace a blob's `cloud_key` belongs to: the key's first
-/// `/`-component.
-///
-/// The namespace prefix of a blob `cloud_key` — the segment before the first `/`.
-///
-/// Every blob `cloud_key` [`CloudSyncStorage::blob_key`] produces is `{namespace}/…`
-/// in BOTH [`BlobPathScheme`] variants (`Hashed` = `{namespace}/{ab}/{cd}/{id}`,
-/// `Plain` = `{namespace}/{cloud_path}`), and a namespace is a single slash-free path
-/// token (validated by [`crate::store_dir::validate_path_token`]). So the namespace
-/// is always recoverable from the key with no second stored copy — the durable
-/// `cloud_outbox` row carries only the key, and the upload drain recovers the
-/// namespace here for the cache copy it places (`storage/cache/<namespace>/…`).
-/// `split_once` returns the prefix for a real key; a slashless key (never produced by
-/// `blob_key`, only by a unit-test fixture that does not exercise namespaced cache
-/// placement) has no prefix and is returned whole.
-pub(crate) fn namespace_from_cloud_key(cloud_key: &str) -> &str {
-    cloud_key
-        .split_once('/')
-        .map_or(cloud_key, |(namespace, _)| namespace)
 }
 
 /// The `EncryptionService` a blob's `scope` selects, against `master`: the
@@ -1009,27 +962,177 @@ pub struct BlobRangeReader {
     header: OnceCell<RangeHeader>,
 }
 
-/// A whole-blob download reader that streams the plaintext front-to-back while
-/// folding each chunk into a content hasher, and — on reaching the end — refuses
-/// to hand the terminal "done" signal to the atomic writer unless the whole-blob
-/// hash matches the blob's author-signed `expected_hash`. Because the writer
-/// commits the file only after this reader returns the empty terminal chunk, a
-/// hash mismatch aborts before the temp file is renamed, so a tampered or
-/// rolled-back object never becomes a cache file a later (hash-unchecked) cache
-/// hit would serve. The per-chunk AEAD already authenticates each chunk's bytes
-/// under the store key; this adds that the *whole* object is the one the row's
-/// author signed.
-struct HashVerifyingPlaintextReader {
-    reader: BlobRangeReader,
-    offset: u64,
+enum ExactBlobOpening {
+    Browsable,
+    Opaque {
+        encryption: EncryptionService,
+        nonce: Vec<u8>,
+        next_chunk: u64,
+        aad_context: Vec<u8>,
+    },
+}
+
+/// Opens one already exact-verified stored blob and withholds EOF until the
+/// complete plaintext size and hash match the signed locator.
+struct ExactBlobPlaintextReader {
+    source: crate::local_blob::PlaintextReader,
+    opening: ExactBlobOpening,
     remaining: u64,
-    hasher: crate::blob::ContentHasher,
-    expected_hash: String,
-    key: String,
+    total_size: u64,
+    hasher: Option<crate::blob::ContentHasher>,
+    expected_hash: ObjectHash,
+    locator_hash: ObjectHash,
+    pending: Vec<u8>,
+    pending_offset: usize,
+}
+
+impl ExactBlobPlaintextReader {
+    async fn new(
+        stored_file: &Path,
+        store_id: &str,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: crate::sync::storage::BlobSpoolProtection,
+    ) -> Result<Self, StorageError> {
+        let locator = blob.locator();
+        let mut source = crate::local_blob::open_reader(stored_file)
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        let expected_stored_size = match locator {
+            crate::blob::locator::BlobLocator::Opaque { .. } => {
+                KEY_TAG_LEN as u64 + chunked_encrypted_len(locator.plaintext_size())
+            }
+            crate::blob::locator::BlobLocator::Browsable { .. } => locator.plaintext_size(),
+        };
+        if blob.object().stored_size() != expected_stored_size {
+            return Err(StorageError::InvalidContent(format!(
+                "blob {} stored length is {}, expected {expected_stored_size} for its locator",
+                locator.locator_hash(),
+                blob.object().stored_size()
+            )));
+        }
+
+        let opening = match (locator, protection) {
+            (
+                crate::blob::locator::BlobLocator::Opaque {
+                    scope,
+                    key_fingerprint,
+                    ..
+                },
+                crate::sync::storage::BlobSpoolProtection::Opaque(master),
+            ) => {
+                let header = read_source_exact(
+                    &mut source,
+                    KEY_TAG_LEN + crate::encryption::NONCE_SIZE,
+                    locator.locator_hash(),
+                )
+                .await?;
+                let (fingerprint, nonce_and_chunks) = read_key_tag(&header).map_err(|error| {
+                    StorageError::Decryption(format!(
+                        "blob {} key tag: {error}",
+                        locator.locator_hash()
+                    ))
+                })?;
+                if crate::encryption::KeyFingerprint::from_bytes(fingerprint) != *key_fingerprint {
+                    return Err(StorageError::InvalidContent(format!(
+                        "blob {} stored key fingerprint differs from its locator",
+                        locator.locator_hash()
+                    )));
+                }
+                let encryption = opening_encryption_for_scope(scope.clone(), &master, &fingerprint)
+                    .map_err(|error| {
+                        StorageError::Decryption(format!(
+                            "blob {} audience key: {error}",
+                            locator.locator_hash()
+                        ))
+                    })?;
+                ExactBlobOpening::Opaque {
+                    encryption,
+                    nonce: nonce_and_chunks.to_vec(),
+                    next_chunk: 0,
+                    aad_context: cloud_aad_context(store_id, &locator.semantic_key()),
+                }
+            }
+            (
+                crate::blob::locator::BlobLocator::Browsable { .. },
+                crate::sync::storage::BlobSpoolProtection::Browsable,
+            ) => ExactBlobOpening::Browsable,
+            (crate::blob::locator::BlobLocator::Opaque { .. }, _) => {
+                return Err(StorageError::Configuration(
+                    "opaque blob locator requires audience encryption".to_string(),
+                ));
+            }
+            (crate::blob::locator::BlobLocator::Browsable { .. }, _) => {
+                return Err(StorageError::Configuration(
+                    "browsable blob locator cannot use audience encryption".to_string(),
+                ));
+            }
+        };
+
+        Ok(Self {
+            source,
+            opening,
+            remaining: locator.plaintext_size(),
+            total_size: locator.plaintext_size(),
+            hasher: Some(crate::blob::ContentHasher::default()),
+            expected_hash: locator.plaintext_hash(),
+            locator_hash: locator.locator_hash(),
+            pending: Vec::new(),
+            pending_offset: 0,
+        })
+    }
+
+    fn take_pending(&mut self, max: usize) -> Vec<u8> {
+        let end = (self.pending_offset + max).min(self.pending.len());
+        let result = self.pending[self.pending_offset..end].to_vec();
+        self.pending_offset = end;
+        if self.pending_offset == self.pending.len() {
+            self.pending.clear();
+            self.pending_offset = 0;
+        }
+        result
+    }
+
+    fn verify_complete(&mut self) -> Result<(), crate::local_blob::PlaintextChunkError> {
+        let Some(hasher) = self.hasher.take() else {
+            return Ok(());
+        };
+        let actual = hasher.finish();
+        if actual != self.expected_hash.to_string() {
+            return Err(crate::local_blob::PlaintextChunkError::InvalidContent(
+                format!(
+                    "blob {} plaintext hash mismatch: expected {}, got {actual}",
+                    self.locator_hash, self.expected_hash
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+async fn read_source_exact(
+    source: &mut crate::local_blob::PlaintextReader,
+    len: usize,
+    locator_hash: ObjectHash,
+) -> Result<Vec<u8>, StorageError> {
+    let mut bytes = Vec::with_capacity(len);
+    while bytes.len() < len {
+        let chunk = source
+            .next_chunk(len - bytes.len())
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        if chunk.is_empty() {
+            return Err(StorageError::InvalidContent(format!(
+                "blob {locator_hash} stored body ended after {} of {len} required bytes",
+                bytes.len()
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 #[async_trait]
-impl crate::local_blob::PlaintextChunkReader for HashVerifyingPlaintextReader {
+impl crate::local_blob::PlaintextChunkReader for ExactBlobPlaintextReader {
     async fn next_chunk(
         &mut self,
         max: usize,
@@ -1037,43 +1140,79 @@ impl crate::local_blob::PlaintextChunkReader for HashVerifyingPlaintextReader {
         if max == 0 {
             return Ok(Vec::new());
         }
+        if !self.pending.is_empty() {
+            return Ok(self.take_pending(max));
+        }
         if self.remaining == 0 {
-            // End of the plaintext: finalize the running hash and require it to
-            // match the row's signed hash before signalling "done" (an empty
-            // chunk), which is what lets the atomic writer commit the file. A
-            // mismatch returns an error instead, so the write aborts before the
-            // rename and nothing is cached.
-            let hasher = std::mem::take(&mut self.hasher);
-            let actual = hasher.finish();
-            if actual != self.expected_hash {
-                return Err(crate::local_blob::PlaintextChunkError::InvalidContent(
-                    format!(
-                        "blob {} content hash mismatch: expected {}, got {actual}",
-                        self.key, self.expected_hash
-                    ),
-                ));
-            }
+            self.verify_complete()?;
             return Ok(Vec::new());
         }
-        let len = self.remaining.min(max as u64);
-        let chunk = self
-            .reader
-            .read(self.offset, len)
-            .await
-            .map_err(crate::local_blob::PlaintextChunkError::Remote)?;
-        if chunk.len() as u64 != len {
+
+        let plaintext = match &mut self.opening {
+            ExactBlobOpening::Browsable => {
+                let wanted = usize::try_from(self.remaining.min(max as u64)).map_err(|_| {
+                    crate::local_blob::PlaintextChunkError::InvalidContent(
+                        "blob plaintext read length does not fit this platform".to_string(),
+                    )
+                })?;
+                let chunk = self.source.next_chunk(wanted).await.map_err(|error| {
+                    crate::local_blob::PlaintextChunkError::Local(error.to_string())
+                })?;
+                if chunk.is_empty() {
+                    return Err(crate::local_blob::PlaintextChunkError::InvalidContent(
+                        format!("blob {} plaintext ended early", self.locator_hash),
+                    ));
+                }
+                chunk
+            }
+            ExactBlobOpening::Opaque {
+                encryption,
+                nonce,
+                next_chunk,
+                aad_context,
+            } => {
+                let plaintext_len = self.remaining.min(crate::encryption::CHUNK_SIZE as u64);
+                let encrypted_len = usize::try_from(plaintext_len)
+                    .expect("one encryption chunk fits usize")
+                    + crate::encryption::TAG_SIZE;
+                let encrypted =
+                    read_source_exact(&mut self.source, encrypted_len, self.locator_hash)
+                        .await
+                        .map_err(crate::local_blob::PlaintextChunkError::Remote)?;
+                let start = *next_chunk * crate::encryption::CHUNK_SIZE as u64;
+                let end = start + plaintext_len;
+                let plaintext = encryption
+                    .decrypt_range_with_offset(
+                        nonce,
+                        &encrypted,
+                        *next_chunk,
+                        start,
+                        end,
+                        self.total_size,
+                        aad_context,
+                    )
+                    .map_err(|error| {
+                        crate::local_blob::PlaintextChunkError::InvalidContent(format!(
+                            "blob {} chunk {}: {error}",
+                            self.locator_hash, *next_chunk
+                        ))
+                    })?;
+                *next_chunk += 1;
+                plaintext
+            }
+        };
+        if plaintext.len() as u64 > self.remaining {
             return Err(crate::local_blob::PlaintextChunkError::InvalidContent(
-                format!(
-                    "short blob range read at {}: got {} of {len} bytes",
-                    self.offset,
-                    chunk.len()
-                ),
+                format!("blob {} produced excess plaintext", self.locator_hash),
             ));
         }
-        self.hasher.update(&chunk);
-        self.offset += chunk.len() as u64;
-        self.remaining = self.remaining.saturating_sub(chunk.len() as u64);
-        Ok(chunk)
+        self.hasher
+            .as_mut()
+            .expect("hash verification remains active until EOF")
+            .update(&plaintext);
+        self.remaining -= plaintext.len() as u64;
+        self.pending = plaintext;
+        Ok(self.take_pending(max))
     }
 }
 
@@ -1222,6 +1361,12 @@ impl BlobRangeReader {
 
 #[async_trait]
 impl CoordinationStorage for CloudCoordinationClient<'_> {
+    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, CoordinationError> {
+        SyncStorage::provider_binding(self.storage)
+            .await
+            .map_err(|error| CoordinationError::Storage(error.to_string()))
+    }
+
     async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
         let raw = self.raw.read_head(key).await.map_err(|error| match error {
             crate::storage::cloud::CloudHomeError::NotFound(_) => {
@@ -1335,6 +1480,12 @@ impl CoordinationStorage for CloudCoordinationClient<'_> {
 
 #[async_trait]
 impl CoordinationStorage for CloudSyncStorage {
+    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, CoordinationError> {
+        SyncStorage::provider_binding(self)
+            .await
+            .map_err(|error| CoordinationError::Storage(error.to_string()))
+    }
+
     async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
         self.primary_coordination_client()?.read_head(key).await
     }
@@ -1371,362 +1522,562 @@ impl CoordinationStorage for CloudSyncStorage {
 
 #[async_trait]
 impl SyncStorage for CloudSyncStorage {
-    async fn append_protocol_object(
+    fn store_blob_protection(
+        &self,
+    ) -> Result<crate::sync::storage::BlobSpoolProtection, StorageError> {
+        Ok(match self.cipher_for_seal()? {
+            CloudCipher::Encrypted(encryption) => {
+                crate::sync::storage::BlobSpoolProtection::Opaque(encryption)
+            }
+            CloudCipher::Plaintext => crate::sync::storage::BlobSpoolProtection::Browsable,
+        })
+    }
+
+    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, StorageError> {
+        self.exact.provider_binding().await.map_err(Into::into)
+    }
+
+    async fn allocate_protocol_slot(
         &self,
         context: &ProtocolObjectContext,
         semantic_prefix: &str,
         extension: &str,
-        data: Vec<u8>,
-    ) -> Result<ImmutableObjectLocator, StorageError> {
+    ) -> Result<ObjectSlot, StorageError> {
         context.validate_path(semantic_prefix)?;
         context.validate_extension(extension)?;
-        let copy_id = self.copy_ids.next_copy_id();
-        let logical_key = format!("{semantic_prefix}/copies/{copy_id}{extension}");
-        let physical_key = format!("{logical_key}{}", self.suffix());
-        let aad = protocol_object_aad_context(context, semantic_prefix);
-        let stored = self.protocol_cipher_for_seal(context)?.seal(data, &aad);
-        let physical = self
-            .immutable
-            .append_object(
-                &physical_key,
-                BlobBody::from_bytes(stored),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        self.bind_appended_object(logical_key, &physical_key, physical)
-            .await
+        Ok(self
+            .exact
+            .allocate_slot(&format!("{semantic_prefix}{extension}"))
+            .await?)
     }
 
-    async fn list_protocol_objects(
+    fn prepare_protocol_object(
         &self,
-        prefix: &str,
-    ) -> Result<ImmutableObjectListing, StorageError> {
-        if !super::storage::is_protocol_listing_prefix(prefix) {
+        context: &ProtocolObjectContext,
+        slot: ObjectSlot,
+        semantic_prefix: &str,
+        data: Vec<u8>,
+    ) -> Result<PreparedExactObject, StorageError> {
+        let expected = format!("{semantic_prefix}{}", context.domain().extension());
+        if slot.logical_key() != expected {
             return Err(StorageError::Parse(format!(
-                "invalid protocol listing prefix {prefix:?}"
+                "protocol slot {:?} does not match semantic object {expected:?}",
+                slot.logical_key()
             )));
         }
-        let suffix = self.suffix();
-        let listing = self.immutable.list_appended(prefix).await?;
-        let mut objects = Vec::with_capacity(listing.objects.len());
-        for physical in listing.objects {
-            let logical_key = physical
-                .logical_key()
-                .strip_suffix(suffix)
-                .ok_or_else(|| {
-                    StorageError::Parse(format!(
-                        "Store append key {:?} lacks expected storage suffix {suffix:?}",
-                        physical.logical_key()
-                    ))
-                })?
-                .to_string();
-            objects.push(ImmutableObjectLocator::new(logical_key, physical));
+        let aad = protocol_object_aad_context(context, semantic_prefix);
+        let stored = self.protocol_cipher_for_seal(context)?.seal(data, &aad);
+        let reference = ExactObjectRef::new(
+            slot,
+            stored.len() as u64,
+            crate::sync::store_commit::ObjectHash::digest(&stored),
+        );
+        PreparedExactObject::new(reference, stored)
+    }
+
+    async fn create_protocol_object(
+        &self,
+        prepared: &PreparedExactObject,
+    ) -> Result<(), StorageError> {
+        let create_error = self
+            .exact
+            .create_at(
+                prepared.reference().slot(),
+                BlobBody::from_bytes(prepared.stored_bytes().to_vec()),
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .err();
+        if let Some(error) = &create_error {
+            if !matches!(
+                error,
+                crate::storage::cloud::CloudHomeError::AlreadyExists(_)
+            ) && !error.is_retryable()
+            {
+                return Err(create_error.expect("create error exists").into());
+            }
         }
-        Ok(ImmutableObjectListing {
-            objects,
-            coverage: listing.coverage,
-        })
+        let observed = match self.exact.read_at(prepared.reference().slot()).await {
+            Ok(observed) => observed,
+            Err(crate::storage::cloud::CloudHomeError::NotFound(_)) if create_error.is_some() => {
+                return Err(create_error.expect("create error exists").into())
+            }
+            Err(readback) => {
+                return match create_error {
+                    Some(operation) => Err(StorageError::UnresolvedOutcome {
+                        operation: Box::new(operation.into()),
+                        readback: Box::new(readback.into()),
+                    }),
+                    None => Err(readback.into()),
+                }
+            }
+        };
+        if observed != prepared.stored_bytes() {
+            return Err(StorageError::SlotCollision(
+                prepared.reference().slot().logical_key().to_string(),
+            ));
+        }
+        prepared.reference().verify(&observed)?;
+        Ok(())
     }
 
     async fn read_protocol_object(
         &self,
         context: &ProtocolObjectContext,
-        object: &ImmutableObjectLocator,
+        object: &ExactObjectRef,
         semantic_prefix: &str,
     ) -> Result<Vec<u8>, StorageError> {
-        context.validate_locator(object, semantic_prefix)?;
-        let expected_physical_key = format!("{}{}", object.logical_key(), self.suffix());
-        if object.physical().logical_key() != expected_physical_key {
-            return Err(StorageError::Parse(format!(
-                "Store locator key {:?} does not match physical key {:?}",
-                object.logical_key(),
-                object.physical().logical_key()
-            )));
-        }
-        let stored = self.immutable.read_appended(object.physical()).await?;
+        context.validate_reference(object, semantic_prefix)?;
+        let stored = self.exact.read_at(object.slot()).await?;
+        object.verify(&stored)?;
         let aad = protocol_object_aad_context(context, semantic_prefix);
         self.protocol_cipher_for_open(context)
             .open(stored, &aad)
             .map_err(|error| {
                 StorageError::Decryption(format!(
                     "protocol object {}: {error}",
-                    object.logical_key()
+                    object.slot().logical_key()
                 ))
             })
     }
 
-    async fn delete_protocol_object(
+    async fn read_protocol_slot(
         &self,
-        object: &ImmutableObjectLocator,
-    ) -> Result<(), StorageError> {
-        self.immutable.delete_appended(object.physical()).await?;
-        Ok(())
-    }
-
-    async fn append_blob_copy_from_file(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        stored_file: &Path,
-    ) -> Result<ImmutableObjectLocator, StorageError> {
-        self.validate_blob_locator_home(locator)?;
-        self.validate_blob_append_authority(locator)?;
-        let copy_id = self.copy_ids.next_copy_id();
-        let logical_key = blob_copy_key(locator, copy_id)?;
-        let stored_len = crate::local_blob::file_len(stored_file)
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
-        let reader = crate::local_blob::open_reader(stored_file)
-            .await
-            .map_err(StorageError::LocalFilesystem)?;
-        let physical = self
-            .immutable
-            .append_object(
-                &logical_key,
-                BlobBody::from_file_with_prefix(stored_len, reader, None, Vec::new()),
-                &crate::storage::cloud::no_progress(),
-            )
+        context: &ProtocolObjectContext,
+        slot: &ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, ExactObjectRef), StorageError> {
+        let (opened, prepared) = self
+            .read_prepared_protocol_slot(context, slot, semantic_prefix)
             .await?;
-        self.bind_appended_object(logical_key.clone(), &logical_key, physical)
-            .await
+        Ok((opened, prepared.reference().clone()))
     }
 
-    async fn list_blob_copies(
+    async fn read_prepared_protocol_slot(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
-    ) -> Result<ImmutableObjectListing, StorageError> {
-        self.validate_blob_locator_home(locator)?;
-        let prefix = blob_copy_prefix(locator)?;
-        let listing = self.immutable.list_appended(&prefix).await?;
-        let mut objects = Vec::with_capacity(listing.objects.len());
-        for physical in listing.objects {
-            let logical_key = physical.logical_key().to_string();
-            let copy = ImmutableObjectLocator::new(logical_key, physical);
-            validate_blob_copy_locator(locator, &copy)?;
-            objects.push(copy);
+        context: &ProtocolObjectContext,
+        slot: &ObjectSlot,
+        semantic_prefix: &str,
+    ) -> Result<(Vec<u8>, PreparedExactObject), StorageError> {
+        context.validate_slot(slot, semantic_prefix)?;
+        let stored = self.exact.read_at(slot).await?;
+        let object = ExactObjectRef::new(
+            slot.clone(),
+            stored.len() as u64,
+            crate::sync::store_commit::ObjectHash::digest(&stored),
+        );
+        let prepared = PreparedExactObject::new(object, stored.clone())?;
+        let aad = protocol_object_aad_context(context, semantic_prefix);
+        let opened = self
+            .protocol_cipher_for_open(context)
+            .open(stored, &aad)
+            .map_err(|error| {
+                StorageError::Decryption(format!("protocol object {}: {error}", slot.logical_key()))
+            })?;
+        Ok((opened, prepared))
+    }
+
+    async fn delete_protocol_object(&self, object: &ExactObjectRef) -> Result<(), StorageError> {
+        let delete_error = self.exact.delete_at(object.slot()).await.err();
+        if delete_error
+            .as_ref()
+            .is_some_and(|error| !error.is_retryable())
+        {
+            return Err(delete_error.expect("delete error exists").into());
         }
-        Ok(ImmutableObjectListing {
-            objects,
-            coverage: listing.coverage,
-        })
+        match self.exact.read_at(object.slot()).await {
+            Err(crate::storage::cloud::CloudHomeError::NotFound(_)) => Ok(()),
+            Err(readback) => match delete_error {
+                Some(operation) => Err(StorageError::UnresolvedOutcome {
+                    operation: Box::new(operation.into()),
+                    readback: Box::new(readback.into()),
+                }),
+                None => Err(readback.into()),
+            },
+            Ok(_) => match delete_error {
+                Some(error) => Err(error.into()),
+                None => Err(StorageError::Storage(format!(
+                    "exact object remains after delete: {}",
+                    object.slot().logical_key()
+                ))),
+            },
+        }
     }
 
-    async fn read_blob_copy_to_file(
+    async fn allocate_blob_slot(
         &self,
         locator: &crate::blob::locator::BlobLocator,
-        copy: &ImmutableObjectLocator,
-        dest: &Path,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+    ) -> Result<ObjectSlot, StorageError> {
+        self.validate_blob_locator_home(locator)?;
+        self.validate_blob_append_authority(locator, authority)
+            .await?;
+        Ok(self.exact.allocate_slot(&locator.semantic_key()).await?)
+    }
+
+    async fn seal_blob_to_spool(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+        protection: crate::sync::storage::BlobSpoolProtection,
+        plaintext_file: &Path,
+        spool_file: &Path,
     ) -> Result<(), StorageError> {
         self.validate_blob_locator_home(locator)?;
-        validate_blob_copy_locator(locator, copy)?;
-        if copy.physical().logical_key() != copy.logical_key() {
-            return Err(StorageError::Parse(format!(
-                "blob locator key {:?} does not match physical key {:?}",
-                copy.logical_key(),
-                copy.physical().logical_key()
+        self.validate_blob_append_authority(locator, authority)
+            .await?;
+        let (plaintext_size, plaintext_hash) = crate::local_blob::exact_file_facts(plaintext_file)
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        if plaintext_size != locator.plaintext_size() || plaintext_hash != locator.plaintext_hash()
+        {
+            return Err(StorageError::InvalidContent(format!(
+                "blob plaintext {}/{} does not match its locator size/hash",
+                locator.namespace(),
+                locator.blob_id()
             )));
         }
-        self.immutable
-            .read_appended_to_file(copy.physical(), dest)
+
+        match tokio::fs::metadata(spool_file).await {
+            Ok(metadata) => {
+                if !metadata.is_file() {
+                    return Err(StorageError::LocalFilesystem(format!(
+                        "blob spool path is not a file: {}",
+                        spool_file.display()
+                    )));
+                }
+                let (stored_size, stored_hash) = crate::local_blob::exact_file_facts(spool_file)
+                    .await
+                    .map_err(StorageError::LocalFilesystem)?;
+                let object = ExactObjectRef::new(
+                    ObjectSlot::logical(locator.semantic_key())?,
+                    stored_size,
+                    stored_hash,
+                );
+                let blob = crate::blob::locator::StoredBlobRef::new(locator.clone(), object)
+                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                let mut reader =
+                    ExactBlobPlaintextReader::new(spool_file, &self.store_id, &blob, protection)
+                        .await?;
+                loop {
+                    let chunk =
+                        crate::local_blob::PlaintextChunkReader::next_chunk(&mut reader, 1 << 20)
+                            .await
+                            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(StorageError::LocalFilesystem(format!(
+                    "inspect blob spool {}: {error}",
+                    spool_file.display()
+                )));
+            }
+        }
+
+        let retry_protection = protection.clone();
+        let body = match (locator, protection) {
+            (
+                crate::blob::locator::BlobLocator::Opaque {
+                    scope,
+                    key_fingerprint,
+                    ..
+                },
+                crate::sync::storage::BlobSpoolProtection::Opaque(encryption),
+            ) => {
+                if encryption.seal_key_fingerprint() != *key_fingerprint {
+                    return Err(StorageError::InvalidContent(format!(
+                        "blob locator key fingerprint {key_fingerprint} differs from the supplied audience key {}",
+                        encryption.seal_key_fingerprint()
+                    )));
+                }
+                let aad = cloud_aad_context(&self.store_id, &locator.semantic_key());
+                CloudCipher::Encrypted(encryption)
+                    .open_body(scope.clone(), plaintext_file, &aad)
+                    .await
+                    .map_err(StorageError::LocalFilesystem)?
+            }
+            (
+                crate::blob::locator::BlobLocator::Browsable { .. },
+                crate::sync::storage::BlobSpoolProtection::Browsable,
+            ) => BlobBody::from_file(plaintext_file)
+                .await
+                .map_err(StorageError::LocalFilesystem)?,
+            (crate::blob::locator::BlobLocator::Opaque { .. }, _) => {
+                return Err(StorageError::Configuration(
+                    "opaque blob locator requires audience encryption".to_string(),
+                ));
+            }
+            (crate::blob::locator::BlobLocator::Browsable { .. }, _) => {
+                return Err(StorageError::Configuration(
+                    "browsable blob locator cannot use audience encryption".to_string(),
+                ));
+            }
+        };
+        let expected_size = body.len();
+        let stream = futures_util::stream::try_unfold(body, |mut body| async move {
+            match body.next_part(1 << 20).await? {
+                Some(chunk) => Ok::<_, crate::storage::cloud::CloudHomeError>(Some((chunk, body))),
+                None => Ok::<_, crate::storage::cloud::CloudHomeError>(None),
+            }
+        });
+        let staged = crate::local_blob::stage_atomic_destination(spool_file)
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        let written = crate::local_blob::write_byte_stream_atomic(staged.path(), Box::pin(stream))
+            .await
+            .map_err(|error| match error {
+                crate::local_blob::ByteStreamWriteError::Source(error) => error.into(),
+                crate::local_blob::ByteStreamWriteError::Local(error) => {
+                    StorageError::LocalFilesystem(error)
+                }
+            })?;
+        if written != expected_size {
+            return Err(StorageError::InvalidContent(format!(
+                "blob spool {} contains {written} stored bytes, expected {expected_size}",
+                spool_file.display()
+            )));
+        }
+        match staged.commit_new().await {
+            Ok(()) => Ok(()),
+            Err(crate::local_blob::CommitNewFileError::DestinationExists(_)) => {
+                let (stored_size, stored_hash) = crate::local_blob::exact_file_facts(spool_file)
+                    .await
+                    .map_err(StorageError::LocalFilesystem)?;
+                let object = ExactObjectRef::new(
+                    ObjectSlot::logical(locator.semantic_key())?,
+                    stored_size,
+                    stored_hash,
+                );
+                let blob = crate::blob::locator::StoredBlobRef::new(locator.clone(), object)
+                    .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                let mut reader = ExactBlobPlaintextReader::new(
+                    spool_file,
+                    &self.store_id,
+                    &blob,
+                    retry_protection,
+                )
+                .await?;
+                loop {
+                    let chunk =
+                        crate::local_blob::PlaintextChunkReader::next_chunk(&mut reader, 1 << 20)
+                            .await
+                            .map_err(|error| StorageError::InvalidContent(error.to_string()))?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => Err(StorageError::LocalFilesystem(error.to_string())),
+        }
+    }
+
+    async fn prepare_blob_object(
+        &self,
+        locator: &crate::blob::locator::BlobLocator,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+        slot: ObjectSlot,
+        stored_file: &Path,
+    ) -> Result<crate::blob::locator::StoredBlobRef, StorageError> {
+        self.validate_blob_locator_home(locator)?;
+        self.validate_blob_append_authority(locator, authority)
+            .await?;
+        let expected = locator.semantic_key();
+        if slot.logical_key() != expected {
+            return Err(StorageError::Parse(format!(
+                "blob slot {:?} does not match locator key {expected:?}",
+                slot.logical_key()
+            )));
+        }
+        let (stored_size, stored_hash) = crate::local_blob::exact_file_facts(stored_file)
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        crate::blob::locator::StoredBlobRef::new(
+            locator.clone(),
+            ExactObjectRef::new(slot, stored_size, stored_hash),
+        )
+        .map_err(|error| StorageError::InvalidContent(error.to_string()))
+    }
+
+    async fn create_blob_object_from_file(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        authority: &crate::sync::storage::BlobWriteAuthority<'_>,
+        stored_file: &Path,
+        progress: &crate::storage::cloud::UploadProgress<'_>,
+    ) -> Result<(), StorageError> {
+        let locator = blob.locator();
+        let object = blob.object();
+        self.validate_blob_locator_home(locator)?;
+        self.validate_blob_append_authority(locator, authority)
+            .await?;
+        let expected = locator.semantic_key();
+        if object.slot().logical_key() != expected {
+            return Err(StorageError::Parse(format!(
+                "blob object {:?} does not match locator key {expected:?}",
+                object.slot().logical_key()
+            )));
+        }
+        crate::local_blob::verify_exact_file(object, stored_file)
+            .await
+            .map_err(|error| match error {
+                crate::local_blob::ExactFileVerificationError::Filesystem(error) => {
+                    StorageError::LocalFilesystem(error)
+                }
+                crate::local_blob::ExactFileVerificationError::IdentityMismatch(error) => {
+                    StorageError::InvalidContent(error)
+                }
+            })?;
+        let body = BlobBody::from_file(stored_file)
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        let create_error = self
+            .exact
+            .create_at(object.slot(), body, progress)
+            .await
+            .err();
+        if let Some(error) = &create_error {
+            if !matches!(
+                error,
+                crate::storage::cloud::CloudHomeError::AlreadyExists(_)
+            ) && !error.is_retryable()
+            {
+                return Err(create_error.expect("create error exists").into());
+            }
+        }
+        match self.exact.read_at(object.slot()).await {
+            Ok(stored) => object
+                .verify(&stored)
+                .map_err(|_| StorageError::SlotCollision(object.slot().logical_key().to_string())),
+            Err(crate::storage::cloud::CloudHomeError::NotFound(_)) if create_error.is_some() => {
+                Err(create_error.expect("create error exists").into())
+            }
+            Err(readback) => match create_error {
+                Some(operation) => Err(StorageError::UnresolvedOutcome {
+                    operation: Box::new(operation.into()),
+                    readback: Box::new(readback.into()),
+                }),
+                None => Err(readback.into()),
+            },
+        }
+    }
+
+    async fn verify_blob_object(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), StorageError> {
+        self.validate_blob_locator_home(blob.locator())?;
+        let expected = blob.locator().semantic_key();
+        if blob.object().slot().logical_key() != expected {
+            return Err(StorageError::Parse(format!(
+                "blob object {:?} does not match locator key {expected:?}",
+                blob.object().slot().logical_key()
+            )));
+        }
+        let stored = self.exact.read_at(blob.object().slot()).await?;
+        blob.object().verify(&stored)
+    }
+
+    async fn stage_exact_blob_download(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        dest: &Path,
+    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError> {
+        let locator = blob.locator();
+        let object = blob.object();
+        self.validate_blob_locator_home(locator)?;
+        let expected = locator.semantic_key();
+        if object.slot().logical_key() != expected {
+            return Err(StorageError::Parse(format!(
+                "blob object {:?} does not match locator key {expected:?}",
+                object.slot().logical_key()
+            )));
+        }
+        let staged = crate::local_blob::stage_atomic_destination(dest)
+            .await
+            .map_err(StorageError::LocalFilesystem)?;
+        self.exact
+            .read_at_to_file(object.slot(), staged.path())
             .await
             .map_err(|error| match error {
                 CloudFileReadError::Source(error) => StorageError::from(error),
                 CloudFileReadError::Local(error) => StorageError::LocalFilesystem(error),
-            })
-    }
-
-    async fn delete_blob_copy(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        copy: &ImmutableObjectLocator,
-    ) -> Result<(), StorageError> {
-        self.validate_blob_locator_home(locator)?;
-        validate_blob_copy_locator(locator, copy)?;
-        if copy.physical().logical_key() != copy.logical_key() {
-            return Err(StorageError::Parse(format!(
-                "blob locator key {:?} does not match physical key {:?}",
-                copy.logical_key(),
-                copy.physical().logical_key()
-            )));
-        }
-        self.immutable.delete_appended(copy.physical()).await?;
-        Ok(())
-    }
-
-    async fn put_blob(
-        &self,
-        namespace: &str,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let uploader = self.self_uploader();
-        let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
-        self.write_blob_sealed(&key, scope, data).await
-    }
-
-    async fn put_blob_from_file(
-        &self,
-        namespace: &str,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_path: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        let uploader = self.self_uploader();
-        let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
-        let cipher = self.cipher_for_seal()?;
-        let body = cipher
-            .open_body(scope, source_path, &self.aad_context(&key))
+            })?;
+        crate::local_blob::verify_exact_file(object, staged.path())
             .await
-            .map_err(StorageError::Storage)?;
-        self.home
-            .write(&key, body, &crate::storage::cloud::no_progress())
+            .map_err(|error| match error {
+                crate::local_blob::ExactFileVerificationError::Filesystem(error) => {
+                    StorageError::LocalFilesystem(error)
+                }
+                crate::local_blob::ExactFileVerificationError::IdentityMismatch(error) => {
+                    StorageError::InvalidContent(error)
+                }
+            })?;
+        Ok(staged)
+    }
+
+    async fn stage_verified_blob_plaintext(
+        &self,
+        blob: &crate::blob::locator::StoredBlobRef,
+        protection: crate::sync::storage::BlobSpoolProtection,
+        dest: &Path,
+    ) -> Result<crate::local_blob::AtomicStagedFile, StorageError> {
+        let stored_destination = dest.with_extension("coven-stored-download");
+        let stored = self
+            .stage_exact_blob_download(blob, &stored_destination)
             .await?;
-        Ok(())
-    }
-
-    async fn get_blob(
-        &self,
-        namespace: &str,
-        uploader: Option<&str>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-    ) -> Result<Vec<u8>, StorageError> {
-        let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
-        self.read_blob_sealed(&key, scope, &format!("blob {namespace}/{id}"))
+        let plaintext = crate::local_blob::stage_atomic_destination(dest)
             .await
-    }
-
-    async fn blob_exists(
-        &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<bool, StorageError> {
-        // Whether an object stands at the key this device would write the blob to, so
-        // it keys under itself. A blob's key names the blob under both schemes — the
-        // hashed key carries its id, and a browsable home's readable path must name it
-        // ([`crate::blob::decl::cloud_path_names_blob`]) — so no two blobs share a key
-        // and the object standing at one is that blob's bytes. Presence IS content.
-        let uploader = self.self_uploader();
-        let key = Self::blob_key(self.blob_paths, namespace, Some(&uploader), id, cloud_path)?;
-        self.home.exists(&key).await.map_err(StorageError::from)
-    }
-
-    async fn read_blob_range(
-        &self,
-        namespace: &str,
-        uploader: Option<&str>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        // Build the ranged reader over a clone of the shared home and the current
-        // cipher (a snapshot of the lock — a key rotation between reads builds a
-        // fresh reader next call). The reader owns the chunk math and decryption;
-        // this just resolves the key/scope/size it needs. The cipher is cloned out
-        // of the lock so the reader doesn't hold the guard across its awaits.
-        let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
-        let cipher = self.cipher();
-        let aad_context = self.aad_context(&key);
-        let reader = BlobRangeReader::new(
-            self.home.clone(),
-            &cipher,
-            scope,
-            key,
-            source_size,
-            aad_context,
-        );
-        reader.read(offset, len).await
-    }
-
-    async fn read_blob_to_file(
-        &self,
-        namespace: &str,
-        uploader: Option<&str>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        expected_hash: &str,
-        dest: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        let key = Self::blob_key(self.blob_paths, namespace, uploader, id, cloud_path)?;
-        let cipher = self.cipher();
-        let aad_context = self.aad_context(&key);
-        let reader = BlobRangeReader::new(
-            self.home.clone(),
-            &cipher,
-            scope,
-            key.clone(),
-            source_size,
-            aad_context,
-        );
-        // Stream the plaintext through a content hasher; the reader refuses to
-        // signal "done" (so the writer never commits the file) unless the
-        // whole-blob hash matches the row's signed one — a tampered or rolled-back
-        // object aborts before the rename and is not cached.
-        let mut source = HashVerifyingPlaintextReader {
-            reader,
-            offset: 0,
-            remaining: source_size,
-            hasher: crate::blob::ContentHasher::new(),
-            expected_hash: expected_hash.to_string(),
-            key,
-        };
-        let written = crate::local_blob::write_stream_atomic(dest, &mut source)
+            .map_err(StorageError::LocalFilesystem)?;
+        let mut reader =
+            ExactBlobPlaintextReader::new(stored.path(), &self.store_id, blob, protection).await?;
+        let written = crate::local_blob::write_stream_to_stage(&plaintext, &mut reader)
             .await
             .map_err(|error| match error {
                 crate::local_blob::StreamWriteError::Source(
-                    crate::local_blob::PlaintextChunkError::Remote(source),
-                ) => source,
+                    crate::local_blob::PlaintextChunkError::Remote(error),
+                ) => error,
                 crate::local_blob::StreamWriteError::Source(
-                    crate::local_blob::PlaintextChunkError::InvalidContent(reason),
-                ) => StorageError::InvalidContent(reason),
+                    crate::local_blob::PlaintextChunkError::InvalidContent(error),
+                ) => StorageError::InvalidContent(error),
                 crate::local_blob::StreamWriteError::Source(
-                    crate::local_blob::PlaintextChunkError::Local(reason),
+                    crate::local_blob::PlaintextChunkError::Local(error),
                 )
-                | crate::local_blob::StreamWriteError::Local(reason) => {
-                    StorageError::LocalFilesystem(reason)
+                | crate::local_blob::StreamWriteError::Local(error) => {
+                    StorageError::LocalFilesystem(error)
                 }
             })?;
-        if written != source_size {
+        if written != blob.locator().plaintext_size() {
             return Err(StorageError::InvalidContent(format!(
-                "downloaded blob {namespace}/{id} wrote {written} bytes, expected {source_size}"
+                "blob {} plaintext stage contains {written} bytes, expected {}",
+                blob.locator().locator_hash(),
+                blob.locator().plaintext_size()
             )));
         }
-        Ok(())
+        Ok(plaintext)
     }
 
-    fn blob_path_scheme(&self) -> BlobPathScheme {
-        self.blob_paths
-    }
-
-    fn blob_cloud_key(
+    async fn delete_blob_object(
         &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<String, StorageError> {
-        Self::blob_key(
-            self.blob_paths,
-            namespace,
-            self.own_uploader().as_deref(),
-            id,
-            cloud_path,
-        )
-    }
-
-    fn own_uploader(&self) -> Option<String> {
-        match self.blob_paths {
-            BlobPathScheme::Hashed => Some(self.self_uploader()),
-            BlobPathScheme::Plain => None,
+        blob: &crate::blob::locator::StoredBlobRef,
+    ) -> Result<(), StorageError> {
+        let locator = blob.locator();
+        let object = blob.object();
+        self.validate_blob_locator_home(locator)?;
+        let expected = locator.semantic_key();
+        if object.slot().logical_key() != expected {
+            return Err(StorageError::Parse(format!(
+                "blob object {:?} does not match locator key {expected:?}",
+                object.slot().logical_key()
+            )));
         }
+        self.delete_protocol_object(object).await?;
+        Ok(())
     }
 
     async fn put_wrapped_key(
@@ -1779,1953 +2130,405 @@ mod tests {
     use super::*;
     use crate::blob::locator::{BlobLocator, RemoteAudience};
     use crate::blob::BlobScope;
-    use crate::config::HomeStorage;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
-    use crate::storage::cloud::{
-        AppendedListing, AppendedObject, BoxPartSink, CloudAccessOutcome, CloudAccessState,
-        CloudFileReadError, CloudHomeError, CopyId, CopyIdGenerator, ImmutableCopyStorage,
-        SequentialCopyIdGenerator, UploadProgress,
+    use crate::sync::storage::{BlobWriteAuthority, ExactObjectRef};
+    use crate::sync::store_commit::{
+        DeviceStreamAnchor, ObjectHash, StoreCommitAnchor, StoreCreationId,
+        StoreDeviceRegistration, StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef,
+        StoreRootRef,
     };
-    use crate::sync::test_helpers::{open_test_db, TestCustody};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::sync::test_helpers::open_serial_test_db;
 
-    fn opaque_locator(uploader: String) -> BlobLocator {
-        BlobLocator::opaque(
-            "covers",
-            "a1b2-blob",
-            uploader,
-            RemoteAudience::Store,
-            BlobScope::Master,
-            crate::KeyFingerprint::from_bytes([4; 8]),
-            19,
-            crate::sync::store_commit::ObjectHash::digest(b"plaintext blob"),
-        )
-        .expect("opaque locator")
-    }
-
-    struct CountingCopyIdGenerator {
-        calls: AtomicUsize,
-    }
-
-    impl CountingCopyIdGenerator {
-        fn new() -> Self {
-            Self {
-                calls: AtomicUsize::new(0),
-            }
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-    }
-
-    impl CopyIdGenerator for CountingCopyIdGenerator {
-        fn next_copy_id(&self) -> CopyId {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            "00".repeat(32).parse().expect("fixed canonical copy id")
-        }
-    }
-
-    async fn assert_locator_mode_rejected_before_io(
+    async fn blob_write_registration(
         storage: &CloudSyncStorage,
-        home: &InMemoryCloudHome,
-        copy_ids: &CountingCopyIdGenerator,
-        locator: &BlobLocator,
-    ) {
-        let copy_id: CopyId = "11".repeat(32).parse().expect("canonical test copy id");
-        let logical_key = blob_copy_key(locator, copy_id).expect("blob copy key");
-        let copy = ImmutableObjectLocator::new(
-            logical_key.clone(),
-            crate::storage::cloud::AppendedObject::from_provider(logical_key, "unused".to_string())
-                .expect("test appended identity is non-empty"),
+        label: &str,
+    ) -> (StoreDeviceRegistrationRef, StoreDeviceRegistration) {
+        let root_bytes = format!("{label} Store root").into_bytes();
+        let root = StoreRootRef {
+            store_root_id: ObjectHash::digest(format!("{label} root id").as_bytes()),
+            store_root_hash: ObjectHash::digest(&root_bytes),
+            object: ExactObjectRef::new(
+                ObjectSlot::logical(format!("store-v1/store-protocol-root/{label}.json")).unwrap(),
+                root_bytes.len() as u64,
+                ObjectHash::digest(&root_bytes),
+            ),
+        };
+        let anchor_slot = |stream: &str| {
+            ObjectSlot::logical(format!(
+                "store-v1/test-device-streams/{label}/{stream}.json"
+            ))
+            .unwrap()
+        };
+        let provider = SyncStorage::provider_binding(storage).await.unwrap().device;
+        let registration = StoreDeviceRegistration::signed(
+            root,
+            StoreDeviceRegistrationOrigin::Founder {
+                creation_id: StoreCreationId::from_nonce(label),
+            },
+            provider,
+            StoreCommitAnchor::MergeConcurrent {
+                announcements: DeviceStreamAnchor::StoreAnnouncements {
+                    first_slot: anchor_slot("announcements"),
+                },
+            },
+            DeviceStreamAnchor::StoreAcknowledgements {
+                first_slot: anchor_slot("acknowledgements"),
+            },
+            DeviceStreamAnchor::StoreSnapshots {
+                first_slot: anchor_slot("snapshots"),
+            },
+            storage.user_keypair(),
+        )
+        .unwrap();
+        let bytes = registration.to_bytes();
+        let reference = StoreDeviceRegistrationRef::from_registration(
+            &registration,
+            ExactObjectRef::new(
+                ObjectSlot::logical(format!(
+                    "store-v1/devices/{}/registration.json",
+                    registration.device_id
+                ))
+                .unwrap(),
+                bytes.len() as u64,
+                ObjectHash::digest(&bytes),
+            ),
         );
-        let temp = tempfile::tempdir().expect("mode mismatch temp dir");
-
-        assert!(matches!(
-            storage
-                .append_blob_copy_from_file(locator, &temp.path().join("absent-source"))
-                .await,
-            Err(StorageError::InvalidContent(_))
-        ));
-        assert!(matches!(
-            storage.list_blob_copies(locator).await,
-            Err(StorageError::InvalidContent(_))
-        ));
-        assert!(matches!(
-            storage
-                .read_blob_copy_to_file(locator, &copy, &temp.path().join("destination"))
-                .await,
-            Err(StorageError::InvalidContent(_))
-        ));
-        assert!(matches!(
-            storage.delete_blob_copy(locator, &copy).await,
-            Err(StorageError::InvalidContent(_))
-        ));
-
-        assert_eq!(copy_ids.calls(), 0, "copy id source must not be consumed");
-        assert_eq!(home.append_count(), 0, "append provider must not be called");
-        assert_eq!(
-            home.appended_list_count(),
-            0,
-            "listing provider must not be called"
-        );
-        assert_eq!(
-            home.appended_full_read_count(),
-            0,
-            "full-read provider must not be called"
-        );
-        assert_eq!(
-            home.appended_stream_read_count(),
-            0,
-            "stream provider must not be called"
-        );
-        assert_eq!(
-            home.appended_delete_count(),
-            0,
-            "delete provider must not be called"
-        );
-    }
-
-    async fn exercise_blob_copy_storage(storage: &dyn SyncStorage, locator: &BlobLocator) {
-        let temp = tempfile::tempdir().expect("blob-copy temp dir");
-        let stored_file = temp.path().join("stored.bin");
-        let readback = temp.path().join("readback.bin");
-        let stored_bytes = b"exact already-sealed bytes";
-        crate::local_blob::write_atomic(&stored_file, stored_bytes)
-            .await
-            .expect("write stored source");
-
-        let first = storage
-            .append_blob_copy_from_file(locator, &stored_file)
-            .await
-            .expect("append first blob copy");
-        let second = storage
-            .append_blob_copy_from_file(locator, &stored_file)
-            .await
-            .expect("append retry blob copy");
-        assert_ne!(first.logical_key(), second.logical_key());
-
-        let listing = storage
-            .list_blob_copies(locator)
-            .await
-            .expect("list blob copies");
-        assert_eq!(listing.objects.len(), 2);
-        assert!(listing.objects.contains(&first));
-        assert!(listing.objects.contains(&second));
-
-        storage
-            .read_blob_copy_to_file(locator, &first, &readback)
-            .await
-            .expect("read exact first copy");
-        assert_eq!(
-            crate::local_blob::read(&readback)
-                .await
-                .expect("read local copy"),
-            stored_bytes,
-        );
-
-        storage
-            .delete_blob_copy(locator, &first)
-            .await
-            .expect("delete exact first copy");
-        let listing = storage
-            .list_blob_copies(locator)
-            .await
-            .expect("list surviving blob copy");
-        assert_eq!(listing.objects, vec![second]);
+        (reference, registration)
     }
 
     #[tokio::test]
-    async fn cloud_storage_appends_lists_reads_and_deletes_exact_blob_copies() {
+    async fn circle_blob_spool_uses_the_supplied_audience_key() {
         let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
-            BlobPathScheme::Hashed,
-            "blob-copy-store",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("blob-copy")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let locator = opaque_locator(storage.self_uploader());
-
-        exercise_blob_copy_storage(&storage, &locator).await;
-
-        let keys = home.appended_keys();
-        assert_eq!(keys.len(), 1);
-        assert!(keys[0].starts_with(&format!("{}/copies/", locator.semantic_key())));
-        assert!(keys[0].ends_with(".enc"));
-        assert_eq!(home.appended_full_read_count(), 0);
-        assert_eq!(home.appended_stream_read_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn opaque_home_rejects_browsable_locator_before_any_io() {
-        let home = InMemoryCloudHome::new();
-        let copy_ids = Arc::new(CountingCopyIdGenerator::new());
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
-            BlobPathScheme::Hashed,
-            "opaque-mode-gate",
-            UserKeypair::generate(),
-            copy_ids.clone(),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let locator = BlobLocator::browsable(
-            "audio",
-            "abcd-track",
-            storage.self_uploader(),
-            "Artist/Album/track.flac",
-            5,
-            crate::sync::store_commit::ObjectHash::digest(b"track"),
-        )
-        .expect("browsable locator");
-
-        assert_locator_mode_rejected_before_io(&storage, &home, &copy_ids, &locator).await;
-    }
-
-    #[tokio::test]
-    async fn browsable_home_rejects_opaque_locator_before_any_io() {
-        let home = InMemoryCloudHome::new();
-        let copy_ids = Arc::new(CountingCopyIdGenerator::new());
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "browsable-mode-gate",
-            UserKeypair::generate(),
-            copy_ids.clone(),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let locator = opaque_locator(storage.self_uploader());
-
-        assert_locator_mode_rejected_before_io(&storage, &home, &copy_ids, &locator).await;
-    }
-
-    #[tokio::test]
-    async fn blob_append_rejects_foreign_uploader_before_id_file_or_provider_io() {
-        let home = InMemoryCloudHome::new();
-        let copy_ids = Arc::new(CountingCopyIdGenerator::new());
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
-            BlobPathScheme::Hashed,
-            "blob-uploader-authority",
-            UserKeypair::generate(),
-            copy_ids.clone(),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let locator = opaque_locator("11".repeat(32));
-        let temp = tempfile::tempdir().expect("foreign uploader temp dir");
-
-        assert!(matches!(
-            storage
-                .append_blob_copy_from_file(&locator, &temp.path().join("absent-source"))
-                .await,
-            Err(StorageError::InvalidContent(_))
-        ));
-        assert_eq!(copy_ids.calls(), 0);
-        assert_eq!(home.append_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn blob_list_read_and_delete_accept_a_foreign_uploader() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
-            BlobPathScheme::Hashed,
-            "foreign-blob-reader",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("foreign-blob-reader")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let locator = opaque_locator("11".repeat(32));
-        let copy_id: CopyId = "22".repeat(32).parse().expect("canonical copy id");
-        let logical_key = blob_copy_key(&locator, copy_id).expect("blob copy key");
-        home.insert_appended_candidate(&logical_key, b"remote stored bytes".to_vec());
-
-        let listing = storage
-            .list_blob_copies(&locator)
-            .await
-            .expect("list foreign uploader copy");
-        assert_eq!(listing.objects.len(), 1);
-        let temp = tempfile::tempdir().expect("foreign uploader temp dir");
-        let destination = temp.path().join("stored.bin");
-        storage
-            .read_blob_copy_to_file(&locator, &listing.objects[0], &destination)
-            .await
-            .expect("read foreign uploader copy");
-        assert_eq!(
-            crate::local_blob::read(&destination)
-                .await
-                .expect("read destination"),
-            b"remote stored bytes"
-        );
-        storage
-            .delete_blob_copy(&locator, &listing.objects[0])
-            .await
-            .expect("delete foreign uploader copy");
-        assert!(storage
-            .list_blob_copies(&locator)
-            .await
-            .expect("list after delete")
-            .objects
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn blob_copy_listing_preserves_provider_duplicates_and_exact_identity() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
-            BlobPathScheme::Hashed,
-            "blob-copy-provider-duplicates",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new(
-                "blob-copy-provider-duplicates",
-            )),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let locator = opaque_locator(storage.self_uploader());
-        let temp = tempfile::tempdir().expect("blob-copy duplicate temp dir");
-        let stored_file = temp.path().join("stored.bin");
-        crate::local_blob::write_atomic(&stored_file, b"first physical bytes")
-            .await
-            .expect("write first physical source");
-        let first = storage
-            .append_blob_copy_from_file(&locator, &stored_file)
-            .await
-            .expect("append first physical copy");
-        home.insert_appended_candidate(first.logical_key(), b"second physical bytes".to_vec());
-
-        let listing = storage
-            .list_blob_copies(&locator)
-            .await
-            .expect("list provider duplicates");
-        assert_eq!(listing.objects.len(), 2);
-        assert_eq!(
-            listing.objects[0].logical_key(),
-            listing.objects[1].logical_key()
-        );
-        assert_ne!(listing.objects[0], listing.objects[1]);
-
-        let first_readback = temp.path().join("first-readback.bin");
-        let second_readback = temp.path().join("second-readback.bin");
-        storage
-            .read_blob_copy_to_file(&locator, &listing.objects[0], &first_readback)
-            .await
-            .expect("read first physical identity");
-        storage
-            .read_blob_copy_to_file(&locator, &listing.objects[1], &second_readback)
-            .await
-            .expect("read second physical identity");
-        assert_eq!(
-            crate::local_blob::read(&first_readback).await.unwrap(),
-            b"first physical bytes"
-        );
-        assert_eq!(
-            crate::local_blob::read(&second_readback).await.unwrap(),
-            b"second physical bytes"
-        );
-
-        storage
-            .delete_blob_copy(&locator, &listing.objects[0])
-            .await
-            .expect("delete first physical identity");
-        assert_eq!(
-            storage.list_blob_copies(&locator).await.unwrap().objects,
-            vec![listing.objects[1].clone()]
-        );
-    }
-
-    #[tokio::test]
-    async fn blob_copy_operations_reject_a_locator_from_another_semantic_slot() {
-        let home = InMemoryCloudHome::new();
+        let identity = UserKeypair::generate();
         let storage = CloudSyncStorage::new(
             Arc::new(home),
-            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
+            CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
             BlobPathScheme::Hashed,
-            "blob-copy-slot-binding",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("blob-copy-slot-binding")),
+            "circle-blob-spool",
+            identity,
         )
-        .expect("test cloud storage supports immutable copies");
-        let first_locator = opaque_locator(storage.self_uploader());
-        let other_locator = BlobLocator::opaque(
-            first_locator.namespace(),
-            "different-blob",
-            first_locator.uploader(),
+        .expect("test cloud storage supports exact slots");
+        let (uploader, registration) = blob_write_registration(&storage, "circle-blob-spool").await;
+        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let circle_key = EncryptionService::from_key([9u8; 32]);
+        let plaintext = b"circle audience blob";
+        let locator = BlobLocator::opaque(
+            "covers",
+            "circle-cover",
+            uploader.clone(),
+            RemoteAudience::Circle(crate::sync::circle::CircleId::from_bytes([8; 16])),
+            BlobScope::Master,
+            circle_key.seal_key_fingerprint(),
+            plaintext.len() as u64,
+            crate::sync::store_commit::ObjectHash::digest(plaintext),
+        )
+        .expect("build Circle locator");
+        let temp = tempfile::tempdir().expect("temporary blob directory");
+        let source = temp.path().join("plaintext");
+        let spool = temp.path().join("spool");
+        tokio::fs::write(&source, plaintext)
+            .await
+            .expect("write plaintext source");
+
+        storage
+            .seal_blob_to_spool(
+                &locator,
+                &authority,
+                crate::sync::storage::BlobSpoolProtection::Opaque(circle_key.clone()),
+                &source,
+                &spool,
+            )
+            .await
+            .expect("seal Circle blob spool");
+
+        let stored = tokio::fs::read(&spool).await.expect("read exact spool");
+        let opened = CloudCipher::Encrypted(circle_key)
+            .open_scoped(
+                BlobScope::Master,
+                stored,
+                &cloud_aad_context("circle-blob-spool", &locator.semantic_key()),
+            )
+            .expect("open Circle blob with supplied key");
+        assert_eq!(opened, plaintext);
+    }
+
+    #[tokio::test]
+    async fn blob_spool_rejects_a_key_that_differs_from_the_locator() {
+        let home = InMemoryCloudHome::new();
+        let identity = UserKeypair::generate();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
+            BlobPathScheme::Hashed,
+            "blob-spool-key-mismatch",
+            identity,
+        )
+        .expect("test cloud storage supports exact slots");
+        let (uploader, registration) =
+            blob_write_registration(&storage, "blob-spool-key-mismatch").await;
+        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let declared_key = EncryptionService::from_key([9u8; 32]);
+        let plaintext = b"audience blob";
+        let locator = BlobLocator::opaque(
+            "covers",
+            "mismatched-cover",
+            uploader.clone(),
             RemoteAudience::Store,
             BlobScope::Master,
-            crate::KeyFingerprint::from_bytes([4; 8]),
-            19,
-            crate::sync::store_commit::ObjectHash::digest(b"plaintext blob"),
+            declared_key.seal_key_fingerprint(),
+            plaintext.len() as u64,
+            crate::sync::store_commit::ObjectHash::digest(plaintext),
         )
-        .expect("other locator");
-        let temp = tempfile::tempdir().expect("blob-copy slot temp dir");
-        let stored_file = temp.path().join("stored.bin");
-        crate::local_blob::write_atomic(&stored_file, b"stored")
+        .expect("build locator");
+        let temp = tempfile::tempdir().expect("temporary blob directory");
+        let source = temp.path().join("plaintext");
+        let spool = temp.path().join("spool");
+        tokio::fs::write(&source, plaintext)
             .await
-            .expect("write stored source");
-        let copy = storage
-            .append_blob_copy_from_file(&first_locator, &stored_file)
-            .await
-            .expect("append first slot copy");
+            .expect("write plaintext source");
 
         assert!(matches!(
             storage
-                .read_blob_copy_to_file(&other_locator, &copy, &temp.path().join("readback.bin"))
-                .await,
-            Err(StorageError::Parse(_))
-        ));
-        assert!(matches!(
-            storage.delete_blob_copy(&other_locator, &copy).await,
-            Err(StorageError::Parse(_))
-        ));
-        assert_eq!(
-            storage
-                .list_blob_copies(&first_locator)
-                .await
-                .unwrap()
-                .objects,
-            vec![copy]
-        );
-    }
-
-    #[tokio::test]
-    async fn mock_storage_implements_the_exact_blob_copy_contract() {
-        let storage = crate::sync::test_helpers::MockSyncStorage::new();
-        let locator = opaque_locator(storage.protocol_founder_pubkey());
-
-        exercise_blob_copy_storage(&storage, &locator).await;
-    }
-
-    #[tokio::test]
-    async fn mock_blob_append_rejects_wrong_mode_and_foreign_uploader_before_counter_or_file() {
-        let storage = crate::sync::test_helpers::MockSyncStorage::new();
-        let temp = tempfile::tempdir().expect("mock parity temp dir");
-        let absent = temp.path().join("absent-source");
-        let browsable = BlobLocator::browsable(
-            "audio",
-            "abcd-track",
-            storage.protocol_founder_pubkey(),
-            "Artist/Album/track.flac",
-            5,
-            crate::sync::store_commit::ObjectHash::digest(b"track"),
-        )
-        .expect("browsable locator");
-        let foreign = opaque_locator("11".repeat(32));
-
-        assert!(matches!(
-            storage
-                .append_blob_copy_from_file(&browsable, &absent)
-                .await,
-            Err(StorageError::InvalidContent(_))
-        ));
-        assert!(matches!(
-            storage.append_blob_copy_from_file(&foreign, &absent).await,
-            Err(StorageError::InvalidContent(_))
-        ));
-        let copy_id: CopyId = "44".repeat(32).parse().expect("canonical copy id");
-        let logical_key = blob_copy_key(&browsable, copy_id).expect("browsable copy key");
-        let copy = ImmutableObjectLocator::new(
-            logical_key.clone(),
-            crate::storage::cloud::AppendedObject::from_provider(logical_key, "unused".to_string())
-                .expect("test appended identity is non-empty"),
-        );
-        assert!(matches!(
-            storage.list_blob_copies(&browsable).await,
-            Err(StorageError::InvalidContent(_))
-        ));
-        assert!(matches!(
-            storage
-                .read_blob_copy_to_file(&browsable, &copy, &temp.path().join("destination"))
-                .await,
-            Err(StorageError::InvalidContent(_))
-        ));
-        assert!(matches!(
-            storage.delete_blob_copy(&browsable, &copy).await,
-            Err(StorageError::InvalidContent(_))
-        ));
-        assert_eq!(storage.blob_copy_append_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn mock_blob_list_read_and_delete_accept_a_foreign_opaque_uploader() {
-        let storage = crate::sync::test_helpers::MockSyncStorage::new();
-        let locator = opaque_locator("11".repeat(32));
-        let copy_id: CopyId = "33".repeat(32).parse().expect("canonical copy id");
-        let inserted = storage
-            .insert_blob_copy_candidate(&locator, copy_id, b"remote stored bytes".to_vec())
-            .expect("insert remote copy");
-
-        let listing = storage
-            .list_blob_copies(&locator)
-            .await
-            .expect("list remote mock copy");
-        assert_eq!(listing.objects, vec![inserted.clone()]);
-        let temp = tempfile::tempdir().expect("remote mock temp dir");
-        let destination = temp.path().join("stored.bin");
-        storage
-            .read_blob_copy_to_file(&locator, &inserted, &destination)
-            .await
-            .expect("read remote mock copy");
-        assert_eq!(
-            crate::local_blob::read(&destination)
-                .await
-                .expect("read destination"),
-            b"remote stored bytes"
-        );
-        storage
-            .delete_blob_copy(&locator, &inserted)
-            .await
-            .expect("delete remote mock copy");
-        assert!(storage
-            .list_blob_copies(&locator)
-            .await
-            .expect("list after delete")
-            .objects
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn blob_copy_listing_preserves_incomplete_coverage_as_success() {
-        let home = InMemoryCloudHome::new();
-        home.set_listing_coverage(crate::storage::cloud::ListingCoverage::BestEffort);
-        let storage = CloudSyncStorage::new(
-            Arc::new(home),
-            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
-            BlobPathScheme::Hashed,
-            "blob-copy-coverage",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("blob-copy-coverage")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let locator = opaque_locator(storage.self_uploader());
-
-        let listing = storage
-            .list_blob_copies(&locator)
-            .await
-            .expect("best-effort listing remains a successful listing");
-
-        assert_eq!(
-            listing.coverage,
-            crate::storage::cloud::ListingCoverage::BestEffort
-        );
-        assert!(listing.objects.is_empty());
-    }
-
-    #[tokio::test]
-    async fn blob_copy_listing_rejects_noncanonical_copy_paths() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([4; 32])),
-            BlobPathScheme::Hashed,
-            "blob-copy-malformed",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("blob-copy-malformed")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let locator = opaque_locator(storage.self_uploader());
-        home.insert_appended_candidate(
-            &format!("{}/copies/not-a-copy-id.enc", locator.semantic_key()),
-            b"stored".to_vec(),
-        );
-
-        assert!(matches!(
-            storage.list_blob_copies(&locator).await,
-            Err(StorageError::Parse(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn browsable_blob_copies_have_no_encryption_suffix() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "browsable-copy-store",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("browsable-copy")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let locator = BlobLocator::browsable(
-            "audio",
-            "abcd-track",
-            storage.self_uploader(),
-            "Artist/Album/track.flac",
-            5,
-            crate::sync::store_commit::ObjectHash::digest(b"track"),
-        )
-        .expect("browsable locator");
-        let temp = tempfile::tempdir().unwrap();
-        let stored_file = temp.path().join("stored.bin");
-        crate::local_blob::write_atomic(&stored_file, b"track")
-            .await
-            .unwrap();
-
-        let copy = storage
-            .append_blob_copy_from_file(&locator, &stored_file)
-            .await
-            .expect("append browsable blob copy");
-
-        assert!(copy
-            .logical_key()
-            .starts_with(&format!("{}/copies/", locator.semantic_key())));
-        assert!(!copy.logical_key().ends_with(".enc"));
-        assert_eq!(
-            home.get_appended(copy.logical_key()),
-            Some(b"track".to_vec())
-        );
-    }
-
-    /// A committed rotation this device has not adopted survives a restart. A
-    /// prior run marks it and persists to `protocol_state`; a fresh run restores it
-    /// into a new in-memory marker, so sealing stays paused rather than resuming
-    /// under the superseded generation a removed member still holds — even though
-    /// the fresh marker started empty. Adopting the rotation and re-persisting
-    /// clears the durable record so a later restart no longer pauses.
-    #[tokio::test]
-    async fn persisted_pending_rotation_pauses_sealing_across_restart() {
-        let db = open_test_db();
-
-        // Prior run: generation 2 is committed but unadopted; record it durably.
-        let marked = PendingRotation::none();
-        marked.mark_committed(2);
-        persist_pending_rotation(&db, &marked).await.unwrap();
-
-        // Fresh run: a brand-new marker restores the pause from protocol_state.
-        let restored = PendingRotation::none();
-        restore_pending_rotation(&db, &restored).await.unwrap();
-        let live_gen_1 = CloudCipher::Encrypted(EncryptionService::from_key([1u8; 32]));
-        assert!(
-            matches!(
-                restored.check(&live_gen_1),
-                Err(RotationPending {
-                    committed_generation: 2,
-                    live_generation: 1,
-                })
-            ),
-            "a restored pause must still refuse sealing under the superseded generation",
-        );
-
-        // Adopt the rotation and re-persist: the durable record clears.
-        let adopted = CloudCipher::Encrypted(
-            EncryptionService::from_key([1u8; 32])
-                .with_appended_generation(2, [2u8; 32])
-                .unwrap(),
-        );
-        restored.resolve(&adopted);
-        persist_pending_rotation(&db, &restored).await.unwrap();
-
-        let after_restart = PendingRotation::none();
-        restore_pending_rotation(&db, &after_restart).await.unwrap();
-        assert!(
-            after_restart.check(&live_gen_1).is_ok(),
-            "a resolved rotation leaves no durable pause behind",
-        );
-    }
-
-    #[derive(Clone)]
-    struct RecordingCloudHome {
-        inner: InMemoryCloudHome,
-        full_reads: Arc<AtomicUsize>,
-        range_reads: Arc<AtomicUsize>,
-    }
-
-    #[derive(Clone)]
-    struct MisdirectedAppendHome {
-        inner: InMemoryCloudHome,
-        actual: Arc<std::sync::Mutex<std::collections::HashMap<String, AppendedObject>>>,
-    }
-
-    impl MisdirectedAppendHome {
-        fn new(inner: InMemoryCloudHome) -> Self {
-            Self {
-                inner,
-                actual: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl CloudHome for MisdirectedAppendHome {
-        fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn ImmutableCopyStorage>> {
-            Some(self)
-        }
-
-        async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-            self.inner.put_object(key, data).await
-        }
-
-        async fn open_multipart<'a>(
-            &'a self,
-            key: &str,
-            total_len: u64,
-        ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-            self.inner.open_multipart(key, total_len).await
-        }
-
-        fn multipart_threshold(&self) -> u64 {
-            self.inner.multipart_threshold()
-        }
-
-        async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-            self.inner.read(key).await
-        }
-
-        async fn read_range(
-            &self,
-            key: &str,
-            start: u64,
-            end: u64,
-        ) -> Result<Vec<u8>, CloudHomeError> {
-            self.inner.read_range(key, start, end).await
-        }
-
-        async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-            self.inner.list(prefix).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-            self.inner.delete(key).await
-        }
-
-        async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-            self.inner.exists(key).await
-        }
-
-        async fn set_access(
-            &self,
-            desired: CloudAccessState,
-        ) -> Result<CloudAccessOutcome, CloudHomeError> {
-            self.inner.set_access(desired).await
-        }
-    }
-
-    #[async_trait]
-    impl ImmutableCopyStorage for MisdirectedAppendHome {
-        async fn append_object(
-            &self,
-            key: &str,
-            body: BlobBody,
-            progress: &UploadProgress<'_>,
-        ) -> Result<AppendedObject, CloudHomeError> {
-            let actual = self.inner.append_object(key, body, progress).await?;
-            let provider_id = actual.opaque_provider_id().to_string();
-            self.actual
-                .lock()
-                .unwrap()
-                .insert(provider_id.clone(), actual);
-            AppendedObject::from_provider("misdirected/object".to_string(), provider_id)
-        }
-
-        async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
-            self.inner.list_appended(prefix).await
-        }
-
-        async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-            let actual = self
-                .actual
-                .lock()
-                .unwrap()
-                .get(object.opaque_provider_id())
-                .cloned()
-                .ok_or_else(|| CloudHomeError::NotFound(object.opaque_provider_id().to_string()))?;
-            self.inner.read_appended(&actual).await
-        }
-
-        async fn read_appended_to_file(
-            &self,
-            object: &AppendedObject,
-            destination: &Path,
-        ) -> Result<(), CloudFileReadError> {
-            let actual = self
-                .actual
-                .lock()
-                .unwrap()
-                .get(object.opaque_provider_id())
-                .cloned()
-                .ok_or_else(|| {
-                    CloudFileReadError::Source(CloudHomeError::NotFound(
-                        object.opaque_provider_id().to_string(),
-                    ))
-                })?;
-            self.inner.read_appended_to_file(&actual, destination).await
-        }
-
-        async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
-            let actual = self
-                .actual
-                .lock()
-                .unwrap()
-                .remove(object.opaque_provider_id())
-                .ok_or_else(|| CloudHomeError::NotFound(object.opaque_provider_id().to_string()))?;
-            self.inner.delete_appended(&actual).await
-        }
-    }
-
-    impl RecordingCloudHome {
-        fn new(inner: InMemoryCloudHome) -> Self {
-            Self {
-                inner,
-                full_reads: Arc::new(AtomicUsize::new(0)),
-                range_reads: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-
-        fn full_reads(&self) -> usize {
-            self.full_reads.load(Ordering::SeqCst)
-        }
-
-        fn range_reads(&self) -> usize {
-            self.range_reads.load(Ordering::SeqCst)
-        }
-
-        fn get(&self, key: &str) -> Option<Vec<u8>> {
-            self.inner.get(key)
-        }
-    }
-
-    #[async_trait]
-    impl CloudHome for RecordingCloudHome {
-        fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn ImmutableCopyStorage>> {
-            Some(self)
-        }
-
-        async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-            self.inner.put_object(key, data).await
-        }
-
-        async fn open_multipart<'a>(
-            &'a self,
-            key: &str,
-            total_len: u64,
-        ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-            self.inner.open_multipart(key, total_len).await
-        }
-
-        fn multipart_threshold(&self) -> u64 {
-            self.inner.multipart_threshold()
-        }
-
-        async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-            self.full_reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read(key).await
-        }
-
-        async fn read_range(
-            &self,
-            key: &str,
-            start: u64,
-            end: u64,
-        ) -> Result<Vec<u8>, CloudHomeError> {
-            self.range_reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read_range(key, start, end).await
-        }
-
-        async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-            self.inner.list(prefix).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-            self.inner.delete(key).await
-        }
-
-        async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-            self.inner.exists(key).await
-        }
-
-        async fn set_access(
-            &self,
-            desired: CloudAccessState,
-        ) -> Result<CloudAccessOutcome, CloudHomeError> {
-            self.inner.set_access(desired).await
-        }
-    }
-
-    #[async_trait]
-    impl ImmutableCopyStorage for RecordingCloudHome {
-        async fn append_object(
-            &self,
-            key: &str,
-            body: BlobBody,
-            progress: &UploadProgress<'_>,
-        ) -> Result<AppendedObject, CloudHomeError> {
-            self.inner.append_object(key, body, progress).await
-        }
-
-        async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
-            self.inner.list_appended(prefix).await
-        }
-
-        async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-            self.inner.read_appended(object).await
-        }
-
-        async fn read_appended_to_file(
-            &self,
-            object: &AppendedObject,
-            destination: &Path,
-        ) -> Result<(), CloudFileReadError> {
-            self.inner.read_appended_to_file(object, destination).await
-        }
-
-        async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
-            self.inner.delete_appended(object).await
-        }
-    }
-
-    /// A blob larger than the in-memory backend's multipart threshold, sealed by
-    /// the streaming `open_body` path and written through `CloudHome::write`, lands
-    /// as a byte-identical `[base_nonce][sealed chunks]` object that the unchanged
-    /// decrypt reads back — proving the multipart streaming path produces the same
-    /// wire format the whole-buffer encryptor does.
-    #[tokio::test]
-    async fn streaming_open_body_multipart_round_trips_through_write() {
-        let master = EncryptionService::from_key([11u8; 32]);
-        let cipher = CloudCipher::Encrypted(master.clone());
-        let home = InMemoryCloudHome::new();
-
-        // Larger than the backend's 4 MiB threshold so `write` streams it multipart.
-        let plaintext: Vec<u8> = (0..9_000_003u32).map(|i| (i % 251) as u8).collect();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("blob.bin");
-        std::fs::write(&path, &plaintext).unwrap();
-
-        let body = cipher
-            .open_body(
-                BlobScope::Master,
-                &path,
-                &cloud_aad_context("test-lib", "blob-key"),
-            )
-            .await
-            .expect("open streaming body");
-        assert!(
-            body.len() > home.multipart_threshold(),
-            "the body must exceed the threshold so it streams multipart",
-        );
-        home.write("blob-key", body, &crate::storage::cloud::no_progress())
-            .await
-            .expect("streaming write");
-
-        // At rest it is the generation-tagged sealed wire format; the cipher
-        // reads the tag and recovers the plaintext.
-        let stored = home.get("blob-key").expect("blob present");
-        assert_eq!(
-            cipher
-                .open(stored, &cloud_aad_context("test-lib", "blob-key"))
-                .expect("decrypt streamed blob"),
-            plaintext,
-            "the multipart-streamed object decrypts to the original plaintext",
-        );
-    }
-
-    #[tokio::test]
-    async fn cloud_sync_storage_put_blob_from_file_uploads_the_file_body() {
-        let home = RecordingCloudHome::new(InMemoryCloudHome::new());
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("put-blob-file")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let plaintext: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("blob.bin");
-        std::fs::write(&path, &plaintext).unwrap();
-
-        storage
-            .put_blob_from_file("audio", "track1", BlobScope::Master, None, &path)
-            .await
-            .expect("upload file body");
-
-        let key = CloudSyncStorage::blob_key(
-            BlobPathScheme::Hashed,
-            "audio",
-            Some(&storage.self_uploader()),
-            "track1",
-            None,
-        )
-        .expect("blob key");
-        assert_eq!(
-            home.get(&key).expect("stored blob"),
-            plaintext,
-            "the file-backed upload stores the file plaintext on a plaintext home",
-        );
-        assert_eq!(
-            home.full_reads(),
-            0,
-            "uploading a file must not read the cloud object back",
-        );
-    }
-
-    #[tokio::test]
-    async fn cloud_sync_storage_read_blob_to_file_uses_ranges() {
-        let home = RecordingCloudHome::new(InMemoryCloudHome::new());
-        let master = EncryptionService::from_key([17u8; 32]);
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(master),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("read-blob-file")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let plaintext: Vec<u8> = (0..180_000u32).map(|i| (i % 251) as u8).collect();
-        storage
-            .put_blob(
-                "audio",
-                "track1",
-                BlobScope::Master,
-                None,
-                plaintext.clone(),
-            )
-            .await
-            .expect("seed encrypted blob");
-
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("download.bin");
-        storage
-            .read_blob_to_file(
-                "audio",
-                Some(&storage.self_uploader()),
-                "track1",
-                BlobScope::Master,
-                None,
-                plaintext.len() as u64,
-                &crate::blob::content_hash(&plaintext),
-                &dest,
-            )
-            .await
-            .expect("download to file");
-
-        assert_eq!(
-            std::fs::read(&dest).expect("read downloaded file"),
-            plaintext,
-            "the file-backed download writes the plaintext to the destination",
-        );
-        assert_eq!(
-            home.full_reads(),
-            0,
-            "download-to-file must not fetch the whole cloud object",
-        );
-        assert!(
-            home.range_reads() > 1,
-            "download-to-file reads the encrypted object through ranges",
-        );
-    }
-
-    #[tokio::test]
-    async fn cloud_blob_hash_mismatch_is_not_provider_transport() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Hashed,
-            "hash-mismatch-store",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("hash-mismatch")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let actual = b"actual-bytes";
-        storage
-            .put_blob(
-                "audio",
-                "hash-mismatch",
-                BlobScope::Master,
-                None,
-                actual.to_vec(),
-            )
-            .await
-            .unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let error = storage
-            .read_blob_to_file(
-                "audio",
-                Some(&storage.self_uploader()),
-                "hash-mismatch",
-                BlobScope::Master,
-                None,
-                actual.len() as u64,
-                &crate::blob::content_hash(b"signed-bytes"),
-                &dir.path().join("download.bin"),
-            )
-            .await
-            .expect_err("signed hash rejects different remote content");
-
-        assert!(
-            matches!(&error, StorageError::InvalidContent(_)),
-            "hash mismatch retains invalid-content category: {error}"
-        );
-        assert!(
-            !error.is_transport(),
-            "hash mismatch is not offline: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn cloud_blob_local_cache_write_failure_is_not_provider_transport() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Hashed,
-            "local-write-store",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("local-write")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let bytes = b"cache-bytes";
-        storage
-            .put_blob(
-                "audio",
-                "local-write",
-                BlobScope::Master,
-                None,
-                bytes.to_vec(),
-            )
-            .await
-            .unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let blocked_parent = dir.path().join("not-a-directory");
-        std::fs::write(&blocked_parent, b"file").unwrap();
-        let error = storage
-            .read_blob_to_file(
-                "audio",
-                Some(&storage.self_uploader()),
-                "local-write",
-                BlobScope::Master,
-                None,
-                bytes.len() as u64,
-                &crate::blob::content_hash(bytes),
-                &blocked_parent.join("download.bin"),
-            )
-            .await
-            .expect_err("cache destination parent is not a directory");
-
-        assert!(
-            matches!(&error, StorageError::LocalFilesystem(_)),
-            "local cache write retains filesystem category: {error}"
-        );
-        assert!(
-            !error.is_transport(),
-            "local cache write is not offline: {error}"
-        );
-    }
-
-    /// `CloudCipher::for_storage` maps a home's storage mode to its at-rest
-    /// cipher: an opaque home seals under the supplied store key, a browsable
-    /// home is always plaintext (ignoring any key), and an opaque home with no
-    /// key — a locked store — has no cipher. This is the same mapping
-    /// `SyncManager::start_sync` builds the sync loop with, so reads through a
-    /// `BlobRangeReader` and writes through the outbox agree on the protection.
-    #[test]
-    fn for_storage_maps_mode_to_cipher() {
-        let master = EncryptionService::from_key([4u8; 32]);
-
-        assert!(matches!(
-            CloudCipher::for_storage(HomeStorage::Opaque, Some(master.clone())),
-            Some(CloudCipher::Encrypted(_))
-        ));
-        // A browsable home is plaintext even if a key is on hand.
-        assert!(matches!(
-            CloudCipher::for_storage(HomeStorage::Browsable, Some(master)),
-            Some(CloudCipher::Plaintext)
-        ));
-        assert!(matches!(
-            CloudCipher::for_storage(HomeStorage::Browsable, None),
-            Some(CloudCipher::Plaintext)
-        ));
-        // An opaque home with no key (a locked store) has no cipher.
-        assert!(CloudCipher::for_storage(HomeStorage::Opaque, None).is_none());
-    }
-
-    #[tokio::test]
-    async fn membership_entry_survives_key_generation_rotation() {
-        let home = InMemoryCloudHome::new();
-        let owner = UserKeypair::generate();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key_at_generation(1, [1u8; 32])),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            owner.clone(),
-            Arc::new(crate::storage::cloud::SequentialCopyIdGenerator::new(
-                "membership-rotation",
-            )),
-        )
-        .expect("test cloud storage supports immutable copies");
-
-        let first =
-            crate::sync::membership::founder_entry("test-lib", &owner, "0000000000001-0000-owner");
-        let store_root_hash = crate::sync::store_commit::ObjectHash::digest(b"test-lib-root");
-        let owner_pubkey = crate::keys::public_key_hex(&owner);
-        let first_coord = first.coord();
-        let mut chain = crate::sync::membership::MembershipChain::from_entries(vec![first.clone()])
-            .expect("found membership");
-        crate::sync::store_objects::append_membership_entry_object(
-            &storage,
-            store_root_hash,
-            &first_coord,
-            &first,
-        )
-        .await
-        .expect("write generation one membership");
-
-        let keyring = EncryptionService::from_keyring([(1, [1u8; 32]), (2, [2u8; 32])]).unwrap();
-        crate::sync::membership_ops::apply_key_rotation(
-            keyring,
-            &TestCustody::default(),
-            storage.cipher_state(),
-            &storage.shared_pending_rotation(),
-        )
-        .expect("adopt generation two");
-
-        assert_eq!(
-            crate::sync::store_objects::load_membership_entry_slot(
-                &storage,
-                store_root_hash,
-                &owner_pubkey,
-                &first_coord.author_owner_grant,
-                first_coord.stream_id,
-                1,
-            )
-            .await
-            .expect("read generation one membership after rotation")
-            .expect("generation one membership exists")
-            .value,
-            first,
-        );
-
-        let member = UserKeypair::generate();
-        let second = chain
-            .signed_set_member(
-                &owner,
-                crate::keys::public_key_hex(&member),
-                None,
-                crate::sync::membership::MemberRole::Member,
-                "0000000000002-0000-owner".to_string(),
-            )
-            .expect("owner adds member");
-        chain.add_entry(second.clone()).expect("valid member add");
-        let second_coord = second.coord();
-        crate::sync::store_objects::append_membership_entry_object(
-            &storage,
-            store_root_hash,
-            &second_coord,
-            &second,
-        )
-        .await
-        .expect("write generation two membership");
-        let semantic_prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
-            &owner_pubkey,
-            &second_coord.author_owner_grant,
-            second_coord.stream_id,
-            2,
-            second_coord.entry_hash,
-        );
-        let context = ProtocolObjectContext::store(
-            store_root_hash,
-            super::super::storage::ProtocolObjectDomain::StoreMembershipEntry,
-        );
-        let generation_two = storage
-            .list_protocol_objects(&semantic_prefix)
-            .await
-            .expect("list generation two membership")
-            .objects
-            .into_iter()
-            .next()
-            .expect("generation two object exists");
-        assert_eq!(
-            storage
-                .read_protocol_object(&context, &generation_two, &semantic_prefix)
-                .await
-                .expect("generation two key opens through protocol storage"),
-            serde_json::to_vec(&second).unwrap(),
-        );
-
-        let generation_one_storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key_at_generation(1, [1u8; 32])),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            owner.clone(),
-            Arc::new(SequentialCopyIdGenerator::new("generation-one-reader")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        assert!(
-            generation_one_storage
-                .read_protocol_object(&context, &generation_two, &semantic_prefix)
-                .await
-                .is_err(),
-            "a generation one key must not open a generation two object",
-        );
-
-        let old_key_labeled_generation_two = CloudSyncStorage::new(
-            Arc::new(home),
-            CloudCipher::Encrypted(EncryptionService::from_key_at_generation(2, [1u8; 32])),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            owner,
-            Arc::new(SequentialCopyIdGenerator::new("relabeled-reader")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        assert!(
-            old_key_labeled_generation_two
-                .read_protocol_object(&context, &generation_two, &semantic_prefix)
-                .await
-                .is_err(),
-            "renumbering the old key cannot open content sealed with generation-two key material",
-        );
-    }
-
-    #[tokio::test]
-    async fn blob_moved_to_a_different_cloud_key_fails_to_open() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("moved-blob")),
-        )
-        .expect("test cloud storage supports immutable copies");
-
-        storage
-            .put_blob(
-                "images",
-                "blob-a",
-                BlobScope::Master,
-                None,
-                b"secret-a".to_vec(),
-            )
-            .await
-            .expect("put blob a");
-        storage
-            .put_blob(
-                "images",
-                "blob-b",
-                BlobScope::Master,
-                None,
-                b"secret-b".to_vec(),
-            )
-            .await
-            .expect("put blob b");
-
-        let uploader = storage.self_uploader();
-        let key_a = CloudSyncStorage::blob_key(
-            BlobPathScheme::Hashed,
-            "images",
-            Some(&uploader),
-            "blob-a",
-            None,
-        )
-        .expect("blob a key");
-        let key_b = CloudSyncStorage::blob_key(
-            BlobPathScheme::Hashed,
-            "images",
-            Some(&uploader),
-            "blob-b",
-            None,
-        )
-        .expect("blob b key");
-        let a_bytes = home.get(&key_a).expect("blob a at rest");
-        home.write(
-            &key_b,
-            BlobBody::from_bytes(a_bytes),
-            &crate::storage::cloud::no_progress(),
-        )
-        .await
-        .expect("overwrite blob b");
-
-        assert!(
-            storage
-                .get_blob("images", Some(&uploader), "blob-b", BlobScope::Master, None)
-                .await
-                .is_err(),
-            "a blob substituted at another key must fail authentication",
-        );
-    }
-    /// A plaintext home stores Store protocol objects and blobs in the clear
-    /// without adding an `.enc` suffix to their keys.
-    #[tokio::test]
-    async fn plaintext_home_stores_protocol_objects_and_blobs_without_encryption_suffix() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("plaintext-copy")),
-        )
-        .expect("test cloud storage supports immutable copies");
-
-        let semantic_prefix = "store-v1/packages/dev1/1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let package = b"changeset-plaintext-bytes".to_vec();
-        let context = crate::sync::storage::ProtocolObjectContext::store(
-            crate::sync::store_commit::ObjectHash::digest(b"test-lib-root"),
-            crate::sync::storage::ProtocolObjectDomain::StorePackage,
-        );
-        let object = storage
-            .append_protocol_object(&context, semantic_prefix, ".pkg", package.clone())
-            .await
-            .expect("append Store package");
-        assert_eq!(
-            home.get_appended(object.physical().logical_key())
-                .as_deref(),
-            Some(package.as_slice()),
-        );
-        assert!(!object.physical().logical_key().ends_with(".enc"));
-        assert_eq!(
-            storage
-                .read_protocol_object(&context, &object, semantic_prefix)
-                .await
-                .expect("read Store package"),
-            package,
-        );
-
-        let blob = b"cover-art-plaintext".to_vec();
-        storage
-            .put_blob("photos", "p1cover", BlobScope::Master, None, blob.clone())
-            .await
-            .expect("put blob");
-        let uploader = storage.self_uploader();
-        let hashed = CloudSyncStorage::blob_key(
-            BlobPathScheme::Hashed,
-            "photos",
-            Some(&uploader),
-            "p1cover",
-            None,
-        )
-        .expect("hashed key");
-        assert_eq!(home.get(&hashed).as_deref(), Some(blob.as_slice()));
-        assert_eq!(
-            storage
-                .get_blob(
-                    "photos",
-                    Some(&uploader),
-                    "p1cover",
-                    BlobScope::Master,
-                    None,
+                .seal_blob_to_spool(
+                    &locator,
+                    &authority,
+                    crate::sync::storage::BlobSpoolProtection::Opaque(EncryptionService::from_key(
+                        [10u8; 32]
+                    ),),
+                    &source,
+                    &spool,
                 )
-                .await
-                .expect("get blob"),
-            blob,
-        );
+                .await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        assert!(!spool.exists());
     }
 
-    /// A `BlobPathScheme::Plain` home stores each blob at the consumer's readable
-    /// `cloud_path` (`{namespace}/{cloud_path}`), not the content-addressed shard:
-    /// the bucket is browsable. Asserts the blob lands at the exact readable key,
-    /// that the hashed shard key it *would* have used is absent, and that
-    /// `get_blob` with the same `cloud_path` round-trips.
     #[tokio::test]
-    async fn plain_scheme_stores_blob_at_the_readable_cloud_path() {
+    async fn exact_blob_plaintext_is_published_only_after_both_verifications() {
         let home = InMemoryCloudHome::new();
+        let identity = UserKeypair::generate();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home),
+            CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
+            BlobPathScheme::Hashed,
+            "verified-blob-download",
+            identity,
+        )
+        .expect("test cloud storage supports exact slots");
+        let (uploader, registration) =
+            blob_write_registration(&storage, "verified-blob-download").await;
+        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let audience_key = EncryptionService::from_key([9u8; 32]);
+        let plaintext: Vec<u8> = (0..150_000u32).map(|value| (value % 251) as u8).collect();
+        let locator = BlobLocator::opaque(
+            "audio",
+            "verified-track",
+            uploader.clone(),
+            RemoteAudience::Store,
+            BlobScope::Derived("album-a".to_string()),
+            audience_key.seal_key_fingerprint(),
+            plaintext.len() as u64,
+            ObjectHash::digest(&plaintext),
+        )
+        .expect("build locator");
+        let temp = tempfile::tempdir().expect("temporary blob directory");
+        let source = temp.path().join("plaintext");
+        let spool = temp.path().join("spool");
+        let destination = temp.path().join("materialized");
+        tokio::fs::write(&source, &plaintext)
+            .await
+            .expect("write plaintext source");
+        storage
+            .seal_blob_to_spool(
+                &locator,
+                &authority,
+                crate::sync::storage::BlobSpoolProtection::Opaque(audience_key.clone()),
+                &source,
+                &spool,
+            )
+            .await
+            .expect("seal exact spool");
+        let slot = storage
+            .allocate_blob_slot(&locator, &authority)
+            .await
+            .expect("allocate exact blob slot");
+        let blob = storage
+            .prepare_blob_object(&locator, &authority, slot, &spool)
+            .await
+            .expect("prepare exact blob");
+        storage
+            .create_blob_object_from_file(
+                &blob,
+                &authority,
+                &spool,
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .expect("create exact blob");
+
+        let staged = storage
+            .stage_verified_blob_plaintext(
+                &blob,
+                crate::sync::storage::BlobSpoolProtection::Opaque(audience_key),
+                &destination,
+            )
+            .await
+            .expect("stage verified plaintext");
+        assert!(!destination.exists());
+        assert_eq!(tokio::fs::read(staged.path()).await.unwrap(), plaintext);
+        staged.commit().await.expect("publish verified plaintext");
+        assert_eq!(tokio::fs::read(destination).await.unwrap(), plaintext);
+    }
+
+    #[tokio::test]
+    async fn stored_blob_corruption_never_creates_a_plaintext_stage() {
+        let home = InMemoryCloudHome::new();
+        let identity = UserKeypair::generate();
         let storage = CloudSyncStorage::new(
             Arc::new(home.clone()),
             CloudCipher::Encrypted(EncryptionService::from_key([3u8; 32])),
-            BlobPathScheme::Plain,
-            "test-lib",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("plain-path")),
-        )
-        .expect("test cloud storage supports immutable copies");
-
-        let cloud_path = "Artist - Album/cover-cover-row-id.jpg";
-        let bytes = b"cover-art-bytes".to_vec();
-        storage
-            .put_blob(
-                "images",
-                "cover-row-id",
-                BlobScope::Master,
-                Some(cloud_path),
-                bytes.clone(),
-            )
-            .await
-            .expect("put_blob plain");
-
-        // It lands at the bare readable key.
-        assert!(
-            home.get("images/Artist - Album/cover-cover-row-id.jpg")
-                .is_some(),
-            "blob stored at the readable cloud_path key",
-        );
-        // The hashed shard key it would otherwise have used does not exist.
-        let hashed = CloudSyncStorage::blob_key(
             BlobPathScheme::Hashed,
-            "images",
-            Some(&storage.self_uploader()),
-            "cover-row-id",
-            None,
+            "corrupt-blob-download",
+            identity,
         )
-        .expect("hashed key");
-        assert!(
-            home.get(&hashed).is_none(),
-            "the hashed shard key must be absent under the plain scheme",
-        );
-
-        // Round-trips with the same cloud_path (a plain home carries no uploader).
-        let got = storage
-            .get_blob(
-                "images",
-                None,
-                "cover-row-id",
-                BlobScope::Master,
-                Some(cloud_path),
+        .expect("test cloud storage supports exact slots");
+        let (uploader, registration) =
+            blob_write_registration(&storage, "corrupt-blob-download").await;
+        let authority = BlobWriteAuthority::new(&uploader, &registration).unwrap();
+        let audience_key = EncryptionService::from_key([9u8; 32]);
+        let plaintext = b"signed blob plaintext";
+        let locator = BlobLocator::opaque(
+            "covers",
+            "corrupt-cover",
+            uploader.clone(),
+            RemoteAudience::Store,
+            BlobScope::Master,
+            audience_key.seal_key_fingerprint(),
+            plaintext.len() as u64,
+            ObjectHash::digest(plaintext),
+        )
+        .expect("build locator");
+        let temp = tempfile::tempdir().expect("temporary blob directory");
+        let source = temp.path().join("plaintext");
+        let spool = temp.path().join("spool");
+        let destination = temp.path().join("materialized");
+        tokio::fs::write(&source, plaintext)
+            .await
+            .expect("write plaintext source");
+        storage
+            .seal_blob_to_spool(
+                &locator,
+                &authority,
+                crate::sync::storage::BlobSpoolProtection::Opaque(audience_key.clone()),
+                &source,
+                &spool,
             )
             .await
-            .expect("get_blob plain");
-        assert_eq!(got, bytes);
-    }
+            .expect("seal exact spool");
+        let slot = storage
+            .allocate_blob_slot(&locator, &authority)
+            .await
+            .unwrap();
+        let blob = storage
+            .prepare_blob_object(&locator, &authority, slot, &spool)
+            .await
+            .unwrap();
+        storage
+            .create_blob_object_from_file(
+                &blob,
+                &authority,
+                &spool,
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+            .unwrap();
+        home.replace_exact_object(blob.object().slot(), b"corrupt".to_vec());
 
-    /// A plain-scheme home with no `cloud_path` is a surfaced error, never a
-    /// silent fall back to the hashed shard (which would scatter readable-path
-    /// blobs under unfindable keys). Asserts both `blob_key` and `put_blob` error.
-    #[tokio::test]
-    async fn plain_scheme_without_cloud_path_errors() {
-        assert!(
-            CloudSyncStorage::blob_key(BlobPathScheme::Plain, "images", None, "id-1", None)
-                .is_err(),
-            "blob_key for a plain home with no cloud_path must error",
-        );
-
-        let storage = CloudSyncStorage::new(
-            Arc::new(InMemoryCloudHome::new()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Plain,
-            "test-lib",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("missing-cloud-path")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        assert!(
+        assert!(matches!(
             storage
-                .put_blob("images", "id-1", BlobScope::Master, None, b"x".to_vec())
-                .await
-                .is_err(),
-            "put_blob for a plain home with no cloud_path must error, not silently hash",
-        );
+                .stage_verified_blob_plaintext(
+                    &blob,
+                    crate::sync::storage::BlobSpoolProtection::Opaque(audience_key),
+                    &destination,
+                )
+                .await,
+            Err(StorageError::InvalidContent(_))
+        ));
+        assert!(!destination.exists());
     }
 
-    /// A `BlobRangeReader` over an encrypted home recovers an arbitrary plaintext
-    /// sub-range — here one that straddles a 64 KB chunk boundary — by fetching
-    /// only the covering chunks plus the one-time nonce, never the whole blob.
     #[tokio::test]
-    async fn blob_range_reader_decrypts_a_multi_chunk_sub_range() {
+    async fn reserved_protocol_slot_read_returns_its_completed_exact_reference() {
         let home = InMemoryCloudHome::new();
-        let master = EncryptionService::from_key([5u8; 32]);
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(master.clone()),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("encrypted-range")),
-        )
-        .expect("test cloud storage supports immutable copies");
-
-        // Larger than two 64 KB chunks so a window can straddle a boundary.
-        let plaintext: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
-        storage
-            .put_blob(
-                "audio",
-                "track1",
-                BlobScope::Master,
-                None,
-                plaintext.clone(),
-            )
-            .await
-            .expect("put_blob");
-
-        let key = CloudSyncStorage::blob_key(
-            BlobPathScheme::Hashed,
-            "audio",
-            Some(&storage.self_uploader()),
-            "track1",
-            None,
-        )
-        .expect("blob_key");
-        let reader = BlobRangeReader::new(
-            Arc::new(home.clone()) as Arc<dyn CloudHome>,
-            &CloudCipher::Encrypted(master),
-            BlobScope::Master,
-            key.clone(),
-            plaintext.len() as u64,
-            cloud_aad_context("test-lib", &key),
-        );
-
-        // A window straddling the 65_536-byte chunk boundary.
-        let (offset, len) = (60_000u64, 20_000u64);
-        let got = reader.read(offset, len).await.expect("ranged read");
-        assert_eq!(
-            got,
-            &plaintext[offset as usize..(offset + len) as usize],
-            "ranged read across a chunk boundary recovers the plaintext window",
-        );
-
-        // A second read reuses the cached nonce and still decrypts correctly.
-        let tail = reader.read(149_000, 1_000).await.expect("second read");
-        assert_eq!(tail, &plaintext[149_000..150_000]);
-    }
-
-    /// On a plaintext home the blob is stored verbatim, so a `BlobRangeReader`
-    /// returns the requested byte range straight through, with no key.
-    #[tokio::test]
-    async fn blob_range_reader_reads_a_plaintext_blob_verbatim() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Plaintext,
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("plaintext-range")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let plaintext: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
-        storage
-            .put_blob(
-                "audio",
-                "track1",
-                BlobScope::Master,
-                None,
-                plaintext.clone(),
-            )
-            .await
-            .expect("put_blob");
-
-        let key = CloudSyncStorage::blob_key(
-            BlobPathScheme::Hashed,
-            "audio",
-            Some(&storage.self_uploader()),
-            "track1",
-            None,
-        )
-        .expect("blob_key");
-        let reader = BlobRangeReader::new(
-            Arc::new(home.clone()) as Arc<dyn CloudHome>,
-            &CloudCipher::Plaintext,
-            BlobScope::Master,
-            key.clone(),
-            plaintext.len() as u64,
-            cloud_aad_context("test-lib", &key),
-        );
-        let got = reader.read(40_000, 10_000).await.expect("ranged read");
-        assert_eq!(got, &plaintext[40_000..50_000]);
-    }
-
-    /// The reader resolves the blob's scope to its key: a blob sealed under a
-    /// derived key reads back through a reader with the same derived scope, while
-    /// a reader with the wrong scope (master) cannot decrypt it.
-    #[tokio::test]
-    async fn blob_range_reader_resolves_the_blob_scope() {
-        let home = InMemoryCloudHome::new();
-        let master = EncryptionService::from_key([7u8; 32]);
-        let cipher = CloudCipher::Encrypted(master);
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            cipher.clone(),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("derived-range")),
-        )
-        .expect("test cloud storage supports immutable copies");
-
-        let scope_id = "release-42".to_string();
-        let plaintext: Vec<u8> = (0..80_000u32).map(|i| (i % 251) as u8).collect();
-        storage
-            .put_blob(
-                "audio",
-                "track1",
-                BlobScope::Derived(scope_id.clone()),
-                None,
-                plaintext.clone(),
-            )
-            .await
-            .expect("put_blob");
-
-        let key = CloudSyncStorage::blob_key(
-            BlobPathScheme::Hashed,
-            "audio",
-            Some(&storage.self_uploader()),
-            "track1",
-            None,
-        )
-        .expect("blob_key");
-        let home_arc = Arc::new(home.clone()) as Arc<dyn CloudHome>;
-
-        let derived = BlobRangeReader::new(
-            home_arc.clone(),
-            &cipher,
-            BlobScope::Derived(scope_id),
-            key.clone(),
-            plaintext.len() as u64,
-            cloud_aad_context("test-lib", &key),
-        );
-        assert_eq!(
-            derived.read(10_000, 20_000).await.expect("derived read"),
-            &plaintext[10_000..30_000],
-            "the matching derived scope decrypts the range",
-        );
-
-        let wrong = BlobRangeReader::new(
-            home_arc,
-            &cipher,
-            BlobScope::Master,
-            key.clone(),
-            plaintext.len() as u64,
-            cloud_aad_context("test-lib", &key),
-        );
-        assert!(
-            wrong.read(10_000, 20_000).await.is_err(),
-            "the master scope must not decrypt a derived-scoped blob",
-        );
-    }
-
-    /// A read past the blob's plaintext length is a surfaced error, not a
-    /// truncated read; a zero-length read is an empty result, not an error.
-    #[tokio::test]
-    async fn blob_range_reader_rejects_an_out_of_range_read() {
-        let home = InMemoryCloudHome::new();
-        let master = EncryptionService::from_key([9u8; 32]);
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(master.clone()),
-            BlobPathScheme::Hashed,
-            "test-lib",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("invalid-range")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let plaintext = b"a short blob".to_vec();
-        storage
-            .put_blob(
-                "audio",
-                "track1",
-                BlobScope::Master,
-                None,
-                plaintext.clone(),
-            )
-            .await
-            .expect("put_blob");
-        let key = CloudSyncStorage::blob_key(
-            BlobPathScheme::Hashed,
-            "audio",
-            Some(&storage.self_uploader()),
-            "track1",
-            None,
-        )
-        .expect("blob_key");
-        let reader = BlobRangeReader::new(
-            Arc::new(home) as Arc<dyn CloudHome>,
-            &CloudCipher::Encrypted(master),
-            BlobScope::Master,
-            key.clone(),
-            plaintext.len() as u64,
-            cloud_aad_context("test-lib", &key),
-        );
-        assert!(
-            reader.read(8, 100).await.is_err(),
-            "a range past the blob length must error",
-        );
-        assert!(reader.read(0, 0).await.expect("empty read").is_empty());
-    }
-
-    #[tokio::test]
-    async fn encrypted_append_retries_keep_distinct_copies_with_one_semantic_aad() {
-        let home = InMemoryCloudHome::new();
-        let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
-            BlobPathScheme::Hashed,
-            "append-store",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("append-copy")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let semantic = format!(
-            "store-v1/store-protocol-root/{}",
-            crate::sync::store_commit::ObjectHash::digest(b"store protocol root")
-        );
-        let context = crate::sync::storage::ProtocolObjectContext::store(
-            crate::sync::store_commit::ObjectHash::digest(b"store protocol root"),
-            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
-        );
-        let first = storage
-            .append_protocol_object(&context, &semantic, ".json", b"same signed bytes".to_vec())
-            .await
-            .expect("first append");
-        let second = storage
-            .append_protocol_object(&context, &semantic, ".json", b"same signed bytes".to_vec())
-            .await
-            .expect("retry append");
-
-        assert_ne!(first.logical_key(), second.logical_key());
-        assert_eq!(
-            storage
-                .read_protocol_object(&context, &first, &semantic)
-                .await
-                .unwrap(),
-            b"same signed bytes"
-        );
-        assert_eq!(
-            storage
-                .read_protocol_object(&context, &second, &semantic)
-                .await
-                .unwrap(),
-            b"same signed bytes"
-        );
-        let listing = storage
-            .list_protocol_objects(&semantic)
-            .await
-            .expect("list both copies");
-        assert_eq!(
-            listing.coverage,
-            crate::storage::cloud::ListingCoverage::CompleteAtScan
-        );
-        assert_eq!(listing.objects.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn append_rejects_and_removes_a_copy_returned_for_another_key() {
-        let inner = InMemoryCloudHome::new();
-        let home = MisdirectedAppendHome::new(inner.clone());
         let storage = CloudSyncStorage::new(
             Arc::new(home),
             CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
             BlobPathScheme::Hashed,
-            "misdirected-store",
+            "reserved-slot-read",
             UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("misdirected-copy")),
         )
-        .expect("test cloud storage supports immutable copies");
-        let root = crate::sync::store_commit::ObjectHash::digest(b"misdirected-root");
-        let semantic = format!("store-v1/store-protocol-root/{root}");
+        .expect("test cloud storage supports exact slots");
+        let root = crate::sync::store_commit::ObjectHash::digest(b"reserved slot root");
+        let semantic = "store-v1/heads/device-a/1".to_string();
         let context = crate::sync::storage::ProtocolObjectContext::store(
             root,
-            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
+            crate::sync::storage::ProtocolObjectDomain::StoreHead,
         );
-
-        assert!(matches!(
-            storage
-                .append_protocol_object(&context, &semantic, ".json", b"protocol".to_vec())
-                .await,
-            Err(StorageError::Parse(_))
-        ));
-
-        let temp = tempfile::tempdir().expect("blob temp dir");
-        let stored = temp.path().join("stored.bin");
-        crate::local_blob::write_atomic(&stored, b"stored blob")
+        let slot = storage
+            .allocate_protocol_slot(&context, &semantic, ".json")
             .await
-            .expect("write stored blob");
-        let locator = opaque_locator(storage.self_uploader());
-        assert!(matches!(
-            storage.append_blob_copy_from_file(&locator, &stored).await,
-            Err(StorageError::Parse(_))
-        ));
-
-        assert_eq!(inner.appended_delete_count(), 2);
-        assert!(inner
-            .list_appended("")
+            .expect("reserve successor slot");
+        let prepared = storage
+            .prepare_protocol_object(
+                &context,
+                slot.clone(),
+                &semantic,
+                b"signed successor bytes".to_vec(),
+            )
+            .expect("prepare successor bytes");
+        storage
+            .create_protocol_object(&prepared)
             .await
-            .expect("list after rejected appends")
-            .objects
-            .is_empty());
+            .expect("create successor");
+
+        let (opened, completed) = storage
+            .read_protocol_slot(&context, &slot, &semantic)
+            .await
+            .expect("read reserved successor slot");
+
+        assert_eq!(opened, b"signed successor bytes");
+        assert_eq!(&completed, prepared.reference());
     }
 
     #[tokio::test]
-    async fn append_reports_both_wrong_key_and_cleanup_failure() {
-        let inner = InMemoryCloudHome::new();
-        inner.fail_appended_delete_on_call(1);
-        let storage = CloudSyncStorage::new(
-            Arc::new(MisdirectedAppendHome::new(inner.clone())),
-            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
-            BlobPathScheme::Hashed,
-            "misdirected-cleanup-store",
-            UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("misdirected-cleanup-copy")),
-        )
-        .expect("test cloud storage supports immutable copies");
-        let root = crate::sync::store_commit::ObjectHash::digest(b"misdirected-cleanup-root");
-        let semantic = format!("store-v1/store-protocol-root/{root}");
-        let context = crate::sync::storage::ProtocolObjectContext::store(
-            root,
-            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
-        );
-
-        let error = storage
-            .append_protocol_object(&context, &semantic, ".json", b"protocol".to_vec())
-            .await
-            .expect_err("wrong provider key and failed cleanup must be reported");
-        let Some((operation, cleanup)) = error.cleanup_causes() else {
-            panic!("expected typed cleanup failure, got {error:?}");
-        };
-        assert!(matches!(operation, StorageError::Parse(_)));
-        assert!(matches!(cleanup, StorageError::Storage(_)));
-        assert_eq!(
-            inner
-                .list_appended("")
-                .await
-                .expect("list failed cleanup object")
-                .objects
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn protocol_object_read_rejects_a_noncanonical_copy_id() {
+    async fn reserved_protocol_slot_rejects_a_mismatched_semantic_path_before_read() {
         let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
-            Arc::new(home.clone()),
-            CloudCipher::Encrypted(EncryptionService::from_key([8u8; 32])),
+            Arc::new(home),
+            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
             BlobPathScheme::Hashed,
-            "copy-id-store",
+            "reserved-slot-relocation",
             UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("copy-id")),
         )
-        .expect("test cloud storage supports immutable copies");
-        let root = crate::sync::store_commit::ObjectHash::digest(b"copy-id-root");
-        let commit_hash = crate::sync::store_commit::ObjectHash::digest(b"commit");
-        let semantic = crate::sync::store_commit::commit_semantic_prefix("device", 1, commit_hash);
+        .expect("test cloud storage supports exact slots");
+        let root = crate::sync::store_commit::ObjectHash::digest(b"reserved slot root");
         let context = crate::sync::storage::ProtocolObjectContext::store(
             root,
-            crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+            crate::sync::storage::ProtocolObjectDomain::StoreHead,
         );
-        let object = storage
-            .append_protocol_object(&context, &semantic, ".json", b"signed commit".to_vec())
+        let original = "store-v1/heads/device-a/1".to_string();
+        let relocated = "store-v1/heads/device-b/1".to_string();
+        let slot = storage
+            .allocate_protocol_slot(&context, &original, ".json")
             .await
-            .expect("append Store commit");
-        let stored = home
-            .get_appended(object.physical().logical_key())
-            .expect("read stored ciphertext");
-        let malformed_logical = format!("{semantic}/copies/not-a-copy-id.json");
-        let malformed_physical =
-            home.insert_appended_candidate(&format!("{malformed_logical}.enc"), stored);
-        let malformed = crate::sync::storage::ImmutableObjectLocator::new(
-            malformed_logical,
-            malformed_physical,
-        );
+            .expect("reserve successor slot");
 
         assert!(matches!(
             storage
-                .read_protocol_object(&context, &malformed, &semantic)
+                .read_protocol_slot(&context, &slot, &relocated)
                 .await,
-            Err(crate::sync::storage::StorageError::Parse(_))
+            Err(StorageError::Parse(_))
         ));
     }
 
@@ -3738,7 +2541,6 @@ mod tests {
             BlobPathScheme::Hashed,
             "aad-store",
             UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("aad-copy")),
         )
         .expect("test cloud storage supports immutable copies");
         let root = crate::sync::store_commit::ObjectHash::digest(b"root-a");
@@ -3749,10 +2551,18 @@ mod tests {
             root,
             crate::sync::storage::ProtocolObjectDomain::StoreCommit,
         );
-        let object = storage
-            .append_protocol_object(&context, &semantic, ".json", b"signed commit".to_vec())
+        let slot = storage
+            .allocate_protocol_slot(&context, &semantic, ".json")
             .await
-            .expect("append root-bound Store commit");
+            .expect("allocate root-bound Store commit slot");
+        let prepared = storage
+            .prepare_protocol_object(&context, slot, &semantic, b"signed commit".to_vec())
+            .expect("prepare root-bound Store commit");
+        storage
+            .create_protocol_object(&prepared)
+            .await
+            .expect("create root-bound Store commit");
+        let object = prepared.reference().clone();
 
         assert_eq!(
             storage
@@ -3802,7 +2612,6 @@ mod tests {
             BlobPathScheme::Plain,
             "coordination-probe",
             UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("coordination-first")),
         )
         .expect("test cloud storage supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()));
@@ -3812,26 +2621,29 @@ mod tests {
             BlobPathScheme::Plain,
             "coordination-probe",
             UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("coordination-second")),
         )
         .expect("test cloud storage supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()));
 
-        crate::sync::storage::probe_serial_coordination(
+        let db = open_serial_test_db();
+        let binding = SyncStorage::provider_binding(&first).await.unwrap();
+        let probe_id = crate::sync::provider::ProviderProbeId::from_bytes([31; 32]);
+        crate::sync::provider::probe_serial_coordination_receipt(
             first.serial_coordination().unwrap(),
             second.serial_coordination().unwrap(),
-            "store-v1/__coordination-probe__/race-head".to_string(),
+            &db,
+            probe_id,
+            &binding,
         )
         .await
         .expect("coordination race probe");
 
-        assert!(home
-            .get("store-v1/__coordination-probe__/race-head")
-            .is_none());
-        assert_eq!(
-            home.deletes_seen(),
-            vec!["store-v1/__coordination-probe__/race-head"]
+        let key = format!(
+            "__coven_probe__/serial/{}",
+            hex::encode(probe_id.as_bytes())
         );
+        assert!(home.get(&key).is_none());
+        assert_eq!(home.deletes_seen(), vec![key]);
     }
 
     #[test]
@@ -3842,7 +2654,6 @@ mod tests {
             BlobPathScheme::Plain,
             "unsupported-coordination",
             UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("unsupported-coordination")),
         )
         .expect("test cloud storage supports immutable copies");
 
@@ -3862,25 +2673,31 @@ mod tests {
             BlobPathScheme::Plain,
             "coordination-cleanup",
             UserKeypair::generate(),
-            Arc::new(SequentialCopyIdGenerator::new("coordination-cleanup")),
         )
         .expect("test cloud storage supports immutable copies")
         .with_test_serial_coordination(Arc::new(home.clone()));
-        let key = "store-v1/__coordination-probe__/cleanup-head";
+        let db = open_serial_test_db();
+        let binding = SyncStorage::provider_binding(&storage).await.unwrap();
+        let probe_id = crate::sync::provider::ProviderProbeId::from_bytes([37; 32]);
+        let key = format!(
+            "__coven_probe__/serial/{}",
+            hex::encode(probe_id.as_bytes())
+        );
 
-        let error = crate::sync::storage::probe_serial_coordination(
+        let error = crate::sync::provider::probe_serial_coordination_receipt(
             storage.serial_coordination().unwrap(),
             storage.serial_coordination().unwrap(),
-            key.to_string(),
+            &db,
+            probe_id,
+            &binding,
         )
         .await
         .expect_err("cleanup failure must abort the probe");
 
         assert!(matches!(
             error,
-            crate::sync::storage::CoordinationProbeError::Cleanup { ref key, .. }
-                if key == "store-v1/__coordination-probe__/cleanup-head"
+            crate::sync::provider::ProviderProbeError::Storage(_)
         ));
-        assert!(home.get(key).is_some());
+        assert!(home.get(&key).is_some());
     }
 }

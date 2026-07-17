@@ -2153,7 +2153,7 @@ mod authority_tests {
         let store_root_hash = ObjectHash::digest(b"three-owner Circle conflict Store");
         let founder_grant = grant(b"three-owner Circle founder grant");
         let circle_id = CircleId::founder(store_root_hash, &first_pubkey, &founder_grant);
-        let first_stream = AuthorStreamId::from_bytes([81; 16]);
+        let first_stream = AuthorStreamId::from_bytes([81; 32]);
         let founder = CircleRosterEntry::founder(
             store_root_hash,
             circle_id,
@@ -2193,7 +2193,7 @@ mod authority_tests {
             .expect("three-Owner roster")
             .signed_remove_member(
                 "second-device",
-                AuthorStreamId::from_bytes([82; 16]),
+                AuthorStreamId::from_bytes([82; 32]),
                 first_pubkey,
                 &second,
             )
@@ -2249,7 +2249,7 @@ mod authority_tests {
         let remove_third = resumed
             .signed_remove_member(
                 "first-device",
-                AuthorStreamId::from_bytes([83; 16]),
+                AuthorStreamId::from_bytes([83; 32]),
                 third_pubkey,
                 &first,
             )
@@ -2257,7 +2257,7 @@ mod authority_tests {
         let remove_first = resumed
             .signed_remove_member(
                 "third-device",
-                AuthorStreamId::from_bytes([84; 16]),
+                AuthorStreamId::from_bytes([84; 32]),
                 first_pubkey.clone(),
                 &third,
             )
@@ -2362,7 +2362,7 @@ mod authority_tests {
         let store_root_hash = ObjectHash::digest(b"bounded Circle cycle Store");
         let founder_grant = grant(b"bounded Circle cycle founder");
         let circle_id = CircleId::founder(store_root_hash, &pubkeys[0], &founder_grant);
-        let founder_stream = AuthorStreamId::from_bytes([121; 16]);
+        let founder_stream = AuthorStreamId::from_bytes([121; 32]);
         let founder = CircleRosterEntry::founder(
             store_root_hash,
             circle_id,
@@ -2394,7 +2394,7 @@ mod authority_tests {
                 let stream = if index == 0 {
                     founder_stream
                 } else {
-                    AuthorStreamId::from_bytes([index as u8; 16])
+                    AuthorStreamId::from_bytes([index as u8; 32])
                 };
                 base_chain
                     .signed_remove_member(
@@ -2435,7 +2435,7 @@ mod authority_tests {
                 &owner_grant,
             ),
             "owner-device",
-            AuthorStreamId::from_bytes([1; 16]),
+            AuthorStreamId::from_bytes([1; 32]),
             owner_grant.clone(),
             &owner,
         );
@@ -2456,8 +2456,8 @@ mod authority_tests {
         let first_grant = grant(b"first-owner-grant");
         let store_root_hash = ObjectHash::digest(b"remove-readd-store");
         let circle_id = CircleId::founder(store_root_hash, &first_pubkey, &first_grant);
-        let first_stream = AuthorStreamId::from_bytes([2; 16]);
-        let second_stream = AuthorStreamId::from_bytes([3; 16]);
+        let first_stream = AuthorStreamId::from_bytes([2; 32]);
+        let second_stream = AuthorStreamId::from_bytes([3; 32]);
         let founder = CircleRosterEntry::founder(
             store_root_hash,
             circle_id,
@@ -2528,7 +2528,7 @@ mod authority_tests {
                 store_root_hash,
                 circle_id,
                 "owner-device",
-                AuthorStreamId::from_bytes([stream_byte; 16]),
+                AuthorStreamId::from_bytes([stream_byte; 32]),
                 grant_id,
                 &owner,
             )])
@@ -2552,8 +2552,8 @@ mod authority_tests {
         let store_root_hash = ObjectHash::digest(b"Circle conflict Store root");
         let first_grant = grant(b"Circle conflict founder grant");
         let circle_id = CircleId::founder(store_root_hash, &first_pubkey, &first_grant);
-        let first_stream = AuthorStreamId::from_bytes([31; 16]);
-        let second_stream = AuthorStreamId::from_bytes([32; 16]);
+        let first_stream = AuthorStreamId::from_bytes([31; 32]);
+        let second_stream = AuthorStreamId::from_bytes([32; 32]);
         let founder = CircleRosterEntry::founder(
             store_root_hash,
             circle_id,
@@ -2775,10 +2775,6 @@ mod authority_tests {
             after_resolution.author_owner_grant,
             resolution.replacement_grant
         );
-        assert_eq!(
-            CircleRosterHead::signed(&after_resolution, &first_owner).resolutions,
-            after_resolution.resolution_dependencies
-        );
         assert!(matches!(
             conflicted
                 .signed_cycle_resolution(resolution.resolver_branch_heads.clone(), &outsider,),
@@ -2797,7 +2793,7 @@ mod authority_tests {
             store_root_hash,
             circle_id,
             "owner-device",
-            AuthorStreamId::from_bytes([99; 16]),
+            AuthorStreamId::from_bytes([99; 32]),
             owner_grant,
             &owner,
         );
@@ -2821,7 +2817,7 @@ mod authority_tests {
         let store_root_hash = ObjectHash::digest(b"Circle entry resolution cut Store");
         let owner_grant = grant(b"Circle entry resolution cut grant");
         let circle_id = CircleId::founder(store_root_hash, &owner_pubkey, &owner_grant);
-        let stream_id = AuthorStreamId::from_bytes([100; 16]);
+        let stream_id = AuthorStreamId::from_bytes([100; 32]);
         let founder = CircleRosterEntry::founder(
             store_root_hash,
             circle_id,

@@ -35,40 +35,11 @@ pub struct CycleMembership {
     /// the LIST view (an entry is visible as soon as it is listed), distinct from
     /// the committed chain (an entry is committed only once a head certifies it).
     pub listed_entries: Vec<super::membership::MembershipCoord>,
-    pub listing_proof: MembershipListingProof,
+    pub discovery_proof: MembershipDiscoveryProof,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct MembershipListingProof {
-    entry_coverage: crate::storage::cloud::ListingCoverage,
-    head_coverage: crate::storage::cloud::ListingCoverage,
-}
-
-impl MembershipListingProof {
-    pub fn is_complete(self) -> bool {
-        self.entry_coverage == crate::storage::cloud::ListingCoverage::CompleteAtScan
-            && self.head_coverage == crate::storage::cloud::ListingCoverage::CompleteAtScan
-    }
-
-    #[cfg(test)]
-    pub(crate) fn complete_for_test() -> Self {
-        Self {
-            entry_coverage: crate::storage::cloud::ListingCoverage::CompleteAtScan,
-            head_coverage: crate::storage::cloud::ListingCoverage::CompleteAtScan,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        entry_coverage: crate::storage::cloud::ListingCoverage,
-        head_coverage: crate::storage::cloud::ListingCoverage,
-    ) -> Self {
-        Self {
-            entry_coverage,
-            head_coverage,
-        }
-    }
-}
+pub struct MembershipDiscoveryProof;
 
 /// Load and anchor the cycle's membership chain once. Every successful listing
 /// is validated; a loader error aborts regardless of owner pin because an
@@ -79,82 +50,36 @@ pub async fn load_cycle_membership(
     storage: &dyn SyncStorage,
     db: &Database,
 ) -> Result<CycleMembership, PullError> {
-    // The store's established owner, pinned at create/join/restore (issue #102).
-    // An initialized plaintext or encrypted store has `Some`; `None` is reserved
-    // for bootstrap callers that run before owner establishment.
     let pinned_owner = db
         .get_protocol_state(super::membership_ops::OWNER_PUBKEY_STATE_KEY)
         .await
-        .map_err(|e| PullError::Apply(format!("read pinned owner: {e}")))?;
-    let store_root_hash = db
-        .required_store_root_hash()
+        .map_err(|error| PullError::Apply(format!("read pinned owner: {error}")))?;
+    let root = db
+        .local_store_root_ref()
         .await
-        .map_err(|error| PullError::Apply(format!("read Store protocol root: {error}")))?;
-
-    let membership_listing =
-        match super::store_objects::list_membership_entry_objects(storage, store_root_hash).await {
-            Ok(entries) => entries,
-            Err(e) => {
-                // Can't even list membership. For an owner-pinned store we cannot
-                // verify authorship, so fail closed (abort, retry next cycle) rather
-                // than apply changesets unvalidated. Only an unpinned
-                // pre-initialization caller can proceed without a chain.
-                if pinned_owner.is_some() {
-                    return Err(PullError::MembershipObject(e));
-                }
-                warn!("failed to list membership entries for validation: {e}");
-                return Ok(CycleMembership {
-                    chain: None,
-                    pinned_owner,
-                    listed_entries: Vec::new(),
-                    listing_proof: MembershipListingProof {
-                        entry_coverage: crate::storage::cloud::ListingCoverage::BestEffort,
-                        head_coverage: crate::storage::cloud::ListingCoverage::BestEffort,
-                    },
-                });
+        .map_err(|error| PullError::Apply(format!("read Store root reference: {error}")))?
+        .ok_or_else(|| PullError::Apply("Store root reference is absent".to_string()))?;
+    let root_value = super::store_objects::load_store_protocol_root(storage, &root)
+        .await
+        .map_err(PullError::MembershipObject)?
+        .value;
+    let owner = pinned_owner
+        .clone()
+        .unwrap_or_else(|| root_value.descriptor.founder_pubkey.clone());
+    let chain = super::membership_ops::load_and_persist_owner_anchor(storage, &root, &owner, db)
+        .await
+        .map_err(|error| match error {
+            super::membership_ops::AnchoredChainError::StorageUnavailable { .. } => {
+                PullError::MembershipLoad(error)
             }
-        };
-    let entry_coverage = membership_listing.coverage;
-    let listed_entries: Vec<super::membership::MembershipCoord> = membership_listing
-        .entries
-        .into_iter()
-        .map(|(coord, _)| coord)
-        .collect();
-
-    // Load + validate the chain and anchor it to the pinned owner. Every
-    // successful LIST result, including an empty one, reaches the same optional
-    // loader: persisted author floors can recover heads and entries omitted by
-    // the listing. For an owner-pinned store a chain that won't validate, or one
-    // founded by a different key, is tamper. This also fails loud without an
-    // owner pin: an unpinned database may already hold accepted author floors,
-    // whose missing or regressed state must not turn authorization off. The
-    // database makes this load monotonic per author.
-    let loaded = match super::membership_ops::load_anchored_chain_if_known_with_proof(
-        storage,
-        store_root_hash,
-        &listed_entries,
-        pinned_owner.as_deref(),
-        Some(db),
-    )
-    .await
-    {
-        Ok(loaded) => loaded,
-        Err(error @ super::membership_ops::AnchoredChainError::StorageUnavailable { .. }) => {
-            return Err(PullError::MembershipLoad(error));
-        }
-        Err(error) => return Err(PullError::MembershipTampered(error.to_string())),
-    };
-    let chain = loaded.chain;
-    let listing_proof = MembershipListingProof {
-        entry_coverage,
-        head_coverage: loaded.head_coverage,
-    };
-
+            _ => PullError::MembershipTampered(error.to_string()),
+        })?;
+    let listed_entries = chain.author_heads();
     Ok(CycleMembership {
-        chain,
-        pinned_owner,
+        chain: Some(chain),
+        pinned_owner: Some(owner),
         listed_entries,
-        listing_proof,
+        discovery_proof: MembershipDiscoveryProof,
     })
 }
 
@@ -223,9 +148,8 @@ pub(super) fn advance_max_updated_at(
 
 pub(crate) struct BlobDownload {
     blob: crate::blob::BlobRef,
-    size: BlobDownloadSize,
-    hash: BlobDownloadHash,
-    cloud_path: BlobDownloadCloudPath,
+    authority: crate::blob::RowBlobAuthority,
+    stored: crate::blob::locator::StoredBlobRef,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,7 +157,6 @@ pub enum BlobDownloadFailureCause {
     Invalid(String),
     Local(String),
     Metadata(String),
-    Uploader(String),
     Storage(super::storage::StorageError),
 }
 
@@ -243,7 +166,6 @@ impl std::fmt::Display for BlobDownloadFailureCause {
             Self::Invalid(reason) => write!(formatter, "invalid blob: {reason}"),
             Self::Local(reason) => write!(formatter, "local cache: {reason}"),
             Self::Metadata(reason) => write!(formatter, "blob metadata: {reason}"),
-            Self::Uploader(reason) => write!(formatter, "blob uploader: {reason}"),
             Self::Storage(error) => write!(formatter, "provider: {error}"),
         }
     }
@@ -299,163 +221,17 @@ impl std::error::Error for BlobDownloadFailures {
     }
 }
 
-/// The row a change is about, named the way every change names it: its table and primary
-/// key. A changeset UPDATE reports only the columns whose values CHANGED, so a column it
-/// omits has to be read back from the row itself — and this is the only handle on that row
-/// that a change always carries, and that a device always resolves.
-///
-/// Naming it by the change's *old blob id* instead — "the row that carries blob X" — asks a
-/// question a device whose row has already moved on cannot answer: a concurrent repointing
-/// of the same row leaves no row carrying X at all, and the lookup fails on a row that is
-/// sitting right there under its primary key.
-///
-/// What the row can answer is the value it currently holds, which is the author's omitted
-/// value exactly when this device agrees with the author's pre-image on that column. It
-/// does not when a *concurrent* change moved that same column: then the author's value is
-/// in no local state and in no part of the changeset, and the download fails its hash
-/// check. Recovering an omitted column from local state cannot cover that; only reading the
-/// blob's length from its own cloud object would, and the object is reachable precisely
-/// because its key names the blob.
-#[derive(Clone)]
-struct PreApplyRow {
-    table: String,
-    pk: String,
-}
-
-/// Where the download reads a blob's declared plaintext size and content hash
-/// from. Both ride with the changeset row when the row change carries them
-/// (`Declared`); an update that changed the blob id but not size/hash omits those
-/// columns — from its old values as well as its new ones — so they are read back from the
-/// [`PreApplyRow`] (`ExistingRow`); a snapshot backfill reads both from the freshly
-/// bootstrapped DB row (`InstalledRow`).
-enum BlobDownloadSize {
-    Declared(u64),
-    ExistingRow(PreApplyRow),
-    InstalledRow,
-    Missing,
-}
-
-enum BlobDownloadHash {
-    Declared(String),
-    ExistingRow(PreApplyRow),
-    InstalledRow,
-    Missing,
-}
-
-/// Where the download reads a blob's readable cloud path from — the key a browsable
-/// home stores it at. The same three sources the size and hash have, with one
-/// difference: a blob legitimately has no cloud path at all (`Absent`) on an opaque
-/// home, which keys by id, so its absence is a value rather than an error. An update
-/// that repointed a row at a new blob left its cloud path alone, so the column is
-/// missing from the change and the pre-apply row holds the (unchanged) value.
-enum BlobDownloadCloudPath {
-    Declared(String),
-    ExistingRow(crate::blob::BlobRef),
-    Absent,
-}
-
 impl BlobDownload {
-    fn from_change(
-        blob: crate::blob::BlobRef,
-        source_size: Option<u64>,
-        source_hash: Option<String>,
-        lookup_blob: Option<crate::blob::BlobRef>,
-        pre_apply: Option<PreApplyRow>,
-    ) -> Self {
-        let size = match (source_size, pre_apply.clone()) {
-            (Some(size), _) => BlobDownloadSize::Declared(size),
-            (None, Some(row)) => BlobDownloadSize::ExistingRow(row),
-            (None, None) => BlobDownloadSize::Missing,
-        };
-        let hash = match (source_hash, pre_apply) {
-            (Some(hash), _) => BlobDownloadHash::Declared(hash),
-            (None, Some(row)) => BlobDownloadHash::ExistingRow(row),
-            (None, None) => BlobDownloadHash::Missing,
-        };
-        let cloud_path = match (blob.cloud_path.clone(), lookup_blob) {
-            (Some(path), _) => BlobDownloadCloudPath::Declared(path),
-            (None, Some(blob)) => BlobDownloadCloudPath::ExistingRow(blob),
-            (None, None) => BlobDownloadCloudPath::Absent,
-        };
-        Self {
-            blob,
-            size,
-            hash,
-            cloud_path,
-        }
-    }
-
-    pub(crate) fn from_installed_db(blob: crate::blob::BlobRef) -> Self {
-        // A row read whole out of the bootstrapped DB carries its cloud path already.
-        let cloud_path = match blob.cloud_path.clone() {
-            Some(path) => BlobDownloadCloudPath::Declared(path),
-            None => BlobDownloadCloudPath::Absent,
-        };
-        Self {
-            blob,
-            size: BlobDownloadSize::InstalledRow,
-            hash: BlobDownloadHash::InstalledRow,
-            cloud_path,
-        }
-    }
-
-    async fn resolve_source_size(
-        db: &Database,
-        blob: &crate::blob::BlobRef,
-        size: BlobDownloadSize,
-    ) -> Result<u64, String> {
-        match size {
-            BlobDownloadSize::Declared(size) => Ok(size),
-            BlobDownloadSize::ExistingRow(row) => {
-                crate::blob::cache::row_blob_size(db, &row.table, &row.pk)
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            BlobDownloadSize::InstalledRow => crate::blob::cache::expected_blob_size(db, blob)
-                .await
-                .map_err(|e| e.to_string()),
-            BlobDownloadSize::Missing => Err(format!(
-                "incoming blob {}/{} has no declared size",
-                blob.namespace, blob.id
-            )),
-        }
-    }
-
-    async fn resolve_source_hash(
-        db: &Database,
-        blob: &crate::blob::BlobRef,
-        hash: BlobDownloadHash,
-    ) -> Result<String, String> {
-        match hash {
-            BlobDownloadHash::Declared(hash) => Ok(hash),
-            BlobDownloadHash::ExistingRow(row) => {
-                crate::blob::cache::row_blob_hash(db, &row.table, &row.pk)
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            BlobDownloadHash::InstalledRow => crate::blob::cache::expected_blob_hash(db, blob)
-                .await
-                .map_err(|e| e.to_string()),
-            BlobDownloadHash::Missing => Err(format!(
-                "incoming blob {}/{} has no declared content hash",
-                blob.namespace, blob.id
-            )),
-        }
-    }
-
-    async fn resolve_cloud_path(
-        db: &Database,
-        cloud_path: BlobDownloadCloudPath,
-    ) -> Result<Option<String>, String> {
-        match cloud_path {
-            BlobDownloadCloudPath::Declared(path) => Ok(Some(path)),
-            BlobDownloadCloudPath::ExistingRow(lookup) => {
-                crate::blob::cache::row_cloud_path(db, &lookup)
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            BlobDownloadCloudPath::Absent => Ok(None),
-        }
+    pub(crate) fn from_row(reference: crate::blob::RowBlobRef) -> Result<Self, String> {
+        let stored = reference
+            .stored()
+            .cloned()
+            .ok_or_else(|| "remote eager blob row has no exact stored reference".to_string())?;
+        Ok(Self {
+            blob: reference.blob().clone(),
+            authority: reference.authority().clone(),
+            stored,
+        })
     }
 }
 
@@ -468,87 +244,54 @@ impl BlobDownload {
 /// as the pre-apply DB lookup key for that unchanged size.
 pub(crate) fn cache_eager_blobs(
     blob_decls: &BlobDecls,
-    old_changes: &[RowChange],
     changes: &[RowChange],
-) -> Result<Vec<BlobDownload>, crate::blob::decl::BlobDeclError> {
-    if old_changes.len() != changes.len() {
-        return Err(crate::blob::decl::BlobDeclError::ChangesetWalkMismatch {
-            old_count: old_changes.len(),
-            new_count: changes.len(),
-        });
-    }
-    old_changes
-        .iter()
-        .zip(changes)
-        .filter_map(
-            |(old, change)| match blob_decls.ref_size_hash_from_change(change) {
-                Ok(Some((blob, size, hash))) if blob.fill == CacheFill::CacheEager => {
-                    // The row this change is about: every change carries its primary key,
-                    // in its old values as well as its new ones.
-                    let pre_apply = change.pk().map(|pk| PreApplyRow {
-                        table: change.table.clone(),
-                        pk: pk.to_string(),
-                    });
-                    match blob_decls.ref_from_change(old) {
-                        Ok(old_blob) => Some(Ok(BlobDownload::from_change(
-                            blob, size, hash, old_blob, pre_apply,
-                        ))),
-                        Err(e) => Some(Err(e)),
-                    }
-                }
-                Ok(_) => None,
-                Err(e) => Some(Err(e)),
-            },
-        )
-        .collect()
-}
-
-/// The blobs a changeset *introduces* — a row whose new blob ref the pre-image
-/// lacked, or differs from — paired with the `author` that uploaded them (the
-/// author of a changeset uploads the blobs its rows introduce, into its own cloud
-/// prefix). A row updated without changing its blob re-references an existing
-/// object and introduces nothing, so it is not recorded here. Empty when the
-/// author is unknown, which is possible only before membership initialization.
-/// Returns `(namespace, blob_id, uploader)` for the local uploader index.
-pub(super) fn introduced_blob_uploads(
-    blob_decls: &BlobDecls,
-    old_changes: &[RowChange],
-    changes: &[RowChange],
-    author: Option<&str>,
-) -> Result<Vec<(String, String, String)>, crate::blob::decl::BlobDeclError> {
-    let Some(author) = author else {
-        return Ok(Vec::new());
-    };
-    if old_changes.len() != changes.len() {
-        return Err(crate::blob::decl::BlobDeclError::ChangesetWalkMismatch {
-            old_count: old_changes.len(),
-            new_count: changes.len(),
-        });
-    }
-    let mut out = Vec::new();
-    for (old, new) in old_changes.iter().zip(changes) {
-        let Some(new_blob) = blob_decls.ref_from_change(new)? else {
+    package: &crate::sync::audience_package::AudiencePackage,
+) -> Result<Vec<BlobDownload>, String> {
+    let authority = crate::blob::RowBlobAuthority::Remote(package.audience().clone());
+    let mut downloads = Vec::new();
+    for change in changes {
+        if change.op == crate::changeset::ChangeOp::Delete {
+            continue;
+        }
+        let Some(blob) = blob_decls
+            .ref_from_change(change)
+            .map_err(|error| error.to_string())?
+        else {
             continue;
         };
-        // An insert always introduces its blob; an update introduces one only when
-        // it moves the row to a different blob (a same-blob update re-references an
-        // existing object and uploads nothing). A delete carries no new blob and is
-        // already skipped above.
-        let introduced = match new.op {
-            crate::changeset::ChangeOp::Insert => true,
-            crate::changeset::ChangeOp::Update => match blob_decls.ref_from_change(old)? {
-                Some(old_blob) => {
-                    old_blob.namespace != new_blob.namespace || old_blob.id != new_blob.id
-                }
-                None => true,
-            },
-            crate::changeset::ChangeOp::Delete => false,
-        };
-        if introduced {
-            out.push((new_blob.namespace, new_blob.id, author.to_string()));
+        if blob.fill != CacheFill::CacheEager {
+            continue;
         }
+        let row_id = change.pk().ok_or_else(|| {
+            format!(
+                "blob-bearing incoming row {:?} has no primary key",
+                change.table
+            )
+        })?;
+        let matches = package
+            .blob_bindings()
+            .iter()
+            .filter(|binding| {
+                binding.table() == change.table
+                    && binding.row_id() == row_id
+                    && binding.blob().locator().namespace() == blob.namespace
+                    && binding.blob().locator().blob_id() == blob.id
+            })
+            .collect::<Vec<_>>();
+        let [binding] = matches.as_slice() else {
+            return Err(format!(
+                "incoming eager blob row {:?}/{row_id:?} has {} exact locator bindings",
+                change.table,
+                matches.len()
+            ));
+        };
+        downloads.push(BlobDownload {
+            blob,
+            authority: authority.clone(),
+            stored: binding.blob().clone(),
+        });
     }
-    Ok(out)
+    Ok(downloads)
 }
 
 /// Derive every local-blob cleanup obligation from a changeset before its rows
@@ -625,15 +368,13 @@ pub(crate) async fn download_blobs(
     blobs: Vec<BlobDownload>,
     storage: &dyn SyncStorage,
     store_dir: &StoreDir,
-    known_uploader: Option<&str>,
 ) -> Result<(), BlobDownloadFailures> {
     let mut failures = Vec::new();
     for download in blobs {
         let BlobDownload {
             blob,
-            size,
-            hash,
-            cloud_path,
+            authority,
+            stored,
         } = download;
         // The blob's `id`/`namespace`/`cloud_path` come from a row in an incoming
         // changeset authored by any write-capable member. An id or namespace that is
@@ -699,7 +440,14 @@ pub(crate) async fn download_blobs(
         // existence check is a local-disk fault, not a missing blob — and the
         // download's own write would hit the same fault. Hold the position and retry
         // next cycle rather than treat the error as absence.
-        match cached_in_either_folder(&dest, &pinned).await {
+        match cached_exact_in_either_folder(
+            &dest,
+            &pinned,
+            stored.locator().plaintext_size(),
+            stored.locator().plaintext_hash(),
+        )
+        .await
+        {
             Ok(true) => continue,
             Ok(false) => {}
             Err(e) => {
@@ -713,106 +461,51 @@ pub(crate) async fn download_blobs(
             }
         }
 
-        let source_size = match BlobDownload::resolve_source_size(db, &blob, size).await {
-            Ok(size) => size,
-            Err(e) => {
-                warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob size, skipping download");
+        let protection = match crate::blob::cache::opening_protection_for_authority(
+            db, storage, &authority, &stored,
+        )
+        .await
+        {
+            Ok(protection) => protection,
+            Err(error) => {
+                let message = error.to_string();
+                warn!(id = %blob.id, namespace = %blob.namespace, error = %message, "cannot resolve exact blob opening authority");
                 failures.push(BlobDownloadFailure {
                     namespace: blob.namespace.clone(),
                     id: blob.id.clone(),
-                    cause: BlobDownloadFailureCause::Metadata(e),
+                    cause: BlobDownloadFailureCause::Metadata(message),
                 });
                 continue;
             }
-        };
-
-        // The author-signed content hash the downloaded plaintext must match. A
-        // blob whose row does not carry one is refused rather than downloaded
-        // unverified — the hash is the authority that pins the bytes to the row's
-        // author, so a missing one is bad data, not a case to skip past.
-        let expected_hash = match BlobDownload::resolve_source_hash(db, &blob, hash).await {
-            Ok(hash) => hash,
-            Err(e) => {
-                warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob content hash, skipping download");
-                failures.push(BlobDownloadFailure {
-                    namespace: blob.namespace.clone(),
-                    id: blob.id.clone(),
-                    cause: BlobDownloadFailureCause::Metadata(e),
-                });
-                continue;
-            }
-        };
-
-        // The readable key a browsable home stores the blob at. A row repointed at a
-        // new blob leaves its cloud path alone, so the change omits the column and the
-        // path comes from the pre-apply row instead — which is the same value, that
-        // being what "the change did not touch it" means.
-        let cloud_path = match BlobDownload::resolve_cloud_path(db, cloud_path).await {
-            Ok(path) => path,
-            Err(e) => {
-                warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "cannot read blob cloud path, skipping download");
-                failures.push(BlobDownloadFailure {
-                    namespace: blob.namespace.clone(),
-                    id: blob.id.clone(),
-                    cause: BlobDownloadFailureCause::Metadata(e),
-                });
-                continue;
-            }
-        };
-        if let Some(path) = cloud_path.as_deref() {
-            if let Err(e) = crate::store_dir::validate_cloud_path(path) {
-                error!(id = %blob.id, cloud_path = %path, "blob cloud_path escapes its prefix ({e}); refusing");
-                failures.push(BlobDownloadFailure {
-                    namespace: blob.namespace.clone(),
-                    id: blob.id.clone(),
-                    cause: BlobDownloadFailureCause::Invalid(e.to_string()),
-                });
-                continue;
-            }
-        }
-
-        // The prefix the blob lives under: the known author for an incremental
-        // pull; otherwise resolved from the index, then a listing scan.
-        let uploader = match known_uploader {
-            Some(uploader) => Some(uploader.to_string()),
-            None => match crate::blob::cache::resolve_blob_uploader(db, storage, &blob).await {
-                Ok(uploader) => uploader,
-                Err(crate::blob::cache::BlobCacheError::Storage(source)) => {
-                    warn!(id = %blob.id, namespace = %blob.namespace, error = %source, "cannot resolve blob uploader, skipping download");
-                    failures.push(BlobDownloadFailure {
-                        namespace: blob.namespace.clone(),
-                        id: blob.id.clone(),
-                        cause: BlobDownloadFailureCause::Storage(source),
-                    });
-                    continue;
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    warn!(id = %blob.id, namespace = %blob.namespace, error = %message, "cannot resolve blob uploader, skipping download");
-                    failures.push(BlobDownloadFailure {
-                        namespace: blob.namespace.clone(),
-                        id: blob.id.clone(),
-                        cause: BlobDownloadFailureCause::Uploader(message),
-                    });
-                    continue;
-                }
-            },
         };
 
         match storage
-            .read_blob_to_file(
-                &blob.namespace,
-                uploader.as_deref(),
-                &blob.id,
-                blob.scope.clone(),
-                cloud_path.as_deref(),
-                source_size,
-                &expected_hash,
-                &dest,
-            )
+            .stage_verified_blob_plaintext(&stored, protection, &dest)
             .await
         {
-            Ok(()) => {}
+            Ok(staged) => match staged.commit().await {
+                Ok(()) => {
+                    if let Err(error) = crate::blob::cache::evict_to_budget(
+                        db,
+                        store_dir,
+                        &blob.namespace,
+                        Some(&dest),
+                    )
+                    .await
+                    {
+                        failures.push(BlobDownloadFailure {
+                            namespace: blob.namespace.clone(),
+                            id: blob.id.clone(),
+                            cause: BlobDownloadFailureCause::Local(error.to_string()),
+                        });
+                    }
+                }
+                Err(error) => failures.push(BlobDownloadFailure {
+                    namespace: blob.namespace.clone(),
+                    id: blob.id.clone(),
+                    cause: BlobDownloadFailureCause::Local(error),
+                }),
+            },
             Err(e) => {
                 warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "failed to download blob");
                 failures.push(BlobDownloadFailure {
@@ -834,13 +527,18 @@ pub(crate) async fn download_blobs(
 /// `pinned/`), so a pull doesn't re-download a blob a read already cached or the
 /// user pinned. An existence-check failure (a broken filesystem) is surfaced, never
 /// collapsed into "absent": re-downloading over a present file would mask the fault.
-async fn cached_in_either_folder(
+async fn cached_exact_in_either_folder(
     cache: &std::path::Path,
     pinned: &std::path::Path,
+    expected_size: u64,
+    expected_hash: super::store_commit::ObjectHash,
 ) -> Result<bool, String> {
     for path in [cache, pinned] {
         if crate::local_blob::exists(path).await? {
-            return Ok(true);
+            let (size, hash) = crate::local_blob::exact_file_facts(path).await?;
+            if size == expected_size && hash == expected_hash {
+                return Ok(true);
+            }
         }
     }
     Ok(false)

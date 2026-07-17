@@ -567,23 +567,12 @@ impl CovenHandle {
         &self,
         branch_id: &coven_core::PendingBranchId,
     ) -> CovenResult<crate::sync::store_pull::SerialResolutionPlan> {
-        let branch = self
-            .db()
-            .pending_branches()
-            .await?
-            .into_iter()
-            .find(|branch| &branch.branch_id == branch_id)
-            .ok_or_else(|| {
-                CovenError::SerialResolution(format!(
-                    "branch {} is not conflicted",
-                    branch_id.first_write_id()
-                ))
-            })?;
+        let branch_base = self.db().conflicted_serial_branch_base(branch_id).await?;
         let manager = self
             .sync_manager()
             .ok_or_else(|| CovenError::SerialResolution("sync is not connected".to_string()))?;
         manager
-            .prepare_serial_resolution(branch.base, &self.store_dir())
+            .prepare_serial_resolution(branch_base, &self.store_dir())
             .await
             .map_err(|error| CovenError::SerialResolution(error.to_string()))
     }
@@ -1057,22 +1046,16 @@ mod tests {
     use crate::keys::test_keyring;
     use crate::storage::cloud::test_utils::InMemoryCloudHome;
     use crate::storage::cloud::{
-        AppendedListing, AppendedObject, BlobBody, BoxPartSink, CloudAccessOutcome,
-        CloudAccessState, CloudHome, CloudHomeError, ImmutableCopyStorage, UploadProgress,
+        BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudHome, CloudHomeError,
+        ExactSlotStorage, ObjectSlot, UploadProgress,
     };
     use crate::store_dir::StoreDir;
-    use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
-    use crate::sync::hlc::Hlc;
+    use crate::sync::cloud_storage::CloudCipher;
     use crate::sync::session::BlobDecl;
-    use crate::sync::storage::SyncStorage;
-    use crate::sync::test_helpers::run_test_cycle as drive_test_cycle;
-    use crate::sync::test_helpers::{
-        capture_bytes, pull_into, query_text, row_exists, MockSyncStorage,
-    };
+    use crate::sync::test_helpers::{pull_into, query_text, row_exists, TestStore};
     use async_trait::async_trait;
     use rusqlite::params;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::RwLock;
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::sync::Notify;
@@ -1212,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_coven_schema_without_a_marker_is_initialized_atomically() {
+    fn interrupted_coven_schema_without_a_marker_is_rejected() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         precreate_database(
@@ -1223,10 +1206,16 @@ mod tests {
              ) STRICT;",
         );
 
-        let handle = open_gated_roots_at(dir, WritePolicy::Serial)
-            .expect("finish an uncommitted Coven schema initialization");
+        let error = match open_gated_roots_at(dir, WritePolicy::Serial) {
+            Ok(_) => panic!("partial Coven schema has no valid initialization commit"),
+            Err(error) => error,
+        };
 
-        assert_eq!(handle.db().write_policy(), WritePolicy::Serial);
+        assert!(matches!(
+            error,
+            CovenError::Database(DbError::Message(reason))
+                if reason.contains("without the required initialization marker")
+        ));
     }
 
     #[tokio::test]
@@ -1488,54 +1477,26 @@ mod tests {
         try_open(&dir).expect("open handle")
     }
 
-    async fn run_test_cycle(
-        storage: &MockSyncStorage,
-        handle: &CovenHandle,
-        keypair: &crate::keys::UserKeypair,
-    ) {
-        let cipher = RwLock::new(CloudCipher::Plaintext);
-        let hlc = Hlc::new("device-test".to_string());
-        crate::sync::test_helpers::bind_mock_store_protocol(handle.db(), storage, "device-test")
-            .await;
-        handle
-            .db()
-            .set_protocol_state(
-                crate::database::LAST_SNAPSHOT_HASH_STATE_KEY,
-                &crate::sync::store_commit::ObjectHash::digest(b"existing-test-snapshot")
-                    .to_string(),
-            )
+    async fn run_test_cycle(storage: &TestStore, handle: &CovenHandle) {
+        storage
+            .publish_pending(handle.db(), &handle.store_dir())
             .await
-            .expect("seed Store snapshot state");
-        drive_test_cycle(
-            storage,
-            "lib-test",
-            "device-test",
-            &hlc,
-            &SystemClock,
-            handle.db(),
-            &cipher,
-            &PendingRotation::none(),
-            keypair,
-            None,
-            &handle.store_dir(),
-            None,
-            None,
-        )
-        .await
-        .expect("sync cycle");
+            .expect("publish pending Store write");
     }
 
-    async fn merge_test_storage(keypair: &crate::keys::UserKeypair) -> MockSyncStorage {
-        let storage = MockSyncStorage::with_store_and_keypair("lib-test", keypair.clone());
-        crate::sync::test_helpers::publish_test_founder_membership(&storage, "lib-test", keypair)
-            .await;
-        storage
+    async fn merge_test_storage(
+        handle: &CovenHandle,
+        keypair: &crate::keys::UserKeypair,
+    ) -> TestStore {
+        TestStore::create(handle.db(), "lib-test", keypair.clone())
+            .await
+            .expect("create exact test Store")
     }
 
     async fn publish_current_writes(handle: &CovenHandle) {
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&keypair).await;
-        run_test_cycle(&storage, handle, &keypair).await;
+        let storage = merge_test_storage(handle, &keypair).await;
+        run_test_cycle(&storage, handle).await;
     }
 
     #[tokio::test]
@@ -1558,11 +1519,11 @@ mod tests {
 
         let reopened = open_files_handle_in(dir);
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&keypair).await;
-        run_test_cycle(&storage, &reopened, &keypair).await;
+        let storage = merge_test_storage(&reopened, &keypair).await;
+        run_test_cycle(&storage, &reopened).await;
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(peer.db(), &storage, "peer", &peer.store_dir()).await;
+        pull_into(peer.db(), &storage, &peer.store_dir()).await;
         assert_eq!(
             query_text(
                 peer.db(),
@@ -1606,18 +1567,31 @@ mod tests {
             .expect("subscribe after restart");
         assert_eq!(*first_status.borrow(), coven_core::WriteStatus::Pending);
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&keypair).await;
-        run_test_cycle(&storage, &reopened, &keypair).await;
+        let storage = merge_test_storage(&reopened, &keypair).await;
+        run_test_cycle(&storage, &reopened).await;
 
         first_status.changed().await.expect("published status");
-        assert!(matches!(
-            &*first_status.borrow(),
-            coven_core::WriteStatus::Published(position) if position.position().seq == 2
-        ));
-        assert!(matches!(
-            reopened.write_status(&write_ids[1]).await.expect("second status"),
-            coven_core::WriteStatus::Published(position) if position.position().seq == 3
-        ));
+        let first_sequence = match &*first_status.borrow() {
+            coven_core::WriteStatus::Published(position) => position.position().seq,
+            status => panic!("first host transaction is not published: {status:?}"),
+        };
+        assert_eq!(
+            reopened
+                .write_status(&write_ids[1])
+                .await
+                .expect("second status after first publication"),
+            coven_core::WriteStatus::Pending,
+        );
+        run_test_cycle(&storage, &reopened).await;
+        let second_sequence = match reopened
+            .write_status(&write_ids[1])
+            .await
+            .expect("second status")
+        {
+            coven_core::WriteStatus::Published(position) => position.position().seq,
+            status => panic!("second host transaction is not published: {status:?}"),
+        };
+        assert_eq!(second_sequence, first_sequence + 1);
         assert!(reopened
             .pending_writes()
             .await
@@ -1625,7 +1599,7 @@ mod tests {
             .is_empty());
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(peer.db(), &storage, "peer", &peer.store_dir()).await;
+        pull_into(peer.db(), &storage, &peer.store_dir()).await;
         assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'file-pending-a'").await);
         assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'file-pending-b'").await);
     }
@@ -1674,8 +1648,8 @@ mod tests {
         assert_eq!(lease_count, 0);
 
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&keypair).await;
-        run_test_cycle(&storage, &handle, &keypair).await;
+        let storage = merge_test_storage(&handle, &keypair).await;
+        run_test_cycle(&storage, &handle).await;
         assert_eq!(
             handle
                 .write_status(&receipt.write_id)
@@ -1722,18 +1696,18 @@ mod tests {
         );
 
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&keypair).await;
-        run_test_cycle(&storage, &handle, &keypair).await;
+        let storage = merge_test_storage(&handle, &keypair).await;
+        run_test_cycle(&storage, &handle).await;
         assert!(matches!(
             handle
                 .write_status(&receipt.write_id)
                 .await
                 .expect("published mixed write"),
-            coven_core::WriteStatus::Published(position) if position.position().seq == 2
+            coven_core::WriteStatus::Published(_)
         ));
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(peer.db(), &storage, "peer", &peer.store_dir()).await;
+        pull_into(peer.db(), &storage, &peer.store_dir()).await;
         assert!(row_exists(peer.db(), "SELECT 1 FROM files WHERE id = 'shared-1'").await);
         assert!(
             !row_exists(
@@ -1768,11 +1742,11 @@ mod tests {
             .await
             .expect("insert before first cycle");
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&keypair).await;
-        run_test_cycle(&storage, &handle, &keypair).await;
+        let storage = merge_test_storage(&handle, &keypair).await;
+        run_test_cycle(&storage, &handle).await;
 
         let (_peer_tmp, peer) = open_files_handle();
-        pull_into(peer.db(), &storage, "peer", &peer.store_dir()).await;
+        pull_into(peer.db(), &storage, &peer.store_dir()).await;
         assert!(
             row_exists(
                 peer.db(),
@@ -1792,9 +1766,9 @@ mod tests {
         drop(handle);
 
         let reopened = open_files_handle_in(dir);
-        run_test_cycle(&storage, &reopened, &keypair).await;
+        run_test_cycle(&storage, &reopened).await;
 
-        pull_into(peer.db(), &storage, "peer", &peer.store_dir()).await;
+        pull_into(peer.db(), &storage, &peer.store_dir()).await;
         assert!(
             !row_exists(
                 peer.db(),
@@ -1808,7 +1782,7 @@ mod tests {
     #[tokio::test]
     async fn pending_write_drains_only_after_changeset_push() {
         let (_tmp, handle) = open_files_handle();
-        handle
+        let receipt = handle
             .sql(|sql| {
                 sql.execute(
                     "INSERT INTO files (id, blob_id, size, _updated_at) \
@@ -1820,54 +1794,35 @@ mod tests {
             .await
             .expect("write before failed push");
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&keypair).await;
-        crate::sync::test_helpers::bind_mock_store_protocol(handle.db(), &storage, "device-test")
-            .await;
-        storage.fail_next_changeset_puts(1);
+        let storage = merge_test_storage(&handle, &keypair).await;
+        storage.home.fail_exact_create_before_call(1);
 
-        let first = drive_test_cycle(
-            &storage,
-            "lib-test",
-            "device-test",
-            &Hlc::new("device-test".to_string()),
-            &SystemClock,
-            handle.db(),
-            &RwLock::new(CloudCipher::Plaintext),
-            &PendingRotation::none(),
-            &keypair,
-            None,
-            &handle.store_dir(),
-            None,
-            None,
-        )
-        .await;
+        let first = storage
+            .publish_pending(handle.db(), &handle.store_dir())
+            .await;
         assert!(
             first
                 .as_ref()
-                .is_err_and(|error| error.contains("forced Store package append failure")),
+                .is_err_and(|error| error.contains("forced failure before exact create")),
             "the first cycle must report the append failure while preserving its outbox: {first:?}",
         );
-        assert!(crate::sync::store_objects::load_commit_slot(
-            &storage,
-            storage.store_root_hash(),
-            "device-test",
-            2,
-        )
-        .await
-        .expect("inspect Store commit slot after failed append")
-        .is_none());
+        assert_eq!(
+            handle
+                .write_status(&receipt.write_id)
+                .await
+                .expect("write status after failed append"),
+            coven_core::WriteStatus::Publishing,
+        );
 
-        run_test_cycle(&storage, &handle, &keypair).await;
+        run_test_cycle(&storage, &handle).await;
         assert!(
-            crate::sync::store_objects::load_commit_slot(
-                &storage,
-                storage.store_root_hash(),
-                "device-test",
-                2,
-            )
-            .await
-            .expect("inspect Store commit slot after retry")
-            .is_some(),
+            matches!(
+                handle
+                    .write_status(&receipt.write_id)
+                    .await
+                    .expect("write status after retry"),
+                coven_core::WriteStatus::Published(_)
+            ),
             "the pending write is published as an immutable Store commit after retry",
         );
     }
@@ -2138,6 +2093,7 @@ mod tests {
     async fn write_inserts_row_and_host_provided_blob() {
         let (_tmp, handle) = open_files_handle();
         let bytes = b"piece-bytes".to_vec();
+        let hash = crate::blob::content_hash(&bytes);
         handle
             .write(
                 {
@@ -2149,9 +2105,9 @@ mod tests {
                 },
                 move |sql| {
                     sql.execute(
-                        "INSERT INTO files (id, blob_id, size, _updated_at) \
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params!["file-1", "blobaaaa", bytes.len() as i64, sql.stamp()],
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params!["file-1", "blobaaaa", bytes.len() as i64, hash, sql.stamp()],
                     )?;
                     Ok(())
                 },
@@ -2185,9 +2141,15 @@ mod tests {
                 },
                 |sql| {
                     sql.execute(
-                        "INSERT INTO files (id, blob_id, size, _updated_at) \
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params!["file-orphan", "orphaaaa", 15i64, sql.stamp()],
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            "file-orphan",
+                            "orphaaaa",
+                            15i64,
+                            crate::blob::content_hash(b"committed bytes"),
+                            sql.stamp()
+                        ],
                     )?;
                     Ok(())
                 },
@@ -2212,9 +2174,15 @@ mod tests {
                 },
                 |sql| {
                     sql.execute(
-                        "INSERT INTO files (id, blob_id, size, _updated_at) \
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params!["file-original", "dupeaaaa", 8i64, sql.stamp()],
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            "file-original",
+                            "dupeaaaa",
+                            8i64,
+                            crate::blob::content_hash(b"original"),
+                            sql.stamp()
+                        ],
                     )?;
                     Ok(())
                 },
@@ -2230,9 +2198,15 @@ mod tests {
                 },
                 |sql| {
                     sql.execute(
-                        "INSERT INTO files (id, blob_id, size, _updated_at) \
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params!["file-replacement", "dupeaaaa", 11i64, sql.stamp()],
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            "file-replacement",
+                            "dupeaaaa",
+                            11i64,
+                            crate::blob::content_hash(b"replacement"),
+                            sql.stamp()
+                        ],
                     )?;
                     Ok(())
                 },
@@ -2271,8 +2245,9 @@ mod tests {
         let (_tmp, handle) = open_remote_root_files_handle();
         let expected = b"remote-root-host-provided-staging-bytes".to_vec();
         let bytes = expected.clone();
+        let hash = crate::blob::content_hash(&bytes);
 
-        let blob = handle
+        handle
             .write(
                 {
                     let bytes = bytes.clone();
@@ -2283,28 +2258,25 @@ mod tests {
                 },
                 move |sql| {
                     sql.execute(
-                        "INSERT INTO files (id, blob_id, size, _updated_at) \
-                         VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
                         params![
                             "file-remote-root",
                             "rrhpaaaa",
                             bytes.len() as i64,
+                            hash,
                             sql.stamp()
                         ],
                     )?;
-                    Ok(BlobRef {
-                        namespace: "media-files".to_string(),
-                        id: "rrhpaaaa".to_string(),
-                        scope: BlobScope::Master,
-                        cloud_path: None,
-                        provenance: Provenance::HostProvided,
-                        fill: CacheFill::CacheLazy,
-                    })
+                    Ok(())
                 },
             )
             .await
-            .expect("write remote-root row and host-provided blob")
-            .value;
+            .expect("write remote-root row and host-provided blob");
+        let blob = handle
+            .row_blob_ref("files", "file-remote-root")
+            .await
+            .expect("capture remote-root blob row");
 
         let whole = handle
             .read_blob(&blob)
@@ -2317,7 +2289,7 @@ mod tests {
 
         let (offset, len) = (12u64, 19u64);
         let range = handle
-            .open_blob_stream(&blob, expected.len() as u64, offset, len)
+            .open_blob_stream(&blob, offset, len)
             .await
             .expect("open_blob_stream serves upload staging before sync upload");
         assert_eq!(
@@ -2390,8 +2362,14 @@ mod tests {
         handle
             .sql(|sql| {
                 sql.execute(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, ?2, 3, ?3)",
-                    params!["file-1", "oldaaaa", sql.stamp()],
+                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES (?1, ?2, 3, ?3, ?4)",
+                    params![
+                        "file-1",
+                        "oldaaaa",
+                        crate::blob::content_hash(b"old"),
+                        sql.stamp()
+                    ],
                 )?;
                 Ok(())
             })
@@ -2418,8 +2396,9 @@ mod tests {
                 },
                 move |sql| {
                     sql.execute(
-                        "UPDATE files SET blob_id = ?1, size = 3, _updated_at = ?2 WHERE id = 'file-1'",
-                        params!["newaaaa", sql.stamp()],
+                        "UPDATE files SET blob_id = ?1, size = 3, hash = ?2, \
+                         _updated_at = ?3 WHERE id = 'file-1'",
+                        params!["newaaaa", crate::blob::content_hash(b"new"), sql.stamp()],
                     )?;
                     Ok(())
                 },
@@ -2449,9 +2428,9 @@ mod tests {
                 },
                 |sql| {
                     sql.execute(
-                        "INSERT INTO files (id, blob_id, size, _updated_at) \
-                         VALUES ('owned-file', 'ownedaaa', 5, ?1)",
-                        [sql.stamp()],
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES ('owned-file', 'ownedaaa', 5, ?1, ?2)",
+                        params![crate::blob::content_hash(b"first"), sql.stamp()],
                     )?;
                     Ok(())
                 },
@@ -2479,9 +2458,10 @@ mod tests {
                 },
                 |sql| {
                     sql.execute(
-                        "UPDATE files SET blob_id = 'ownedbbb', size = 6, _updated_at = ?1 \
+                        "UPDATE files SET blob_id = 'ownedbbb', size = 6, hash = ?1, \
+                         _updated_at = ?2 \
                          WHERE id = 'owned-file'",
-                        [sql.stamp()],
+                        params![crate::blob::content_hash(b"second"), sql.stamp()],
                     )?;
                     Ok(())
                 },
@@ -2498,26 +2478,47 @@ mod tests {
         first_path: &std::path::Path,
     ) {
         let keypair = crate::keys::UserKeypair::generate();
-        let storage = merge_test_storage(&keypair).await;
-        run_test_cycle(&storage, handle, &keypair).await;
+        let storage = merge_test_storage(handle, &keypair).await;
+        run_test_cycle(&storage, handle).await;
 
-        assert!(matches!(
-            handle.write_status(first_write).await.expect("first status"),
-            coven_core::WriteStatus::Published(position) if position.position().seq == 2
-        ));
-        assert!(matches!(
-            handle.write_status(second_write).await.expect("second status"),
-            coven_core::WriteStatus::Published(position) if position.position().seq == 3
-        ));
-        assert!(storage
-            .blob_exists("media-files", "ownedaaa", None)
+        let first_sequence = match handle
+            .write_status(first_write)
             .await
-            .expect("first cloud blob"));
-        assert!(storage
-            .blob_exists("media-files", "ownedbbb", None)
+            .expect("first status")
+        {
+            coven_core::WriteStatus::Published(position) => position.position().seq,
+            status => panic!("first replacement write is not published: {status:?}"),
+        };
+        assert_eq!(
+            handle
+                .write_status(second_write)
+                .await
+                .expect("second status after first publication"),
+            coven_core::WriteStatus::Pending,
+            "one Store publication consumes one pending host transaction",
+        );
+
+        run_test_cycle(&storage, handle).await;
+        let second_sequence = match handle
+            .write_status(second_write)
             .await
-            .expect("second cloud blob"));
-        assert_eq!(storage.blob_put_from_file_count(), 2);
+            .expect("second status")
+        {
+            coven_core::WriteStatus::Published(position) => position.position().seq,
+            status => panic!("second replacement write is not published: {status:?}"),
+        };
+        assert_eq!(
+            second_sequence,
+            first_sequence + 1,
+            "replacement writes publish in their host transaction order"
+        );
+        let blob_objects = storage
+            .home
+            .keys()
+            .into_iter()
+            .filter(|key| key.starts_with("media-files/opaque/"))
+            .count();
+        assert_eq!(blob_objects, 2, "both row versions upload their blob bytes");
         assert!(
             !first_path.exists(),
             "the first write releases its local bytes after publication"
@@ -2526,6 +2527,17 @@ mod tests {
 
     #[tokio::test]
     async fn pending_write_owns_blob_bytes_until_its_publication() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(run_pending_write_owns_blob_bytes_until_its_publication())
+                    .await
+                    .expect("pending-write blob ownership test task");
+            })
+            .await;
+    }
+
+    async fn run_pending_write_owns_blob_bytes_until_its_publication() {
         let (_tmp, handle) = open_files_handle();
         let (first_write, second_write, first_path) = queue_replacement_before_sync(&handle).await;
 
@@ -2541,9 +2553,9 @@ mod tests {
                 },
                 |sql| {
                     sql.execute(
-                        "INSERT INTO files (id, blob_id, size, _updated_at) \
-                         VALUES ('overwrite', 'ownedaaa', 11, ?1)",
-                        [sql.stamp()],
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES ('overwrite', 'ownedaaa', 11, ?1, ?2)",
+                        params![crate::blob::content_hash(b"overwritten"), sql.stamp()],
                     )?;
                     Ok(())
                 },
@@ -2563,6 +2575,17 @@ mod tests {
 
     #[tokio::test]
     async fn pending_write_blob_ownership_survives_restart() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                tokio::task::spawn_local(run_pending_write_blob_ownership_survives_restart())
+                    .await
+                    .expect("reopened pending-write blob ownership test task");
+            })
+            .await;
+    }
+
+    async fn run_pending_write_blob_ownership_survives_restart() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let dir = StoreDir::new(tmp.path());
         let handle = open_files_handle_in(dir.clone());
@@ -2620,8 +2643,14 @@ mod tests {
         handle
             .sql(|sql| {
                 sql.execute(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, ?2, 3, ?3)",
-                    params!["file-1", "oldcccc", sql.stamp()],
+                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES (?1, ?2, 3, ?3, ?4)",
+                    params![
+                        "file-1",
+                        "oldcccc",
+                        crate::blob::content_hash(b"old"),
+                        sql.stamp()
+                    ],
                 )?;
                 Ok(())
             })
@@ -2650,7 +2679,7 @@ mod tests {
                 },
                 move |sql| {
                     sql.execute(
-                        "UPDATE files SET blob_id = NULL, size = 0, _updated_at = ?1 \
+                        "UPDATE files SET blob_id = NULL, size = 0, hash = NULL, _updated_at = ?1 \
                          WHERE id = 'file-1'",
                         [sql.stamp()],
                     )?;
@@ -2682,8 +2711,14 @@ mod tests {
         handle
             .sql(|sql| {
                 sql.execute(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, ?2, 3, ?3)",
-                    params!["file-1", "oldddddd", sql.stamp()],
+                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES (?1, ?2, 3, ?3, ?4)",
+                    params![
+                        "file-1",
+                        "oldddddd",
+                        crate::blob::content_hash(b"old"),
+                        sql.stamp()
+                    ],
                 )?;
                 Ok(())
             })
@@ -2711,7 +2746,7 @@ mod tests {
                 },
                 |sql| {
                     sql.execute(
-                        "UPDATE files SET blob_id = NULL, size = 0, _updated_at = ?1 \
+                        "UPDATE files SET blob_id = NULL, size = 0, hash = NULL, _updated_at = ?1 \
                          WHERE id = 'file-1'",
                         [sql.stamp()],
                     )?;
@@ -2764,14 +2799,15 @@ mod tests {
         let blob_id = "shared01";
         handle
             .sql(move |sql| {
-                sql.execute_batch(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) \
-                     VALUES ('remote-deletes', 'shared01', 4, \
-                             '0000000001000-0000-dev-remote'); \
-                     INSERT INTO files (id, blob_id, size, _updated_at) \
-                     VALUES ('still-live', 'shared01', 4, \
-                             '0000000001000-0000-dev-remote');",
-                )?;
+                let hash = crate::blob::content_hash(b"live");
+                for id in ["remote-deletes", "still-live"] {
+                    sql.execute(
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES (?1, 'shared01', 4, ?2, \
+                                 '0000000001000-0000-dev-remote')",
+                        params![id, &hash],
+                    )?;
+                }
                 Ok(())
             })
             .await
@@ -2793,32 +2829,74 @@ mod tests {
         write_raw_file(&pinned, b"live").await;
         write_raw_file(&cached, b"live").await;
 
-        let (source, _stamper) = Database::open(
-            std::path::Path::new(":memory:"),
-            vec![files_table()],
-            crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-            crate::blob::TransferLimits::serial(),
-            coven_core::WritePolicy::MergeConcurrent,
-            "dev-remote".to_string(),
-            &[files_migration()],
-        )
-        .expect("open remote source");
-        capture_bytes(
-            &source,
-            &["INSERT INTO files (id, blob_id, size, _updated_at) \
-                 VALUES ('remote-deletes', 'shared01', 4, \
-                         '0000000001000-0000-dev-remote')"],
-        )
-        .await;
-        let remote_delete =
-            capture_bytes(&source, &["DELETE FROM files WHERE id = 'remote-deletes'"]).await;
-        let storage = Arc::new(MockSyncStorage::new());
-        storage.store_changeset("dev-remote", 1, &remote_delete, 1);
+        let (_source_tmp, source) = open_files_handle();
+        let storage = Arc::new(
+            TestStore::create(
+                source.db(),
+                "lib-test",
+                crate::keys::UserKeypair::generate(),
+            )
+            .await
+            .expect("create remote exact test Store"),
+        );
+        source
+            .write(
+                |batch| {
+                    batch.put_blob("media-files", "shared01", b"live".to_vec());
+                    Ok(())
+                },
+                |sql| {
+                    sql.execute(
+                        "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                         VALUES ('remote-deletes', 'shared01', 4, ?1, ?2)",
+                        params![crate::blob::content_hash(b"live"), sql.stamp()],
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("insert remote row");
+        storage
+            .publish_pending(source.db(), &source.store_dir())
+            .await
+            .expect("publish remote insert");
+        let delete = source
+            .sql(|sql| {
+                sql.execute("DELETE FROM files WHERE id = 'remote-deletes'", [])?;
+                Ok(())
+            })
+            .await
+            .expect("delete remote row");
+        storage
+            .publish_pending(source.db(), &source.store_dir())
+            .await
+            .expect("publish remote delete");
+
+        assert!(matches!(
+            source
+                .write_status(&delete.write_id)
+                .await
+                .expect("remote delete status"),
+            coven_core::WriteStatus::Published(_)
+        ));
+        let (device_id, sequence) = source
+            .db()
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT device_id, seq FROM materialized_commits ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .map_err(coven_core::database::DbError::from)
+            })
+            .await
+            .expect("load remote delete stream coordinate");
+        let sequence = u64::try_from(sequence).expect("remote delete sequence is non-negative");
 
         let (commit_reached, resume_pull) = handle.db().arm_test_pause(
             coven_core::database::DatabaseTestPoint::PullAfterRemoteCommit {
-                device_id: "dev-remote".to_string(),
-                seq: 1,
+                device_id,
+                seq: sequence,
             },
         );
         let pull_handle = handle.clone();
@@ -2827,7 +2905,6 @@ mod tests {
             pull_into(
                 pull_handle.db(),
                 pull_storage.as_ref(),
-                "device-test",
                 &pull_handle.store_dir(),
             )
             .await
@@ -2877,8 +2954,14 @@ mod tests {
         handle
             .sql(|sql| {
                 sql.execute(
-                    "INSERT INTO files (id, blob_id, size, _updated_at) VALUES (?1, ?2, 3, ?3)",
-                    params!["file-1", "oldbbbb", sql.stamp()],
+                    "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                     VALUES (?1, ?2, 3, ?3, ?4)",
+                    params![
+                        "file-1",
+                        "oldbbbb",
+                        crate::blob::content_hash(b"old"),
+                        sql.stamp()
+                    ],
                 )?;
                 Ok(())
             })
@@ -2959,9 +3042,15 @@ mod tests {
                     },
                     move |sql| {
                         sql.execute(
-                            "INSERT INTO files (id, blob_id, size, _updated_at) \
-                             VALUES (?1, ?2, ?3, ?4)",
-                            params!["winner", "raceblob", 9i64, sql.stamp()],
+                            "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            params![
+                                "winner",
+                                "raceblob",
+                                9i64,
+                                crate::blob::content_hash(b"committed"),
+                                sql.stamp()
+                            ],
                         )?;
                         Ok(())
                     },
@@ -3035,7 +3124,7 @@ mod tests {
 
     #[async_trait]
     impl CloudHome for GateCloudHome {
-        fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn ImmutableCopyStorage>> {
+        fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>> {
             Some(self)
         }
 
@@ -3097,39 +3186,56 @@ mod tests {
     }
 
     #[async_trait]
-    impl ImmutableCopyStorage for GateCloudHome {
-        async fn append_object(
+    impl ExactSlotStorage for GateCloudHome {
+        async fn provider_binding(
             &self,
-            key: &str,
+        ) -> Result<crate::sync::storage::ResolvedProviderBinding, CloudHomeError> {
+            self.gate().await;
+            ExactSlotStorage::provider_binding(&self.inner).await
+        }
+
+        async fn allocate_slot(&self, key: &str) -> Result<ObjectSlot, CloudHomeError> {
+            self.gate().await;
+            ExactSlotStorage::allocate_slot(&self.inner, key).await
+        }
+
+        async fn create_at(
+            &self,
+            slot: &ObjectSlot,
             body: BlobBody,
             progress: &UploadProgress<'_>,
-        ) -> Result<AppendedObject, CloudHomeError> {
+        ) -> Result<(), CloudHomeError> {
             self.gate().await;
-            self.inner.append_object(key, body, progress).await
+            ExactSlotStorage::create_at(&self.inner, slot, body, progress).await
         }
 
-        async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
+        async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
             self.gate().await;
-            self.inner.list_appended(prefix).await
+            ExactSlotStorage::read_at(&self.inner, slot).await
         }
 
-        async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-            self.gate().await;
-            self.inner.read_appended(object).await
-        }
-
-        async fn read_appended_to_file(
+        async fn read_range_at(
             &self,
-            object: &AppendedObject,
+            slot: &ObjectSlot,
+            start: u64,
+            end: u64,
+        ) -> Result<Vec<u8>, CloudHomeError> {
+            self.gate().await;
+            ExactSlotStorage::read_range_at(&self.inner, slot, start, end).await
+        }
+
+        async fn read_at_to_file(
+            &self,
+            slot: &ObjectSlot,
             destination: &std::path::Path,
         ) -> Result<(), crate::storage::cloud::CloudFileReadError> {
             self.gate().await;
-            self.inner.read_appended_to_file(object, destination).await
+            ExactSlotStorage::read_at_to_file(&self.inner, slot, destination).await
         }
 
-        async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
+        async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
             self.gate().await;
-            self.inner.delete_appended(object).await
+            ExactSlotStorage::delete_at(&self.inner, slot).await
         }
     }
 
@@ -3193,10 +3299,15 @@ mod tests {
             entered: entered_tx,
             release: release.clone(),
         });
-        handle
-            .connect_sync_with_test_home(home, CloudCipher::Plaintext)
-            .await
-            .expect("connect over the gating test home");
+        let connect_handle = handle.clone();
+        tokio::spawn(async move {
+            connect_handle
+                .connect_sync_with_test_home(home, CloudCipher::Plaintext)
+                .await
+        })
+        .await
+        .expect("gating test connection task completes")
+        .expect("connect over the gating test home");
 
         // Bootstrap is done; gate the loop's next cycle and wait until it parks
         // mid-cycle inside the cloud home.
@@ -3245,10 +3356,18 @@ mod tests {
         handle
             .initialize_identity()
             .expect("establish this store's identity before connecting");
-        handle
-            .connect_sync_with_test_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
-            .await
-            .expect("connect over the test home");
+        let connect_handle = handle.clone();
+        tokio::spawn(async move {
+            connect_handle
+                .connect_sync_with_test_home(
+                    Arc::new(InMemoryCloudHome::new()),
+                    CloudCipher::Plaintext,
+                )
+                .await
+        })
+        .await
+        .expect("shutdown test connection task completes")
+        .expect("connect over the test home");
 
         drop(handle);
 
@@ -3545,6 +3664,7 @@ mod tests {
             .expect("open writer");
 
         let bytes = b"read-only-handle-serves-these-blob-bytes".to_vec();
+        let hash = crate::blob::content_hash(&bytes);
         writer
             .write(
                 {
@@ -3558,9 +3678,9 @@ mod tests {
                     let len = bytes.len() as i64;
                     move |sql| {
                         sql.execute(
-                            "INSERT INTO files (id, blob_id, size, _updated_at) \
-                             VALUES (?1, ?2, ?3, ?4)",
-                            params!["file-ro", "roblob01", len, sql.stamp()],
+                            "INSERT INTO files (id, blob_id, size, hash, _updated_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            params!["file-ro", "roblob01", len, hash, sql.stamp()],
                         )?;
                         Ok(())
                     }
@@ -3576,14 +3696,10 @@ mod tests {
             .open_read_only()
             .expect("read-only open");
 
-        let blob = BlobRef {
-            namespace: "media-files".to_string(),
-            id: "roblob01".to_string(),
-            scope: BlobScope::Master,
-            cloud_path: None,
-            provenance: Provenance::HostProvided,
-            fill: CacheFill::CacheLazy,
-        };
+        let blob = reader
+            .row_blob_ref("files", "file-ro")
+            .await
+            .expect("capture read-only blob row");
         let read = reader
             .read_blob(&blob)
             .await
@@ -3596,7 +3712,7 @@ mod tests {
         // A ranged read through the same handle serves the requested slice.
         let (offset, len) = (5u64, 10u64);
         let range = reader
-            .open_blob_stream(&blob, bytes.len() as u64, offset, len)
+            .open_blob_stream(&blob, offset, len)
             .await
             .expect("ranged read via read handle");
         assert_eq!(range, &bytes[offset as usize..(offset + len) as usize]);

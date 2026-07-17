@@ -48,6 +48,24 @@ pub struct ApplyResult {
     /// Tables that hit non-retryable SQLite constraint conflicts. The caller must
     /// roll back the transaction when this is non-empty.
     pub constraint_conflict_tables: Vec<String>,
+    /// Incoming rows whose exact row value won arbitration. A missing stamp
+    /// identifies a winning deletion.
+    #[cfg(test)]
+    pub(crate) winning_rows: Vec<WinningRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WinningRow {
+    pub(crate) table: String,
+    pub(crate) row_id: String,
+    pub(crate) row_stamp: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct IncomingRow {
+    table: String,
+    row_id: String,
+    row_stamp: Option<String>,
 }
 
 /// Changeset bytes paired with the exact synced schema that validated their row
@@ -89,7 +107,7 @@ pub fn resolve_and_apply_changeset(
     receiver_wall_ms: u64,
 ) -> Result<ApplyResult, DbError> {
     let schema = Arc::new(TableSchema::from_db(conn, tables)?);
-    resolve_and_apply_changeset_with_schema(conn, bytes, schema, receiver_wall_ms, &[])
+    resolve_and_apply_changeset_with_schema(conn, bytes, schema, receiver_wall_ms)
 }
 
 /// Apply `bytes` to `conn`, resolving conflicts against a pre-built
@@ -109,25 +127,16 @@ pub fn resolve_and_apply_changeset(
 /// without re-deriving it per call. `receiver_wall_ms` is the receiver's current
 /// wall-clock millis, read once by the caller and moved into the closure to bound
 /// a grossly-future incoming `_updated_at` (see [`arbitrate_row_conflict`]).
-/// `blob_uploads` records, atomically with the applied rows, which device uploaded
-/// each blob the changeset introduces (`(namespace, blob_id, uploader)`): the read
-/// dispatch later keys a blob under its uploader's cloud prefix. Writing it inside
-/// this transaction is what keeps the index consistent with the rows that reference
-/// the blobs — a committed row always has its uploader recorded, never a later
-/// repair. Callers with no blobs to record (a test, a snapshot round-trip) pass an
-/// empty slice.
 pub fn resolve_and_apply_changeset_with_schema(
     conn: &Connection,
     bytes: &[u8],
     schema: Arc<TableSchema>,
     receiver_wall_ms: u64,
-    blob_uploads: &[(String, String, String)],
 ) -> Result<ApplyResult, DbError> {
     let changeset = ValidatedChangeset::new(bytes, schema)
         .map_err(|error| DbError::Message(error.to_string()))?;
     let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-    let result =
-        resolve_and_apply_changeset_with_schema_on(&tx, changeset, receiver_wall_ms, blob_uploads)?;
+    let result = resolve_and_apply_changeset_with_schema_on(&tx, changeset, receiver_wall_ms)?;
     if result.had_fk_violations || !result.constraint_conflict_tables.is_empty() {
         tx.rollback().map_err(DbError::from)?;
     } else {
@@ -137,17 +146,18 @@ pub fn resolve_and_apply_changeset_with_schema(
 }
 
 /// Apply one changeset on a connection whose transaction boundary belongs to the
-/// caller. Rows, blob-uploader records, durable cleanup intents, and the receiver's
-/// position can therefore commit as one database operation. The caller must roll
-/// back when the returned result reports an FK or non-FK constraint conflict.
+/// caller. Rows, exact row-bound blob locators, durable cleanup intents, and the
+/// receiver's position can therefore commit as one database operation. The caller
+/// must roll back when the returned result reports an FK or non-FK constraint conflict.
 pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
     conn: &Connection,
     changeset: ValidatedChangeset<B>,
     receiver_wall_ms: u64,
-    blob_uploads: &[(String, String, String)],
 ) -> Result<ApplyResult, DbError> {
     let ValidatedChangeset { bytes, schema } = changeset;
     let bytes = bytes.as_ref();
+    #[cfg(test)]
+    let incoming_rows = incoming_rows(bytes, &schema)?;
 
     let fk_flag = Arc::new(AtomicBool::new(false));
     let constraint_conflict_tables = Arc::new(Mutex::new(Vec::new()));
@@ -155,6 +165,7 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
 
     let closure_flag = fk_flag.clone();
     let closure_constraint_conflict_tables = constraint_conflict_tables.clone();
+    let closure_schema = schema.clone();
     conn.apply_strm(
         &mut &bytes[..],
         None::<fn(&str) -> bool>,
@@ -201,19 +212,17 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
                     }
                 }
             }
-            arbitrate_row_conflict(conflict_type, item, &table, &schema, receiver_wall_ms)
+            arbitrate_row_conflict(
+                conflict_type,
+                item,
+                &table,
+                &closure_schema,
+                receiver_wall_ms,
+            )
         },
     )
     .map_err(DbError::from)?;
     let had_fk_violations = fk_flag.load(Ordering::Relaxed);
-    if !had_fk_violations {
-        // Record the uploader of each blob these rows introduce on the caller's
-        // transaction, so a committed blob-bearing row always carries its
-        // uploader. The caller rolls these records back with the rows on any
-        // rejected apply; a deferred retry re-records the same fact idempotently.
-        record_blob_uploaders(conn, blob_uploads)?;
-    }
-
     let constraint_conflict_tables = constraint_conflict_tables
         .lock()
         .map_err(|error| {
@@ -222,17 +231,125 @@ pub(crate) fn resolve_and_apply_changeset_with_schema_on<B: AsRef<[u8]>>(
             ))
         })?
         .clone();
+    #[cfg(test)]
+    let winning_rows = resolve_winning_rows(conn, &schema, incoming_rows)?;
 
     Ok(ApplyResult {
         had_fk_violations,
         constraint_conflict_tables,
+        #[cfg(test)]
+        winning_rows,
     })
+}
+
+fn incoming_rows(bytes: &[u8], schema: &TableSchema) -> Result<Vec<IncomingRow>, DbError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input: &mut dyn std::io::Read = &mut &bytes[..];
+    let mut iter = ChangesetIter::start_strm(&input).map_err(DbError::from)?;
+    let mut rows = Vec::new();
+    while let Some(item) = iter.next().map_err(DbError::from)? {
+        let op = item.op().map_err(DbError::from)?;
+        let table = op.table_name();
+        let updated_at = schema.updated_at(table).ok_or_else(|| {
+            DbError::Message(format!("changeset contains undeclared table {table:?}"))
+        })?;
+        let (id_side, stamp_side) = match op.code() {
+            Action::SQLITE_INSERT => (UpdateValue::New, Some(UpdateValue::New)),
+            Action::SQLITE_UPDATE => (UpdateValue::Old, Some(UpdateValue::New)),
+            Action::SQLITE_DELETE => (UpdateValue::Old, None),
+            code => {
+                return Err(DbError::Message(format!(
+                    "changeset for {table:?} contains unsupported operation {code:?}"
+                )))
+            }
+        };
+        let row_id = required_text_changeset_value(item, table, 0, id_side, "row id")?;
+        let row_stamp = stamp_side
+            .map(|side| required_text_changeset_value(item, table, updated_at, side, "row stamp"))
+            .transpose()?;
+        rows.push(IncomingRow {
+            table: table.to_string(),
+            row_id,
+            row_stamp,
+        });
+    }
+    Ok(rows)
+}
+
+fn required_text_changeset_value(
+    item: &ChangesetItem,
+    table: &str,
+    column: usize,
+    side: UpdateValue,
+    field: &str,
+) -> Result<String, DbError> {
+    let value = changeset_value(item, column, side)?.ok_or_else(|| {
+        DbError::Message(format!("changeset for {table:?} has no {side:?} {field}"))
+    })?;
+    let Value::Text(value) = value else {
+        return Err(DbError::Message(format!(
+            "changeset for {table:?} has non-TEXT {side:?} {field}"
+        )));
+    };
+    Ok(value)
+}
+
+fn resolve_winning_rows(
+    conn: &Connection,
+    schema: &TableSchema,
+    incoming: Vec<IncomingRow>,
+) -> Result<Vec<WinningRow>, DbError> {
+    let mut winners = Vec::new();
+    for row in incoming {
+        let columns = schema.columns(&row.table).ok_or_else(|| {
+            DbError::Message(format!("synced table {:?} has no column map", row.table))
+        })?;
+        let updated_at = schema.updated_at(&row.table).ok_or_else(|| {
+            DbError::Message(format!(
+                "synced table {:?} has no _updated_at column index",
+                row.table
+            ))
+        })?;
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {} = ?1",
+            quote_ident(&columns[updated_at]),
+            quote_ident(&row.table),
+            quote_ident(&columns[0])
+        );
+        let live_stamp = conn
+            .query_row(&sql, [&row.row_id], |result| result.get::<_, String>(0))
+            .optional()
+            .map_err(DbError::from)?;
+        let incoming_won = match (&row.row_stamp, &live_stamp) {
+            (None, None) => true,
+            (Some(expected), Some(actual)) => expected == actual,
+            _ => false,
+        };
+        if incoming_won {
+            winners.push(WinningRow {
+                table: row.table,
+                row_id: row.row_id,
+                row_stamp: row.row_stamp,
+            });
+        }
+    }
+    Ok(winners)
+}
+
+pub(crate) fn current_winning_rows(
+    conn: &Connection,
+    synced_tables: &[super::session::SyncedTable],
+    changeset: &[u8],
+) -> Result<Vec<WinningRow>, DbError> {
+    let schema = TableSchema::from_db(conn, synced_tables)?;
+    resolve_winning_rows(conn, &schema, incoming_rows(changeset, &schema)?)
 }
 
 pub(crate) fn apply_changeset_strict_on<B: AsRef<[u8]>>(
     conn: &Connection,
     changeset: ValidatedChangeset<B>,
-    blob_uploads: &[(String, String, String)],
 ) -> Result<(), DbError> {
     let bytes = changeset.bytes();
     conn.apply_strm(
@@ -241,17 +358,6 @@ pub(crate) fn apply_changeset_strict_on<B: AsRef<[u8]>>(
         |_conflict_type, _item| ConflictAction::SQLITE_CHANGESET_ABORT,
     )
     .map_err(DbError::from)?;
-    record_blob_uploaders(conn, blob_uploads)?;
-    Ok(())
-}
-
-fn record_blob_uploaders(
-    conn: &Connection,
-    blob_uploads: &[(String, String, String)],
-) -> Result<(), DbError> {
-    for (namespace, blob_id, uploader) in blob_uploads {
-        crate::database::Database::record_blob_uploader_on(conn, namespace, blob_id, uploader)?;
-    }
     Ok(())
 }
 

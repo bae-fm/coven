@@ -6,23 +6,310 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::database::{Database, DbError};
 use crate::encryption::MasterKeyring;
 use crate::keys::{KeyError, MasterKeyCustody, UserKeypair};
 use crate::migration::Migration;
-use crate::storage::cloud::{BoxPartSink, CloudHome, CloudHomeError, CloudHomeJoinInfo, PartSink};
 use crate::store_dir::StoreDir;
 use crate::sync::apply::resolve_and_apply_changeset;
-use crate::sync::membership::{
-    MembershipChain, MembershipCoord, MembershipEntry, MembershipGrantId,
-};
+use crate::sync::membership::{MembershipChain, MembershipEntry};
 use crate::sync::session::{BlobDecl, SyncedTable};
-use crate::sync::storage::{
-    ImmutableObjectListing, ImmutableObjectLocator, StorageError, SyncStorage,
-};
+
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_membership_grant_id(label: &str) -> crate::sync::causal_grants::MembershipGrantId {
+    crate::sync::causal_grants::MembershipGrantId(crate::sync::store_commit::ObjectHash::digest(
+        label.as_bytes(),
+    ))
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_founder_provider_admin(
+    label: &str,
+) -> crate::sync::provider::FounderProviderAdminGrant {
+    use crate::sync::provider::{
+        ExactSlotProbeReceipt, ExactSlotProbeTranscript, LostResponseProbeReceipt,
+        ProbeCreateAttempt, ProbeCreateOutcome, ProbePayloadLabel, ProbeRangeReceipt,
+        ProviderAdminGrantId, ProviderCapabilityProof, ProviderProbeId, PROBE_RANGE_END,
+        PROBE_RANGE_START,
+    };
+    use crate::sync::storage::{
+        ProviderDeviceBinding, ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding,
+    };
+    use crate::sync::store_commit::ObjectHash;
+
+    let probe_id = ProviderProbeId::from_bytes(*ObjectHash::digest(label.as_bytes()).as_bytes());
+    let slot = crate::storage::cloud::ObjectSlot::logical(format!(
+        "store-v1/test/{label}/provider-probe/exact"
+    ))
+    .expect("valid exact-probe test slot");
+    let first =
+        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::ExactCreateFirst);
+    let second =
+        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::ExactCreateSecond);
+    let accepted = crate::sync::storage::ExactObjectRef::new(
+        slot.clone(),
+        first.len() as u64,
+        ObjectHash::digest(&first),
+    );
+    let lost_slot = crate::storage::cloud::ObjectSlot::logical(format!(
+        "store-v1/test/{label}/provider-probe/lost-response"
+    ))
+    .expect("valid lost-response test slot");
+    let lost_payload =
+        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::LostResponse);
+    let lost_ref = crate::sync::storage::ExactObjectRef::new(
+        lost_slot.clone(),
+        lost_payload.len() as u64,
+        ObjectHash::digest(&lost_payload),
+    );
+    let device = ProviderDeviceBinding {
+        principal: ProviderPrincipalId::CustomS3Credential {
+            access_key_id_hash: ObjectHash::digest(format!("{label} access key").as_bytes()),
+        },
+    };
+    let store = StoreProviderBinding::S3 {
+        endpoint: S3EndpointBinding::Custom {
+            origin: "https://test.invalid".to_string(),
+        },
+        region: "test-region".to_string(),
+        bucket: format!("{label}-bucket"),
+        key_prefix: None,
+    };
+    let transcript = ExactSlotProbeTranscript {
+        probe_id,
+        logical_key: slot.logical_key().to_string(),
+        slot,
+        contenders: [
+            ProbeCreateAttempt {
+                payload_hash: ObjectHash::digest(&first),
+                outcome: ProbeCreateOutcome::Created,
+            },
+            ProbeCreateAttempt {
+                payload_hash: ObjectHash::digest(&second),
+                outcome: ProbeCreateOutcome::RejectedOccupied,
+            },
+        ],
+        accepted: accepted.clone(),
+        full_read_hash: accepted.stored_hash(),
+        range: ProbeRangeReceipt {
+            start: PROBE_RANGE_START,
+            end: PROBE_RANGE_END,
+            bytes_hash: ObjectHash::digest(
+                &first[PROBE_RANGE_START as usize..PROBE_RANGE_END as usize],
+            ),
+        },
+        delete_verified_absent: true,
+        lost_response: LostResponseProbeReceipt {
+            logical_key: lost_slot.logical_key().to_string(),
+            slot: lost_slot,
+            payload_hash: ObjectHash::digest(&lost_payload),
+            settled: lost_ref,
+            readback_hash: ObjectHash::digest(&lost_payload),
+            delete_verified_absent: true,
+        },
+    };
+    crate::sync::provider::FounderProviderAdminGrant {
+        grant_id: ProviderAdminGrantId(ObjectHash::digest(
+            format!("{label} provider admin grant").as_bytes(),
+        )),
+        provider: device.clone(),
+        access: crate::sync::provider::ProviderAccessLocator::S3SharedCredentialGeneration {
+            generation: 1,
+            access_key_id_hash: ObjectHash::digest(format!("{label} access key").as_bytes()),
+        },
+        capability: ProviderCapabilityProof {
+            exact_slots: ExactSlotProbeReceipt::from_transcript(transcript, &store, &device),
+            serial_coordination: None,
+        },
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub fn install_test_store_root_authority(
+    conn: &Connection,
+    label: &str,
+) -> crate::sync::store_commit::ObjectHash {
+    use crate::storage::cloud::ObjectSlot;
+    use crate::sync::storage::{ExactObjectRef, S3EndpointBinding, StoreProviderBinding};
+    use crate::sync::store_commit::{
+        GrantStreamAnchor, ObjectHash, StoreCreationDescriptor, StoreCreationId,
+        StoreMembershipGenesis, StoreProtocolRoot, STORE_PROTOCOL_VERSION,
+    };
+
+    let keypair_bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
+        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    ))
+    .expect("fixed test signing key is hexadecimal")
+    .try_into()
+    .expect("fixed test signing key is 64 bytes");
+    let signer = UserKeypair::from_signing_key_bytes(&keypair_bytes)
+        .expect("fixed test signing key is valid");
+    let sync_routing_hash: ObjectHash = conn
+        .query_row(
+            "SELECT value FROM protocol_state WHERE key = 'sync_routing_hash'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("test Store has a sync-routing hash")
+        .parse()
+        .expect("test Store sync-routing hash is valid");
+    let root_slot =
+        ObjectSlot::logical(crate::sync::store_commit::STORE_PROTOCOL_ROOT_LOGICAL_KEY.to_string())
+            .expect("valid test Store root slot");
+    let descriptor = StoreCreationDescriptor {
+        version: STORE_PROTOCOL_VERSION,
+        creation_id: StoreCreationId::from_random_bytes(
+            *ObjectHash::digest(label.as_bytes()).as_bytes(),
+        ),
+        provider: StoreProviderBinding::S3 {
+            endpoint: S3EndpointBinding::Custom {
+                origin: "https://test.invalid".to_string(),
+            },
+            region: "test-region".to_string(),
+            bucket: format!("{label}-bucket"),
+            key_prefix: None,
+        },
+        schema_version: 1,
+        sync_routing_hash,
+        write_policy: crate::WritePolicy::MergeConcurrent,
+        founder_pubkey: crate::keys::public_key_hex(&signer),
+        founder_grant: test_membership_grant_id(&format!("{label} founder grant")),
+        root_slot: root_slot.clone(),
+        founder_registration: ObjectSlot::logical(format!(
+            "store-v1/test/{label}/registration.json"
+        ))
+        .expect("valid test founder registration slot"),
+        founder_provider_admin: test_founder_provider_admin(label),
+        membership: StoreMembershipGenesis::MergeConcurrent {
+            founder_membership: GrantStreamAnchor::StoreMembership {
+                first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/membership/1.json"))
+                    .expect("valid test founder membership slot"),
+            },
+        },
+        founder_recovery: GrantStreamAnchor::OwnerRecovery {
+            first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/recovery/1.json"))
+                .expect("valid test founder recovery slot"),
+        },
+    };
+    let root = StoreProtocolRoot::signed(descriptor, &signer).expect("sign test Store root");
+    let bytes = root.to_bytes();
+    let hash = root.object_hash();
+    let object = ExactObjectRef::new(root_slot, bytes.len() as u64, ObjectHash::digest(&bytes));
+    conn.execute(
+        "INSERT INTO store_protocol_root_authority
+         (singleton, store_root_hash, store_protocol_root_bytes, store_root_object)
+         VALUES (1, ?1, ?2, ?3)
+         ON CONFLICT(singleton) DO NOTHING",
+        rusqlite::params![
+            hash.to_string(),
+            bytes,
+            serde_json::to_string(&object).expect("serialize test Store root object")
+        ],
+    )
+    .expect("install test Store root authority");
+    hash
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub fn test_row_routing_id(
+    conn: &Connection,
+    generation_one_key: [u8; 32],
+    table: &str,
+    row_id: &str,
+) -> crate::sync::circle::RowRoutingId {
+    let root_hash: crate::sync::store_commit::ObjectHash = conn
+        .query_row(
+            "SELECT store_root_hash FROM store_protocol_root_authority WHERE singleton = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("test Store root authority is installed")
+        .parse()
+        .expect("test Store root hash is valid");
+    let encryption = crate::encryption::EncryptionService::from_key(generation_one_key);
+    let key = crate::sync::circle::derive_row_routing_key(&encryption, root_hash)
+        .expect("test keyring has one generation-one key");
+    crate::sync::circle::row_routing_id(&key, table, row_id)
+}
+
+#[cfg(test)]
+pub(crate) fn test_serial_founder_provider_admin(
+    label: &str,
+) -> crate::sync::provider::FounderProviderAdminGrant {
+    use crate::sync::provider::{
+        ProbeCreateAttempt, ProbeCreateOutcome, ProbePayloadLabel, ProbeReplaceAttempt,
+        ProbeReplaceOutcome, ProviderProbeId, SerialCoordinationProbeReceipt,
+        SerialCoordinationProbeTranscript,
+    };
+    use crate::sync::storage::{
+        ProviderDeviceBinding, ProviderPrincipalId, S3EndpointBinding, StoreProviderBinding,
+    };
+    use crate::sync::store_commit::ObjectHash;
+
+    let mut grant = test_founder_provider_admin(label);
+    let probe_id = ProviderProbeId::from_bytes(
+        *ObjectHash::digest(format!("{label} serial probe").as_bytes()).as_bytes(),
+    );
+    let create_first =
+        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::SerialCreateFirst);
+    let create_second =
+        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::SerialCreateSecond);
+    let replace_first =
+        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::SerialReplaceFirst);
+    let replace_second =
+        crate::sync::provider::probe_payload(&probe_id, ProbePayloadLabel::SerialReplaceSecond);
+    let store = StoreProviderBinding::S3 {
+        endpoint: S3EndpointBinding::Custom {
+            origin: "https://test.invalid".to_string(),
+        },
+        region: "test-region".to_string(),
+        bucket: format!("{label}-bucket"),
+        key_prefix: None,
+    };
+    let device = ProviderDeviceBinding {
+        principal: ProviderPrincipalId::CustomS3Credential {
+            access_key_id_hash: ObjectHash::digest(format!("{label} access key").as_bytes()),
+        },
+    };
+    let transcript = SerialCoordinationProbeTranscript {
+        probe_id,
+        logical_key: format!("store-v1/test/{label}/provider-probe/serial"),
+        create_attempts: [
+            ProbeCreateAttempt {
+                payload_hash: ObjectHash::digest(&create_first),
+                outcome: ProbeCreateOutcome::Created,
+            },
+            ProbeCreateAttempt {
+                payload_hash: ObjectHash::digest(&create_second),
+                outcome: ProbeCreateOutcome::RejectedOccupied,
+            },
+        ],
+        created_bytes_hash: ObjectHash::digest(&create_first),
+        created_version_hash: ObjectHash::digest(b"created version"),
+        replace_attempts: [
+            ProbeReplaceAttempt {
+                payload_hash: ObjectHash::digest(&replace_first),
+                outcome: ProbeReplaceOutcome::Replaced,
+            },
+            ProbeReplaceAttempt {
+                payload_hash: ObjectHash::digest(&replace_second),
+                outcome: ProbeReplaceOutcome::RejectedVersionMismatch,
+            },
+        ],
+        replaced_bytes_hash: ObjectHash::digest(&replace_first),
+        replaced_version_hash: ObjectHash::digest(b"replaced version"),
+        authoritative_read_bytes_hash: ObjectHash::digest(&replace_first),
+        authoritative_read_version_hash: ObjectHash::digest(b"replaced version"),
+        delete_verified_absent: true,
+    };
+    grant.capability.serial_coordination = Some(SerialCoordinationProbeReceipt::from_transcript(
+        transcript, &store, &device,
+    ));
+    grant
+}
 
 /// In-memory [`MasterKeyCustody`] for tests, with a switch to force `persist`
 /// to fail. The switch models a device whose keyring is momentarily
@@ -172,7 +459,7 @@ pub fn read_test_db_with_download_limit(namespace: &str, downloads: usize) -> Da
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         tables,
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::BLOB_TOMBSTONE_GRACE,
         limits,
         crate::WritePolicy::MergeConcurrent,
         "test-device".to_string(),
@@ -231,18 +518,6 @@ pub async fn plant_blob_row_with_size_hash(
     })
     .await
     .expect("plant blob row");
-}
-
-/// Record `uploader` as the member that uploaded blob `(namespace, id)` — the way
-/// the pull records the signed changeset's author, and the way a snapshot carries
-/// the source's uploader index forward. For tests that seed a Remote blob
-/// directly (no pull, no make_remote) and then read or backfill it, so the read
-/// resolves the blob's prefix from the recorded uploader rather than a listing
-/// scan (which no longer exists).
-pub async fn record_blob_uploader(db: &Database, namespace: &str, id: &str, uploader: &str) {
-    db.record_blob_uploader(namespace, id, uploader)
-        .await
-        .expect("record blob uploader");
 }
 
 /// Flip the gate on a blob's planted `notes` root — `shared = remote` for the row
@@ -351,7 +626,7 @@ pub fn open_serial_test_db() -> Database {
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
         crate::WritePolicy::Serial,
         "test-device".to_string(),
@@ -368,7 +643,7 @@ pub fn open_test_db_schema(tables: Vec<SyncedTable>, migrations: Vec<Migration>)
     let (db, _stamper) = Database::open(
         std::path::Path::new(":memory:"),
         tables,
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
         crate::WritePolicy::MergeConcurrent,
         "test-device".to_string(),
@@ -399,7 +674,7 @@ pub fn open_test_db_with_hlc(
     let (db, _stamper) = Database::open_with_hlc(
         std::path::Path::new(":memory:"),
         test_synced_tables(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
+        crate::blob::BLOB_TOMBSTONE_GRACE,
         crate::blob::TransferLimits::serial(),
         crate::WritePolicy::MergeConcurrent,
         hlc,
@@ -529,1853 +804,992 @@ pub fn user_keypair_from_seed(seed: [u8; 32]) -> UserKeypair {
         .expect("seed-derived signing key is valid")
 }
 
+pub async fn create_exact_protocol_object(
+    storage: &dyn crate::sync::storage::SyncStorage,
+    context: &crate::sync::storage::ProtocolObjectContext,
+    semantic_prefix: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> Result<crate::sync::storage::ExactObjectRef, String> {
+    let slot = storage
+        .allocate_protocol_slot(context, semantic_prefix, extension)
+        .await
+        .map_err(|error| error.to_string())?;
+    let prepared = storage
+        .prepare_protocol_object(context, slot, semantic_prefix, bytes.to_vec())
+        .map_err(|error| error.to_string())?;
+    crate::sync::store_objects::create_exact_object(storage, &prepared)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn load_exact_materialized_commit(
+    db: &Database,
+    storage: &dyn crate::sync::storage::SyncStorage,
+    stream_id: &str,
+    sequence: u64,
+) -> Result<
+    Option<(
+        crate::sync::store_commit::StoreBatchCommitRef,
+        crate::sync::store_objects::VerifiedObject<crate::sync::store_commit::StoreBatchCommit>,
+    )>,
+    String,
+> {
+    let Some(reference) = db
+        .exact_materialized_ref(stream_id, sequence)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let root = db
+        .local_store_root_ref()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "materialized Store commit has no exact root authority".to_string())?;
+    let context = crate::sync::storage::ProtocolObjectContext::store(
+        root.store_root_hash,
+        crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+    );
+    let bytes = storage
+        .read_protocol_object(
+            &context,
+            &reference.object,
+            &crate::sync::store_commit::commit_semantic_prefix(
+                stream_id,
+                sequence,
+                reference.commit_hash,
+            ),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let unverified: crate::sync::store_commit::StoreBatchCommit =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let author = db
+        .activated_store_device_registration(unverified.author_registration)
+        .await
+        .map_err(|error| error.to_string())?;
+    let commit = crate::sync::store_objects::load_commit_ref(
+        storage,
+        root.store_root_hash,
+        &reference,
+        &author,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(Some((reference, commit)))
+}
+
 /// A membership chain rooted at the exact founder entry carried by Store protocol root.
 pub fn bootstrap_chain(founder: MembershipEntry) -> MembershipChain {
-    let mut chain = MembershipChain::new();
-    chain.add_entry(founder).unwrap();
-    chain
+    MembershipChain::from_entries(vec![founder]).unwrap()
 }
 
-pub async fn append_membership_entry(
-    storage: &MockSyncStorage,
-    chain: &mut MembershipChain,
-    author_pubkey: &str,
-    seq: u64,
-    entry: MembershipEntry,
-) {
-    let coord = entry.coord();
-    assert_eq!(coord.author_pubkey, author_pubkey);
-    assert_eq!(coord.seq, seq);
-    chain
-        .add_entry_at(coord.clone(), entry.clone())
-        .expect("valid membership test chain");
-    crate::sync::store_objects::append_membership_entry_object(
-        storage,
-        storage.store_protocol_root().object_hash(),
-        &coord,
-        &entry,
-    )
-    .await
-    .expect("upload membership entry");
-}
-
-pub async fn append_membership_entry_bytes(
-    storage: &dyn SyncStorage,
-    store_root_hash: crate::sync::store_commit::ObjectHash,
-    author_pubkey: &str,
-    seq: u64,
-    data: Vec<u8>,
-) -> Result<(), StorageError> {
-    let entry: MembershipEntry =
-        serde_json::from_slice(&data).map_err(|error| StorageError::Parse(error.to_string()))?;
-    if entry.author_pubkey != author_pubkey || entry.seq != seq {
-        return Err(StorageError::Parse(format!(
-            "membership bytes declare {}/{}, expected {author_pubkey}/{seq}",
-            entry.author_pubkey, entry.seq
-        )));
-    }
-    let hash = crate::sync::store_commit::ObjectHash::digest(&data);
-    let prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
-        author_pubkey,
-        &entry.author_owner_grant,
-        entry.stream_id,
-        seq,
-        hash,
-    );
-    storage
-        .append_protocol_object(
-            &crate::sync::storage::ProtocolObjectContext::store(
-                store_root_hash,
-                crate::sync::storage::ProtocolObjectDomain::StoreMembershipEntry,
-            ),
-            &prefix,
-            ".json",
-            data,
-        )
-        .await?;
-    Ok(())
-}
-
-pub async fn publish_membership_chain_head(
-    storage: &MockSyncStorage,
-    chain: &MembershipChain,
+pub async fn create_exact_test_store(
+    db: &Database,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    store_id: &str,
     signer: &UserKeypair,
-) {
-    crate::sync::membership_ops::publish_membership_head(
+) -> Result<crate::sync::store_commit::StoreRootRef, String> {
+    crate::sync::store_protocol_root::create_store(db, storage, store_id, signer)
+        .await
+        .map_err(|error| error.to_string())?;
+    db.local_store_root_ref()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "created test Store has no exact root reference".to_string())
+}
+
+pub async fn initialize_store_fixture(
+    db: &Database,
+    storage: &crate::sync::cloud_storage::CloudSyncStorage,
+    store_id: &str,
+    signer: &UserKeypair,
+) -> Result<
+    (
+        crate::sync::store_commit::StoreRootRef,
+        crate::sync::membership::MembershipChain,
+    ),
+    String,
+> {
+    let root = create_exact_test_store(db, storage, store_id, signer).await?;
+    let protocol_root = crate::sync::store_objects::load_store_protocol_root(storage, &root)
+        .await
+        .map_err(|error| error.to_string())?
+        .value;
+    crate::sync::cycle::ensure_owner_anchored_chain(storage, db, &root, &protocol_root, signer)
+        .await?;
+    let membership = crate::sync::pull::load_cycle_membership(storage, db)
+        .await
+        .map_err(|error| error.to_string())?
+        .chain
+        .ok_or_else(|| "initialized test Store has no membership chain".to_string())?;
+    Ok((root, membership))
+}
+
+pub async fn publish_snapshot_fixture(
+    storage: &dyn crate::sync::storage::SyncStorage,
+    root: &crate::sync::store_commit::StoreRootRef,
+    db_image: Vec<u8>,
+    coverage: crate::sync::store_commit::CommitFrontier,
+    keypair: &UserKeypair,
+    membership: Option<&crate::sync::membership::MembershipChain>,
+    db: &Database,
+) -> Result<crate::sync::store_commit::SnapshotMeta, String> {
+    crate::sync::store_snapshot::push_store_snapshot(
         storage,
-        storage.store_protocol_root().object_hash(),
-        chain,
-        signer,
+        root.store_root_hash,
+        crate::sync::snapshot::CreatedSnapshot {
+            db_image,
+            blobs: Vec::new(),
+        },
+        coverage,
+        db.schema_version(),
+        keypair,
+        "2026-07-16T00:00:00Z".to_string(),
+        membership,
+        db,
     )
     .await
-    .expect("publish membership head");
+    .map_err(|error| error.to_string())
 }
 
-/// The object key [`MockSyncStorage`] stores a blob under. A plain-scheme blob
-/// (one carrying a `cloud_path`) delegates to [`CloudSyncStorage::blob_key`] so it
-/// is exactly the readable key production writes; an obfuscated one keys flat by id
-/// as `{namespace}/{id}` (the mock deliberately doesn't shard — a flat id key is
-/// unambiguous for tests and never needs to match production's `{ab}/{cd}` layout).
-fn blob_key(namespace: &str, id: &str, cloud_path: Option<&str>) -> String {
-    match cloud_path {
-        Some(path) => crate::sync::cloud_storage::CloudSyncStorage::blob_key(
-            crate::sync::cloud_storage::BlobPathScheme::Plain,
-            namespace,
-            None,
-            id,
-            Some(path),
-        )
-        .expect("plain blob_key with a cloud_path is always Ok"),
-        None => format!("{namespace}/{id}"),
-    }
+pub async fn run_cycle_fixture(
+    db: &Database,
+    storage: crate::sync::cloud_storage::CloudSyncStorage,
+    store_dir: &StoreDir,
+) -> Result<crate::sync::cycle::SyncComponents, String> {
+    let expected_store_root = db
+        .local_store_root_ref()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "cycle fixture database has no exact Store root".to_string())?;
+    let components = Box::pin(crate::sync::cycle::init_sync_over_storage(
+        db,
+        storage,
+        crate::sync::cycle::StoreInitialization::OpenStore {
+            expected_store_root,
+        },
+        None,
+    ))
+    .await
+    .map_err(|error| error.to_string())?;
+    Box::pin(components.run_cycle(&crate::clock::SystemClock, None, store_dir, None))
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(components)
 }
 
-struct MembershipHeadReadPause {
-    author_pubkey: String,
-    snapshot_held: std::sync::Arc<tokio::sync::Notify>,
-    release: std::sync::Arc<tokio::sync::Notify>,
+pub async fn latest_local_store_position_fixture(
+    db: &Database,
+) -> Result<Option<crate::sync::store_commit::StoreBatchCommitRef>, String> {
+    db.latest_local_store_position()
+        .await
+        .map_err(|error| error.to_string())
 }
 
-/// In-memory mock of SyncStorage for tests.
-///
-/// Stores blobs and membership objects in memory and immutable Store protocol
-/// copies under their exact semantic paths.
-pub struct MockSyncStorage {
-    objects: Mutex<HashMap<String, Vec<u8>>>,
-    protocol_objects: Mutex<Vec<(crate::storage::cloud::AppendedObject, Vec<u8>)>>,
-    blob_copies: Mutex<Vec<(crate::storage::cloud::AppendedObject, Vec<u8>)>>,
-    next_protocol_object: std::sync::atomic::AtomicU64,
-    next_blob_copy: std::sync::atomic::AtomicU64,
-    store_commits: Mutex<HashMap<(String, u64), crate::sync::store_commit::StoreBatchCommit>>,
-    store_protocol_root: crate::sync::store_commit::StoreProtocolRoot,
-    /// One membership-head read to pause after snapshotting its bytes. The two
-    /// notifications tell the test that the snapshot is held and release it.
-    membership_head_read_pause: Mutex<Option<MembershipHeadReadPause>>,
-    /// The device identity this mock uses for signed Store objects and membership.
-    keypair: UserKeypair,
-    /// When set, `list_membership_entries` returns an error — to exercise the
-    /// fail-closed path where membership can't even be listed (#88), instead of
-    /// silently disabling authorization for the cycle.
-    fail_membership_list: std::sync::atomic::AtomicBool,
-    /// Paired with `membership_list_count` via [`arm_put_failure`] /
-    /// [`armed_put_failure_hits`] to fail exactly one numbered
-    /// `list_membership_entries` call, so a test can make the cycle-start listing
-    /// succeed and a later mid-cycle re-list fail (or vice versa) instead of
-    /// failing every call alike.
-    fail_membership_list_on: std::sync::atomic::AtomicUsize,
-    membership_list_count: std::sync::atomic::AtomicUsize,
-    membership_entry_read_count: std::sync::atomic::AtomicUsize,
-    /// Exact author-stream coordinates the LIST omits but a keyed GET still serves.
-    /// Simulates the eventual-consistency window where a freshly-written
-    /// membership entry isn't in the LIST yet, but a direct GET (read-after-write
-    /// consistent) resolves it — the exact lag issue #84's grant-coordinate fetch
-    /// is built for.
-    hidden_from_listing: Mutex<
-        std::collections::HashSet<(
-            String,
-            MembershipGrantId,
-            crate::sync::membership::AuthorStreamId,
-            u64,
-        )>,
-    >,
-    fail_blob_puts: std::sync::atomic::AtomicUsize,
-    blob_put_count: std::sync::atomic::AtomicUsize,
-    blob_put_from_file_count: std::sync::atomic::AtomicUsize,
-    blob_read_to_file_count: std::sync::atomic::AtomicUsize,
-    fail_blob_reads: std::sync::atomic::AtomicUsize,
-    fail_blob_put_on: std::sync::atomic::AtomicUsize,
-    fail_changeset_puts: std::sync::atomic::AtomicUsize,
-    wrapped_key_put_count: std::sync::atomic::AtomicUsize,
-    fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize,
-    membership_head_append_count: std::sync::atomic::AtomicUsize,
-    fail_membership_head_append_on: std::sync::atomic::AtomicUsize,
-    lose_membership_head_append_on: std::sync::atomic::AtomicUsize,
-    membership_entry_append_count: std::sync::atomic::AtomicUsize,
-    fail_membership_entry_append_on: std::sync::atomic::AtomicUsize,
-    /// When armed, every `read_blob_to_file` gathers on this barrier before serving,
-    /// so a test can prove the pin loop runs fetches concurrently and bounds them:
-    /// with a barrier of size N, N fetches must arrive together to release it, and
-    /// `read_to_file_max_inflight` records the observed peak.
-    read_to_file_barrier: Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>,
-    read_to_file_inflight: std::sync::atomic::AtomicUsize,
-    read_to_file_max_inflight: std::sync::atomic::AtomicUsize,
-}
-
-/// Arm the `call_number`-th put (1-based) tracked by the `(count, fail_on)` atomic
-/// pair to fail once: reset the running count and record which call trips. `label`
-/// names the object kind in the 1-based assertion. Paired with
-/// [`armed_put_failure_hits`], which the matching put method calls to test the arm.
-fn arm_put_failure(
-    count: &std::sync::atomic::AtomicUsize,
-    fail_on: &std::sync::atomic::AtomicUsize,
-    call_number: usize,
-    label: &str,
-) {
-    assert!(call_number > 0, "{label} put call numbers are 1-based");
-    count.store(0, std::sync::atomic::Ordering::SeqCst);
-    fail_on.store(call_number, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// Count this put and report whether it is the call [`arm_put_failure`] armed,
-/// clearing the arm on a hit so only that one call fails.
-fn armed_put_failure_hits(
-    count: &std::sync::atomic::AtomicUsize,
-    fail_on: &std::sync::atomic::AtomicUsize,
-) -> bool {
-    let call = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    if fail_on.load(std::sync::atomic::Ordering::SeqCst) == call {
-        fail_on.store(0, std::sync::atomic::Ordering::SeqCst);
-        true
-    } else {
-        false
-    }
-}
-
-impl MockSyncStorage {
-    pub fn new() -> Self {
-        Self::with_keypair(UserKeypair::generate())
-    }
-
-    pub fn for_store(store_id: &str) -> Self {
-        Self::with_store_and_keypair(store_id, UserKeypair::generate())
-    }
-
-    pub fn with_keypair(keypair: UserKeypair) -> Self {
-        Self::with_store_and_keypair("test-store", keypair)
-    }
-
-    pub fn with_store_and_keypair(store_id: &str, keypair: UserKeypair) -> Self {
-        let founder = crate::sync::membership::founder_entry(
-            store_id,
-            &keypair,
-            "0000000000001-0000-test-founder",
+pub fn install_active_device_fixture<'a>(
+    store: &'a TestStore,
+    observer_db: &'a Database,
+    local_db: &'a Database,
+    identity: &'a UserKeypair,
+    published_at: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+    let future = async move {
+        let authorization = Box::new(
+            crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(
+                Box::pin(store.open_into(observer_db)).await?,
+            ),
         );
-        let store_protocol_root = crate::sync::store_commit::StoreProtocolRoot::signed(
-            store_id.to_string(),
-            founder,
-            1,
-            test_sync_routing_hash(),
-            crate::WritePolicy::MergeConcurrent,
-            &keypair,
+        let provider_admin_grant = store
+            .protocol_root
+            .descriptor
+            .founder_provider_admin
+            .grant_id
+            .clone();
+        let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+            pending_dir.path().join("pending-device-join.sqlite"),
         )
-        .expect("create test store protocol root");
-        let store_root_hash = store_protocol_root.object_hash();
-        let copy_id: crate::storage::cloud::CopyId = format!("{:064x}", 0_u64)
-            .parse()
-            .expect("canonical test copy id");
-        let store_protocol_root_key =
-            crate::sync::store_commit::store_protocol_root_copy_key(store_root_hash, copy_id);
-        let store_protocol_root_object = crate::storage::cloud::AppendedObject::from_provider(
-            store_protocol_root_key,
-            "mock-protocol-0".to_string(),
-        )
-        .expect("mock protocol identity is non-empty");
-        MockSyncStorage {
-            objects: Mutex::new(HashMap::new()),
-            protocol_objects: Mutex::new(vec![(
-                store_protocol_root_object,
-                store_protocol_root.to_bytes(),
-            )]),
-            blob_copies: Mutex::new(Vec::new()),
-            next_protocol_object: std::sync::atomic::AtomicU64::new(1),
-            next_blob_copy: std::sync::atomic::AtomicU64::new(0),
-            store_commits: Mutex::new(HashMap::new()),
-            store_protocol_root,
-            membership_head_read_pause: Mutex::new(None),
-            keypair,
-            fail_membership_list: std::sync::atomic::AtomicBool::new(false),
-            fail_membership_list_on: std::sync::atomic::AtomicUsize::new(0),
-            membership_list_count: std::sync::atomic::AtomicUsize::new(0),
-            membership_entry_read_count: std::sync::atomic::AtomicUsize::new(0),
-            hidden_from_listing: Mutex::new(std::collections::HashSet::new()),
-            fail_blob_puts: std::sync::atomic::AtomicUsize::new(0),
-            blob_put_count: std::sync::atomic::AtomicUsize::new(0),
-            blob_put_from_file_count: std::sync::atomic::AtomicUsize::new(0),
-            blob_read_to_file_count: std::sync::atomic::AtomicUsize::new(0),
-            fail_blob_reads: std::sync::atomic::AtomicUsize::new(0),
-            fail_blob_put_on: std::sync::atomic::AtomicUsize::new(0),
-            fail_changeset_puts: std::sync::atomic::AtomicUsize::new(0),
-            wrapped_key_put_count: std::sync::atomic::AtomicUsize::new(0),
-            fail_wrapped_key_put_on: std::sync::atomic::AtomicUsize::new(0),
-            membership_head_append_count: std::sync::atomic::AtomicUsize::new(0),
-            fail_membership_head_append_on: std::sync::atomic::AtomicUsize::new(0),
-            lose_membership_head_append_on: std::sync::atomic::AtomicUsize::new(0),
-            membership_entry_append_count: std::sync::atomic::AtomicUsize::new(0),
-            fail_membership_entry_append_on: std::sync::atomic::AtomicUsize::new(0),
-            read_to_file_barrier: Mutex::new(None),
-            read_to_file_inflight: std::sync::atomic::AtomicUsize::new(0),
-            read_to_file_max_inflight: std::sync::atomic::AtomicUsize::new(0),
+        .map_err(|error| error.to_string())?;
+        let offer = Box::new(
+            Box::pin(crate::sync::device_join::begin_device_join(
+                observer_db,
+                &store.storage,
+                &authorization,
+                &store.signer,
+                &pubkey_hex(identity),
+                provider_admin_grant,
+            ))
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let access_request = Box::new(
+            Box::pin(
+                crate::sync::device_join::prepare_device_provider_access_request(
+                    &pending,
+                    crate::sync::storage::SyncStorage::provider_binding(&store.storage)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                    identity,
+                    *offer,
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let approval = Box::new(
+            Box::pin(crate::sync::device_join::authorize_device_provider_access(
+                observer_db,
+                &store.storage,
+                None,
+                None,
+                None,
+                &authorization,
+                &store.signer,
+                *access_request,
+            ))
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let registration_request = Box::new(
+            Box::pin(
+                crate::sync::device_join::prepare_device_registration_request(
+                    &pending,
+                    &store.storage,
+                    None,
+                    identity,
+                    *approval,
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let provisional = Box::new(
+            Box::pin(
+                crate::sync::device_join::accept_device_registration_request(
+                    observer_db,
+                    &store.storage,
+                    None,
+                    &authorization,
+                    &store.signer,
+                    *registration_request,
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let provider_ready = Box::new(
+            Box::pin(crate::sync::device_join::publish_device_provider_challenge(
+                observer_db,
+                &store.storage,
+                None,
+                *provisional,
+            ))
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let membership = Box::pin(store.open_into(local_db)).await?;
+        let (_bootstrap_temp, bootstrap_store_dir) = temp_store_dir();
+        let bootstrap_pull = Box::pin(crate::sync::store_pull::pull_store_commits_with_identity(
+            local_db,
+            local_db.synced_tables(),
+            &store.storage,
+            None,
+            store.root.store_root_hash,
+            &bootstrap_store_dir,
+            Some(&membership),
+            Some(identity),
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+        if !bootstrap_pull.held_positions.is_empty() {
+            return Err(format!(
+                "device join bootstrap pull held signed positions: {:?}",
+                bootstrap_pull.held_positions
+            ));
         }
+        let readiness = Box::new(
+            Box::pin(crate::sync::device_join::bootstrap_pending_device(
+                local_db,
+                &pending,
+                &store.storage,
+                None,
+                identity,
+                *provider_ready,
+                published_at,
+            ))
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let completion = Box::new(
+            Box::pin(
+                crate::sync::device_join::complete_device_provider_admission(
+                    observer_db,
+                    None,
+                    &store.signer,
+                    *readiness,
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let activation = Box::new(
+            Box::pin(crate::sync::device_join::finalize_device_join(
+                observer_db,
+                &store.storage,
+                None,
+                &authorization,
+                &store.signer,
+                *completion,
+            ))
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        Box::pin(crate::sync::device_join::complete_device_join(
+            local_db,
+            &pending,
+            &store.storage,
+            *activation,
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    };
+    Box::pin(future)
+}
+
+#[cfg(test)]
+pub(crate) struct TestDropboxAccessAdministrator {
+    pub(crate) namespace_id: String,
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl crate::sync::device_join::DeviceProviderAccessAdministrator
+    for TestDropboxAccessAdministrator
+{
+    async fn grant_member_access(
+        &self,
+        _member_pubkey: &str,
+        _provider_account_email: Option<&str>,
+        peer: &crate::sync::storage::ProviderDeviceBinding,
+    ) -> Result<
+        crate::sync::provider::ProviderAccessLocator,
+        crate::sync::device_join::DeviceJoinError,
+    > {
+        let crate::sync::storage::ProviderPrincipalId::Dropbox { account_id } = &peer.principal
+        else {
+            return Err(crate::sync::device_join::DeviceJoinError::Provider(
+                "test Dropbox access administrator received a non-Dropbox peer".to_string(),
+            ));
+        };
+        Ok(
+            crate::sync::provider::ProviderAccessLocator::DropboxSharedFolderMember {
+                namespace_id: self.namespace_id.clone(),
+                account_id: account_id.clone(),
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+pub fn install_cross_principal_device_fixture<'a>(
+    store: &'a TestStore,
+    observer_db: &'a Database,
+    local_db: &'a Database,
+    identity: &'a UserKeypair,
+    peer_account_id: &'a str,
+    published_at: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + 'a>> {
+    Box::pin(async move {
+        let authorization = Box::new(
+            crate::sync::device_join::DeviceJoinAuthorization::MergeConcurrent(
+                Box::pin(store.open_into(observer_db)).await?,
+            ),
+        );
+        let crate::sync::storage::StoreProviderBinding::Dropbox { namespace_id } =
+            &store.protocol_root.descriptor.provider
+        else {
+            return Err("cross-principal test Store is not Dropbox".to_string());
+        };
+        let peer_binding = crate::sync::storage::ResolvedProviderBinding {
+            store: store.protocol_root.descriptor.provider.clone(),
+            device: crate::sync::storage::ProviderDeviceBinding {
+                principal: crate::sync::storage::ProviderPrincipalId::Dropbox {
+                    account_id: peer_account_id.to_string(),
+                },
+            },
+        };
+        let peer_home = std::sync::Arc::new(
+            store
+                .home
+                .as_ref()
+                .clone()
+                .with_provider_binding(peer_binding),
+        );
+        let peer_storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+            peer_home.clone(),
+            crate::sync::cloud_storage::CloudCipher::Encrypted(
+                crate::encryption::EncryptionService::from_key([42; 32]),
+            ),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+            "cross-principal-test-store",
+            identity.clone(),
+        )
+        .map_err(|error| error.to_string())?
+        .with_test_serial_coordination(peer_home.clone());
+        let pending_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let pending = crate::sync::device_join::DeviceJoinJournalDatabase::open(
+            pending_dir.path().join("pending-device-join.sqlite"),
+        )
+        .map_err(|error| error.to_string())?;
+        let offer = Box::new(
+            Box::pin(crate::sync::device_join::begin_device_join(
+                observer_db,
+                &store.storage,
+                &authorization,
+                &store.signer,
+                &pubkey_hex(identity),
+                store
+                    .protocol_root
+                    .descriptor
+                    .founder_provider_admin
+                    .grant_id
+                    .clone(),
+            ))
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let access_request = Box::new(
+            Box::pin(
+                crate::sync::device_join::prepare_device_provider_access_request(
+                    &pending,
+                    crate::sync::storage::SyncStorage::provider_binding(&peer_storage)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                    identity,
+                    *offer,
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let access_administrator = TestDropboxAccessAdministrator {
+            namespace_id: namespace_id.clone(),
+        };
+        let approval = Box::new(
+            Box::pin(crate::sync::device_join::authorize_device_provider_access(
+                observer_db,
+                &store.storage,
+                None,
+                Some(store.home.as_ref()),
+                Some(&access_administrator),
+                &authorization,
+                &store.signer,
+                *access_request,
+            ))
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        if !matches!(
+            approval.admission,
+            crate::sync::device_join::DeviceProviderAdmissionChallenge::CrossPrincipal(_)
+        ) {
+            return Err("distinct provider principals produced same-principal admission".into());
+        }
+        let registration_request = Box::new(
+            Box::pin(
+                crate::sync::device_join::prepare_device_registration_request(
+                    &pending,
+                    &peer_storage,
+                    Some(peer_home.as_ref()),
+                    identity,
+                    *approval,
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let provisional = Box::new(
+            Box::pin(
+                crate::sync::device_join::accept_device_registration_request(
+                    observer_db,
+                    &store.storage,
+                    None,
+                    &authorization,
+                    &store.signer,
+                    *registration_request,
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        let provider_ready = Box::new(
+            Box::pin(crate::sync::device_join::publish_device_provider_challenge(
+                observer_db,
+                &store.storage,
+                Some(store.home.as_ref()),
+                *provisional,
+            ))
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        Box::pin(store.open_into(local_db)).await?;
+        let readiness = Box::new(
+            Box::pin(crate::sync::device_join::bootstrap_pending_device(
+                local_db,
+                &pending,
+                &peer_storage,
+                Some(peer_home.as_ref()),
+                identity,
+                *provider_ready,
+                published_at,
+            ))
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        if !matches!(
+            readiness.provider,
+            crate::sync::device_join::DeviceProviderReadiness::CrossPrincipal(_)
+        ) {
+            return Err("distinct provider principals produced same-principal readiness".into());
+        }
+        let completion = Box::new(
+            Box::pin(
+                crate::sync::device_join::complete_device_provider_admission(
+                    observer_db,
+                    Some(store.home.as_ref()),
+                    &store.signer,
+                    *readiness,
+                ),
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        if !matches!(
+            completion.admission,
+            crate::sync::device_join::DeviceProviderAdmission::CrossPrincipal(_)
+        ) {
+            return Err("distinct provider principals produced same-principal completion".into());
+        }
+        let activation = Box::new(
+            Box::pin(crate::sync::device_join::finalize_device_join(
+                observer_db,
+                &store.storage,
+                None,
+                &authorization,
+                &store.signer,
+                *completion,
+            ))
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+        Box::pin(crate::sync::device_join::complete_device_join(
+            local_db,
+            &pending,
+            &peer_storage,
+            *activation,
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    })
+}
+
+pub struct TestStore {
+    pub home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+    pub storage: crate::sync::cloud_storage::CloudSyncStorage,
+    pub root: crate::sync::store_commit::StoreRootRef,
+    pub protocol_root: crate::sync::store_commit::StoreProtocolRoot,
+    pub signer: UserKeypair,
+    producers: tokio::sync::Mutex<TestStoreProducers>,
+}
+
+impl std::ops::Deref for TestStore {
+    type Target = crate::sync::cloud_storage::CloudSyncStorage;
+
+    fn deref(&self) -> &Self::Target {
+        &self.storage
+    }
+}
+
+struct TestStoreProducer {
+    db: Database,
+    device_id: String,
+}
+
+struct TestStoreProducers {
+    unassigned: Option<TestStoreProducer>,
+    by_name: HashMap<String, TestStoreProducer>,
+}
+
+impl TestStore {
+    pub async fn create(
+        db: &Database,
+        store_id: &str,
+        signer: UserKeypair,
+    ) -> Result<Self, String> {
+        let home = std::sync::Arc::new(
+            crate::storage::cloud::test_utils::InMemoryCloudHome::new().with_provider_binding(
+                crate::sync::storage::ResolvedProviderBinding {
+                    store: crate::sync::storage::StoreProviderBinding::GoogleDrive {
+                        corpus: crate::sync::storage::GoogleDriveCorpus::SharedDrive {
+                            drive_id: "test-drive".to_string(),
+                            folder_id: "test-folder".to_string(),
+                        },
+                    },
+                    device: crate::sync::storage::ProviderDeviceBinding {
+                        principal: crate::sync::storage::ProviderPrincipalId::GoogleDrive {
+                            permission_id: "test-permission".to_string(),
+                        },
+                    },
+                },
+            ),
+        );
+        Box::pin(Self::create_with_home(db, store_id, signer, home)).await
+    }
+
+    pub async fn create_with_provider_binding(
+        db: &Database,
+        store_id: &str,
+        signer: UserKeypair,
+        binding: crate::sync::storage::ResolvedProviderBinding,
+    ) -> Result<Self, String> {
+        let home = std::sync::Arc::new(
+            crate::storage::cloud::test_utils::InMemoryCloudHome::new()
+                .with_provider_binding(binding),
+        );
+        Box::pin(Self::create_with_home(db, store_id, signer, home)).await
+    }
+
+    async fn create_with_home(
+        db: &Database,
+        store_id: &str,
+        signer: UserKeypair,
+        home: std::sync::Arc<crate::storage::cloud::test_utils::InMemoryCloudHome>,
+    ) -> Result<Self, String> {
+        let storage = crate::sync::cloud_storage::CloudSyncStorage::new(
+            home.clone(),
+            crate::sync::cloud_storage::CloudCipher::Encrypted(
+                crate::encryption::EncryptionService::from_key([42; 32]),
+            ),
+            crate::sync::cloud_storage::BlobPathScheme::Hashed,
+            store_id,
+            signer.clone(),
+        )
+        .map_err(|error| error.to_string())?
+        .with_test_serial_coordination(home.clone());
+        let root = Box::pin(create_exact_test_store(db, &storage, store_id, &signer)).await?;
+        let protocol_root = Box::pin(crate::sync::store_objects::load_store_protocol_root(
+            &storage, &root,
+        ))
+        .await
+        .map_err(|error| error.to_string())?
+        .value;
+        Ok(Self {
+            home,
+            storage,
+            root,
+            protocol_root,
+            signer,
+            producers: tokio::sync::Mutex::new(TestStoreProducers {
+                unassigned: Some(TestStoreProducer {
+                    device_id: db
+                        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| {
+                            "created Store has no activated founder device".to_string()
+                        })?,
+                    db: db.clone(),
+                }),
+                by_name: HashMap::new(),
+            }),
+        })
+    }
+
+    pub async fn new() -> Self {
+        Box::pin(Self::for_store("test-store")).await
+    }
+
+    pub async fn for_store(store_id: &str) -> Self {
+        Box::pin(Self::with_store_and_keypair(
+            store_id,
+            UserKeypair::generate(),
+        ))
+        .await
+    }
+
+    pub async fn with_keypair(signer: UserKeypair) -> Self {
+        Box::pin(Self::with_store_and_keypair("test-store", signer)).await
+    }
+
+    pub async fn with_store_and_keypair(store_id: &str, signer: UserKeypair) -> Self {
+        let db = open_test_db();
+        Box::pin(Self::create(&db, store_id, signer))
+            .await
+            .expect("create exact test Store")
     }
 
     pub fn store_root_hash(&self) -> crate::sync::store_commit::ObjectHash {
-        self.store_protocol_root.object_hash()
+        self.root.store_root_hash
     }
 
-    pub fn store_protocol_root(&self) -> crate::sync::store_commit::StoreProtocolRoot {
-        self.store_protocol_root.clone()
+    pub fn protocol_root(&self) -> &crate::sync::store_commit::StoreProtocolRoot {
+        &self.protocol_root
     }
 
     pub fn protocol_founder_pubkey(&self) -> String {
-        crate::keys::public_key_hex(&self.keypair)
+        crate::keys::public_key_hex(&self.signer)
     }
 
     pub fn protocol_founder_keypair(&self) -> UserKeypair {
-        self.keypair.clone()
+        self.signer.clone()
     }
 
-    pub fn blob_copy_append_count(&self) -> usize {
-        self.next_blob_copy
-            .load(std::sync::atomic::Ordering::SeqCst) as usize
+    pub async fn device_id(&self, name: &str) -> Result<String, String> {
+        self.ensure_producer(name).await
     }
 
-    pub fn insert_blob_copy_candidate(
+    pub async fn next_commit_sequence(&self, name: &str) -> Result<u64, String> {
+        self.ensure_producer(name).await?;
+        let db = {
+            let producers = self.producers.lock().await;
+            producers
+                .by_name
+                .get(name)
+                .expect("ensured test producer exists")
+                .db
+                .clone()
+        };
+        db.latest_local_store_position()
+            .await
+            .map_err(|error| error.to_string())?
+            .map_or(Ok(1), |reference| {
+                reference
+                    .coord
+                    .sequence()
+                    .checked_add(1)
+                    .ok_or_else(|| "test producer sequence exhausted u64".to_string())
+            })
+    }
+
+    pub async fn founder_device_authority(
         &self,
-        locator: &crate::blob::locator::BlobLocator,
-        copy_id: crate::storage::cloud::CopyId,
-        bytes: Vec<u8>,
-    ) -> Result<ImmutableObjectLocator, StorageError> {
-        Self::validate_blob_locator_mode(locator)?;
-        let logical_key = crate::sync::storage::blob_copy_key(locator, copy_id)?;
-        let physical = crate::storage::cloud::AppendedObject::from_provider(
-            logical_key.clone(),
-            format!("mock-inserted-blob-copy-{copy_id}"),
-        )?;
-        self.blob_copies
-            .lock()
-            .unwrap()
-            .push((physical.clone(), bytes));
-        Ok(ImmutableObjectLocator::new(logical_key, physical))
+    ) -> Result<
+        (
+            crate::sync::store_commit::StoreDeviceRegistrationRef,
+            crate::sync::store_commit::StoreDeviceRegistration,
+            UserKeypair,
+        ),
+        String,
+    > {
+        let device_id = self.ensure_producer("founder").await?;
+        let db = {
+            let producers = self.producers.lock().await;
+            producers
+                .by_name
+                .get("founder")
+                .expect("ensured founder producer exists")
+                .db
+                .clone()
+        };
+        let (reference, registration) = db
+            .activated_store_device_registration_records()
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|(_, registration)| registration.device_id.to_string() == device_id)
+            .ok_or_else(|| "founder device registration is not active".to_string())?;
+        let device_signer = registration
+            .device_signer(&self.signer)
+            .map_err(|error| error.to_string())?;
+        Ok((reference, registration, device_signer))
     }
 
-    fn validate_blob_locator_mode(
-        locator: &crate::blob::locator::BlobLocator,
-    ) -> Result<(), StorageError> {
-        if !matches!(locator, crate::blob::locator::BlobLocator::Opaque { .. }) {
-            return Err(StorageError::InvalidContent(
-                "blob locator protection does not match the mock's hashed storage mode".to_string(),
+    #[cfg(test)]
+    pub async fn publish_changeset(
+        &self,
+        name: &str,
+        sequence: u64,
+        changeset: &[u8],
+        schema_version: u32,
+    ) -> Result<crate::sync::store_commit::StoreBatchCommitRef, String> {
+        let device_id = self.ensure_producer(name).await?;
+        let db = {
+            let producers = self.producers.lock().await;
+            producers
+                .by_name
+                .get(name)
+                .expect("ensured test producer exists")
+                .db
+                .clone()
+        };
+        if schema_version != db.schema_version() {
+            return Err(format!(
+                "test changeset schema version {schema_version} differs from producer schema {}",
+                db.schema_version()
             ));
         }
-        Ok(())
-    }
-
-    fn validate_blob_append_authority(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-    ) -> Result<(), StorageError> {
-        if locator.uploader() != self.protocol_founder_pubkey() {
-            return Err(StorageError::InvalidContent(format!(
-                "blob locator uploader {:?} is not this mock device",
-                locator.uploader()
-            )));
+        let before = db
+            .latest_local_store_position()
+            .await
+            .map_err(|error| error.to_string())?;
+        let expected = before
+            .as_ref()
+            .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+        if sequence != expected {
+            return Err(format!(
+                "test producer {name:?} expected sequence {expected}, got {sequence}"
+            ));
         }
-        Ok(())
-    }
-
-    pub fn protocol_founder_coord(&self) -> crate::sync::membership::MembershipCoord {
-        self.store_protocol_root.founder.coord()
-    }
-
-    pub async fn publish_protocol_founder_membership(
-        &self,
-    ) -> crate::sync::membership::MembershipChain {
-        let founder = self.store_protocol_root.founder.clone();
-        let coord = founder.coord();
-        let chain = crate::sync::membership::MembershipChain::from_entries(vec![founder.clone()])
-            .expect("validate mock protocol founder");
-        crate::sync::store_objects::append_membership_entry_object(
-            self,
-            self.store_protocol_root.object_hash(),
-            &coord,
-            &founder,
+        db.enqueue_store_changeset_for_test(changeset.to_vec())
+            .await
+            .map_err(|error| error.to_string())?;
+        let (_tmp, store_dir) = temp_store_dir();
+        let membership = crate::sync::pull::load_cycle_membership(&self.storage, &db)
+            .await
+            .map_err(|error| error.to_string())?;
+        let prepared = crate::sync::store_outbound::prepare_pending_store_write(
+            &db,
+            &self.storage,
+            &device_id,
+            "2026-07-16T00:00:00Z",
+            &self.signer,
+            &store_dir,
+            membership.chain.as_ref(),
         )
         .await
-        .expect("publish mock protocol founder membership");
-        crate::sync::membership_ops::publish_membership_head(
-            self,
-            self.store_protocol_root.object_hash(),
-            &chain,
-            &self.keypair,
-        )
-        .await
-        .expect("publish mock protocol founder head");
-        chain
-    }
-
-    pub fn store_commit_position(
-        &self,
-        device_id: &str,
-        seq: u64,
-    ) -> crate::sync::store_commit::CommitPosition {
-        self.store_commits
-            .lock()
-            .unwrap()
-            .get(&(device_id.to_string(), seq))
-            .unwrap_or_else(|| panic!("missing Store commit {device_id}/{seq}"))
-            .position()
-    }
-
-    pub async fn publish_store_snapshot(
-        &self,
-        db_image: Vec<u8>,
-        coverage: std::collections::BTreeMap<String, crate::sync::store_commit::CommitPosition>,
-        schema_version: u32,
-        db: &Database,
-    ) -> crate::sync::store_commit::SnapshotMeta {
-        let membership = self.publish_protocol_founder_membership().await;
-        crate::sync::store_snapshot::push_store_snapshot(
-            self,
-            self.store_root_hash(),
-            crate::sync::snapshot::CreatedSnapshot {
-                db_image,
-                host_blobs: Vec::new(),
-                publish_blobs: Vec::new(),
-            },
-            crate::CommitFrontier::MergeConcurrent(coverage),
-            schema_version,
-            &self.keypair,
-            "2026-02-10T00:00:00Z".to_string(),
-            Some(&membership),
-            db,
-        )
-        .await
-        .expect("publish mock Store snapshot")
-    }
-
-    fn append_test_protocol(
-        &self,
-        semantic_prefix: &str,
-        extension: &str,
-        bytes: Vec<u8>,
-    ) -> ImmutableObjectLocator {
-        let id = self
-            .next_protocol_object
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let copy_id: crate::storage::cloud::CopyId = format!("{id:064x}")
-            .parse()
-            .expect("canonical test copy id");
-        let logical_key = format!("{semantic_prefix}/copies/{copy_id}{extension}");
-        let physical = crate::storage::cloud::AppendedObject::from_provider(
-            logical_key.clone(),
-            format!("mock-protocol-{id}"),
-        )
-        .expect("mock protocol identity is non-empty");
-        self.protocol_objects
-            .lock()
-            .unwrap()
-            .push((physical.clone(), bytes));
-        ImmutableObjectLocator::new(logical_key, physical)
-    }
-
-    /// Arm `read_blob_to_file` to gather `n` calls on a barrier before each serves,
-    /// so a pin test can prove the download loop runs `n` fetches at once. Use with a
-    /// blob count that is a multiple of `n` so every wave fills the barrier.
-    pub fn arm_read_to_file_concurrency_probe(&self, n: usize) {
-        *self.read_to_file_barrier.lock().unwrap() =
-            Some(std::sync::Arc::new(tokio::sync::Barrier::new(n)));
-    }
-
-    /// The peak number of `read_blob_to_file` calls observed in flight at once while
-    /// the concurrency probe was armed.
-    pub fn read_to_file_max_inflight(&self) -> usize {
-        self.read_to_file_max_inflight
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Make `list_membership_entries` fail, so a test can assert the cycle fails
-    /// closed (refuses to apply changesets) when membership can't be listed,
-    /// rather than falling open to "no chain, accept everything" (#88).
-    pub fn fail_membership_listing(&self) {
-        self.fail_membership_list
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Fail exactly the `call_number`-th (1-based) `list_membership_entries` call,
-    /// leaving every other call to succeed normally. Lets a test isolate a
-    /// mid-cycle re-list (the second call within one pull) from the cycle-start
-    /// listing (the first), to exercise the reload's own fallback to the
-    /// cycle-start chain without also failing cycle start itself.
-    pub fn fail_membership_list_on_call(&self, call_number: usize) {
-        arm_put_failure(
-            &self.membership_list_count,
-            &self.fail_membership_list_on,
-            call_number,
-            "membership-list",
-        );
-    }
-
-    pub fn membership_list_count(&self) -> usize {
-        self.membership_list_count
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn membership_entry_read_count(&self) -> usize {
-        self.membership_entry_read_count
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub async fn discover_membership_entries(&self) -> Vec<MembershipCoord> {
-        crate::sync::membership_ops::list_membership_entries(
-            self,
-            self.store_protocol_root().object_hash(),
-        )
-        .await
-        .expect("discover membership entries")
-    }
-
-    fn membership_coords(&self, author_pubkey: &str, seq: u64) -> Vec<MembershipCoord> {
-        let mut coords = self
-            .protocol_objects
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|(object, _)| {
-                crate::sync::store_commit::parse_membership_entry_copy_key(object.logical_key())
-                    .ok()
-            })
-            .filter(|slot| slot.author == author_pubkey && slot.sequence == seq)
-            .map(|slot| MembershipCoord {
-                author_pubkey: slot.author,
-                author_owner_grant: slot.author_owner_grant,
-                stream_id: slot.stream_id,
-                seq: slot.sequence,
-                entry_hash: slot.semantic_hash,
-            })
-            .collect::<Vec<_>>();
-        coords.sort();
-        coords.dedup();
-        coords
-    }
-
-    async fn unique_membership_coord(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-    ) -> Result<MembershipCoord, StorageError> {
-        let matches = self.membership_coords(author_pubkey, seq);
-        match matches.as_slice() {
-            [coord] => Ok(coord.clone()),
-            [] => Err(StorageError::NotFound(format!(
-                "membership entry {author_pubkey}/{seq}"
-            ))),
-            _ => Err(StorageError::Parse(format!(
-                "membership entry {author_pubkey}/{seq} spans multiple Owner grant streams"
-            ))),
+        .map_err(|error| error.to_string())?;
+        if !prepared {
+            return Err("test changeset did not prepare a Store commit".to_string());
         }
+        crate::sync::store_outbound::drain_store_writes(&db, &self.storage)
+            .await
+            .map_err(|error| error.to_string())?;
+        db.latest_local_store_position()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "published test changeset has no Store position".to_string())
     }
 
-    pub async fn read_membership_entry_bytes(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        let coord = self.unique_membership_coord(author_pubkey, seq).await?;
-        crate::sync::store_objects::load_membership_entry_slot(
-            self,
-            self.store_protocol_root().object_hash(),
-            author_pubkey,
-            &coord.author_owner_grant,
-            coord.stream_id,
-            seq,
-        )
-        .await
-        .map_err(|error| StorageError::Parse(error.to_string()))?
-        .map(|entry| entry.bytes)
-        .ok_or_else(|| StorageError::NotFound(format!("membership entry {author_pubkey}/{seq}")))
-    }
-
-    pub async fn append_membership_entry_bytes(
-        &self,
-        author_pubkey: &str,
-        seq: u64,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let entry: MembershipEntry = serde_json::from_slice(&data)
-            .map_err(|error| StorageError::Parse(error.to_string()))?;
-        if entry.author_pubkey != author_pubkey || entry.seq != seq {
-            return Err(StorageError::Parse(format!(
-                "membership bytes declare {}/{}, expected {author_pubkey}/{seq}",
-                entry.author_pubkey, entry.seq
-            )));
+    async fn ensure_producer(&self, name: &str) -> Result<String, String> {
+        {
+            let producers = self.producers.lock().await;
+            if let Some(producer) = producers.by_name.get(name) {
+                return Ok(producer.device_id.clone());
+            }
         }
-        let hash = crate::sync::store_commit::ObjectHash::digest(&data);
-        let prefix = crate::sync::store_commit::membership_entry_semantic_prefix(
-            author_pubkey,
-            &entry.author_owner_grant,
-            entry.stream_id,
-            seq,
-            hash,
-        );
-        SyncStorage::append_protocol_object(
-            self,
-            &crate::sync::storage::ProtocolObjectContext::store(
-                self.store_protocol_root().object_hash(),
-                crate::sync::storage::ProtocolObjectDomain::StoreMembershipEntry,
-            ),
-            &prefix,
-            ".json",
-            data,
-        )
-        .await?;
-        Ok(())
-    }
 
-    pub async fn read_latest_membership_head_bytes(
-        &self,
-        author_pubkey: &str,
-    ) -> Result<Vec<u8>, StorageError> {
-        crate::sync::store_objects::list_membership_head_objects(
-            self,
-            self.store_protocol_root().object_hash(),
-        )
-        .await
-        .map_err(|error| StorageError::Parse(error.to_string()))?
-        .heads
-        .into_iter()
-        .filter(|head| head.value.author_pubkey == author_pubkey)
-        .max_by_key(|head| head.value.seq)
-        .map(|head| head.bytes)
-        .ok_or_else(|| StorageError::NotFound(format!("membership head {author_pubkey}")))
-    }
-
-    pub async fn append_membership_head_bytes(
-        &self,
-        author_pubkey: &str,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let head: crate::sync::membership::AuthorHead = serde_json::from_slice(&data)
-            .map_err(|error| StorageError::Parse(error.to_string()))?;
-        let hash = crate::sync::store_commit::ObjectHash::digest(&data);
-        let prefix = crate::sync::store_commit::membership_head_semantic_prefix(
-            author_pubkey,
-            &head.author_owner_grant,
-            head.stream_id,
-            head.seq,
-            hash,
-        );
-        SyncStorage::append_protocol_object(
-            self,
-            &crate::sync::storage::ProtocolObjectContext::store(
-                self.store_protocol_root().object_hash(),
-                crate::sync::storage::ProtocolObjectDomain::StoreMembershipHead,
-            ),
-            &prefix,
-            ".json",
-            data,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Hide a stored membership entry from `list_membership_entries` while leaving
-    /// `get_membership_entry` able to serve it — the eventual-consistency window
-    /// where the LIST that rebuilds the chain lags an entry a direct (keyed,
-    /// read-after-write consistent) GET already resolves. Lets a test stage a
-    /// member's authorizing Add, hide it from the LIST, and prove issue #84's
-    /// grant-coordinate fetch recovers the changeset instead of dropping it.
-    pub fn hide_membership_from_listing(&self, author_pubkey: &str, seq: u64) {
-        let matches = self.membership_coords(author_pubkey, seq);
-        assert_eq!(
-            matches.len(),
-            1,
-            "membership slot must identify one grant stream"
-        );
-        let coord = &matches[0];
-        self.hidden_from_listing.lock().unwrap().insert((
-            coord.author_pubkey.clone(),
-            coord.author_owner_grant.clone(),
-            coord.stream_id,
-            coord.seq,
-        ));
-    }
-
-    /// Remove an author's published membership head while leaving its entries
-    /// stored, so a reader test can distinguish a missing required head from a
-    /// lagging entry listing.
-    pub fn remove_membership_head(&self, author_pubkey: &str) {
-        let prefix = format!("store-v1/membership/heads/{author_pubkey}/");
-        let mut objects = self.protocol_objects.lock().unwrap();
-        let before = objects.len();
-        objects.retain(|(object, _)| !object.logical_key().starts_with(&prefix));
-        assert!(
-            objects.len() < before,
-            "remove_membership_head: no head for {author_pubkey}"
-        );
-    }
-
-    /// Remove one membership entry from keyed storage as well as the listing.
-    pub fn remove_membership_entry(&self, author_pubkey: &str, seq: u64) {
-        let matches = self.membership_coords(author_pubkey, seq);
-        assert_eq!(
-            matches.len(),
-            1,
-            "membership slot must identify one grant stream"
-        );
-        let prefix = format!(
-            "store-v1/membership/entries/{author_pubkey}/{}/{}/{seq}/",
-            matches[0].author_owner_grant, matches[0].stream_id
-        );
-        let mut objects = self.protocol_objects.lock().unwrap();
-        let before = objects.len();
-        objects.retain(|(object, _)| !object.logical_key().starts_with(&prefix));
-        assert!(
-            objects.len() < before,
-            "remove_membership_entry: no entry at {author_pubkey}/{seq}"
-        );
-    }
-
-    /// Pause the next read of `author_pubkey`'s membership head after cloning its
-    /// current bytes. Returns `(snapshot_held, release)` notifications.
-    pub fn pause_next_membership_head_read(
-        &self,
-        author_pubkey: &str,
-    ) -> (
-        std::sync::Arc<tokio::sync::Notify>,
-        std::sync::Arc<tokio::sync::Notify>,
-    ) {
-        let snapshot_held = std::sync::Arc::new(tokio::sync::Notify::new());
-        let release = std::sync::Arc::new(tokio::sync::Notify::new());
-        let previous =
-            self.membership_head_read_pause
-                .lock()
-                .unwrap()
-                .replace(MembershipHeadReadPause {
-                    author_pubkey: author_pubkey.to_string(),
-                    snapshot_held: snapshot_held.clone(),
-                    release: release.clone(),
-                });
-        assert!(
-            previous.is_none(),
-            "a membership-head read is already paused"
-        );
-        (snapshot_held, release)
-    }
-
-    pub fn fail_next_blob_puts(&self, count: usize) {
-        self.fail_blob_puts
-            .store(count, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn fail_blob_put_on_call(&self, call_number: usize) {
-        assert!(call_number > 0, "blob put call numbers are 1-based");
-        self.blob_put_count
-            .store(0, std::sync::atomic::Ordering::SeqCst);
-        self.fail_blob_put_on
-            .store(call_number, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn blob_put_from_file_count(&self) -> usize {
-        self.blob_put_from_file_count
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn blob_read_to_file_count(&self) -> usize {
-        self.blob_read_to_file_count
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn fail_next_blob_reads(&self, count: usize) {
-        self.fail_blob_reads
-            .store(count, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn fail_next_changeset_puts(&self, count: usize) {
-        self.fail_changeset_puts
-            .store(count, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn fail_wrapped_key_put_on_call(&self, call_number: usize) {
-        arm_put_failure(
-            &self.wrapped_key_put_count,
-            &self.fail_wrapped_key_put_on,
-            call_number,
-            "wrapped-key",
-        );
-    }
-
-    /// Fail the `call_number`-th membership-entry put (1-based) to exercise the
-    /// invite entry-upload rollback: the wrapped key is written first, then the
-    /// entry upload fails and the rollback must restore or delete the slot.
-    pub fn fail_membership_entry_append_on_call(&self, call_number: usize) {
-        arm_put_failure(
-            &self.membership_entry_append_count,
-            &self.fail_membership_entry_append_on,
-            call_number,
-            "membership-entry",
-        );
-    }
-
-    /// Fail the `call_number`-th membership-head put (1-based) to exercise the
-    /// failed-publish retry path: the entry uploads but its head does not commit.
-    pub fn fail_membership_head_append_on_call(&self, call_number: usize) {
-        arm_put_failure(
-            &self.membership_head_append_count,
-            &self.fail_membership_head_append_on,
-            call_number,
-            "membership-head",
-        );
-    }
-
-    pub fn lose_membership_head_append_result_on_call(&self, call_number: usize) {
-        assert!(
-            call_number > 0,
-            "membership-head append call numbers are 1-based"
-        );
-        self.membership_head_append_count
-            .store(0, std::sync::atomic::Ordering::SeqCst);
-        self.lose_membership_head_append_on
-            .store(call_number, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Remove a blob object from the mock cloud, keyed the same flat
-    /// `{namespace}/{id}` way [`Self::put_blob`] stores a no-`cloud_path` blob. Lets
-    /// a cache test delete the cloud copy after a read populated the local cache, to
-    /// prove a second read is served from disk (a re-fetch would now fail).
-    pub async fn delete_blob_object(&self, namespace: &str, id: &str) {
-        let key = blob_key(namespace, id, None);
-        assert!(
-            self.objects.lock().unwrap().remove(&key).is_some(),
-            "delete_blob_object: no mock cloud blob at {key} to delete (test-setup bug)",
-        );
-    }
-
-    /// Store a changeset in the mock storage (simulates what push would do). The
-    /// changeset itself is left unsigned (for tests exercising unsigned-changeset
-    /// rejection); the device head it advances is signed by the mock's keypair.
-    pub fn store_changeset(
-        &self,
-        device_id: &str,
-        seq: u64,
-        changeset_bytes: &[u8],
-        schema_version: u32,
-    ) {
-        self.store_changeset_with_grant(
-            device_id,
-            seq,
-            changeset_bytes,
-            schema_version,
-            Some(self.protocol_founder_coord()),
-        );
-    }
-
-    pub fn store_changeset_with_grant(
-        &self,
-        device_id: &str,
-        seq: u64,
-        changeset_bytes: &[u8],
-        schema_version: u32,
-        membership_grant: Option<MembershipCoord>,
-    ) {
-        self.store_changeset_signed_as(
-            device_id,
-            seq,
-            changeset_bytes,
-            schema_version,
-            membership_grant,
-            &self.keypair,
-            &self.keypair,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn store_changeset_signed_as(
-        &self,
-        device_id: &str,
-        seq: u64,
-        changeset_bytes: &[u8],
-        schema_version: u32,
-        membership_grant: Option<MembershipCoord>,
-        commit_signer: &UserKeypair,
-        head_signer: &UserKeypair,
-    ) {
-        let previous = if seq == 1 {
-            None
-        } else {
-            Some(
-                self.store_commits
-                    .lock()
-                    .unwrap()
-                    .get(&(device_id.to_string(), seq - 1))
-                    .unwrap_or_else(|| panic!("missing predecessor {device_id}/{}", seq - 1))
-                    .commit_hash(),
-            )
+        let unassigned = {
+            let mut producers = self.producers.lock().await;
+            producers.unassigned.take()
         };
-        let commit = crate::sync::store_commit::StoreBatchCommit::signed(
-            self.store_root_hash(),
-            crate::WriteId::from_generated(format!("test-{device_id}-{seq}")),
-            device_id.to_string(),
-            crate::sync::store_commit::StoreCommitOrder::MergeConcurrent {
-                seq,
-                previous_commit_hash: previous,
-                dependencies: std::collections::BTreeMap::new(),
-            },
-            membership_grant.map(crate::sync::membership::MembershipGrantCreationAuthority::Entry),
-            schema_version,
-            changeset_bytes,
-            commit_signer,
+        let producer = match unassigned {
+            Some(producer) => producer,
+            None => {
+                let db = open_test_db();
+                let observer_db = {
+                    let producers = self.producers.lock().await;
+                    producers
+                        .by_name
+                        .values()
+                        .next()
+                        .ok_or_else(|| "test Store has no active device observer".to_string())?
+                        .db
+                        .clone()
+                };
+                install_active_device_fixture(
+                    self,
+                    &observer_db,
+                    &db,
+                    &self.signer,
+                    "2026-07-16T00:00:00Z",
+                )
+                .await?;
+                let device_id = db
+                    .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "test producer has no activated device".to_string())?;
+                TestStoreProducer { db, device_id }
+            }
+        };
+        let device_id = producer.device_id.clone();
+        let mut producers = self.producers.lock().await;
+        if producers
+            .by_name
+            .insert(name.to_string(), producer)
+            .is_some()
+        {
+            return Err(format!("test producer {name:?} was registered twice"));
+        }
+        Ok(device_id)
+    }
+
+    pub async fn open_into(
+        &self,
+        db: &Database,
+    ) -> Result<crate::sync::membership::MembershipChain, String> {
+        let open = crate::sync::store_protocol_root::open_store(db, &self.storage, &self.root);
+        let root = open.await.map_err(|error| error.to_string())?;
+        let ensure = crate::sync::cycle::ensure_owner_anchored_chain(
+            &self.storage,
+            db,
+            &self.root,
+            &root,
+            &self.signer,
+        );
+        ensure.await?;
+        let load = crate::sync::pull::load_cycle_membership(&self.storage, db);
+        load.await
+            .map_err(|error| error.to_string())?
+            .chain
+            .ok_or_else(|| "opened test Store has no membership chain".to_string())
+    }
+
+    pub async fn publish_pending(
+        &self,
+        db: &Database,
+        store_dir: &StoreDir,
+    ) -> Result<bool, String> {
+        let device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "test Store has no activated local device".to_string())?;
+        let membership = crate::sync::pull::load_cycle_membership(&self.storage, db)
+            .await
+            .map_err(|error| error.to_string())?;
+        let prepared = crate::sync::store_outbound::prepare_pending_store_write(
+            db,
+            &self.storage,
+            &device_id,
+            "2026-07-16T00:00:00Z",
+            &self.signer,
+            store_dir,
+            membership.chain.as_ref(),
         )
-        .expect("sign test Store commit");
-        let head = crate::sync::store_commit::StoreDeviceHead::signed(
-            self.store_root_hash(),
-            device_id.to_string(),
-            Some(commit.position()),
-            "2026-02-10T00:00:00Z".to_string(),
-            head_signer,
-        )
-        .expect("sign test Store head");
-        self.append_test_protocol(
-            &commit
-                .store_package
-                .as_ref()
-                .expect("test Store commit has a package")
-                .object_key,
-            ".pkg",
-            changeset_bytes.to_vec(),
-        );
-        self.append_test_protocol(
-            &crate::sync::store_commit::commit_semantic_prefix(
-                device_id,
-                seq,
-                commit.commit_hash(),
-            ),
-            ".json",
-            commit.to_bytes(),
-        );
-        self.append_test_protocol(
-            &crate::sync::store_commit::head_semantic_prefix(device_id, seq, head.head_hash()),
-            ".json",
-            head.to_bytes(),
-        );
-        self.store_commits
-            .lock()
-            .unwrap()
-            .insert((device_id.to_string(), seq), commit);
-    }
-}
-
-#[async_trait]
-impl SyncStorage for MockSyncStorage {
-    async fn append_protocol_object(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        semantic_prefix: &str,
-        extension: &str,
-        data: Vec<u8>,
-    ) -> Result<ImmutableObjectLocator, StorageError> {
-        context.validate_path(semantic_prefix)?;
-        context.validate_extension(extension)?;
-        if semantic_prefix.starts_with("store-v1/membership/entries/")
-            && armed_put_failure_hits(
-                &self.membership_entry_append_count,
-                &self.fail_membership_entry_append_on,
-            )
-        {
-            return Err(StorageError::Storage(format!(
-                "forced membership-entry append failure for {semantic_prefix}"
-            )));
-        }
-        if semantic_prefix.starts_with("store-v1/membership/heads/")
-            && armed_put_failure_hits(
-                &self.membership_head_append_count,
-                &self.fail_membership_head_append_on,
-            )
-        {
-            return Err(StorageError::Storage(format!(
-                "forced membership-head append failure for {semantic_prefix}"
-            )));
-        }
-        if extension == ".pkg"
-            && self
-                .fail_changeset_puts
-                .fetch_update(
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                    |remaining| remaining.checked_sub(1),
-                )
-                .is_ok()
-        {
-            return Err(StorageError::Storage(format!(
-                "forced Store package append failure for {semantic_prefix}"
-            )));
-        }
-        let appended = self.append_test_protocol(semantic_prefix, extension, data);
-        if semantic_prefix.starts_with("store-v1/membership/heads/") {
-            let call = self
-                .membership_head_append_count
-                .load(std::sync::atomic::Ordering::SeqCst);
-            if self
-                .lose_membership_head_append_on
-                .compare_exchange(
-                    call,
-                    0,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                return Err(StorageError::Storage(format!(
-                    "membership-head append result lost after storing {semantic_prefix}"
-                )));
-            }
-        }
-        Ok(appended)
-    }
-
-    async fn list_protocol_objects(
-        &self,
-        prefix: &str,
-    ) -> Result<ImmutableObjectListing, StorageError> {
-        if prefix == "store-v1/membership/entries/" {
-            let armed_call_hit =
-                armed_put_failure_hits(&self.membership_list_count, &self.fail_membership_list_on);
-            if self
-                .fail_membership_list
-                .load(std::sync::atomic::Ordering::SeqCst)
-                || armed_call_hit
-            {
-                return Err(StorageError::Storage(
-                    "injected membership-list failure".into(),
-                ));
-            }
-        }
-        let hidden = self.hidden_from_listing.lock().unwrap();
-        let objects = self
-            .protocol_objects
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(physical, _)| {
-                if !physical.logical_key().starts_with(prefix) {
-                    return false;
-                }
-                if prefix != "store-v1/membership/entries/" {
-                    return true;
-                }
-                crate::sync::store_commit::parse_membership_entry_copy_key(physical.logical_key())
-                    .is_ok_and(|parsed| {
-                        !hidden.contains(&(
-                            parsed.author,
-                            parsed.author_owner_grant,
-                            parsed.stream_id,
-                            parsed.sequence,
-                        ))
-                    })
-            })
-            .map(|(physical, _)| {
-                ImmutableObjectLocator::new(physical.logical_key().to_string(), physical.clone())
-            })
-            .collect();
-        Ok(ImmutableObjectListing {
-            objects,
-            coverage: crate::storage::cloud::ListingCoverage::CompleteAtScan,
-        })
-    }
-
-    async fn read_protocol_object(
-        &self,
-        context: &crate::sync::storage::ProtocolObjectContext,
-        object: &ImmutableObjectLocator,
-        semantic_prefix: &str,
-    ) -> Result<Vec<u8>, StorageError> {
-        context.validate_locator(object, semantic_prefix)?;
-        let bytes = self
-            .protocol_objects
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(physical, _)| physical == object.physical())
-            .map(|(_, bytes)| bytes.clone())
-            .ok_or_else(|| StorageError::NotFound(object.logical_key().to_string()))?;
-        if crate::sync::store_commit::parse_membership_entry_copy_key(object.logical_key()).is_ok()
-        {
-            self.membership_entry_read_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        if let Ok(parsed) =
-            crate::sync::store_commit::parse_membership_head_copy_key(object.logical_key())
-        {
-            let pause = {
-                let mut pause = self.membership_head_read_pause.lock().unwrap();
-                if pause
-                    .as_ref()
-                    .is_some_and(|pause| pause.author_pubkey == parsed.author)
-                {
-                    pause.take()
-                } else {
-                    None
-                }
-            };
-            if let Some(pause) = pause {
-                pause.snapshot_held.notify_one();
-                pause.release.notified().await;
-            }
-        }
-        Ok(bytes)
-    }
-
-    async fn delete_protocol_object(
-        &self,
-        object: &ImmutableObjectLocator,
-    ) -> Result<(), StorageError> {
-        let mut objects = self.protocol_objects.lock().unwrap();
-        let before = objects.len();
-        objects.retain(|(physical, _)| physical != object.physical());
-        if objects.len() == before {
-            return Err(StorageError::NotFound(object.logical_key().to_string()));
-        }
-        Ok(())
-    }
-
-    async fn append_blob_copy_from_file(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        stored_file: &std::path::Path,
-    ) -> Result<ImmutableObjectLocator, StorageError> {
-        Self::validate_blob_locator_mode(locator)?;
-        self.validate_blob_append_authority(locator)?;
-        let id = self
-            .next_blob_copy
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let copy_id = format!("{id:064x}")
-            .parse::<crate::storage::cloud::CopyId>()
-            .map_err(|error| StorageError::Configuration(error.to_string()))?;
-        let logical_key = crate::sync::storage::blob_copy_key(locator, copy_id)?;
-        let physical = crate::storage::cloud::AppendedObject::from_provider(
-            logical_key.clone(),
-            format!("mock-blob-copy-{id}"),
-        )?;
-        let bytes = crate::local_blob::read(stored_file)
+        .await
+        .map_err(|error| error.to_string())?;
+        let published = crate::sync::store_outbound::drain_store_writes(db, &self.storage)
             .await
-            .map_err(StorageError::LocalFilesystem)?;
-        self.blob_copies
-            .lock()
-            .unwrap()
-            .push((physical.clone(), bytes));
-        Ok(ImmutableObjectLocator::new(logical_key, physical))
-    }
-
-    async fn list_blob_copies(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-    ) -> Result<ImmutableObjectListing, StorageError> {
-        Self::validate_blob_locator_mode(locator)?;
-        let prefix = crate::sync::storage::blob_copy_prefix(locator)?;
-        let objects = self
-            .blob_copies
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(physical, _)| physical.logical_key().starts_with(&prefix))
-            .map(|(physical, _)| {
-                ImmutableObjectLocator::new(physical.logical_key().to_string(), physical.clone())
-            })
-            .collect::<Vec<_>>();
-        for copy in &objects {
-            crate::sync::storage::validate_blob_copy_locator(locator, copy)?;
+            .map_err(|error| error.to_string())?;
+        if published > 0 {
+            crate::sync::cycle::drain_published_blob_drop_intents(db, store_dir, u64::MAX).await?;
+            crate::blob::local_cleanup::drain(db, store_dir)
+                .await
+                .map_err(|error| error.to_string())?;
         }
-        Ok(ImmutableObjectListing {
-            objects,
-            coverage: crate::storage::cloud::ListingCoverage::CompleteAtScan,
-        })
+        Ok(prepared || published > 0)
     }
-
-    async fn read_blob_copy_to_file(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        copy: &ImmutableObjectLocator,
-        dest: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        Self::validate_blob_locator_mode(locator)?;
-        crate::sync::storage::validate_blob_copy_locator(locator, copy)?;
-        if copy.physical().logical_key() != copy.logical_key() {
-            return Err(StorageError::Parse(format!(
-                "blob locator key {:?} does not match physical key {:?}",
-                copy.logical_key(),
-                copy.physical().logical_key()
-            )));
-        }
-        let bytes = self
-            .blob_copies
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(physical, _)| physical == copy.physical())
-            .map(|(_, bytes)| bytes.clone())
-            .ok_or_else(|| StorageError::NotFound(copy.logical_key().to_string()))?;
-        crate::local_blob::write_atomic(dest, &bytes)
-            .await
-            .map_err(StorageError::LocalFilesystem)
-    }
-
-    async fn delete_blob_copy(
-        &self,
-        locator: &crate::blob::locator::BlobLocator,
-        copy: &ImmutableObjectLocator,
-    ) -> Result<(), StorageError> {
-        Self::validate_blob_locator_mode(locator)?;
-        crate::sync::storage::validate_blob_copy_locator(locator, copy)?;
-        if copy.physical().logical_key() != copy.logical_key() {
-            return Err(StorageError::Parse(format!(
-                "blob locator key {:?} does not match physical key {:?}",
-                copy.logical_key(),
-                copy.physical().logical_key()
-            )));
-        }
-        let mut copies = self.blob_copies.lock().unwrap();
-        let before = copies.len();
-        copies.retain(|(physical, _)| physical != copy.physical());
-        if copies.len() == before {
-            return Err(StorageError::NotFound(copy.logical_key().to_string()));
-        }
-        Ok(())
-    }
-
-    async fn put_blob(
-        &self,
-        namespace: &str,
-        id: &str,
-        _scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        let call_number = self
-            .blob_put_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        if self
-            .fail_blob_put_on
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == call_number
-        {
-            return Err(StorageError::Storage(format!(
-                "forced blob upload failure for {namespace}/{id}"
-            )));
-        }
-        if self
-            .fail_blob_puts
-            .fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |remaining| remaining.checked_sub(1),
-            )
-            .is_ok()
-        {
-            return Err(StorageError::Storage(format!(
-                "forced blob upload failure for {namespace}/{id}"
-            )));
-        }
-        let key = blob_key(namespace, id, cloud_path);
-        self.objects.lock().unwrap().insert(key, data);
-        Ok(())
-    }
-
-    async fn put_blob_from_file(
-        &self,
-        namespace: &str,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_path: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        self.blob_put_from_file_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let data = crate::local_blob::read(source_path)
-            .await
-            .map_err(StorageError::Storage)?;
-        self.put_blob(namespace, id, scope, cloud_path, data).await
-    }
-
-    async fn get_blob(
-        &self,
-        namespace: &str,
-        _uploader: Option<&str>,
-        id: &str,
-        _scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-    ) -> Result<Vec<u8>, StorageError> {
-        // The mock keys blobs flat by (namespace, id) and ignores the uploader
-        // prefix — the real `{namespace}/{uploader}/…` layout is exercised against
-        // `CloudSyncStorage` over an `InMemoryCloudHome`, where it can be observed.
-        let key = blob_key(namespace, id, cloud_path);
-        let objects = self.objects.lock().unwrap();
-        objects
-            .get(&key)
-            .cloned()
-            .ok_or(StorageError::NotFound(key))
-    }
-
-    async fn blob_exists(
-        &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<bool, StorageError> {
-        let key = blob_key(namespace, id, cloud_path);
-        Ok(self.objects.lock().unwrap().contains_key(&key))
-    }
-
-    async fn read_blob_range(
-        &self,
-        namespace: &str,
-        _uploader: Option<&str>,
-        id: &str,
-        _scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, StorageError> {
-        // The mock stores blobs as plaintext (no at-rest cipher in tests), so the
-        // plaintext range is exactly the stored byte range — the same slice the
-        // real `BlobRangeReader` would yield over a `Plaintext` home, which its
-        // own cloud_storage tests exercise against `InMemoryCloudHome` with real
-        // encryption. The bounds checks mirror `BlobRangeReader::read` so a miss
-        // here behaves identically whether the cloud is the mock or a real home.
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        let end = offset.checked_add(len).ok_or_else(|| {
-            StorageError::Storage(format!("blob range overflow: offset={offset}, len={len}"))
-        })?;
-        if end > source_size {
-            return Err(StorageError::Storage(format!(
-                "blob range {offset}..{end} exceeds blob size {source_size}"
-            )));
-        }
-        let key = blob_key(namespace, id, cloud_path);
-        let objects = self.objects.lock().unwrap();
-        let stored = objects.get(&key).ok_or(StorageError::NotFound(key))?;
-        Ok(stored[offset as usize..end as usize].to_vec())
-    }
-
-    async fn read_blob_to_file(
-        &self,
-        namespace: &str,
-        uploader: Option<&str>,
-        id: &str,
-        scope: crate::blob::BlobScope,
-        cloud_path: Option<&str>,
-        source_size: u64,
-        expected_hash: &str,
-        dest: &std::path::Path,
-    ) -> Result<(), StorageError> {
-        self.blob_read_to_file_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if self
-            .fail_blob_reads
-            .fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |remaining| remaining.checked_sub(1),
-            )
-            .is_ok()
-        {
-            return Err(StorageError::Storage(format!(
-                "forced blob download failure for {namespace}/{id}"
-            )));
-        }
-        // Concurrency probe: when armed, record the peak in-flight count and gather on
-        // the barrier so a fixed number of fetches must run at once to proceed. Clone
-        // the Arc out of the lock first so the guard isn't held across the await.
-        let barrier = self.read_to_file_barrier.lock().unwrap().clone();
-        if let Some(barrier) = barrier {
-            let inflight = self
-                .read_to_file_inflight
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                + 1;
-            self.read_to_file_max_inflight
-                .fetch_max(inflight, std::sync::atomic::Ordering::SeqCst);
-            barrier.wait().await;
-            self.read_to_file_inflight
-                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        let bytes = self
-            .read_blob_range(
-                namespace,
-                uploader,
-                id,
-                scope,
-                cloud_path,
-                source_size,
-                0,
-                source_size,
-            )
-            .await?;
-        // Verify the content hash before committing the file, the same authority
-        // the real `CloudSyncStorage` streaming download enforces — so a
-        // mock-served blob that does not match its row's hash is refused, not
-        // cached.
-        let actual = crate::blob::content_hash(&bytes);
-        if actual != expected_hash {
-            return Err(StorageError::InvalidContent(format!(
-                "blob {namespace}/{id} content hash mismatch: expected {expected_hash}, got {actual}"
-            )));
-        }
-        crate::local_blob::write_atomic(dest, &bytes)
-            .await
-            .map_err(StorageError::LocalFilesystem)
-    }
-
-    fn blob_path_scheme(&self) -> crate::sync::cloud_storage::BlobPathScheme {
-        crate::sync::cloud_storage::BlobPathScheme::Hashed
-    }
-
-    fn blob_cloud_key(
-        &self,
-        namespace: &str,
-        id: &str,
-        cloud_path: Option<&str>,
-    ) -> Result<String, StorageError> {
-        // The mock keys objects flatly (namespace/cloud_path or namespace/id),
-        // regardless of the scheme it reports — so a tombstone cancel targets the same
-        // key the object was stored under.
-        Ok(blob_key(namespace, id, cloud_path))
-    }
-
-    fn own_uploader(&self) -> Option<String> {
-        Some(hex::encode(self.keypair.public_key()))
-    }
-
-    async fn put_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        if armed_put_failure_hits(&self.wrapped_key_put_count, &self.fail_wrapped_key_put_on) {
-            return Err(StorageError::Storage(format!(
-                "forced wrapped-key upload failure for {owner_pubkey}/{recipient_pubkey}"
-            )));
-        }
-        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}.enc");
-        self.objects.lock().unwrap().insert(key, data);
-        Ok(())
-    }
-
-    async fn get_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-    ) -> Result<Vec<u8>, StorageError> {
-        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}.enc");
-        let objects = self.objects.lock().unwrap();
-        objects
-            .get(&key)
-            .cloned()
-            .ok_or(StorageError::NotFound(key))
-    }
-
-    async fn delete_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-    ) -> Result<(), StorageError> {
-        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}.enc");
-        self.objects.lock().unwrap().remove(&key);
-        Ok(())
-    }
-}
-
-/// A [`PartSink`] for [`MockSyncStorage`]: accumulate the streamed parts and store
-/// the assembled object on `finish`, so a multipart upload round-trips like a
-/// single `put_object`.
-struct MockPartSink<'a> {
-    storage: &'a MockSyncStorage,
-    key: String,
-    buf: Vec<u8>,
-}
-
-#[async_trait]
-impl PartSink for MockPartSink<'_> {
-    fn part_size(&self) -> usize {
-        4 * 1024 * 1024
-    }
-    async fn send_part(
-        &mut self,
-        part: bytes::Bytes,
-        _offset: u64,
-        _is_last: bool,
-    ) -> Result<(), CloudHomeError> {
-        self.buf.extend_from_slice(&part);
-        Ok(())
-    }
-    async fn abort(&mut self) -> Result<(), CloudHomeError> {
-        Ok(())
-    }
-    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
-        self.storage
-            .objects
-            .lock()
-            .unwrap()
-            .insert(self.key, self.buf);
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl CloudHome for MockSyncStorage {
-    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
-        self.objects.lock().unwrap().insert(key.to_string(), data);
-        Ok(())
-    }
-
-    async fn open_multipart<'a>(
-        &'a self,
-        key: &str,
-        _total_len: u64,
-    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
-        Ok(Box::new(MockPartSink {
-            storage: self,
-            key: key.to_string(),
-            buf: Vec::new(),
-        }))
-    }
-
-    fn multipart_threshold(&self) -> u64 {
-        8 * 1024 * 1024
-    }
-
-    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        self.objects
-            .lock()
-            .unwrap()
-            .get(key)
-            .cloned()
-            .ok_or_else(|| CloudHomeError::NotFound(key.to_string()))
-    }
-
-    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
-        let data = self.read(key).await?;
-        Ok(data[start as usize..end as usize].to_vec())
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        let objects = self.objects.lock().unwrap();
-        Ok(objects
-            .keys()
-            .filter(|k| k.starts_with(prefix))
-            .cloned()
-            .collect())
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
-        self.objects.lock().unwrap().remove(key);
-        Ok(())
-    }
-
-    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
-        Ok(self.objects.lock().unwrap().contains_key(key))
-    }
-
-    async fn set_access(
-        &self,
-        desired: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
-        Ok(match desired {
-            crate::storage::cloud::CloudAccessState::Present { .. } => {
-                crate::storage::cloud::CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
-                    bucket: "test-bucket".to_string(),
-                    region: "us-east-1".to_string(),
-                    endpoint: None,
-                    access_key: "test-access-key".to_string(),
-                    secret_key: "test-secret-key".to_string(),
-                    key_prefix: None,
-                })
-            }
-            crate::storage::cloud::CloudAccessState::Absent { .. } => {
-                crate::storage::cloud::CloudAccessOutcome::Absent(
-                    crate::storage::cloud::RevokeOutcome::Unsupported,
-                )
-            }
-        })
-    }
-}
-
-/// Bind a test database to the immutable Store protocol root already carried by the
-/// mock and to the device that will publish from it.
-pub async fn bind_mock_store_protocol(db: &Database, storage: &MockSyncStorage, device_id: &str) {
-    db.set_protocol_state(
-        crate::database::STORE_ROOT_HASH_STATE_KEY,
-        &storage.store_root_hash().to_string(),
-    )
-    .await
-    .expect("bind mock Store protocol root");
-    db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
-        .await
-        .expect("bind mock Store device");
-}
-
-/// Append a founder-signed Store protocol root and pin its exact hash in a test
-/// database. Real cloud-storage tests use this instead of inventing protocol
-/// state that has no corresponding immutable object.
-pub async fn publish_test_store_protocol_root(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    store_id: &str,
-    device_id: &str,
-    founder: &UserKeypair,
-) -> crate::sync::store_commit::ObjectHash {
-    let founder_entry = crate::sync::membership::founder_entry(
-        store_id,
-        founder,
-        "0000000000001-0000-test-store-protocol-root",
-    );
-    let store_protocol_root = crate::sync::store_commit::StoreProtocolRoot::signed(
-        store_id.to_string(),
-        founder_entry,
-        1,
-        db.sync_routing_hash(),
-        crate::WritePolicy::MergeConcurrent,
-        founder,
-    )
-    .expect("sign test Store protocol root");
-    let hash = store_protocol_root.object_hash();
-    crate::sync::store_objects::append_and_verify(
-        storage,
-        &crate::sync::storage::ProtocolObjectContext::store(
-            hash,
-            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
-        ),
-        &crate::sync::store_commit::store_protocol_root_semantic_prefix(hash),
-        ".json",
-        &store_protocol_root.to_bytes(),
-    )
-    .await
-    .expect("append test Store protocol root");
-    db.set_protocol_state(
-        crate::database::STORE_ROOT_HASH_STATE_KEY,
-        &hash.to_string(),
-    )
-    .await
-    .expect("pin test Store protocol root");
-    db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
-        .await
-        .expect("bind test Store device");
-    hash
-}
-
-pub async fn publish_test_serial_store_protocol_root(
-    db: &Database,
-    storage: &dyn SyncStorage,
-    store_id: &str,
-    device_id: &str,
-    founder: &UserKeypair,
-) -> crate::sync::store_commit::ObjectHash {
-    let founder_entry = crate::sync::membership::founder_entry(
-        store_id,
-        founder,
-        "0000000000001-0000-test-serial-store-protocol-root",
-    );
-    let store_protocol_root = crate::sync::store_commit::StoreProtocolRoot::signed(
-        store_id.to_string(),
-        founder_entry,
-        1,
-        db.sync_routing_hash(),
-        crate::WritePolicy::Serial,
-        founder,
-    )
-    .expect("sign test Serial Store protocol root");
-    let hash = store_protocol_root.object_hash();
-    crate::sync::store_objects::append_and_verify(
-        storage,
-        &crate::sync::storage::ProtocolObjectContext::store(
-            hash,
-            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
-        ),
-        &crate::sync::store_commit::store_protocol_root_semantic_prefix(hash),
-        ".json",
-        &store_protocol_root.to_bytes(),
-    )
-    .await
-    .expect("append test Serial Store protocol root");
-    db.set_protocol_state(
-        crate::database::STORE_ROOT_HASH_STATE_KEY,
-        &hash.to_string(),
-    )
-    .await
-    .expect("pin test Serial Store protocol root");
-    db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
-        .await
-        .expect("bind test Serial Store device");
-    let authorization = crate::sync::membership::SerialAuthorizationState::from_founder(
-        hash,
-        &store_protocol_root.founder,
-    )
-    .expect("derive test Serial founder authorization");
-    db.install_serial_root_authorization(
-        store_protocol_root.founder.author_pubkey.clone(),
-        authorization,
-    )
-    .await
-    .expect("install test Serial founder authorization");
-    hash
-}
-
-/// Publish one Store protocol root and its byte-identical membership founder root.
-pub async fn publish_test_protocol_roots(
-    storage: &dyn SyncStorage,
-    store_id: &str,
-    founder: &UserKeypair,
-    created_at: &str,
-) -> (
-    crate::sync::store_commit::StoreProtocolRoot,
-    crate::sync::membership::MembershipChain,
-) {
-    let founder_entry = crate::sync::membership::founder_entry(store_id, founder, created_at);
-    let store_protocol_root = crate::sync::store_commit::StoreProtocolRoot::signed(
-        store_id.to_string(),
-        founder_entry.clone(),
-        1,
-        test_sync_routing_hash(),
-        crate::WritePolicy::MergeConcurrent,
-        founder,
-    )
-    .expect("sign test Store protocol root");
-    let hash = store_protocol_root.object_hash();
-    crate::sync::store_objects::append_and_verify(
-        storage,
-        &crate::sync::storage::ProtocolObjectContext::store(
-            hash,
-            crate::sync::storage::ProtocolObjectDomain::StoreProtocolRoot,
-        ),
-        &crate::sync::store_commit::store_protocol_root_semantic_prefix(hash),
-        ".json",
-        &store_protocol_root.to_bytes(),
-    )
-    .await
-    .expect("publish test Store protocol root");
-    let coord = founder_entry.coord();
-    let chain = crate::sync::membership::MembershipChain::from_entries(vec![founder_entry.clone()])
-        .expect("validate test founder membership");
-    crate::sync::store_objects::append_membership_entry_object(
-        storage,
-        hash,
-        &coord,
-        &founder_entry,
-    )
-    .await
-    .expect("publish test founder membership");
-    crate::sync::membership_ops::publish_membership_head(storage, hash, &chain, founder)
-        .await
-        .expect("publish test founder head");
-    (store_protocol_root, chain)
-}
-
-pub async fn publish_test_founder_membership(
-    storage: &dyn SyncStorage,
-    store_id: &str,
-    founder: &UserKeypair,
-) -> crate::sync::membership::MembershipChain {
-    let store_protocol_root = crate::sync::store_objects::discover_store_protocol_root(
-        storage,
-        store_id,
-        Some(&crate::keys::public_key_hex(founder)),
-    )
-    .await
-    .expect("load test Store protocol root")
-    .value;
-    let store_root_hash = store_protocol_root.object_hash();
-    let entry = store_protocol_root.founder;
-    let coord = entry.coord();
-    let mut chain = crate::sync::membership::MembershipChain::new();
-    chain
-        .add_entry_at(coord.clone(), entry.clone())
-        .expect("valid test founder membership");
-    crate::sync::store_objects::append_membership_entry_object(
-        storage,
-        store_root_hash,
-        &coord,
-        &entry,
-    )
-    .await
-    .expect("publish test founder membership");
-    crate::sync::membership_ops::publish_membership_head(storage, store_root_hash, &chain, founder)
-        .await
-        .expect("publish test founder membership head");
-    chain
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn push_test_store_snapshot(
-    storage: &dyn SyncStorage,
-    store_root_hash: crate::sync::store_commit::ObjectHash,
-    db_image: Vec<u8>,
-    coverage: std::collections::BTreeMap<String, crate::sync::store_commit::CommitPosition>,
-    schema_version: u32,
-    founder: &UserKeypair,
-    membership: &crate::sync::membership::MembershipChain,
-    db: &Database,
-) -> crate::sync::store_commit::SnapshotMeta {
-    crate::sync::store_snapshot::push_store_snapshot(
-        storage,
-        store_root_hash,
-        crate::sync::snapshot::CreatedSnapshot {
-            db_image,
-            host_blobs: Vec::new(),
-            publish_blobs: Vec::new(),
-        },
-        crate::CommitFrontier::MergeConcurrent(coverage),
-        schema_version,
-        founder,
-        "2026-02-10T00:00:00Z".to_string(),
-        Some(membership),
-        db,
-    )
-    .await
-    .expect("publish test Store snapshot")
-}
-
-pub async fn push_test_serial_store_snapshot(
-    storage: &dyn SyncStorage,
-    store_root_hash: crate::sync::store_commit::ObjectHash,
-    db_image: Vec<u8>,
-    coverage: Option<crate::sync::store_commit::CommitPosition>,
-    schema_version: u32,
-    founder: &UserKeypair,
-    db: &Database,
-) -> crate::sync::store_commit::SnapshotMeta {
-    crate::sync::store_snapshot::push_store_snapshot(
-        storage,
-        store_root_hash,
-        crate::sync::snapshot::CreatedSnapshot {
-            db_image,
-            host_blobs: Vec::new(),
-            publish_blobs: Vec::new(),
-        },
-        crate::CommitFrontier::Serial(coverage),
-        schema_version,
-        founder,
-        "2026-07-14T00:00:00Z".to_string(),
-        None,
-        db,
-    )
-    .await
-    .expect("publish test Serial Store snapshot")
-}
-
-/// Pull into `db` the way production does: `pull_changes` applies each incoming
-/// changeset with a plain `call` (never journaled), so applied rows aren't
-/// recorded as a local change, while a host write during the pull journals
-/// normally. Returns the updated positions and the pull result.
-pub async fn pull_into(
-    db: &Database,
-    storage: &MockSyncStorage,
-    device_id: &str,
-    store_dir: &crate::store_dir::StoreDir,
-) -> (
-    std::collections::BTreeMap<String, u64>,
-    crate::sync::store_pull::StorePullResult,
-) {
-    pull_into_result(db, storage, device_id, store_dir)
-        .await
-        .expect("pull")
 }
 
 pub async fn pull_into_result(
     db: &Database,
-    storage: &MockSyncStorage,
-    device_id: &str,
-    store_dir: &crate::store_dir::StoreDir,
+    store: &TestStore,
+    store_dir: &StoreDir,
 ) -> Result<
     (
         std::collections::BTreeMap<String, u64>,
@@ -2383,115 +1797,37 @@ pub async fn pull_into_result(
     ),
     crate::sync::store_pull::StorePullError,
 > {
-    bind_mock_store_protocol(db, storage, device_id).await;
-    let store_root_hash = storage.store_root_hash();
-    let membership = crate::sync::pull::load_cycle_membership(storage, db)
-        .await
-        .map_err(|error| {
-            crate::sync::store_pull::StorePullError::Membership(
-                crate::sync::store_pull::StorePullMembershipError::Message(error.to_string()),
-            )
-        })?;
-    let result = crate::sync::store_pull::pull_store_commits(
+    let membership = Box::new(Box::pin(store.open_into(db)).await.map_err(|error| {
+        crate::sync::store_pull::StorePullError::Membership(
+            crate::sync::store_pull::StorePullMembershipError::Message(error),
+        )
+    })?);
+    let result = Box::pin(crate::sync::store_pull::pull_store_commits(
         db,
         db.synced_tables(),
-        storage,
-        store_root_hash,
-        device_id,
+        &store.storage,
+        store.root.store_root_hash,
         store_dir,
-        membership.chain.as_ref(),
-    )
+        Some(&membership),
+    ))
     .await?;
     let sequences = result
         .frontier
         .iter()
-        .map(|(device_id, position)| (device_id.clone(), position.seq))
+        .map(|(stream, reference)| (stream.clone(), reference.coord.sequence()))
         .collect();
     Ok((sequences, result))
 }
 
-pub async fn pull_cloud_into(
+pub async fn pull_into(
     db: &Database,
-    trusted_store_db: &Database,
-    storage: &crate::sync::cloud_storage::CloudSyncStorage,
-    device_id: &str,
-    store_dir: &crate::store_dir::StoreDir,
+    store: &TestStore,
+    store_dir: &StoreDir,
 ) -> (
     std::collections::BTreeMap<String, u64>,
     crate::sync::store_pull::StorePullResult,
 ) {
-    let store_root_hash = trusted_store_db
-        .required_store_root_hash()
+    pull_into_result(db, store, store_dir)
         .await
-        .expect("read trusted Store protocol root");
-    crate::sync::store_protocol_root::open_store(
-        db,
-        storage,
-        store_root_hash,
-        storage.store_id(),
-        &crate::keys::public_key_hex(storage.user_keypair()),
-    )
-    .await
-    .expect("open exact test Store");
-    db.set_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY, device_id)
-        .await
-        .expect("bind test Store device");
-    let membership = crate::sync::pull::load_cycle_membership(storage, db)
-        .await
-        .expect("load test Store membership");
-    let result = crate::sync::store_pull::pull_store_commits(
-        db,
-        db.synced_tables(),
-        storage,
-        store_root_hash,
-        device_id,
-        store_dir,
-        membership.chain.as_ref(),
-    )
-    .await
-    .expect("pull exact test Store");
-    let sequences = result
-        .frontier
-        .iter()
-        .map(|(device_id, position)| (device_id.clone(), position.seq))
-        .collect();
-    (sequences, result)
-}
-
-/// Drive the raw engine with an injected [`SyncStorage`] in downstream tests.
-/// Production runtimes can execute cycles only through initialized
-/// [`crate::sync::cycle::SyncComponents`].
-#[allow(clippy::too_many_arguments)]
-pub async fn run_test_cycle(
-    storage: &dyn SyncStorage,
-    store_id: &str,
-    device_id: &str,
-    hlc: &crate::sync::hlc::Hlc,
-    clock: &dyn crate::clock::Clock,
-    db: &Database,
-    cipher: &dyn crate::sync::cloud_storage::CloudCipherAccess,
-    pending_rotation: &crate::sync::cloud_storage::PendingRotation,
-    user_keypair: &UserKeypair,
-    custody: Option<&dyn MasterKeyCustody>,
-    store_dir: &StoreDir,
-    cloud_home: Option<&dyn CloudHome>,
-    observer: Option<&dyn crate::blob::BlobTransitionObserver>,
-) -> Result<crate::sync::cycle::SyncCycleResult, String> {
-    crate::sync::cycle::run_single_sync_cycle(
-        storage,
-        store_id,
-        device_id,
-        hlc,
-        clock,
-        db,
-        cipher,
-        pending_rotation,
-        user_keypair,
-        custody,
-        store_dir,
-        cloud_home,
-        observer,
-    )
-    .await
-    .map_err(|error| error.to_string())
+        .expect("pull exact test Store")
 }

@@ -79,9 +79,9 @@ returns. Two beats give the flavor; the whole tour, from open to invite, is
 the [Example](/docs/example).
 
 **Open the store.** Declare the tables that sync and the migration ladder
-that builds your schema; `open` runs coven's own bookkeeping migration, then
-your ladder, and returns one handle. Tables you don't list stay local to the
-device.
+that builds your schema; `open` installs or verifies Coven's one current
+internal schema, runs your ladder, and returns one handle. Tables you don't
+list stay local to the device.
 
 ```rust
 use coven::{Coven, Migration, RowIdentity, SyncedTable, WritePolicy};

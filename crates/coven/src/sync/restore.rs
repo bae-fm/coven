@@ -32,7 +32,7 @@ use crate::sync::session::SyncedTable;
 pub struct RestoreSource {
     pub join_info: CloudHomeJoinInfo,
     pub custom_s3_serial: Option<crate::CustomS3Serial>,
-    pub custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
+    pub custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
     pub oauth_tokens: Option<OAuthTokens>,
     pub cloudkit_ops: Option<Arc<dyn crate::storage::cloud::cloudkit::CloudKitOps>>,
 }
@@ -73,7 +73,7 @@ async fn build_cloud_home(
     let RestoreSource {
         join_info,
         custom_s3_serial: _,
-        custom_s3_immutable_copies,
+        custom_s3_exact_slots,
         oauth_tokens,
         cloudkit_ops,
     } = source;
@@ -98,7 +98,7 @@ async fn build_cloud_home(
                 access_key.clone(),
                 secret_key.clone(),
                 key_prefix.clone(),
-                custom_s3_immutable_copies,
+                custom_s3_exact_slots,
             )
             .await?;
             let home = Arc::new(home);
@@ -194,7 +194,7 @@ async fn build_cloud_home(
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_from_cloud(
     store_id: &str,
-    store_root_hash: crate::sync::store_commit::ObjectHash,
+    store_root: crate::sync::store_commit::StoreRootRef,
     founder_pubkey: &str,
     serialized_keyring: Option<&str>,
     store_name: &str,
@@ -206,6 +206,8 @@ pub async fn restore_from_cloud(
     source: RestoreSource,
     membership_floor: &crate::join_code::MembershipFloor,
     keypair: &UserKeypair,
+    authority: &crate::sync::restore_code::RestoreAuthority,
+    continuation_device_signer: Option<&UserKeypair>,
     layout: &StoreLayout,
     clock: crate::clock::ClockRef,
     ids: crate::id_provider::IdRef,
@@ -229,13 +231,13 @@ pub async fn restore_from_cloud(
         actual_write_policy,
     )
     .map_err(|provider| BootstrapError::SerialCoordinationUnavailable { provider })?;
-    crate::storage::cloud::setup::require_immutable_copy_capabilities_join_info(
+    crate::storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &source.join_info,
-        source.custom_s3_immutable_copies,
+        source.custom_s3_exact_slots,
     )
-    .map_err(|provider| BootstrapError::ImmutableCopiesUnavailable { provider })?;
+    .map_err(|provider| BootstrapError::ExactSlotsUnavailable { provider })?;
     let custom_s3_serial = source.custom_s3_serial;
-    let custom_s3_immutable_copies = source.custom_s3_immutable_copies;
+    let custom_s3_exact_slots = source.custom_s3_exact_slots;
 
     let store_dir = layout.store_dir(store_id);
 
@@ -299,7 +301,6 @@ pub async fn restore_from_cloud(
             blob_paths,
             store_id.to_string(),
             keypair.clone(),
-            std::sync::Arc::new(crate::storage::cloud::RandomCopyIdGenerator),
         )?;
         let storage = match coordination {
             Some((primary, peer)) => storage.with_serial_coordination_clients(primary, peer),
@@ -309,20 +310,45 @@ pub async fn restore_from_cloud(
         // Create the store directory under `stores/` (its non-existence was
         // checked up front, so this create and the failure-cleanup below own
         // it entirely).
-        let device_id = ids.new_id();
+        let device_id = match authority {
+            crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(continuation) => {
+                continuation.registration.device_id.to_string()
+            }
+            crate::sync::restore_code::RestoreAuthority::OwnerRecovery(_) => ids.new_id(),
+        };
         std::fs::create_dir_all(&*store_dir)?;
 
-        bootstrap_and_save_store(
+        let continuation = match (authority, continuation_device_signer) {
+            (
+                crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(continuation),
+                Some(device_signer),
+            ) => Some((continuation, device_signer)),
+            (crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(_), None) => {
+                return Err(BootstrapError::InvalidSigningKey(
+                    "activated continuation has no device signing key".to_string(),
+                ));
+            }
+            (crate::sync::restore_code::RestoreAuthority::OwnerRecovery(_), None) => None,
+            (crate::sync::restore_code::RestoreAuthority::OwnerRecovery(_), Some(_)) => {
+                return Err(BootstrapError::InvalidSigningKey(
+                    "Owner recovery cannot carry an activated device signer".to_string(),
+                ));
+            }
+        };
+
+        Box::pin(bootstrap_and_save_store(
             &storage,
             &cipher,
             master_key.as_ref(),
             &store_dir,
             store_id,
             &device_id,
-            store_root_hash,
-            crate::sync::join::BootstrapContext::Restore {
+            store_root,
+            crate::sync::join::RestoreBootstrapContext {
                 founder_pubkey,
                 keypair,
+                authority,
+                continuation,
             },
             membership_floor,
             synced_tables,
@@ -330,14 +356,13 @@ pub async fn restore_from_cloud(
             &join_info,
             store_name,
             custom_s3_serial,
-            custom_s3_immutable_copies,
+            custom_s3_exact_slots,
             &store_keys,
             custody.as_ref(),
             identity_custody.as_ref(),
-            clock.as_ref(),
             &on_status,
             cancel,
-        )
+        ))
         .await
     }
     .await;
@@ -373,7 +398,7 @@ pub async fn restore_from_code(
     migrations: &[Migration],
     expected_write_policy: crate::WritePolicy,
     custom_s3_serial: Option<crate::CustomS3Serial>,
-    custom_s3_immutable_copies: Option<crate::CustomS3ImmutableCopies>,
+    custom_s3_exact_slots: Option<crate::CustomS3ExactSlots>,
     key_custody: KeyCustody,
     identity_custody: IdentityCustody,
     oauth_tokens: Option<crate::oauth::OAuthTokens>,
@@ -401,11 +426,11 @@ pub async fn restore_from_code(
         actual_write_policy,
     )
     .map_err(|provider| BootstrapError::SerialCoordinationUnavailable { provider })?;
-    crate::storage::cloud::setup::require_immutable_copy_capabilities_join_info(
+    crate::storage::cloud::setup::require_exact_slot_capabilities_join_info(
         &parsed.provider,
-        custom_s3_immutable_copies,
+        custom_s3_exact_slots,
     )
-    .map_err(|provider| BootstrapError::ImmutableCopiesUnavailable { provider })?;
+    .map_err(|provider| BootstrapError::ExactSlotsUnavailable { provider })?;
     let custody = key_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
     let identity_custody = identity_custody.resolve(&parsed.sid, &layout.store_dir(&parsed.sid));
 
@@ -413,7 +438,15 @@ pub async fn restore_from_code(
     // restored signing identity from it. The storage signs its control objects
     // with this keypair during restore, and `restore_from_cloud` imports it into
     // custody just before saving the config.
-    let signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(&parsed.sk)
+    let identity_secret = match &parsed.authority {
+        crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(continuation) => {
+            &continuation.identity_signing_secret
+        }
+        crate::sync::restore_code::RestoreAuthority::OwnerRecovery(recovery) => {
+            &recovery.owner_identity_secret
+        }
+    };
+    let signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(identity_secret)
         .map_err(|e| BootstrapError::InvalidSigningKey(format!("invalid encoding: {e}")))?
         .try_into()
         .map_err(|_| {
@@ -423,14 +456,34 @@ pub async fn restore_from_code(
             ))
         })?;
     let keypair = UserKeypair::from_signing_key_bytes(&signing_key).map_err(BootstrapError::Key)?;
+    let continuation_device_signer = match &parsed.authority {
+        crate::sync::restore_code::RestoreAuthority::ActivatedContinuation(continuation) => {
+            let bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
+                hex::decode(&continuation.device_signing_secret)
+                    .map_err(|error| {
+                        BootstrapError::InvalidSigningKey(format!(
+                            "invalid device signing key encoding: {error}"
+                        ))
+                    })?
+                    .try_into()
+                    .map_err(|_| {
+                        BootstrapError::InvalidSigningKey(format!(
+                            "Device signing key must be {} bytes",
+                            crate::keys::SIGN_SECRETKEYBYTES
+                        ))
+                    })?;
+            Some(UserKeypair::from_signing_key_bytes(&bytes).map_err(BootstrapError::Key)?)
+        }
+        crate::sync::restore_code::RestoreAuthority::OwnerRecovery(_) => None,
+    };
 
     // `parsed.provider` is already the shared `CloudHomeJoinInfo`; `build_cloud_home`
     // (via `restore_from_cloud`) matches on it and pulls in these extras, so there's
     // no per-provider conversion left to do here.
     let source = RestoreSource {
-        join_info: parsed.provider,
+        join_info: parsed.provider.clone(),
         custom_s3_serial,
-        custom_s3_immutable_copies,
+        custom_s3_exact_slots,
         oauth_tokens,
         cloudkit_ops,
     };
@@ -438,9 +491,9 @@ pub async fn restore_from_code(
     // `restore_from_cloud` imports this store's signing identity as the step
     // before it saves the config, so a saved config always has its identity in
     // custody. Nothing identity-related is left for this caller to do.
-    restore_from_cloud(
+    Box::pin(restore_from_cloud(
         &parsed.sid,
-        parsed.store_root_hash,
+        parsed.store_root,
         &parsed.founder_pubkey,
         parsed.ek.as_deref(),
         &parsed.name,
@@ -452,12 +505,14 @@ pub async fn restore_from_code(
         source,
         &parsed.membership_floor,
         &keypair,
+        &parsed.authority,
+        continuation_device_signer.as_ref(),
         layout,
         clock,
         ids,
         on_status,
         cancel,
-    )
+    ))
     .await
 }
 
@@ -492,7 +547,7 @@ mod tests {
                 folder_path: "/Apps/coven/my-store".to_string(),
             },
             custom_s3_serial: None,
-            custom_s3_immutable_copies: None,
+            custom_s3_exact_slots: None,
             oauth_tokens: Some(tokens.clone()),
             cloudkit_ops: None,
         };
@@ -543,7 +598,7 @@ mod build_cloud_home_tests {
                 key_prefix: Some("prefix/".to_string()),
             },
             custom_s3_serial: None,
-            custom_s3_immutable_copies: None,
+            custom_s3_exact_slots: None,
             oauth_tokens: None,
             cloudkit_ops: None,
         };
@@ -575,7 +630,7 @@ mod build_cloud_home_tests {
                 zone_name: "zone".to_string(),
             },
             custom_s3_serial: None,
-            custom_s3_immutable_copies: None,
+            custom_s3_exact_slots: None,
             oauth_tokens: None,
             cloudkit_ops: None,
         };

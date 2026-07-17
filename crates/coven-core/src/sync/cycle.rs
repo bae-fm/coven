@@ -206,23 +206,15 @@ struct PublishedBlobDropIntent {
     drop: super::service::DeferredLocalBlobDrop,
 }
 
-async fn drain_published_blob_drop_intents(
+pub(crate) async fn drain_published_blob_drop_intents(
     db: &Database,
     store_dir: &StoreDir,
     max_seq: u64,
 ) -> Result<(), String> {
     let intents = load_published_blob_drop_intents(db, max_seq).await?;
     for intent in intents {
-        match apply_published_blob_drop_intent(db, store_dir, &intent).await {
-            Ok(()) => clear_published_blob_drop_intent(db, &intent).await?,
-            Err(error) => warn!(
-                seq = intent.seq,
-                namespace = %intent.drop.namespace,
-                blob_id = %intent.drop.id,
-                error = %error,
-                "published blob local-store cleanup remains pending"
-            ),
-        }
+        apply_published_blob_drop_intent(db, store_dir, &intent).await?;
+        clear_published_blob_drop_intent(db, &intent).await?;
     }
     Ok(())
 }
@@ -328,40 +320,6 @@ async fn clear_published_blob_drop_intent(
     .map_err(|e| format!("Failed to clear published blob drop intent: {e}"))
 }
 
-/// Record a published blob's local-store disposition, keyed by the `seq` of the
-/// changeset whose publication makes the blob Remote. The existing drain
-/// (`drain_published_blob_drop_intents`) applies it only once that seq is pushed,
-/// so the local copy is never touched before the row that shares it is durable.
-///
-/// Two commits write here: the host-provided make_remote flip commit records the
-/// authoritative disposition first, and the inline-push staging commit records a
-/// disposition for every host blob in the pushed changeset — which includes the
-/// blob the flip just re-emitted, but with the default disposition, since the flip
-/// consumed the make_remote intent that carried `retain_pinned`. `DO NOTHING` keeps
-/// the first (authoritative) record, so the flip's pin/eager choice wins over the
-/// inline re-scan's default; it also makes a crash-retried stage idempotent.
-pub(crate) fn insert_published_blob_drop_intent(
-    tx: &rusqlite::Transaction<'_>,
-    seq: u64,
-    drop: &super::service::DeferredLocalBlobDrop,
-) -> Result<(), DbError> {
-    tx.execute(
-        "INSERT INTO published_blob_drop_intents \
-         (seq, namespace, blob_id, size, disposition) \
-         VALUES (?1, ?2, ?3, ?4, ?5) \
-         ON CONFLICT(seq, namespace, blob_id) DO NOTHING",
-        rusqlite::params![
-            seq as i64,
-            drop.namespace,
-            drop.id,
-            drop.size as i64,
-            drop.disposition.as_db(),
-        ],
-    )
-    .map(|_| ())
-    .map_err(DbError::from)
-}
-
 fn disposition_from_db(raw: &str) -> Result<DeferredLocalBlobDisposition, String> {
     match raw {
         "drop" => Ok(DeferredLocalBlobDisposition::Drop),
@@ -403,7 +361,7 @@ async fn capture_snapshot_cut(
         }
         let snapshot = super::snapshot::create_snapshot_with_host_blobs(conn, &temp_dir, &tables)
             .map_err(|e| DbError::Message(e.to_string()))?;
-        let coverage = super::store_commit::CommitFrontier::from_positions(
+        let coverage = super::store_commit::CommitFrontier::from_refs(
             write_policy,
             Database::materialized_frontier_on(conn, None)?,
         )
@@ -422,7 +380,7 @@ async fn capture_snapshot_cut(
 /// device's own changes.
 /// Loads/persists all cycle state (local_seq, positions, staging, snapshots) through
 /// `db`'s bookkeeping API rather than keeping mutable state across calls.
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(test)]
 pub(crate) async fn run_single_sync_cycle(
     storage: &dyn SyncStorage,
     store_id: &str,
@@ -462,7 +420,7 @@ pub(crate) async fn run_single_sync_cycle(
 pub(crate) async fn run_single_sync_cycle_with_coordination(
     storage: &dyn SyncStorage,
     serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
-    store_id: &str,
+    _store_id: &str,
     device_id: &str,
     hlc: &Hlc,
     clock: &dyn crate::clock::Clock,
@@ -479,10 +437,13 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     // The synced-table set is owned by the Database; read it once here.
     let tables = db.synced_tables();
 
-    let store_root_hash = db
-        .required_store_root_hash()
+    let store_root = db
+        .local_store_root_ref()
         .await
-        .map_err(|error| format!("read store protocol root hash: {error}"))?;
+        .map_err(|error| format!("read Store root reference: {error}"))?
+        .ok_or_else(|| "Store root reference is absent".to_string())?;
+    let store_root_hash = store_root.store_root_hash;
+    let protocol_store_id = store_root.store_root_id.to_string();
 
     // Resolve the policy's authorization state before this cycle pushes, judges,
     // or decrypts. MergeConcurrent anchors its causal membership chain once for
@@ -505,7 +466,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
                     storage,
                     serial_coordination
                         .ok_or_else(|| "Serial coordination capability is absent".to_string())?,
-                    store_root_hash,
+                    &store_root,
                 )
                 .await
                 .map_err(|error| SyncCycleFailure::operation("load Serial authorization", error))?,
@@ -586,7 +547,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
             db,
             user_keypair,
             custody,
-            store_id,
+            &protocol_store_id,
             &current_owners,
             &visible_activations,
         )
@@ -598,10 +559,9 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     // once, right after the refresh that is the one place this cycle could adopt
     // a rotation, and used below to skip every write that would otherwise seal
     // new data under a generation the store has already superseded: the blob
-    // upload drain, the host-provided make_remote completion, the inline
-    // host-provided blob upload inside `service::sync`, the tombstone write
-    // drain, both changeset-push paths, and the snapshot. Pull, local writes, and
-    // delete-only paths (tombstone GC and cancel-drain) are unaffected — the gate
+    // upload drain, the inline blob upload inside `service::sync`, the tombstone
+    // write drain, both changeset-push paths, and the snapshot. Pull, local writes,
+    // and delete-only tombstone GC are unaffected — the gate
     // is on sealing for the cloud, not on using the store. An unadoptable
     // rotation — including one whose activation entry is not yet visible — is
     // marked pending by the refresh and pauses exactly this set; it never aborts
@@ -616,29 +576,95 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
         );
     }
 
+    if let Some(home) = cloud_home {
+        if rotation_pending.is_none() {
+            let drained = crate::blob::delete::drain_tombstones(
+                db,
+                home,
+                cipher,
+                pending_rotation,
+                &protocol_store_id,
+                user_keypair,
+                clock,
+            )
+            .await
+            .map_err(|error| format!("drain queued blob tombstones: {error}"))?;
+            if drained > 0 {
+                info!(count = drained, "Drained blob tombstones");
+            }
+        }
+        let reclaimed = crate::blob::delete::gc_tombstones(
+            db,
+            home,
+            storage,
+            cipher,
+            &protocol_store_id,
+            &hex::encode(user_keypair.public_key()),
+            merge_chain,
+            serial_authorization
+                .as_ref()
+                .map(|serial| &serial.authorization.membership),
+            clock,
+            db.blob_tombstone_grace(),
+        )
+        .await
+        .map_err(|error| format!("garbage-collect blob tombstones: {error}"))?;
+        if reclaimed > 0 {
+            info!(count = reclaimed, "Reclaimed tombstoned blobs");
+        }
+    }
+
     let local_seq = db
-        .latest_outbound_store_position()
+        .latest_local_store_position()
         .await
         .map_err(|error| format!("read local Store position: {error}"))?
-        .map_or(0, |position| position.seq);
+        .map_or(0, |reference| reference.coord.sequence());
     let last_snapshot_time: Option<chrono::DateTime<chrono::Utc>> =
         read_protocol_state::<chrono::DateTime<chrono::FixedOffset>>(db, "last_snapshot_time")
             .await?
             .map(|time| time.with_timezone(&chrono::Utc));
-    let last_snapshot_position: Option<super::store_commit::CommitPosition> = db
-        .get_protocol_state(crate::database::LAST_SNAPSHOT_POSITION_STATE_KEY)
+    let last_snapshot = db
+        .latest_local_store_snapshot()
         .await
-        .map_err(|error| format!("read last snapshot position: {error}"))?
-        .map(|raw| {
-            serde_json::from_str(&raw)
-                .map_err(|error| format!("last snapshot position is invalid: {error}"))
-        })
-        .transpose()?;
-    let has_snapshot = db
-        .get_protocol_state(crate::database::LAST_SNAPSHOT_HASH_STATE_KEY)
-        .await
-        .map_err(|error| format!("read last snapshot hash: {error}"))?
-        .is_some();
+        .map_err(|error| format!("read latest exact Store snapshot: {error}"))?;
+    let last_snapshot_position = match last_snapshot.as_ref() {
+        None => None,
+        Some(snapshot) => {
+            let write_policy = db.write_policy();
+            if snapshot.meta.coverage.policy() != write_policy {
+                return Err(
+                    "latest local Store snapshot coverage has the wrong write policy"
+                        .to_string()
+                        .into(),
+                );
+            }
+            let local_stream_id = match write_policy {
+                crate::WritePolicy::MergeConcurrent => {
+                    let (root, registration, _, _) =
+                        super::store_outbound::load_local_store_authority(
+                            db,
+                            device_id,
+                            user_keypair,
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("load local Store snapshot cadence authority: {error}")
+                        })?;
+                    super::causal_grants::AuthorStreamId::store_announcements(&root, &registration)
+                        .to_string()
+                }
+                crate::WritePolicy::Serial => super::store_commit::SERIAL_STREAM_ID.to_string(),
+            };
+            snapshot
+                .meta
+                .coverage
+                .clone()
+                .into_refs()
+                .remove(&local_stream_id)
+                .map(|reference| reference.coord.sequence())
+        }
+    };
+    let has_snapshot = last_snapshot.is_some();
     drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
 
     // One wall-clock reading for this whole cycle. Store acknowledgements and
@@ -646,66 +672,28 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     // carry a separate HLC stamp (`timestamp` below) for causal ordering.
     let sync_time = clock.now().to_rfc3339();
 
-    // The cloud handle + object-key suffix the inline host-provided upload path uses to
-    // cancel a pending tombstone after a (re-)upload — the same invariant the outbox
-    // drain holds. `None` on a cloud-less run, which has no tombstones to cancel.
-    let blob_object_suffix = cipher.snapshot().suffix();
-    let host_upload_cancel = cloud_home.map(|ch| super::service::HostUploadCloud {
-        cloud_home: ch,
-        suffix: blob_object_suffix,
-        now_rfc: &sync_time,
-    });
-
-    // Drain the blob engine's upload queue. Blob-before-row ordering is enforced by
-    // the gate column: a root being made Remote stays gated off until its last
-    // user-provided blob lands, and coven flips it on inside the drain (the
-    // make_remote completion), breaking the drain so this cycle publishes the
-    // now-shareable subtree instead of waiting for the whole batch. The changeset is
-    // gated per row, not by a global "any upload pending" flag. The drain reports
-    // whether it broke to publish, which drives the loop's cadence below.
     let mut resume_drain_promptly = false;
-    if let Some(ch) = cloud_home {
-        if rotation_pending.is_none() {
-            match crate::blob::upload::drain_uploads(
-                db,
-                ch,
-                cipher,
-                pending_rotation,
-                store_id,
-                store_dir,
-                clock,
-                hlc,
-                routing_encryption,
-                observer,
-            )
-            .await
-            {
-                Ok(outcome) => {
-                    if outcome.failures.has_transport_failure() {
-                        return Err(SyncCycleFailure::operation(
-                            "upload queued blobs",
-                            outcome.failures,
-                        ));
-                    }
-                    resume_drain_promptly = outcome.yielded_for_publish;
-                    if outcome.uploaded > 0 {
-                        info!(count = outcome.uploaded, "Drained blob uploads");
-                    }
-                }
-                Err(e) => warn!("Blob upload drain error: {e}"),
-            }
+    if rotation_pending.is_none() {
+        let outcome = crate::blob::upload::drain_uploads(
+            db,
+            storage,
+            store_dir,
+            clock,
+            hlc,
+            routing_encryption,
+            observer,
+        )
+        .await
+        .map_err(|error| SyncCycleFailure::operation("drain queued blob uploads", error))?;
+        if outcome.failures.has_transport_failure() {
+            return Err(SyncCycleFailure::operation(
+                "upload queued blobs",
+                outcome.failures,
+            ));
         }
-
-        // Retry any tombstone-cancel an upload's inline cancel could not complete.
-        // Runs right after the upload drain (and before the tombstone GC below), so
-        // a blob re-uploaded this cycle has its tombstone removed before the GC
-        // could reclaim it. A cancel that still fails stays queued for the next
-        // cycle, backed off like the delete drain — the live re-uploaded blob must
-        // never lose its tombstone-cancel.
-        match crate::blob::delete::drain_tombstone_cancels(db, ch, cipher, clock).await {
-            Ok(n) if n > 0 => info!(count = n, "Completed pending tombstone cancels"),
-            Err(e) => warn!("Tombstone cancel drain error: {e}"),
-            _ => {}
+        resume_drain_promptly = outcome.yielded_for_publish;
+        if outcome.uploaded > 0 {
+            info!(count = outcome.uploaded, "Drained blob uploads");
         }
     }
 
@@ -728,7 +716,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
                 storage,
                 serial_coordination
                     .ok_or_else(|| "Serial coordination capability is absent".to_string())?,
-                store_root_hash,
+                &store_root,
             )
             .await
             .map_err(|error| {
@@ -766,53 +754,26 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
         }
     }
 
-    let timestamp = hlc.now().to_string();
-    let local_seq_before_stage = db
-        .latest_outbound_store_position()
-        .await
-        .map_err(|error| format!("read local Store position: {error}"))?
-        .map_or(0, |position| position.seq);
-
-    if rotation_pending.is_some() {
-        debug!(
-            "rotation pending; leaving ready host-provided make_remote intents queued until adoption"
-        );
-    } else if super::service::complete_host_provided_make_remotes(
-        db,
-        tables,
-        storage,
-        &timestamp,
-        store_dir,
-        local_seq_before_stage,
-        routing_encryption,
-        host_upload_cancel.as_ref(),
-    )
-    .await
-    .map_err(|error| SyncCycleFailure::operation("complete host-provided make_remote", error))?
-    {
-        resume_drain_promptly = true;
-    }
-
-    let store_pull = super::store_pull::pull_store_commits_with_identity(
+    let store_pull = Box::pin(super::store_pull::pull_store_commits_with_identity(
         db,
         tables,
         storage,
         serial_coordination,
         store_root_hash,
-        device_id,
         store_dir,
         merge_chain,
         Some(user_keypair),
-    )
+    ))
     .await
     .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
     let serial_membership_after_pull = match db.write_policy() {
         crate::WritePolicy::MergeConcurrent => None,
         crate::WritePolicy::Serial => Some(
-            db.serial_membership_state()
+            db.serial_authorization_state()
                 .await
                 .map_err(|error| format!("read materialized Serial membership: {error}"))?
-                .ok_or_else(|| "materialized Serial membership is absent".to_string())?,
+                .ok_or_else(|| "materialized Serial authorization is absent".to_string())?
+                .membership,
         ),
     };
 
@@ -845,7 +806,6 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
                 user_keypair,
                 store_dir,
                 merge_chain,
-                host_upload_cancel.as_ref(),
             )
             .await
             .map_err(|error| SyncCycleFailure::operation("prepare Store write", error))?;
@@ -870,11 +830,15 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     };
 
     let local_seq = db
-        .latest_outbound_store_position()
+        .latest_local_store_position()
         .await
         .map_err(|error| format!("read local Store position after publish: {error}"))?
-        .map_or(0, |position| position.seq);
+        .map_or(0, |position| position.coord.sequence());
     drain_published_blob_drop_intents(db, store_dir, local_seq).await?;
+    let local_blob_cleanup_pending = crate::blob::local_cleanup::drain(db, store_dir)
+        .await
+        .map_err(|error| format!("drain local blob cleanup after Store publication: {error}"))?
+        || store_pull.local_blob_cleanup_pending;
 
     // Flush the clock's high-water mark so a restart re-seeds past it. Store pull
     // advances the clock in the row-and-materialized-position commit closure, so
@@ -886,72 +850,6 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     )
     .await
     .map_err(|e| format!("Failed to persist HLC high-water mark: {e}"))?;
-
-    // Turn queued blob deletes into signed cloud tombstones (the deletion's
-    // durable record), then GC tombstones whose convergence grace has passed
-    // (the actual blob deletion). Holding the blob for the grace
-    // keeps a peer that still references the row from being stranded; the
-    // signature stops a non-member forging a deletion. (This is blob-tombstone
-    // GC; changeset reclamation runs separately, after a snapshot is published.)
-    if let Some(ch) = cloud_home {
-        if rotation_pending.is_none() {
-            match crate::blob::delete::drain_tombstones(
-                db,
-                ch,
-                cipher,
-                pending_rotation,
-                store_id,
-                user_keypair,
-                clock,
-            )
-            .await
-            {
-                Ok(n) if n > 0 => info!(count = n, "Wrote blob tombstones"),
-                Err(e) => warn!("Tombstone drain error: {e}"),
-                _ => {}
-            }
-        }
-        // A still-pending tombstone-cancel means a blob was re-uploaded this
-        // cycle (or earlier) but its cancel couldn't reach the cloud, so the
-        // tombstone is still present though the blob is live. Reclaiming now would
-        // delete that re-upload, so skip the GC entirely while any cancel is
-        // pending — the initiating loop must retry the durable cancels before
-        // reclaiming.
-        let cancels_pending = match db.get_pending_cloud_cancels().await {
-            Ok(cancels) => !cancels.is_empty(),
-            Err(e) => {
-                // Can't confirm the cancel queue is clear — don't risk reclaiming.
-                warn!("Tombstone GC skipped: failed to read pending cancels: {e}");
-                true
-            }
-        };
-        if cancels_pending {
-            debug!("tombstone cancels still pending; skipping reclaim this cycle");
-        } else {
-            // Authorize every reclaim against the policy state materialized by this
-            // cycle: the founder-anchored MergeConcurrent chain, or the Serial
-            // membership produced by the exact pulled global prefix.
-            match crate::blob::delete::gc_tombstones(
-                db,
-                ch,
-                cipher,
-                store_id,
-                &hex::encode(user_keypair.public_key()),
-                merge_chain,
-                serial_membership_after_pull.as_ref(),
-                clock,
-                db.blob_tombstone_grace(),
-            )
-            .await
-            {
-                Ok(n) if n > 0 => {
-                    info!(count = n, "Reclaimed blobs past the tombstone grace")
-                }
-                Err(e) => warn!("Tombstone GC error: {e}"),
-                _ => {}
-            }
-        }
-    }
 
     // Check snapshot policy.
     let hours_since = last_snapshot_time.map(|t| {
@@ -965,11 +863,9 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     let is_initial_sync = local_seq == 0 && !has_snapshot && !staged_store_batch;
 
     // The snapshot is the second channel that propagates rows to peers. It
-    // applies the same row-level gate as the changeset push (create_snapshot runs
-    // the gate's delete_gated_false), so a row whose gate column is off — which
-    // the host keeps off until its blobs upload — is already excluded. No global
-    // upload deferral is needed: the snapshot can never carry a row whose blobs
-    // aren't in the cloud.
+    // applies the same row-level gate as the changeset push, captures every
+    // surviving blob row in the immutable cut, and publishes that exact blob
+    // closure before activating the snapshot metadata.
     // Owner-only snapshots: a snapshot restates the whole catalog — the image a new
     // device bootstraps from wholesale — so only a current Owner may author one.
     // Decide whether a snapshot is both due and permitted BEFORE create_snapshot
@@ -984,15 +880,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
         && (is_initial_sync
             || super::snapshot::should_create_snapshot(
                 local_seq,
-                if has_snapshot {
-                    Some(
-                        last_snapshot_position
-                            .as_ref()
-                            .map_or(0, |position| position.seq),
-                    )
-                } else {
-                    None
-                },
+                last_snapshot_position,
                 hours_since,
             ));
     let may_snapshot = if rotation_pending.is_some() {
@@ -1051,18 +939,6 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
 
         match snapshot_result {
             Ok(cut) => {
-                super::service::upload_snapshot_host_blobs(
-                    db,
-                    storage,
-                    store_dir,
-                    &cut.snapshot.host_blobs,
-                    host_upload_cancel.as_ref(),
-                )
-                .await
-                .map_err(|error| {
-                    SyncCycleFailure::operation("upload snapshot host-provided blobs", error)
-                })?;
-
                 let meta = super::store_snapshot::push_store_snapshot(
                     storage,
                     store_root_hash,
@@ -1092,10 +968,9 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
             .materialized_frontier()
             .await
             .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?;
-        let frontier =
-            super::store_commit::CommitFrontier::from_positions(db.write_policy(), frontier)
-                .map_err(|error| format!("shape Store acknowledgement frontier: {error}"))?;
-        super::store_ack::stage_store_ack(db, frontier, sync_time.clone(), user_keypair)
+        let frontier = super::store_commit::CommitFrontier::from_refs(db.write_policy(), frontier)
+            .map_err(|error| format!("shape Store acknowledgement frontier: {error}"))?;
+        super::store_ack::stage_store_ack(db, storage, frontier, sync_time.clone(), user_keypair)
             .await
             .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
         super::store_ack::drain_outbound_store_acks(db, storage)
@@ -1110,7 +985,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
                     .chain
                     .as_ref()
                     .ok_or_else(|| "MergeConcurrent cycle has no membership chain".to_string())?,
-                listing_proof: membership.listing_proof,
+                discovery_proof: membership.discovery_proof,
             },
             (None, Some(serial)) => super::store_reclaim::ReclaimMembership::Serial(serial),
             _ => {
@@ -1147,7 +1022,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
         device_activity: core_status.other_devices,
         sync_time,
         asset_downloads_failed: store_pull.asset_downloads_failed,
-        local_blob_cleanup_pending: store_pull.local_blob_cleanup_pending,
+        local_blob_cleanup_pending,
         row_changes: store_pull.row_changes,
         resume_drain_promptly,
         rotation_pending,
@@ -1335,8 +1210,7 @@ pub enum InitSyncError {
 pub enum StoreInitialization {
     CreateStore,
     OpenStore {
-        expected_store_root_hash: super::store_commit::ObjectHash,
-        expected_founder: String,
+        expected_store_root: super::store_commit::StoreRootRef,
     },
 }
 
@@ -1378,37 +1252,46 @@ pub async fn init_sync_over_storage(
             super::store_protocol_root::create_store(
                 db,
                 &storage,
-                &store_id,
                 &hlc.now().to_string(),
                 &user_keypair,
             )
             .await
         }
         StoreInitialization::OpenStore {
-            expected_store_root_hash,
-            expected_founder,
-        } => {
-            super::store_protocol_root::open_store(
-                db,
-                &storage,
-                expected_store_root_hash,
-                &store_id,
-                &expected_founder,
-            )
-            .await
-        }
+            expected_store_root,
+        } => super::store_protocol_root::open_store(db, &storage, &expected_store_root).await,
     }
     .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
-    match store_protocol_root.write_policy {
+    let store_root_ref = db
+        .local_store_root_ref()
+        .await
+        .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?
+        .ok_or_else(|| {
+            InitSyncError::StoreProtocolRoot(
+                "opened Store root has no durable exact reference".to_string(),
+            )
+        })?;
+    match store_protocol_root.descriptor.write_policy {
         crate::WritePolicy::MergeConcurrent => {
-            ensure_owner_anchored_chain(&storage, db, &store_protocol_root, &user_keypair)
-                .await
-                .map_err(InitSyncError::MembershipAnchor)?;
+            ensure_owner_anchored_chain(
+                &storage,
+                db,
+                &store_root_ref,
+                &store_protocol_root,
+                &user_keypair,
+            )
+            .await
+            .map_err(InitSyncError::MembershipAnchor)?;
         }
         crate::WritePolicy::Serial => {
-            ensure_serial_founder_authorization(db, &store_protocol_root)
-                .await
-                .map_err(InitSyncError::MembershipAnchor)?;
+            ensure_serial_founder_authorization(
+                &storage,
+                db,
+                &store_root_ref,
+                &store_protocol_root,
+            )
+            .await
+            .map_err(InitSyncError::MembershipAnchor)?;
         }
     }
 
@@ -1425,7 +1308,32 @@ pub async fn init_sync_over_storage(
         .map_err(|e| InitSyncError::PendingRotationRestore(e.to_string()))?;
     }
 
-    let device_id = hlc.device_id().to_string();
+    let mut device_id = db
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
+    if device_id.is_none()
+        && store_protocol_root.descriptor.founder_pubkey
+            == crate::keys::public_key_hex(&user_keypair)
+    {
+        super::store_registration::install_existing_founder_device(
+            db,
+            &storage,
+            &store_root_ref,
+            &user_keypair,
+        )
+        .await
+        .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
+        device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .map_err(|error| InitSyncError::StoreProtocolRoot(error.to_string()))?;
+    }
+    let device_id = device_id.ok_or_else(|| {
+        InitSyncError::StoreProtocolRoot(
+            "initialized Store has no local device registration id".to_string(),
+        )
+    })?;
     let pending_rotation = storage.shared_pending_rotation();
     info!("Sync initialized (device: {device_id})");
 
@@ -1442,8 +1350,10 @@ pub async fn init_sync_over_storage(
     })
 }
 
-async fn ensure_serial_founder_authorization(
+pub(crate) async fn ensure_serial_founder_authorization(
+    storage: &dyn super::storage::SyncStorage,
     db: &Database,
+    root_ref: &super::store_commit::StoreRootRef,
     root: &super::store_commit::StoreProtocolRoot,
 ) -> Result<(), String> {
     let pinned = db
@@ -1452,43 +1362,48 @@ async fn ensure_serial_founder_authorization(
         .map_err(|error| format!("read pinned Serial founder: {error}"))?;
     if pinned
         .as_ref()
-        .is_some_and(|founder| founder != &root.author_pubkey)
+        .is_some_and(|founder| founder != &root.descriptor.founder_pubkey)
     {
         return Err(format!(
             "pinned Serial founder {:?} does not match Store root founder {:?}",
             pinned.as_deref(),
-            root.author_pubkey
+            root.descriptor.founder_pubkey
         ));
     }
-    let membership = db
-        .serial_membership_state()
+    let authorization = db
+        .serial_authorization_state()
         .await
-        .map_err(|error| format!("read Serial membership state: {error}"))?;
-    let generation = db
-        .serial_key_generation()
-        .await
-        .map_err(|error| format!("read Serial key generation: {error}"))?;
-    match (pinned, membership, generation) {
-        (Some(_), Some(membership), Some(_)) => {
-            if membership.store_root_hash() != root.object_hash() {
+        .map_err(|error| format!("read Serial authorization state: {error}"))?;
+    match (pinned, authorization) {
+        (Some(_), Some(authorization)) => {
+            if authorization.membership.store_root_hash() != root.object_hash() {
                 return Err("Serial membership state belongs to another Store root".to_string());
             }
             Ok(())
         }
-        (None, None, None) => {
+        (None, None) => {
+            let founder = super::store_objects::load_founder_registration(storage, root_ref)
+                .await
+                .map_err(|error| error.to_string())?;
+            let founder_ref = super::store_commit::StoreDeviceRegistrationRef::from_registration(
+                &founder.value,
+                founder.object,
+            );
             let authorization = super::membership::SerialAuthorizationState::from_founder(
-                root.object_hash(),
-                &root.founder,
+                root_ref,
+                root,
+                &founder_ref,
+                &founder.value,
             )
             .map_err(|error| error.to_string())?;
-            db.install_serial_root_authorization(root.author_pubkey.clone(), authorization)
-                .await
-                .map_err(|error| error.to_string())
+            db.install_serial_root_authorization(
+                root.descriptor.founder_pubkey.clone(),
+                authorization,
+            )
+            .await
+            .map_err(|error| error.to_string())
         }
-        _ => Err(
-            "Serial founder pin, membership, and key generation are only valid together"
-                .to_string(),
-        ),
+        _ => Err("Serial founder pin and authorization are only valid together".to_string()),
     }
 }
 
@@ -1503,166 +1418,33 @@ async fn ensure_serial_founder_authorization(
 pub async fn ensure_owner_anchored_chain(
     storage: &dyn SyncStorage,
     db: &Database,
+    root: &super::store_commit::StoreRootRef,
     store_protocol_root: &super::store_commit::StoreProtocolRoot,
     owner_keypair: &UserKeypair,
 ) -> Result<(), String> {
-    use super::membership_ops::OWNER_PUBKEY_STATE_KEY;
-
-    let our_pk = hex::encode(owner_keypair.public_key());
-    let pinned = db
-        .get_protocol_state(OWNER_PUBKEY_STATE_KEY)
-        .await
-        .map_err(|e| format!("read pinned owner: {e}"))?;
-    let store_root_hash = store_protocol_root.object_hash();
-    let entries = super::membership_ops::list_membership_entries(storage, store_root_hash)
-        .await
-        .map_err(|e| format!("list membership entries: {e}"))?;
-    if pinned
-        .as_deref()
-        .is_some_and(|owner| owner != store_protocol_root.author_pubkey)
-    {
-        return Err(format!(
-            "pinned owner {:?} does not match store protocol root founder {:?}",
-            pinned.as_deref(),
-            store_protocol_root.author_pubkey
-        ));
+    if root.store_root_hash != store_protocol_root.object_hash() {
+        return Err("local Store root reference differs from the opened Store root".to_string());
     }
-    let expected_owner = &store_protocol_root.author_pubkey;
-    let loaded = super::membership_ops::load_and_persist_owner_anchor(
+    let chain = super::membership_ops::load_and_persist_owner_anchor(
         storage,
-        store_root_hash,
-        &entries,
-        expected_owner,
+        root,
+        &crate::keys::public_key_hex(owner_keypair),
         db,
     )
     .await
     .map_err(|error| error.to_string())?;
-    if let Some(chain) = loaded {
-        if chain.entries().first() != Some(&store_protocol_root.founder) {
-            return Err("membership founder does not match store protocol root".to_string());
-        }
-        return Ok(());
-    }
-    if let Some(pinned) = pinned {
-        return Err(format!(
-            "membership chain has no committed heads but owner {pinned} is pinned \
-             — refusing (wiped or tampered membership/*)"
-        ));
-    }
-
-    if our_pk != store_protocol_root.author_pubkey {
-        return Err(format!(
-            "membership root is absent and local identity {our_pk} cannot republish founder {}",
-            store_protocol_root.author_pubkey
-        ));
-    }
-
-    publish_or_complete_founder(
-        storage,
-        store_root_hash,
-        &store_protocol_root.founder,
-        owner_keypair,
-    )
-    .await?;
-    let committed_entries =
-        super::membership_ops::list_membership_entries(storage, store_root_hash)
-            .await
-            .map_err(|e| format!("list membership entries after founder publish: {e}"))?;
-    super::membership_ops::load_and_persist_owner_anchor(
-        storage,
-        store_root_hash,
-        &committed_entries,
-        &our_pk,
-        db,
-    )
-    .await
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "founder publish produced no signed committed membership head".to_string())?;
-    info!(owner = %our_pk, "Founded store: wrote owner-anchored founder entry");
-    Ok(())
-}
-
-async fn publish_or_complete_founder(
-    storage: &dyn SyncStorage,
-    store_root_hash: super::store_commit::ObjectHash,
-    store_protocol_root_founder: &super::membership::MembershipEntry,
-    owner_keypair: &UserKeypair,
-) -> Result<(), String> {
-    use super::membership::MembershipChain;
-    use super::store_objects::{append_membership_entry_object, load_membership_entry_slot};
-
-    let owner_pubkey = hex::encode(owner_keypair.public_key());
-    let founder_coord = store_protocol_root_founder.coord();
-    match load_membership_entry_slot(
-        storage,
-        store_root_hash,
-        &owner_pubkey,
-        &founder_coord.author_owner_grant,
-        founder_coord.stream_id,
-        1,
-    )
-    .await
+    let founder = chain
+        .entries()
+        .first()
+        .ok_or_else(|| "membership founder is absent from Store membership chain".to_string())?;
+    if store_protocol_root
+        .descriptor
+        .validate_merge_founder_entry(founder)
+        .is_err()
     {
-        Ok(Some(verified)) => {
-            let bytes = verified.bytes;
-            let entry = verified.value;
-            let coord = entry.coord();
-            let entry = super::membership_ops::parse_membership_entry_at(&coord, &bytes)?;
-            let chain =
-                MembershipChain::from_entries_with_coords(vec![(coord.clone(), entry.clone())])
-                    .map_err(|error| format!("invalid interrupted founder entry: {error}"))?;
-            if !chain.is_founded_by(&owner_pubkey) {
-                return Err(
-                    "interrupted founder entry is not this storage identity's founder".to_string(),
-                );
-            }
-            if chain.entries().first() != Some(store_protocol_root_founder) {
-                return Err(
-                    "interrupted founder entry does not match store protocol root".to_string(),
-                );
-            }
-            append_membership_entry_object(storage, store_root_hash, &coord, &entry)
-                .await
-                .map_err(|error| format!("re-publish interrupted founder entry: {error}"))?;
-            super::membership_ops::publish_membership_stream_head(
-                storage,
-                store_root_hash,
-                &chain,
-                owner_keypair,
-                founder_coord.stream_id,
-            )
-            .await
-            .map_err(|error| format!("publish interrupted founder head: {error}"))?;
-            Ok(())
-        }
-        Ok(None) => {
-            let coord = founder_coord;
-            append_membership_entry_object(
-                storage,
-                store_root_hash,
-                &coord,
-                store_protocol_root_founder,
-            )
-            .await
-            .map_err(|error| format!("publish store protocol root founder entry: {error}"))?;
-            let chain = MembershipChain::from_entries_with_coords(vec![(
-                coord,
-                store_protocol_root_founder.clone(),
-            )])
-            .map_err(|error| format!("store protocol root founder is invalid: {error}"))?;
-            super::membership_ops::publish_membership_stream_head(
-                storage,
-                store_root_hash,
-                &chain,
-                owner_keypair,
-                store_protocol_root_founder.stream_id,
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("publish store protocol root founder head: {error}"))
-        }
-        Err(error) => Err(format!("read interrupted founder entry: {error}")),
+        return Err("membership founder does not match Store protocol root".to_string());
     }
+    Ok(())
 }
 
 /// Components needed to run sync cycles.
@@ -1761,10 +1543,7 @@ impl SyncComponents {
     ) -> Result<crate::blob::upload::DrainOutcome, DbError> {
         crate::blob::upload::drain_uploads(
             &self.db,
-            self.storage.cloud_home(),
-            &self.cipher,
-            &self.pending_rotation,
-            &self.store_id,
+            &*self.storage,
             store_dir,
             clock,
             &self.hlc,

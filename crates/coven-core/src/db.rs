@@ -1,10 +1,10 @@
-//! coven's bookkeeping schema and the cloud-outbox row types.
+//! coven's bookkeeping schema.
 //!
 //! coven owns its device-local bookkeeping tables — `protocol_state`,
 //! `materialized_commits`, `snapshot_coverage`, `store_writes`,
 //! `outbound_membership_mutation`, `outbound_store_snapshot`,
-//! `cloud_outbox`, `local_blob_refs`, `blob_make_remote_intents`,
-//! `local_cleanup_intents`, `store_write_blob_leases`, and `blob_uploaders` — all
+//! `local_blob_refs`, `local_cleanup_intents`, exact prepared Store objects, and
+//! row-bound blob locators — all
 //! created STRICT by [`apply_coven_schema`], which coven
 //! runs against the connection it owns during open. The host does not implement
 //! any of this; app SQL goes through [`crate::CovenHandle::sql`] or
@@ -24,7 +24,7 @@ macro_rules! coven_tables {
             "
     device_id TEXT NOT NULL,
     seq INTEGER NOT NULL CHECK (seq > 0),
-    commit_hash TEXT NOT NULL CHECK (length(commit_hash) = 64),
+    commit_ref TEXT NOT NULL CHECK (json_valid(commit_ref)),
     PRIMARY KEY (device_id, seq)
 "
         );
@@ -33,53 +33,71 @@ macro_rules! coven_tables {
             "
     device_id TEXT PRIMARY KEY,
     seq INTEGER NOT NULL CHECK (seq > 0),
-    commit_hash TEXT NOT NULL CHECK (length(commit_hash) = 64),
+    commit_ref TEXT NOT NULL CHECK (json_valid(commit_ref)),
     snapshot_hash TEXT NOT NULL CHECK (length(snapshot_hash) = 64)
+"
+        );
+        $visit!(
+            local_blob_refs,
+            "
+    table_name TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    row_stamp TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    blob_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    plaintext_size INTEGER NOT NULL CHECK (plaintext_size >= 0),
+    plaintext_hash TEXT NOT NULL CHECK (length(plaintext_hash) = 64),
+    PRIMARY KEY (table_name, row_id, column_name, row_stamp)
 "
         );
         $visit!(
             cloud_outbox,
             "
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    operation TEXT NOT NULL CHECK (operation IN ('upload', 'delete', 'cancel')),
-    -- The blob's file id, which an upload reports progress under. NULL for a
-    -- delete or cancel entry, which carry no file id.
-    file_id TEXT,
-    cloud_key TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('upload', 'delete')),
+    table_name TEXT,
+    row_id TEXT,
+    column_name TEXT,
+    row_stamp TEXT,
+    root_table TEXT,
+    root_id TEXT,
+    row_ref TEXT CHECK (row_ref IS NULL OR json_valid(row_ref)),
+    upload_state TEXT CHECK (upload_state IS NULL OR json_valid(upload_state)),
+    stored_ref TEXT CHECK (stored_ref IS NULL OR json_valid(stored_ref)),
     source_path TEXT,
-    -- The blob's encryption scope (master / derived / item), serialized so the
-    -- async drain resolves it to a key long after the enqueue site is gone.
-    -- NULL for a delete or cancel entry, which touch no key. Local bookkeeping;
-    -- this table does not sync.
-    scope TEXT,
-    -- Whether a successful upload should also populate coven's protected cache
-    -- folder (storage/pinned/<id>) from the plaintext, so the blob is kept local
-    -- and budget-exempt with no later cloud round-trip. Upload-only and honestly
-    -- 0 for a delete or cancel (they retain nothing), so unlike scope/source_path
-    -- it has a meaningful default rather than NULL.
-    retain_pinned INTEGER NOT NULL DEFAULT 0,
+    retain_pinned INTEGER CHECK (retain_pinned IS NULL OR retain_pinned IN (0, 1)),
     created_at TEXT NOT NULL,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
     last_error TEXT,
     last_attempt_at TEXT,
-    UNIQUE(operation, cloud_key)
-"
-        );
-        $visit!(
-            local_blob_refs,
-            "
-    blob_id   TEXT PRIMARY KEY,
-    namespace TEXT NOT NULL,
-    path      TEXT NOT NULL,   -- absolute external path coven reads but does NOT own
-    size      INTEGER NOT NULL -- plaintext length; validate-on-read
+    CHECK (
+        (operation = 'upload' AND table_name IS NOT NULL AND row_id IS NOT NULL
+         AND column_name IS NOT NULL AND row_stamp IS NOT NULL
+         AND root_table IS NOT NULL AND root_id IS NOT NULL AND row_ref IS NOT NULL
+         AND stored_ref IS NULL AND source_path IS NOT NULL AND retain_pinned IS NOT NULL
+         AND upload_state IS NOT NULL)
+        OR
+        (operation = 'delete' AND table_name IS NULL AND row_id IS NULL
+         AND column_name IS NULL AND row_stamp IS NULL
+         AND root_table IS NULL AND root_id IS NULL AND row_ref IS NULL
+         AND stored_ref IS NOT NULL AND source_path IS NULL AND retain_pinned IS NULL
+         AND upload_state IS NULL)
+    ),
+    UNIQUE (operation, table_name, row_id, column_name, row_stamp),
+    UNIQUE (stored_ref)
 "
         );
         $visit!(
             blob_make_remote_intents,
             "
     root_table TEXT NOT NULL,
-    root_id    TEXT NOT NULL,
-    retain_pinned INTEGER NOT NULL DEFAULT 0,
+    root_id TEXT NOT NULL,
+    retain_pinned INTEGER NOT NULL CHECK (retain_pinned IN (0, 1)),
+    state TEXT NOT NULL CHECK (state IN ('uploading', 'cancelling', 'publishing')),
+    write_id TEXT UNIQUE,
+    CHECK ((state = 'publishing') = (write_id IS NOT NULL)),
     PRIMARY KEY (root_table, root_id)
 "
         );
@@ -143,6 +161,58 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            remote_objects,
+            "
+    object_id TEXT PRIMARY KEY CHECK (length(object_id) = 64),
+    state TEXT NOT NULL CHECK (json_valid(state))
+"
+        );
+        $visit!(
+            store_write_packages,
+            "
+    write_id TEXT NOT NULL,
+    audience TEXT NOT NULL,
+    remote_object_id TEXT NOT NULL CHECK (length(remote_object_id) = 64),
+    PRIMARY KEY (write_id, audience),
+    FOREIGN KEY (write_id) REFERENCES store_writes(write_id) ON DELETE CASCADE,
+    FOREIGN KEY (remote_object_id) REFERENCES remote_objects(object_id)
+"
+        );
+        $visit!(
+            store_write_blobs,
+            "
+    write_id TEXT NOT NULL,
+    audience TEXT NOT NULL,
+    locator_hash TEXT NOT NULL CHECK (length(locator_hash) = 64),
+    remote_object_id TEXT NOT NULL CHECK (length(remote_object_id) = 64),
+    spool_path TEXT,
+    PRIMARY KEY (write_id, audience, remote_object_id),
+    FOREIGN KEY (write_id) REFERENCES store_writes(write_id) ON DELETE CASCADE,
+    FOREIGN KEY (remote_object_id) REFERENCES remote_objects(object_id)
+"
+        );
+        $visit!(
+            blob_locators,
+            "
+    remote_object_id TEXT PRIMARY KEY CHECK (length(remote_object_id) = 64),
+    locator_hash TEXT NOT NULL CHECK (length(locator_hash) = 64),
+    FOREIGN KEY (remote_object_id) REFERENCES remote_objects(object_id)
+"
+        );
+        $visit!(
+            row_blob_locators,
+            "
+    table_name TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    row_stamp TEXT NOT NULL,
+    audience_authority TEXT NOT NULL CHECK (json_valid(audience_authority)),
+    remote_object_id TEXT NOT NULL CHECK (length(remote_object_id) = 64),
+    PRIMARY KEY (table_name, row_id, column_name, row_stamp),
+    FOREIGN KEY (remote_object_id) REFERENCES blob_locators(remote_object_id)
+"
+        );
+        $visit!(
             outbound_membership_mutation,
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -155,26 +225,54 @@ macro_rules! coven_tables {
             outbound_store_snapshot,
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    snapshot_hash TEXT NOT NULL CHECK (length(snapshot_hash) = 64),
-    image_hash TEXT NOT NULL CHECK (length(image_hash) = 64),
+    snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
+    meta_prepared TEXT NOT NULL CHECK (json_valid(meta_prepared)),
+    image_ref TEXT NOT NULL CHECK (json_valid(image_ref)),
+    image_prepared TEXT NOT NULL CHECK (json_valid(image_prepared)),
     image_bytes BLOB NOT NULL,
+    meta_bytes BLOB NOT NULL,
+    blobs TEXT NOT NULL CHECK (json_valid(blobs))
+"
+        );
+        $visit!(
+            published_store_snapshot,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    snapshot_ref TEXT NOT NULL CHECK (json_valid(snapshot_ref)),
+    successor_slot TEXT NOT NULL CHECK (json_valid(successor_slot)),
     meta_bytes BLOB NOT NULL
 "
         );
         $visit!(
-            published_store_acks,
+            snapshot_blob_spool_cleanup,
             "
-    revision INTEGER PRIMARY KEY CHECK (revision > 0),
-    ack_hash TEXT NOT NULL UNIQUE CHECK (length(ack_hash) = 64)
+    path TEXT PRIMARY KEY
 "
         );
         $visit!(
             outbound_store_acks,
             "
-    revision INTEGER PRIMARY KEY CHECK (revision > 0),
-    ack_hash TEXT NOT NULL UNIQUE CHECK (length(ack_hash) = 64),
-    previous_ack_hash TEXT,
-    ack_bytes BLOB NOT NULL
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    ack_ref TEXT NOT NULL CHECK (json_valid(ack_ref)),
+    ack_bytes BLOB NOT NULL,
+    prepared_object TEXT NOT NULL CHECK (json_valid(prepared_object))
+"
+        );
+        $visit!(
+            published_store_acks,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    ack_ref TEXT NOT NULL CHECK (json_valid(ack_ref)),
+    successor_slot TEXT NOT NULL CHECK (json_valid(successor_slot))
+"
+        );
+        $visit!(
+            store_protocol_root_authority,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    store_root_hash TEXT NOT NULL CHECK (length(store_root_hash) = 64),
+    store_protocol_root_bytes BLOB NOT NULL,
+    store_root_object TEXT NOT NULL CHECK (json_valid(store_root_object))
 "
         );
         $visit!(
@@ -183,58 +281,66 @@ macro_rules! coven_tables {
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     store_root_hash TEXT NOT NULL CHECK (length(store_root_hash) = 64),
     store_protocol_root_bytes BLOB NOT NULL,
-    published INTEGER NOT NULL CHECK (published IN (0, 1))
+    prepared_object TEXT NOT NULL CHECK (json_valid(prepared_object))
 "
         );
         $visit!(
             local_store_device_registration,
             "
-    revision INTEGER PRIMARY KEY CHECK (revision > 0),
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    device_id TEXT NOT NULL UNIQUE,
     registration_hash TEXT NOT NULL UNIQUE CHECK (length(registration_hash) = 64),
-    previous_registration_hash TEXT,
-    state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
     registration_bytes BLOB NOT NULL,
-    activation_base_head_bytes BLOB,
-    activation_commit_bytes BLOB,
-    activation_head_bytes BLOB,
-    published INTEGER NOT NULL CHECK (published IN (0, 1)),
-    CHECK ((activation_commit_bytes IS NULL) = (activation_head_bytes IS NULL))
+    prepared_object TEXT NOT NULL CHECK (json_valid(prepared_object)),
+    initial_ack_ref TEXT NOT NULL CHECK (json_valid(initial_ack_ref)),
+    initial_ack_bytes BLOB NOT NULL,
+    initial_ack_prepared TEXT NOT NULL CHECK (json_valid(initial_ack_prepared)),
+    state TEXT NOT NULL CHECK (json_valid(state))
+"
+        );
+        $visit!(
+            local_store_device_retirement,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    payload BLOB NOT NULL,
+    published INTEGER NOT NULL CHECK (published IN (0, 1))
+"
+        );
+        $visit!(
+            local_store_founder_graph,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    membership_graph TEXT NOT NULL CHECK (json_valid(membership_graph))
+"
+        );
+        $visit!(
+            serial_head_receipt,
+            "
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    head_bytes BLOB NOT NULL,
+    version_token TEXT NOT NULL CHECK (json_valid(version_token)),
+    commit_ref TEXT NOT NULL CHECK (json_valid(commit_ref))
 "
         );
         $visit!(
             store_device_registration_activations,
             "
-    device_id TEXT NOT NULL,
-    revision INTEGER NOT NULL CHECK (revision > 0),
+    device_id TEXT PRIMARY KEY,
     registration_hash TEXT NOT NULL CHECK (length(registration_hash) = 64),
-    previous_registration_hash TEXT,
-    state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
     author_pubkey TEXT NOT NULL,
+    device_signing_pubkey TEXT NOT NULL,
     registration_bytes BLOB NOT NULL,
-    stream_id TEXT NOT NULL,
-    seq INTEGER NOT NULL CHECK (seq > 0),
-    commit_hash TEXT NOT NULL CHECK (length(commit_hash) = 64),
-    PRIMARY KEY (device_id, revision),
+    registration_object TEXT NOT NULL CHECK (json_valid(registration_object)),
+    activation_authority TEXT NOT NULL CHECK (json_valid(activation_authority)),
     UNIQUE (device_id, registration_hash),
-    UNIQUE (stream_id, seq, device_id)
+    UNIQUE (registration_object)
 "
         );
         $visit!(
-            blob_uploaders,
+            store_device_state_snapshots,
             "
-    namespace TEXT NOT NULL,
-    blob_id   TEXT NOT NULL,
-    -- Hex public key of the member that uploaded this blob (its cloud key sits
-    -- under `{namespace}/{uploader}/…`). Recorded from an authenticated source
-    -- only: at pull (the signed changeset's author, who uploads the blobs its rows
-    -- introduce) and at our own enqueue (ourselves). Never discovered by scanning
-    -- an untrusted listing — a missing record is a fail-loud dispatch error, not a
-    -- cue to search. Not a synced table, but preserved into a snapshot (unlike the
-    -- per-device bookkeeping tables) because a blob's uploader is a member-global
-    -- fact the same for every device, so a snapshot-bootstrapped device inherits
-    -- authoritative uploaders from the Owner-signed snapshot rather than scanning.
-    uploader  TEXT NOT NULL,
-    PRIMARY KEY (namespace, blob_id)
+    commit_ref TEXT PRIMARY KEY CHECK (json_valid(commit_ref)),
+    state TEXT NOT NULL CHECK (json_valid(state))
 "
         );
         $visit!(
@@ -348,6 +454,12 @@ macro_rules! coven_routing_tables {
 pub(crate) struct CovenSchemaManifest {
     objects: Vec<CovenSchemaObject>,
     tables: Vec<CovenTableShape>,
+}
+
+impl CovenSchemaManifest {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.objects.is_empty() && self.tables.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -634,6 +746,29 @@ mod tests {
     }
 
     #[test]
+    fn prepared_blob_identity_is_the_exact_remote_object() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        apply_coven_schema(&conn).expect("apply coven schema");
+        let primary_key = conn
+            .prepare("PRAGMA table_info(store_write_blobs)")
+            .expect("prepare store_write_blobs table_info")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+            })
+            .expect("query store_write_blobs columns")
+            .filter_map(|row| {
+                let (name, position) = row.expect("read store_write_blobs column");
+                (position != 0).then_some((position, name))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(
+            primary_key.into_values().collect::<Vec<_>>(),
+            ["write_id", "audience", "remote_object_id"]
+        );
+    }
+
+    #[test]
     fn routing_tables_are_strict_without_rowid() {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
         apply_coven_routing_schema(&conn).expect("apply routing schema");
@@ -664,59 +799,41 @@ pub struct ExternalBlob {
     pub size: u64,
 }
 
-/// A pending cloud blob operation from the `cloud_outbox` table.
-///
-/// The fields the operations share live here; the operation-specific ones live in
-/// [`OutboxOperation`]. The `cloud_outbox` table is flat (the operation-specific
-/// `scope`/`source_path` columns are nullable), but a row reads back as exactly one
-/// variant, so a drain matches on `operation` and never sees a column that doesn't
-/// belong to it (no upload-only `scope` on a delete or cancel).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEntry {
     pub id: i64,
-    pub cloud_key: String,
-    /// How many times an upload of this entry has failed. `0` for a freshly
-    /// queued entry.
     pub attempt_count: i64,
-    /// RFC 3339 timestamp of the most recent attempt, if any. Drives retry
-    /// backoff.
     pub last_attempt_at: Option<String>,
-    /// The operation and its operation-specific fields.
     pub operation: OutboxOperation,
 }
 
-/// A cloud blob operation and the fields only that operation carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboxOperation {
-    /// Upload a local blob. Carries the local source, the host-named encryption
-    /// scope (resolved to a key at drain, since the upload runs long after the
-    /// enqueue site is gone), the `file_id` the upload reports progress under,
-    /// and whether to keep the uploaded blob pinned in the local cache.
     Upload {
-        file_id: String,
-        /// Local plaintext source. `None` means the blob lives at coven's
-        /// default storage path for `file_id`.
-        source_path: Option<String>,
-        /// The blob's encryption scope, named by the host at enqueue. An upload
-        /// always has one — a delete, which touches no key, has none.
-        scope: crate::blob::BlobScope,
-        /// Whether the drain populates the protected cache folder
-        /// (`storage/pinned/<namespace>/<id>`) from the plaintext on a successful
-        /// upload, so a pinned Remote blob is kept local and budget-exempt with no
-        /// later cloud round-trip. `false` populates nothing on write — the evictable
-        /// `storage/cache/<namespace>/<id>` fills on a later read-miss instead.
+        root_table: String,
+        root_id: String,
+        row: crate::blob::RowBlobRef,
+        source_path: std::path::PathBuf,
         retain_pinned: bool,
+        state: OutboxUploadState,
     },
-    /// Delete a cloud blob. The drain turns it into a signed cloud tombstone (the
-    /// deletion's durable record); a later GC reclaims the blob once a convergence
-    /// grace has passed, so a peer that still references it isn't stranded. See
-    /// [`crate::blob::delete`]. Carries no extra fields.
-    Delete,
-    /// Cancel the tombstone for `cloud_key`: remove the `blob_tombstones/{key}`
-    /// object so a GC pass won't reclaim a blob that has just been (re-)uploaded
-    /// to that key. Queued by the upload drain only when its inline cancel of the
-    /// tombstone fails, so the cancel survives that failure and a restart and is
-    /// retried each cycle until the tombstone is gone (see
-    /// [`crate::blob::delete::drain_tombstone_cancels`]). Carries no extra fields.
-    Cancel,
+    Delete {
+        stored: crate::blob::locator::StoredBlobRef,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OutboxUploadState {
+    Pending,
+    Prepared {
+        authority: crate::sync::audience_package::PackageAudience,
+        stored: crate::blob::locator::StoredBlobRef,
+        spool_path: std::path::PathBuf,
+    },
+    Created {
+        authority: crate::sync::audience_package::PackageAudience,
+        stored: crate::blob::locator::StoredBlobRef,
+        spool_path: std::path::PathBuf,
+    },
 }

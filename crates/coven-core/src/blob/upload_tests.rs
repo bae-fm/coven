@@ -1,196 +1,498 @@
-//! Tests for the blob engine's upload drain: record-and-continue, per-entry
-//! backoff, scope-resolved sealing, and the upload lifecycle observer callbacks.
-//!
-//! These drive the real [`drain_uploads`] against a real [`crate::database::Database`]
-//! (carrying the `cloud_outbox` bookkeeping table), a `RecordingObserver`, and
-//! `InMemoryCloudHome` / `FailingCloudHome` (the cloud backend). The unit under
-//! test is `drain_uploads` itself; only the cloud backend and observer are fakes.
+//! Tests for the exact blob upload journal and drain.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use chrono::Duration;
+use rusqlite::OptionalExtension;
 
 use super::upload::{backoff_window, drain_uploads, DrainOutcome};
-use crate::blob::BlobTransitionObserver;
+use crate::blob::{BlobTransitionObserver, CacheFill, Provenance};
 use crate::clock::{Clock, FixedClock};
 use crate::database::{Database, DbError};
 use crate::encryption::EncryptionService;
+use crate::keys::UserKeypair;
 use crate::storage::cloud::test_utils::InMemoryCloudHome;
-use crate::storage::cloud::{CloudHome, CloudHomeError};
+use crate::storage::cloud::{
+    BlobBody, BlobBody as ExactBlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+    CloudFileReadError, CloudHeadCreateError, CloudHeadReplaceError, CloudHeadStorage,
+    CloudHeadVersion, CloudHome, CloudHomeError, CloudHomeJoinInfo, CloudVersionedHead,
+    ExactSlotStorage, ObjectSlot, RevokeOutcome, UploadProgress,
+};
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
+use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use crate::sync::hlc::Hlc;
-use rusqlite::OptionalExtension;
+use crate::sync::session::BlobDecl;
+use crate::sync::test_helpers::{
+    create_exact_test_store, test_migrations, test_synced_tables_with_blob,
+};
 
-/// Run the real [`drain_uploads`] with a throwaway HLC, the register coven stamps a
-/// manage flip from. These drain tests carry no synced/gated tables (an `open_outbox_
-/// db` has only the bookkeeping schema), so no upload resolves to a gated root — the
-/// completion flip never fires and the HLC only ever mints the stamps that go unused.
+const T0: &str = "2024-06-01T00:00:00Z";
+const ROOT_ID: &str = "upload-root";
+
+fn fixed_clock(rfc3339: &str) -> FixedClock {
+    FixedClock(
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    )
+}
+
+#[derive(Clone)]
+struct InstrumentedHome {
+    inner: InMemoryCloudHome,
+    fail_creates: Arc<AtomicBool>,
+    create_calls: Arc<AtomicUsize>,
+    keys: Arc<Mutex<Vec<String>>>,
+    inflight: Arc<AtomicUsize>,
+    max_inflight: Arc<AtomicUsize>,
+    barrier: Option<Arc<tokio::sync::Barrier>>,
+    barrier_enabled: Arc<AtomicBool>,
+    slow_chunk: Arc<AtomicUsize>,
+    slow_delay_ms: Arc<AtomicU64>,
+}
+
+impl InstrumentedHome {
+    fn new() -> Self {
+        Self::with_barrier(None)
+    }
+
+    fn with_barrier(gather: Option<usize>) -> Self {
+        Self {
+            inner: InMemoryCloudHome::new(),
+            fail_creates: Arc::new(AtomicBool::new(false)),
+            create_calls: Arc::new(AtomicUsize::new(0)),
+            keys: Arc::new(Mutex::new(Vec::new())),
+            inflight: Arc::new(AtomicUsize::new(0)),
+            max_inflight: Arc::new(AtomicUsize::new(0)),
+            barrier: gather.map(|count| Arc::new(tokio::sync::Barrier::new(count))),
+            barrier_enabled: Arc::new(AtomicBool::new(false)),
+            slow_chunk: Arc::new(AtomicUsize::new(0)),
+            slow_delay_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn fail_creates(&self) {
+        self.fail_creates.store(true, Ordering::SeqCst);
+    }
+
+    fn enable_barrier(&self) {
+        self.barrier_enabled.store(true, Ordering::SeqCst);
+    }
+
+    fn slow_creates(&self, chunk: usize, delay: std::time::Duration) {
+        self.slow_chunk.store(chunk, Ordering::SeqCst);
+        self.slow_delay_ms
+            .store(delay.as_millis() as u64, Ordering::SeqCst);
+    }
+
+    fn reset_observations(&self) {
+        self.create_calls.store(0, Ordering::SeqCst);
+        self.keys.lock().unwrap().clear();
+        self.max_inflight.store(0, Ordering::SeqCst);
+    }
+
+    fn create_calls(&self) -> usize {
+        self.create_calls.load(Ordering::SeqCst)
+    }
+
+    fn max_inflight(&self) -> usize {
+        self.max_inflight.load(Ordering::SeqCst)
+    }
+
+    fn keys(&self) -> Vec<String> {
+        let mut keys = self.keys.lock().unwrap().clone();
+        keys.sort();
+        keys
+    }
+}
+
+#[async_trait]
+impl CloudHeadStorage for InstrumentedHome {
+    async fn read_head(&self, key: &str) -> Result<CloudVersionedHead, CloudHomeError> {
+        self.inner.read_head(key).await
+    }
+
+    async fn create_head(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
+        self.inner.create_head(key, bytes).await
+    }
+
+    async fn replace_head(
+        &self,
+        key: &str,
+        expected: &CloudHeadVersion,
+        bytes: Vec<u8>,
+    ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
+        self.inner.replace_head(key, expected, bytes).await
+    }
+
+    async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError> {
+        self.inner.delete_probe_head(key).await
+    }
+}
+
+#[async_trait]
+impl CloudHome for InstrumentedHome {
+    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>> {
+        Some(self)
+    }
+
+    async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
+        self.inner.put_object(key, data).await
+    }
+
+    async fn open_multipart<'a>(
+        &'a self,
+        key: &str,
+        total_len: u64,
+    ) -> Result<BoxPartSink<'a>, CloudHomeError> {
+        self.inner.open_multipart(key, total_len).await
+    }
+
+    fn multipart_threshold(&self) -> u64 {
+        self.inner.multipart_threshold()
+    }
+
+    async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
+        self.inner.read(key).await
+    }
+
+    async fn read_range(&self, key: &str, start: u64, end: u64) -> Result<Vec<u8>, CloudHomeError> {
+        self.inner.read_range(key, start, end).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<String>, CloudHomeError> {
+        self.inner.list(prefix).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), CloudHomeError> {
+        self.inner.delete(key).await
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, CloudHomeError> {
+        self.inner.exists(key).await
+    }
+
+    async fn set_access(
+        &self,
+        desired: CloudAccessState,
+    ) -> Result<CloudAccessOutcome, CloudHomeError> {
+        match desired {
+            CloudAccessState::Present { .. } => {
+                Ok(CloudAccessOutcome::Present(CloudHomeJoinInfo::S3 {
+                    bucket: "test".to_string(),
+                    region: "test".to_string(),
+                    endpoint: None,
+                    access_key: "test".to_string(),
+                    secret_key: "test".to_string(),
+                    key_prefix: None,
+                }))
+            }
+            CloudAccessState::Absent { .. } => {
+                Ok(CloudAccessOutcome::Absent(RevokeOutcome::Revoked))
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ExactSlotStorage for InstrumentedHome {
+    async fn provider_binding(
+        &self,
+    ) -> Result<crate::sync::storage::ResolvedProviderBinding, CloudHomeError> {
+        ExactSlotStorage::provider_binding(&self.inner).await
+    }
+
+    async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
+        ExactSlotStorage::allocate_slot(&self.inner, logical_key).await
+    }
+
+    async fn create_at(
+        &self,
+        slot: &ObjectSlot,
+        body: BlobBody,
+        progress: &UploadProgress<'_>,
+    ) -> Result<(), CloudHomeError> {
+        self.create_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_creates.load(Ordering::SeqCst) {
+            return Err(CloudHomeError::Transport(
+                "induced exact create failure".to_string(),
+            ));
+        }
+        let current = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_inflight.fetch_max(current, Ordering::SeqCst);
+        if self.barrier_enabled.load(Ordering::SeqCst) {
+            self.barrier
+                .as_ref()
+                .expect("enabled barrier exists")
+                .wait()
+                .await;
+        }
+        let chunk = self.slow_chunk.load(Ordering::SeqCst);
+        let result = if chunk == 0 {
+            ExactSlotStorage::create_at(&self.inner, slot, body, progress).await
+        } else {
+            let bytes = body.collect().await?;
+            let mut sent = 0;
+            while sent < bytes.len() {
+                sent = (sent + chunk).min(bytes.len());
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    self.slow_delay_ms.load(Ordering::SeqCst),
+                ))
+                .await;
+                progress(sent as u64);
+            }
+            ExactSlotStorage::create_at(
+                &self.inner,
+                slot,
+                ExactBlobBody::from_bytes(bytes),
+                &crate::storage::cloud::no_progress(),
+            )
+            .await
+        };
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
+        if result.is_ok() {
+            self.keys
+                .lock()
+                .unwrap()
+                .push(slot.logical_key().to_string());
+        }
+        result
+    }
+
+    async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
+        ExactSlotStorage::read_at(&self.inner, slot).await
+    }
+
+    async fn read_range_at(
+        &self,
+        slot: &ObjectSlot,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, CloudHomeError> {
+        ExactSlotStorage::read_range_at(&self.inner, slot, start, end).await
+    }
+
+    async fn read_at_to_file(
+        &self,
+        slot: &ObjectSlot,
+        destination: &std::path::Path,
+    ) -> Result<(), CloudFileReadError> {
+        ExactSlotStorage::read_at_to_file(&self.inner, slot, destination).await
+    }
+
+    async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        ExactSlotStorage::delete_at(&self.inner, slot).await
+    }
+}
+
+struct UploadFixture {
+    db: Database,
+    storage: CloudSyncStorage,
+    home: Arc<InstrumentedHome>,
+}
+
+async fn upload_fixture(policy: crate::WritePolicy, uploads: usize) -> UploadFixture {
+    upload_fixture_with_home(policy, uploads, Arc::new(InstrumentedHome::new())).await
+}
+
+async fn upload_fixture_with_home(
+    policy: crate::WritePolicy,
+    uploads: usize,
+    home: Arc<InstrumentedHome>,
+) -> UploadFixture {
+    let limits = crate::blob::TransferLimits {
+        uploads: std::num::NonZeroUsize::new(uploads).expect("nonzero upload limit"),
+        downloads: std::num::NonZeroUsize::MIN,
+    };
+    let (db, _stamper) = Database::open(
+        std::path::Path::new(":memory:"),
+        test_synced_tables_with_blob(BlobDecl::new(
+            "photos",
+            Provenance::UserProvided,
+            CacheFill::CacheLazy,
+        )),
+        crate::blob::BLOB_TOMBSTONE_GRACE,
+        limits,
+        policy,
+        "test-device".to_string(),
+        &test_migrations(),
+    )
+    .expect("open upload database");
+    let owner = UserKeypair::generate();
+    let storage = CloudSyncStorage::new(
+        home.clone(),
+        CloudCipher::Encrypted(EncryptionService::from_key([42; 32])),
+        BlobPathScheme::Hashed,
+        "upload-store",
+        owner.clone(),
+    )
+    .expect("construct exact sync storage")
+    .with_test_serial_coordination(home.clone());
+    create_exact_test_store(&db, &storage, "upload-store", &owner)
+        .await
+        .expect("initialize exact local blob authority");
+    home.reset_observations();
+    UploadFixture { db, storage, home }
+}
+
+async fn plant_uploads(
+    fixture: &UploadFixture,
+    store_dir: &StoreDir,
+    rows: &[(&str, &[u8])],
+    retain_pinned: bool,
+) -> Vec<std::path::PathBuf> {
+    let rows_owned = rows
+        .iter()
+        .map(|(id, bytes)| {
+            (
+                id.to_string(),
+                bytes.len() as i64,
+                crate::blob::content_hash(bytes),
+            )
+        })
+        .collect::<Vec<_>>();
+    fixture
+        .db
+        .call(move |conn| {
+            conn.execute(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+                 VALUES (?1, 'upload', 0, '0000000001000-0000-test', '2024-01-01')",
+                [ROOT_ID],
+            )
+            .map_err(DbError::from)?;
+            for (id, size, hash) in rows_owned {
+                conn.execute(
+                    "INSERT INTO note_photos
+                     (id, note_id, kind, size, hash, _updated_at, created_at)
+                     VALUES (?1, ?2, 'attach', ?3, ?4, '0000000001000-0000-test', '2024-01-01')",
+                    rusqlite::params![id, ROOT_ID, size, hash],
+                )
+                .map_err(DbError::from)?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("plant exact Local blob rows");
+
+    let mut paths = Vec::new();
+    for (id, bytes) in rows {
+        let path = store_dir
+            .db_path()
+            .parent()
+            .expect("Store directory has a parent")
+            .join(format!("{id}.source"));
+        crate::local_blob::write_atomic(&path, bytes)
+            .await
+            .expect("write exact upload source");
+        let row = fixture
+            .db
+            .row_blob_ref("note_photos", id)
+            .await
+            .expect("load exact Local row");
+        let registered = path.clone();
+        fixture
+            .db
+            .call(move |conn| Database::register_external_blob_on(conn, &row, &registered))
+            .await
+            .expect("register exact source authority");
+        paths.push(path);
+    }
+    crate::blob::transition::make_remote(
+        &fixture.db,
+        store_dir,
+        &Hlc::new("test-device".to_string()),
+        "notes",
+        ROOT_ID,
+        retain_pinned,
+    )
+    .await
+    .expect("enqueue real make_remote upload journals");
+    paths
+}
+
 async fn run_drain(
-    db: &Database,
-    cloud: &dyn CloudHome,
-    cipher: &std::sync::RwLock<CloudCipher>,
+    fixture: &UploadFixture,
     store_dir: &StoreDir,
     clock: &dyn Clock,
     observer: Option<&dyn BlobTransitionObserver>,
-) -> Result<DrainOutcome, crate::database::DbError> {
-    let hlc = Hlc::new("test-device".to_string());
+) -> Result<DrainOutcome, DbError> {
+    let routing = (fixture.db.write_policy() == crate::WritePolicy::Serial)
+        .then(|| EncryptionService::from_key([42; 32]));
     drain_uploads(
-        db,
-        cloud,
-        cipher,
-        &PendingRotation::none(),
-        "test-lib",
+        &fixture.db,
+        &fixture.storage,
         store_dir,
         clock,
-        &hlc,
-        None,
+        &Hlc::new("test-device".to_string()),
+        routing.as_ref(),
         observer,
     )
     .await
 }
 
-// --- Database under test ----------------------------------------------------
-
-/// A `Database` over an in-memory connection with just the bookkeeping tables —
-/// no synced tables (the upload drain doesn't need them). The upload queue lives
-/// in coven's `cloud_outbox` migration table, created by `Database::open`.
-fn open_outbox_db() -> Database {
-    open_outbox_db_with_policy(crate::WritePolicy::MergeConcurrent)
-}
-
-fn open_outbox_db_with_policy(policy: crate::WritePolicy) -> Database {
-    let (db, _stamper) = Database::open(
-        std::path::Path::new(":memory:"),
-        Vec::new(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits::serial(),
-        policy,
-        "test-device".to_string(),
-        &[],
-    )
-    .expect("open outbox database");
-    db
-}
-
-#[tokio::test]
-async fn provider_upload_failure_remains_typed_for_both_write_policies() {
-    for policy in [
-        crate::WritePolicy::MergeConcurrent,
-        crate::WritePolicy::Serial,
-    ] {
-        let db = open_outbox_db_with_policy(policy);
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("provider-upload");
-        crate::local_blob::write_atomic(&source, b"provider-upload")
-            .await
-            .unwrap();
-        insert_upload(
-            &db,
-            1,
-            "provider-upload",
-            "photos/provider-upload",
-            Some(source.to_string_lossy().into_owned()),
-            0,
-            None,
-        )
-        .await;
-        let cloud = FailingCloudHome::new();
-        let (_store_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
-
-        let outcome = run_drain(
-            &db,
-            &cloud,
-            &RwLock::new(CloudCipher::Plaintext),
-            &store_dir,
-            &fixed_clock(T0),
-            None,
-        )
+async fn journal(fixture: &UploadFixture, blob_id: &str) -> crate::db::OutboxEntry {
+    fixture
+        .db
+        .get_pending_cloud_uploads()
         .await
-        .unwrap();
-        assert_eq!(outcome.failures.failures().len(), 1);
-        assert!(outcome.failures.has_transport_failure());
-        assert!(crate::sync::cycle::SyncCycleFailure::operation(
-            "upload queued blob",
-            outcome.failures,
-        )
-        .is_offline());
+        .expect("read upload journals")
+        .into_iter()
+        .find(|entry| {
+            matches!(
+                &entry.operation,
+                crate::db::OutboxOperation::Upload { row, .. } if row.blob().id == blob_id
+            )
+        })
+        .expect("upload journal exists")
+}
+
+async fn journal_attempt(
+    fixture: &UploadFixture,
+    blob_id: &str,
+) -> (i64, Option<String>, Option<String>) {
+    let blob_id = blob_id.to_string();
+    fixture
+        .db
+        .call(move |conn| {
+            conn.query_row(
+                "SELECT attempt_count, last_error, last_attempt_at
+                 FROM cloud_outbox WHERE operation = 'upload' AND row_id = ?1",
+                [blob_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("read journal attempt")
+        .expect("journal exists")
+}
+
+fn is_created(entry: &crate::db::OutboxEntry) -> bool {
+    matches!(
+        entry.operation,
+        crate::db::OutboxOperation::Upload {
+            state: crate::db::OutboxUploadState::Created { .. },
+            ..
+        }
+    )
+}
+
+fn created_slot(entry: &crate::db::OutboxEntry) -> &ObjectSlot {
+    match &entry.operation {
+        crate::db::OutboxOperation::Upload {
+            state: crate::db::OutboxUploadState::Created { stored, .. },
+            ..
+        } => stored.object().slot(),
+        _ => panic!("journal is not Created"),
     }
 }
-
-/// An outbox-only `Database` whose upload drain runs up to `uploads` writes at once
-/// (downloads stay serial — not exercised by the drain).
-fn open_outbox_db_with_uploads(uploads: usize) -> Database {
-    let (db, _stamper) = Database::open(
-        std::path::Path::new(":memory:"),
-        Vec::new(),
-        crate::blob::delete::BLOB_TOMBSTONE_GRACE,
-        crate::blob::TransferLimits {
-            uploads: std::num::NonZeroUsize::new(uploads).expect("uploads limit is nonzero"),
-            downloads: std::num::NonZeroUsize::MIN,
-        },
-        crate::WritePolicy::MergeConcurrent,
-        "test-device".to_string(),
-        &[],
-    )
-    .expect("open outbox database");
-    db
-}
-
-/// Insert a fully-specified `cloud_outbox` upload row.
-async fn insert_upload(
-    db: &Database,
-    id: i64,
-    file_id: &str,
-    cloud_key: &str,
-    source_path: Option<String>,
-    attempt_count: i64,
-    last_attempt_at: Option<String>,
-) {
-    let (file_id, cloud_key) = (file_id.to_string(), cloud_key.to_string());
-    let scope = crate::blob::BlobScope::Master.to_outbox_str();
-    db.call(move |conn| {
-        conn.execute(
-            &format!(
-                "INSERT INTO cloud_outbox \
-                 (id, operation, file_id, cloud_key, source_path, scope, created_at, \
-                  attempt_count, last_attempt_at) \
-                 VALUES (?1, 'upload', ?2, ?3, ?4, '{scope}', '2024-01-01T00:00:00Z', ?5, ?6)"
-            ),
-            rusqlite::params![
-                id,
-                file_id,
-                cloud_key,
-                source_path,
-                attempt_count,
-                last_attempt_at
-            ],
-        )
-        .map(|_| ())
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("insert outbox upload");
-}
-
-/// Read back `(attempt_count, last_error, last_attempt_at)` for an entry, or
-/// `None` if it was removed.
-async fn get_upload(db: &Database, id: i64) -> Option<(i64, Option<String>, Option<String>)> {
-    db.call(move |conn| {
-        conn.query_row(
-            "SELECT attempt_count, last_error, last_attempt_at FROM cloud_outbox WHERE id = ?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()
-        .map_err(DbError::from)
-    })
-    .await
-    .expect("query outbox entry")
-}
-
-// --- Fakes ------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 enum ObsEvent {
@@ -200,7 +502,6 @@ enum ObsEvent {
     Failed(String, String),
 }
 
-/// Records the upload-lifecycle callbacks in arrival order.
 struct RecordingObserver {
     events: Mutex<Vec<ObsEvent>>,
 }
@@ -211,12 +512,13 @@ impl RecordingObserver {
             events: Mutex::new(Vec::new()),
         }
     }
+
     fn events(&self) -> Vec<ObsEvent> {
         self.events.lock().unwrap().clone()
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl BlobTransitionObserver for RecordingObserver {
     async fn on_blob_upload_started(&self, file_id: &str) {
         self.events
@@ -224,19 +526,21 @@ impl BlobTransitionObserver for RecordingObserver {
             .unwrap()
             .push(ObsEvent::Started(file_id.to_string()));
     }
-    async fn on_blob_upload_progress(&self, file_id: &str, bytes_done: u64, bytes_total: u64) {
-        self.events.lock().unwrap().push(ObsEvent::Progress(
-            file_id.to_string(),
-            bytes_done,
-            bytes_total,
-        ));
+
+    async fn on_blob_upload_progress(&self, file_id: &str, done: u64, total: u64) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(ObsEvent::Progress(file_id.to_string(), done, total));
     }
+
     async fn on_blob_uploaded(&self, file_id: &str) {
         self.events
             .lock()
             .unwrap()
             .push(ObsEvent::Uploaded(file_id.to_string()));
     }
+
     async fn on_blob_upload_failed(&self, file_id: &str, error: &str) {
         self.events
             .lock()
@@ -245,806 +549,6 @@ impl BlobTransitionObserver for RecordingObserver {
     }
 }
 
-/// A cloud backend whose `write` always fails. Counts write attempts so a test
-/// can assert that a backed-off entry was not attempted.
-struct FailingCloudHome {
-    write_calls: AtomicUsize,
-}
-
-impl FailingCloudHome {
-    fn new() -> Self {
-        Self {
-            write_calls: AtomicUsize::new(0),
-        }
-    }
-    fn write_calls(&self) -> usize {
-        self.write_calls.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait::async_trait]
-impl CloudHome for FailingCloudHome {
-    async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
-        self.write_calls.fetch_add(1, Ordering::SeqCst);
-        Err(CloudHomeError::Transport("induced write failure".into()))
-    }
-    async fn open_multipart<'a>(
-        &'a self,
-        _key: &str,
-        _total_len: u64,
-    ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
-        self.write_calls.fetch_add(1, Ordering::SeqCst);
-        Err(CloudHomeError::Transport("induced write failure".into()))
-    }
-    fn multipart_threshold(&self) -> u64 {
-        // Small upload payloads in these tests go via put_object.
-        8 * 1024 * 1024
-    }
-    async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn read_range(
-        &self,
-        _key: &str,
-        _start: u64,
-        _end: u64,
-    ) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn set_access(
-        &self,
-        _desired: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-}
-
-/// A cloud backend whose multipart sink accepts each part after a delay, so the
-/// upload spans several of `drain_uploads`' coalescing ticks and the driver's
-/// per-part progress advances over time.
-struct SlowChunkedCloudHome {
-    chunk: usize,
-    per_chunk_delay: std::time::Duration,
-}
-
-/// The delay sink: each `send_part` sleeps, so the driver's progress advances one
-/// part at a time across several ticks.
-struct SlowPartSink {
-    part_size: usize,
-    per_chunk_delay: std::time::Duration,
-}
-
-#[async_trait::async_trait]
-impl crate::storage::cloud::PartSink for SlowPartSink {
-    fn part_size(&self) -> usize {
-        self.part_size
-    }
-    async fn send_part(
-        &mut self,
-        _part: bytes::Bytes,
-        _offset: u64,
-        _is_last: bool,
-    ) -> Result<(), CloudHomeError> {
-        tokio::time::sleep(self.per_chunk_delay).await;
-        Ok(())
-    }
-    async fn abort(&mut self) -> Result<(), CloudHomeError> {
-        Ok(())
-    }
-    async fn finish(self: Box<Self>) -> Result<(), CloudHomeError> {
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl CloudHome for SlowChunkedCloudHome {
-    async fn put_object(&self, _key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
-        Ok(())
-    }
-    async fn open_multipart<'a>(
-        &'a self,
-        _key: &str,
-        _total_len: u64,
-    ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
-        Ok(Box::new(SlowPartSink {
-            part_size: self.chunk,
-            per_chunk_delay: self.per_chunk_delay,
-        }))
-    }
-    fn multipart_threshold(&self) -> u64 {
-        // Stream every non-empty payload so the delay sink drives progress.
-        0
-    }
-    async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn read_range(
-        &self,
-        _key: &str,
-        _start: u64,
-        _end: u64,
-    ) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
-        // The upload drain cancels any tombstone for a key it just wrote, which
-        // deletes the (absent) tombstone object. This fake stores nothing, so the
-        // cancel is a successful no-op.
-        Ok(())
-    }
-    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn set_access(
-        &self,
-        _desired: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-}
-
-// --- Helpers ---------------------------------------------------------------
-
-const T0: &str = "2024-06-01T00:00:00Z";
-
-fn fixed_clock(rfc3339: &str) -> FixedClock {
-    FixedClock(
-        chrono::DateTime::parse_from_rfc3339(rfc3339)
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-    )
-}
-
-fn enc() -> RwLock<CloudCipher> {
-    RwLock::new(CloudCipher::Encrypted(EncryptionService::from_key(
-        [0u8; 32],
-    )))
-}
-
-fn write_temp_file(dir: &std::path::Path, name: &str, contents: &[u8]) -> String {
-    let p = dir.join(name);
-    std::fs::write(&p, contents).unwrap();
-    p.to_string_lossy().to_string()
-}
-
-// --- Tests -----------------------------------------------------------------
-
-#[tokio::test]
-async fn bad_item_does_not_block_good_later_item() {
-    let tmp = tempfile::tempdir().unwrap();
-    let good_path = write_temp_file(tmp.path(), "good.bin", b"good-bytes");
-    let missing_path = tmp.path().join("missing.bin").to_string_lossy().to_string();
-
-    let db = open_outbox_db();
-    insert_upload(&db, 1, "fa", "key-a", Some(missing_path), 0, None).await; // read fails
-    insert_upload(&db, 2, "fb", "key-b", Some(good_path), 0, None).await; // uploads fine
-    let cloud = InMemoryCloudHome::new();
-    let observer = RecordingObserver::new();
-    let clock = fixed_clock(T0);
-
-    let outcome = run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &clock,
-        Some(&observer),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        outcome.uploaded, 1,
-        "the good entry uploads despite the earlier failure"
-    );
-    assert_eq!(outcome.failures.failures().len(), 1);
-    assert!(!outcome.failures.has_transport_failure());
-    assert!(matches!(
-        outcome.failures.failures()[0].cause,
-        super::upload::UploadFailureCause::Local(_)
-    ));
-    assert!(cloud.get("key-b").is_some(), "good blob landed in cloud");
-    assert!(cloud.get("key-a").is_none(), "failed blob did not land");
-
-    let (attempt, err, last) = get_upload(&db, 1).await.expect("failed entry stays queued");
-    assert_eq!(attempt, 1);
-    assert!(err.is_some());
-    let recorded = chrono::DateTime::parse_from_rfc3339(last.as_deref().unwrap()).unwrap();
-    assert_eq!(recorded.with_timezone(&chrono::Utc), clock.now());
-
-    assert!(get_upload(&db, 2).await.is_none(), "uploaded entry removed");
-}
-
-/// While this device has not adopted a store-key rotation the cloud has already
-/// committed, the drain refuses to seal any entry rather than sealing it under
-/// the superseded generation: no object reaches the cloud, and the entry stays
-/// queued (the same "recorded and skipped" shape a cloud write failure takes),
-/// to retry once adoption clears the marker.
-#[tokio::test]
-async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
-    let db = open_outbox_db();
-    insert_upload(&db, 1, "f1", "k1", Some(path), 0, None).await;
-    let cloud = InMemoryCloudHome::new();
-    let cipher = enc();
-    let pending_rotation = PendingRotation::none();
-    pending_rotation.mark_committed(2);
-
-    let outcome = drain_uploads(
-        &db,
-        &cloud,
-        &cipher,
-        &pending_rotation,
-        "test-lib",
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        &Hlc::new("test-device".to_string()),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        outcome.uploaded, 0,
-        "nothing seals while adoption is pending"
-    );
-    assert!(cloud.get("k1").is_none(), "no object reaches the cloud");
-    let (attempt, err, _) = get_upload(&db, 1).await.expect("entry stays queued");
-    assert_eq!(attempt, 1);
-    assert!(
-        err.as_deref().unwrap().contains("rotated to generation 2"),
-        "the recorded failure names the rotation, got {err:?}"
-    );
-}
-
-/// A failed attempt persists attempt_count + last_error, and a later cycle past
-/// the backoff window retries and bumps the count again.
-#[tokio::test]
-async fn failure_persists_attempt_count_and_last_error() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
-    let db = open_outbox_db();
-    insert_upload(&db, 1, "f1", "k1", Some(path), 0, None).await;
-    let cloud = FailingCloudHome::new();
-
-    run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        None,
-    )
-    .await
-    .unwrap();
-    let (attempt, err, _) = get_upload(&db, 1).await.unwrap();
-    assert_eq!(attempt, 1);
-    assert!(err.as_deref().unwrap().contains("cloud write failed"));
-
-    // 31s later — past the 30s window for attempt_count==1 → retried.
-    run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock("2024-06-01T00:00:31Z"),
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(get_upload(&db, 1).await.unwrap().0, 2);
-    assert_eq!(cloud.write_calls(), 2);
-}
-
-/// An entry still inside its backoff window is skipped — not read, not written,
-/// no started event, attempt_count untouched — then retried once the window
-/// elapses.
-#[tokio::test]
-async fn backoff_skips_item_inside_window() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
-    let db = open_outbox_db();
-    insert_upload(&db, 1, "f1", "k1", Some(path), 1, Some(T0.to_string())).await;
-    let cloud = FailingCloudHome::new();
-    let observer = RecordingObserver::new();
-
-    // 10s after last attempt: inside the 30s window for attempt_count==1.
-    let n = run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock("2024-06-01T00:00:10Z"),
-        Some(&observer),
-    )
-    .await
-    .unwrap()
-    .uploaded;
-    assert_eq!(n, 0);
-    assert_eq!(
-        cloud.write_calls(),
-        0,
-        "no write attempted inside backoff window"
-    );
-    assert!(
-        observer.events().is_empty(),
-        "no started event for skipped entry"
-    );
-    assert_eq!(
-        get_upload(&db, 1).await.unwrap().0,
-        1,
-        "attempt_count unchanged"
-    );
-
-    // 31s after last attempt: window elapsed → attempted (and fails again).
-    run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock("2024-06-01T00:00:31Z"),
-        Some(&observer),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        cloud.write_calls(),
-        1,
-        "write attempted past backoff window"
-    );
-    assert_eq!(get_upload(&db, 1).await.unwrap().0, 2);
-}
-
-#[tokio::test]
-async fn observer_fires_started_then_uploaded_on_success() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
-    let db = open_outbox_db();
-    insert_upload(&db, 1, "fid", "k1", Some(path), 0, None).await;
-    let cloud = InMemoryCloudHome::new();
-    let observer = RecordingObserver::new();
-
-    run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        Some(&observer),
-    )
-    .await
-    .unwrap();
-
-    // A small file uploads instantly, so the coalescing ticker never fires; the
-    // terminal progress forward on success still emits one full-size Progress
-    // between Started and Uploaded.
-    let events = observer.events();
-    assert_eq!(events.len(), 3);
-    assert_eq!(events[0], ObsEvent::Started("fid".into()));
-    assert_eq!(events[2], ObsEvent::Uploaded("fid".into()));
-    match events[1] {
-        ObsEvent::Progress(ref fid, done, total) => {
-            assert_eq!(fid, "fid");
-            assert_eq!(done, total, "terminal forward reports done == total");
-            assert!(total > 5, "encrypted size exceeds the 5 plaintext bytes");
-        }
-        ref other => panic!("expected Progress, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn observer_fires_started_then_failed_on_failure() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = write_temp_file(tmp.path(), "f.bin", b"bytes");
-    let db = open_outbox_db();
-    insert_upload(&db, 1, "fid", "k1", Some(path), 0, None).await;
-    let cloud = FailingCloudHome::new();
-    let observer = RecordingObserver::new();
-
-    run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        Some(&observer),
-    )
-    .await
-    .unwrap();
-
-    let events = observer.events();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0], ObsEvent::Started("fid".into()));
-    match &events[1] {
-        ObsEvent::Failed(fid, err) => {
-            assert_eq!(fid, "fid");
-            assert!(err.contains("cloud write failed"));
-        }
-        other => panic!("expected Failed, got {other:?}"),
-    }
-}
-
-/// A slow, chunked upload reports mid-file progress: the coalescing ticker
-/// forwards an advancing byte count to the observer between Started and Uploaded,
-/// and the final forwarded value equals the total.
-#[tokio::test(start_paused = true)]
-async fn observer_receives_advancing_midfile_progress() {
-    let tmp = tempfile::tempdir().unwrap();
-    let total = 10_000usize;
-    let path = write_temp_file(tmp.path(), "big.bin", &vec![7u8; total]);
-    let db = open_outbox_db();
-    insert_upload(&db, 1, "fid", "k1", Some(path), 0, None).await;
-    let cloud = SlowChunkedCloudHome {
-        chunk: 1000,
-        per_chunk_delay: std::time::Duration::from_millis(500),
-    };
-    let observer = RecordingObserver::new();
-
-    run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        Some(&observer),
-    )
-    .await
-    .unwrap();
-
-    let events = observer.events();
-    assert_eq!(events.first(), Some(&ObsEvent::Started("fid".into())));
-    assert_eq!(events.last(), Some(&ObsEvent::Uploaded("fid".into())));
-
-    let progress: Vec<(u64, u64)> = events
-        .iter()
-        .filter_map(|e| match e {
-            ObsEvent::Progress(fid, done, total) if fid == "fid" => Some((*done, *total)),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        progress.len() >= 2,
-        "expected several mid-file progress ticks, got {progress:?}"
-    );
-    for w in progress.windows(2) {
-        assert!(w[1].0 >= w[0].0, "progress went backwards: {progress:?}");
-    }
-    let (last_done, last_total) = *progress.last().unwrap();
-    assert_eq!(
-        last_done, last_total,
-        "final progress reports done == total"
-    );
-    assert!(last_total >= total as u64, "total covers the whole payload");
-}
-
-#[test]
-fn backoff_window_is_exponential_and_capped() {
-    assert_eq!(backoff_window(0), Duration::zero());
-    assert_eq!(backoff_window(1), Duration::seconds(30));
-    assert_eq!(backoff_window(2), Duration::seconds(60));
-    assert_eq!(backoff_window(3), Duration::seconds(120));
-    // 30 · 2^7 = 3840, capped to the 3600s ceiling.
-    assert_eq!(backoff_window(8), Duration::seconds(3600));
-    assert_eq!(backoff_window(50), Duration::seconds(3600));
-}
-
-/// `enqueue_upload_on` composes with a host transaction: a rollback takes the
-/// queued upload with it, and a commit lands it — so a host can make "row +
-/// its upload intent" a single atomic fact.
-#[tokio::test]
-async fn enqueue_upload_on_is_transactional_with_host_writes() {
-    let db = open_outbox_db();
-
-    // Rolled-back host transaction: the enqueue must vanish with it.
-    db.call(|conn| {
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        Database::enqueue_upload_on(
-            &tx,
-            "f-rollback",
-            "k-rollback",
-            None,
-            crate::blob::BlobScope::Master,
-            false,
-            T0,
-        )?;
-        tx.rollback().map_err(DbError::from)
-    })
-    .await
-    .expect("rolled-back transaction");
-
-    // Committed host transaction: the enqueue lands.
-    db.call(|conn| {
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        Database::enqueue_upload_on(
-            &tx,
-            "f-commit",
-            "k-commit",
-            Some("/tmp/source.flac"),
-            crate::blob::BlobScope::Derived("rel-1".to_string()),
-            false,
-            T0,
-        )?;
-        tx.commit().map_err(DbError::from)
-    })
-    .await
-    .expect("committed transaction");
-
-    let pending = db.get_pending_cloud_uploads().await.expect("pending");
-    let keys: Vec<&str> = pending.iter().map(|e| e.cloud_key.as_str()).collect();
-    assert_eq!(
-        keys,
-        vec!["k-commit"],
-        "only the committed enqueue persists"
-    );
-}
-
-/// A `retain_pinned` upload populates the PROTECTED cache folder from the
-/// plaintext: after the drain, `storage/pinned/<id>` holds the plaintext bytes
-/// (not the sealed ciphertext the cloud holds), and the evictable
-/// `storage/cache/<id>` is untouched — the blob is kept local and budget-exempt
-/// with no later cloud round-trip.
-#[tokio::test]
-async fn pinned_upload_populates_the_protected_cache_folder() {
-    let tmp = tempfile::tempdir().unwrap();
-    let plaintext = b"PINNED-AUDIO-BYTES";
-    let source = write_temp_file(tmp.path(), "track.flac", plaintext);
-    let ld = StoreDir::new(tmp.path());
-
-    let db = open_outbox_db();
-    let file_id = "pinaaaa1";
-    let namespace = "release_files";
-    // The cache namespace is derived from the cloud key's first component, so it must
-    // be the namespace the assertions below check.
-    let cloud_key = "release_files/pi/na/pinaaaa1";
-    db.enqueue_upload(
-        file_id,
-        cloud_key,
-        Some(source.as_str()),
-        crate::blob::BlobScope::Master,
-        true, // retain_pinned
-        T0,
-    )
-    .await
-    .expect("enqueue a pinned upload");
-
-    let cloud = InMemoryCloudHome::new();
-    let n = run_drain(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
-        .await
-        .expect("drain")
-        .uploaded;
-    assert_eq!(n, 1, "the pinned blob uploads");
-
-    // The cloud holds the sealed (encrypted) bytes, not the plaintext.
-    let at_rest = cloud.get(cloud_key).expect("blob present in cloud");
-    assert_ne!(at_rest, plaintext, "the cloud copy is sealed ciphertext");
-
-    // The protected folder holds the PLAINTEXT (what the cache serves), written
-    // straight from the drain's read — no cloud round-trip.
-    let pinned_path = ld.pinned_blob_path(namespace, file_id).unwrap();
-    assert!(
-        pinned_path.exists(),
-        "a pinned upload writes storage/pinned/<namespace>/<id>",
-    );
-    assert_eq!(
-        std::fs::read(&pinned_path).unwrap(),
-        plaintext,
-        "the pinned file is the plaintext, not the sealed cloud bytes",
-    );
-
-    // The evictable cache is untouched: a pin populates pinned/, never cache/.
-    assert!(
-        !ld.cache_blob_path(namespace, file_id).unwrap().exists(),
-        "a pinned upload does not populate the evictable storage/cache/<namespace>/<id>",
-    );
-}
-
-/// An unpinned upload populates NOTHING on write: after the drain the blob is in
-/// the cloud but neither cache folder holds it — the evictable `storage/cache/<id>`
-/// fills only on a later read-miss, never on the upload itself.
-#[tokio::test]
-async fn unpinned_upload_populates_nothing_on_write() {
-    let tmp = tempfile::tempdir().unwrap();
-    let plaintext = b"UNPINNED-AUDIO-BYTES";
-    let source = write_temp_file(tmp.path(), "track.flac", plaintext);
-    let ld = StoreDir::new(tmp.path());
-
-    let db = open_outbox_db();
-    let file_id = "unpaaaa1";
-    let namespace = "release_files";
-    // The cache namespace is derived from the cloud key's first component.
-    let cloud_key = "release_files/un/pa/unpaaaa1";
-    db.enqueue_upload(
-        file_id,
-        cloud_key,
-        Some(source.as_str()),
-        crate::blob::BlobScope::Master,
-        false, // retain_pinned
-        T0,
-    )
-    .await
-    .expect("enqueue an unpinned upload");
-
-    let cloud = InMemoryCloudHome::new();
-    let n = run_drain(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
-        .await
-        .expect("drain")
-        .uploaded;
-    assert_eq!(n, 1, "the unpinned blob uploads");
-    assert!(cloud.get(cloud_key).is_some(), "the blob is in the cloud");
-
-    // Neither folder holds it: an unpinned upload writes no local cache copy.
-    assert!(
-        !ld.pinned_blob_path(namespace, file_id).unwrap().exists(),
-        "an unpinned upload does not populate storage/pinned/<namespace>/<id>",
-    );
-    assert!(
-        !ld.cache_blob_path(namespace, file_id).unwrap().exists(),
-        "an unpinned upload does not populate storage/cache/<namespace>/<id>",
-    );
-}
-
-/// A pin populate that fails does NOT fail the upload: the upload already
-/// succeeded and the bytes are in the cloud, so a populate failure is logged and
-/// swallowed (a later read re-fetches into the cache). Here the protected folder is
-/// blocked by planting a FILE where the blob's shard directory must go, so the
-/// atomic write into `storage/pinned/<id>` can't create its parent — yet the drain
-/// still reports the upload done and clears the queue entry.
-#[tokio::test]
-async fn a_failed_pin_populate_does_not_fail_the_upload() {
-    let tmp = tempfile::tempdir().unwrap();
-    let plaintext = b"PIN-FAILS-BUT-UPLOAD-OK";
-    let source = write_temp_file(tmp.path(), "track.flac", plaintext);
-    let ld = StoreDir::new(tmp.path());
-
-    let db = open_outbox_db();
-    let file_id = "pinfail1";
-    let namespace = "release_files";
-    // The cache namespace is derived from the cloud key's first component.
-    let cloud_key = "release_files/pi/nf/pinfail1";
-
-    // Block the populate: the pinned blob path is
-    // storage/pinned/<namespace>/{ab}/{cd}/<id>; plant a regular FILE at the {ab}
-    // level so creating the {ab}/{cd} shard directory fails, and with it the atomic
-    // write into pinned/.
-    let pinned_path = ld.pinned_blob_path(namespace, file_id).unwrap();
-    let ab_dir = pinned_path.parent().unwrap().parent().unwrap(); // .../pinned/<namespace>/{ab}
-    std::fs::create_dir_all(ab_dir.parent().unwrap()).unwrap(); // .../pinned/<namespace>
-    std::fs::write(ab_dir, b"blocker").unwrap(); // {ab} is now a file, not a dir
-
-    db.enqueue_upload(
-        file_id,
-        cloud_key,
-        Some(source.as_str()),
-        crate::blob::BlobScope::Master,
-        true, // retain_pinned — but the populate will fail
-        T0,
-    )
-    .await
-    .expect("enqueue a pinned upload whose populate will fail");
-
-    let cloud = InMemoryCloudHome::new();
-    let n = run_drain(&db, &cloud, &enc(), &ld, &fixed_clock(T0), None)
-        .await
-        .expect("the drain succeeds despite the populate failure")
-        .uploaded;
-
-    // The upload counted, the blob reached the cloud, and the queue entry was
-    // cleared — the failed populate rolled none of that back.
-    assert_eq!(n, 1, "the upload succeeds even though pinning failed");
-    assert!(cloud.get(cloud_key).is_some(), "the blob reached the cloud");
-    assert!(
-        get_upload(&db, 1).await.is_none(),
-        "the completed upload's queue entry was removed",
-    );
-    // The pin did not land (its parent couldn't be created).
-    assert!(
-        !pinned_path.exists(),
-        "the blocked populate left no storage/pinned/<id> file",
-    );
-}
-
-// --- bounded concurrency ----------------------------------------------------
-
-/// A cloud backend that gathers writes on a barrier before serving, so a test can
-/// prove the drain runs uploads concurrently and bounds them: with a barrier of size
-/// N, N writes must arrive together to release it, and `max_inflight` records the
-/// observed peak. Records each written key so the test can assert what landed. Its
-/// `delete` is a no-op (the drain's post-upload tombstone cancel deletes an absent
-/// object).
-struct BarrierCloudHome {
-    keys: Mutex<Vec<String>>,
-    inflight: AtomicUsize,
-    max_inflight: AtomicUsize,
-    barrier: tokio::sync::Barrier,
-}
-
-impl BarrierCloudHome {
-    fn new(gather: usize) -> Self {
-        Self {
-            keys: Mutex::new(Vec::new()),
-            inflight: AtomicUsize::new(0),
-            max_inflight: AtomicUsize::new(0),
-            barrier: tokio::sync::Barrier::new(gather),
-        }
-    }
-    fn max_inflight(&self) -> usize {
-        self.max_inflight.load(Ordering::SeqCst)
-    }
-    fn keys(&self) -> Vec<String> {
-        let mut k = self.keys.lock().unwrap().clone();
-        k.sort();
-        k
-    }
-    async fn gather(&self, key: &str) {
-        let n = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
-        self.max_inflight.fetch_max(n, Ordering::SeqCst);
-        self.barrier.wait().await;
-        self.inflight.fetch_sub(1, Ordering::SeqCst);
-        self.keys.lock().unwrap().push(key.to_string());
-    }
-}
-
-#[async_trait::async_trait]
-impl CloudHome for BarrierCloudHome {
-    async fn put_object(&self, key: &str, _data: Vec<u8>) -> Result<(), CloudHomeError> {
-        self.gather(key).await;
-        Ok(())
-    }
-    async fn open_multipart<'a>(
-        &'a self,
-        _key: &str,
-        _total_len: u64,
-    ) -> Result<crate::storage::cloud::BoxPartSink<'a>, CloudHomeError> {
-        unimplemented!("the probe keeps blobs under the multipart threshold")
-    }
-    fn multipart_threshold(&self) -> u64 {
-        8 * 1024 * 1024
-    }
-    async fn read(&self, _key: &str) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn read_range(
-        &self,
-        _key: &str,
-        _start: u64,
-        _end: u64,
-    ) -> Result<Vec<u8>, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn list(&self, _prefix: &str) -> Result<Vec<String>, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn delete(&self, _key: &str) -> Result<(), CloudHomeError> {
-        Ok(())
-    }
-    async fn exists(&self, _key: &str) -> Result<bool, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-    async fn set_access(
-        &self,
-        _desired: crate::storage::cloud::CloudAccessState,
-    ) -> Result<crate::storage::cloud::CloudAccessOutcome, CloudHomeError> {
-        unimplemented!("not exercised by drain_uploads")
-    }
-}
-
-/// An observer that pauses the drain after its first `admit_before` admission checks:
-/// `should_skip_uploads` returns false for the first `admit_before` calls, then true.
-/// Records the started blob ids so a test can assert which entries were admitted.
 struct PausingObserver {
     admit_before: usize,
     checks: AtomicUsize,
@@ -1059,236 +563,549 @@ impl PausingObserver {
             started: Mutex::new(Vec::new()),
         }
     }
+
     fn started(&self) -> Vec<String> {
         self.started.lock().unwrap().clone()
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl BlobTransitionObserver for PausingObserver {
     async fn on_blob_upload_started(&self, file_id: &str) {
         self.started.lock().unwrap().push(file_id.to_string());
     }
+
     async fn on_blob_uploaded(&self, _file_id: &str) {}
     async fn on_blob_upload_failed(&self, _file_id: &str, _error: &str) {}
+
     fn should_skip_uploads(&self) -> bool {
         self.checks.fetch_add(1, Ordering::SeqCst) >= self.admit_before
     }
 }
 
-/// Enqueue `n` ready uploads with distinct ids/keys over real temp files, returning
-/// the (file_id, cloud_key) pairs in order.
-async fn seed_uploads(db: &Database, dir: &std::path::Path, n: usize) -> Vec<(String, String)> {
-    let mut ids = Vec::new();
-    for i in 0..n {
-        let file_id = format!("f{i}");
-        let cloud_key = format!("k{i}");
-        let path = write_temp_file(
-            dir,
-            &format!("blob-{i}.bin"),
-            format!("bytes-{i}").as_bytes(),
-        );
-        insert_upload(db, i as i64 + 1, &file_id, &cloud_key, Some(path), 0, None).await;
-        ids.push((file_id, cloud_key));
+#[tokio::test]
+async fn provider_upload_failure_remains_typed_for_both_write_policies() {
+    for policy in [
+        crate::WritePolicy::MergeConcurrent,
+        crate::WritePolicy::Serial,
+    ] {
+        let fixture = upload_fixture(policy, 1).await;
+        let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+        plant_uploads(
+            &fixture,
+            &store_dir,
+            &[("fail0001", b"provider upload")],
+            false,
+        )
+        .await;
+        fixture.home.fail_creates();
+
+        let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.failures.failures().len(), 1);
+        assert!(outcome.failures.has_transport_failure());
+        assert!(crate::sync::cycle::SyncCycleFailure::operation(
+            "upload queued blob",
+            outcome.failures,
+        )
+        .is_offline());
     }
-    ids
 }
 
-/// At limit 1 the drain is serial: it uploads every entry in queue order, one at a
-/// time — each entry's `Started` is immediately followed by its `Uploaded` before the
-/// next entry starts — and clears each row.
 #[tokio::test]
-async fn limit_one_drains_every_entry_in_order() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = open_outbox_db_with_uploads(1);
-    let ids = seed_uploads(&db, tmp.path(), 3).await;
-    let cloud = InMemoryCloudHome::new();
+async fn bad_item_does_not_block_good_later_item() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let paths = plant_uploads(
+        &fixture,
+        &store_dir,
+        &[("bad00001", b"bad"), ("good0001", b"good")],
+        false,
+    )
+    .await;
+    tokio::fs::remove_file(&paths[0]).await.unwrap();
+
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        .await
+        .unwrap();
+    assert_eq!(outcome.uploaded, 1);
+    assert_eq!(outcome.failures.failures().len(), 1);
+    assert!(matches!(
+        outcome.failures.failures()[0].cause,
+        super::upload::UploadFailureCause::Storage(_)
+    ));
+    assert_eq!(journal_attempt(&fixture, "bad00001").await.0, 1);
+    assert!(is_created(&journal(&fixture, "good0001").await));
+}
+
+#[tokio::test]
+async fn upload_refuses_to_seal_while_a_rotation_is_pending() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    plant_uploads(&fixture, &store_dir, &[("rotate01", b"bytes")], false).await;
+    fixture.storage.shared_pending_rotation().mark_committed(2);
+
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        .await
+        .unwrap();
+    assert_eq!(outcome.uploaded, 0);
+    assert_eq!(fixture.home.create_calls(), 0);
+    let (_, error, _) = journal_attempt(&fixture, "rotate01").await;
+    assert!(error.unwrap().contains("rotated to generation 2"));
+}
+
+#[tokio::test]
+async fn failure_persists_attempt_count_and_last_error() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    plant_uploads(&fixture, &store_dir, &[("retry001", b"bytes")], false).await;
+    fixture.home.fail_creates();
+
+    run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        .await
+        .unwrap();
+    let (attempt, error, _) = journal_attempt(&fixture, "retry001").await;
+    assert_eq!(attempt, 1);
+    assert!(error.unwrap().contains("induced exact create failure"));
+
+    run_drain(
+        &fixture,
+        &store_dir,
+        &fixed_clock("2024-06-01T00:00:31Z"),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(journal_attempt(&fixture, "retry001").await.0, 2);
+    assert_eq!(fixture.home.create_calls(), 2);
+}
+
+#[tokio::test]
+async fn backoff_skips_item_inside_window() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    plant_uploads(&fixture, &store_dir, &[("backoff1", b"bytes")], false).await;
+    fixture.home.fail_creates();
+    let entry = journal(&fixture, "backoff1").await;
+    fixture
+        .db
+        .record_cloud_outbox_failure(&entry, "prior", T0)
+        .await
+        .unwrap();
+
+    let observer = RecordingObserver::new();
+    run_drain(
+        &fixture,
+        &store_dir,
+        &fixed_clock("2024-06-01T00:00:10Z"),
+        Some(&observer),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fixture.home.create_calls(), 0);
+    assert!(observer.events().is_empty());
+    assert_eq!(journal_attempt(&fixture, "backoff1").await.0, 1);
+
+    run_drain(
+        &fixture,
+        &store_dir,
+        &fixed_clock("2024-06-01T00:00:31Z"),
+        Some(&observer),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fixture.home.create_calls(), 1);
+    assert_eq!(journal_attempt(&fixture, "backoff1").await.0, 2);
+}
+
+#[tokio::test]
+async fn observer_fires_started_then_uploaded_on_success() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    plant_uploads(&fixture, &store_dir, &[("observe1", b"bytes")], false).await;
     let observer = RecordingObserver::new();
 
-    let n = run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        Some(&observer),
-    )
-    .await
-    .unwrap()
-    .uploaded;
-    assert_eq!(n, 3, "every entry uploads");
+    run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+        .await
+        .unwrap();
 
-    for (i, (_file_id, key)) in ids.iter().enumerate() {
-        assert!(cloud.get(key).is_some(), "{key} landed in the cloud");
-        assert!(
-            get_upload(&db, i as i64 + 1).await.is_none(),
-            "the uploaded entry's row was removed",
-        );
-    }
+    let events = observer.events();
+    assert_eq!(events.first(), Some(&ObsEvent::Started("observe1".into())));
+    assert_eq!(events.last(), Some(&ObsEvent::Uploaded("observe1".into())));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ObsEvent::Progress(id, done, total) if id == "observe1" && done == total
+    )));
+}
 
-    // Serial order: Sf0,Uf0,Sf1,Uf1,Sf2,Uf2 — no entry starts before the previous
-    // one's upload completes.
-    let seq: Vec<String> = observer
+#[tokio::test]
+async fn observer_fires_started_then_failed_on_failure() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    plant_uploads(&fixture, &store_dir, &[("observe2", b"bytes")], false).await;
+    fixture.home.fail_creates();
+    let observer = RecordingObserver::new();
+
+    run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+        .await
+        .unwrap();
+
+    let events = observer.events();
+    assert_eq!(events[0], ObsEvent::Started("observe2".into()));
+    assert!(matches!(&events[1], ObsEvent::Failed(id, _) if id == "observe2"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn observer_receives_advancing_midfile_progress() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let bytes = vec![7; 10_000];
+    plant_uploads(&fixture, &store_dir, &[("progress", &bytes)], false).await;
+    fixture
+        .home
+        .slow_creates(1000, std::time::Duration::from_millis(500));
+    let observer = RecordingObserver::new();
+
+    run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+        .await
+        .unwrap();
+
+    let progress = observer
         .events()
-        .iter()
-        .filter_map(|e| match e {
-            ObsEvent::Started(f) => Some(format!("S{f}")),
-            ObsEvent::Uploaded(f) => Some(format!("U{f}")),
+        .into_iter()
+        .filter_map(|event| match event {
+            ObsEvent::Progress(id, done, total) if id == "progress" => Some((done, total)),
             _ => None,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    assert!(progress.len() >= 2);
+    assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    assert_eq!(progress.last().unwrap().0, progress.last().unwrap().1);
+}
+
+#[test]
+fn backoff_window_is_exponential_and_capped() {
+    assert_eq!(backoff_window(0), Duration::zero());
+    assert_eq!(backoff_window(1), Duration::seconds(30));
+    assert_eq!(backoff_window(2), Duration::seconds(60));
+    assert_eq!(backoff_window(3), Duration::seconds(120));
+    assert_eq!(backoff_window(8), Duration::seconds(3600));
+    assert_eq!(backoff_window(50), Duration::seconds(3600));
+}
+
+#[tokio::test]
+async fn enqueue_upload_on_is_transactional_with_host_writes() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let paths = plant_local_rows(&fixture, &store_dir, &[("transact", b"bytes")]).await;
+    let row = fixture
+        .db
+        .row_blob_ref("note_photos", "transact")
+        .await
+        .unwrap();
+
+    let rollback_row = row.clone();
+    let rollback_path = paths[0].clone();
+    fixture
+        .db
+        .call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            Database::enqueue_upload_on(
+                &tx,
+                "notes",
+                ROOT_ID,
+                &rollback_row,
+                &rollback_path,
+                false,
+                T0,
+            )?;
+            tx.rollback().map_err(DbError::from)
+        })
+        .await
+        .unwrap();
+    assert!(fixture
+        .db
+        .get_pending_cloud_uploads()
+        .await
+        .unwrap()
+        .is_empty());
+
+    fixture
+        .db
+        .call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            Database::enqueue_upload_on(&tx, "notes", ROOT_ID, &row, &paths[0], false, T0)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+        .unwrap();
     assert_eq!(
-        seq,
-        vec!["Sf0", "Uf0", "Sf1", "Uf1", "Sf2", "Uf2"],
-        "limit 1 uploads strictly one entry at a time in queue order",
+        fixture.db.get_pending_cloud_uploads().await.unwrap().len(),
+        1
     );
 }
 
-/// At limit 2 the drain runs two uploads at once and no more: a barrier that only
-/// releases when two writes gather proves both the concurrency and the bound (a limit
-/// of 1 would deadlock it). Every entry lands and its row is cleared.
+async fn plant_local_rows(
+    fixture: &UploadFixture,
+    store_dir: &StoreDir,
+    rows: &[(&str, &[u8])],
+) -> Vec<std::path::PathBuf> {
+    let rows_owned = rows
+        .iter()
+        .map(|(id, bytes)| {
+            (
+                id.to_string(),
+                bytes.len() as i64,
+                crate::blob::content_hash(bytes),
+            )
+        })
+        .collect::<Vec<_>>();
+    fixture
+        .db
+        .call(move |conn| {
+            conn.execute(
+                "INSERT INTO notes (id, title, shared, _updated_at, created_at)
+                 VALUES (?1, 'upload', 0, '0000000001000-0000-test', '2024-01-01')",
+                [ROOT_ID],
+            )
+            .map_err(DbError::from)?;
+            for (id, size, hash) in rows_owned {
+                conn.execute(
+                    "INSERT INTO note_photos
+                     (id, note_id, kind, size, hash, _updated_at, created_at)
+                     VALUES (?1, ?2, 'attach', ?3, ?4, '0000000001000-0000-test', '2024-01-01')",
+                    rusqlite::params![id, ROOT_ID, size, hash],
+                )
+                .map_err(DbError::from)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut paths = Vec::new();
+    for (id, bytes) in rows {
+        let path = store_dir
+            .db_path()
+            .parent()
+            .expect("Store directory has a parent")
+            .join(format!("{id}.source"));
+        crate::local_blob::write_atomic(&path, bytes).await.unwrap();
+        let row = fixture.db.row_blob_ref("note_photos", id).await.unwrap();
+        let registered = path.clone();
+        fixture
+            .db
+            .call(move |conn| Database::register_external_blob_on(conn, &row, &registered))
+            .await
+            .unwrap();
+        paths.push(path);
+    }
+    paths
+}
+
+#[tokio::test]
+async fn pinned_upload_populates_the_protected_cache_folder() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let bytes = b"PINNED-AUDIO-BYTES";
+    plant_uploads(&fixture, &store_dir, &[("pinaaaa1", bytes)], true).await;
+
+    assert_eq!(
+        run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+            .await
+            .unwrap()
+            .uploaded,
+        1
+    );
+    let pinned = store_dir.pinned_blob_path("photos", "pinaaaa1").unwrap();
+    assert_eq!(tokio::fs::read(pinned).await.unwrap(), bytes);
+    assert!(!store_dir
+        .cache_blob_path("photos", "pinaaaa1")
+        .unwrap()
+        .exists());
+    let entry = journal(&fixture, "pinaaaa1").await;
+    assert!(is_created(&entry));
+    assert!(
+        ExactSlotStorage::read_at(fixture.home.as_ref(), created_slot(&entry))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn unpinned_upload_populates_nothing_on_write() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    plant_uploads(&fixture, &store_dir, &[("unpaaaa1", b"UNPINNED")], false).await;
+
+    run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        .await
+        .unwrap();
+    assert!(!store_dir
+        .pinned_blob_path("photos", "unpaaaa1")
+        .unwrap()
+        .exists());
+    assert!(!store_dir
+        .cache_blob_path("photos", "unpaaaa1")
+        .unwrap()
+        .exists());
+    assert!(is_created(&journal(&fixture, "unpaaaa1").await));
+}
+
+#[tokio::test]
+async fn a_failed_pin_populate_does_not_fail_the_upload() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let pinned = store_dir.pinned_blob_path("photos", "pinfail1").unwrap();
+    let shard = pinned.parent().unwrap().parent().unwrap();
+    std::fs::create_dir_all(shard.parent().unwrap()).unwrap();
+    std::fs::write(shard, b"blocker").unwrap();
+    plant_uploads(&fixture, &store_dir, &[("pinfail1", b"PIN")], true).await;
+
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        .await
+        .unwrap();
+    assert_eq!(outcome.uploaded, 0);
+    assert_eq!(outcome.failures.failures().len(), 1);
+    let entry = journal(&fixture, "pinfail1").await;
+    assert!(is_created(&entry));
+    assert!(
+        ExactSlotStorage::read_at(fixture.home.as_ref(), created_slot(&entry))
+            .await
+            .is_ok()
+    );
+}
+
+async fn seed_uploads(fixture: &UploadFixture, store_dir: &StoreDir, count: usize) -> Vec<String> {
+    let owned = (0..count)
+        .map(|index| {
+            (
+                format!("blob{index:04}"),
+                format!("bytes-{index}").into_bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let borrowed = owned
+        .iter()
+        .map(|(id, bytes)| (id.as_str(), bytes.as_slice()))
+        .collect::<Vec<_>>();
+    plant_uploads(fixture, store_dir, &borrowed, false).await;
+    owned.into_iter().map(|(id, _)| id).collect()
+}
+
+#[tokio::test]
+async fn limit_one_drains_every_entry_in_order() {
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let ids = seed_uploads(&fixture, &store_dir, 3).await;
+    let observer = RecordingObserver::new();
+
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+        .await
+        .unwrap();
+    assert_eq!(outcome.uploaded, 3);
+    for id in &ids {
+        assert!(is_created(&journal(&fixture, id).await));
+    }
+    let sequence = observer
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            ObsEvent::Started(id) => Some(format!("S{id}")),
+            ObsEvent::Uploaded(id) => Some(format!("U{id}")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sequence,
+        vec![
+            "Sblob0000",
+            "Ublob0000",
+            "Sblob0001",
+            "Ublob0001",
+            "Sblob0002",
+            "Ublob0002"
+        ]
+    );
+}
+
 #[tokio::test]
 async fn concurrent_drain_overlaps_up_to_the_limit() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = open_outbox_db_with_uploads(2);
-    let ids = seed_uploads(&db, tmp.path(), 4).await;
-    let cloud = BarrierCloudHome::new(2);
+    let home = Arc::new(InstrumentedHome::with_barrier(Some(2)));
+    let fixture =
+        upload_fixture_with_home(crate::WritePolicy::MergeConcurrent, 2, home.clone()).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let ids = seed_uploads(&fixture, &store_dir, 4).await;
+    home.enable_barrier();
 
-    let n = run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        None,
-    )
-    .await
-    .unwrap()
-    .uploaded;
-
-    assert_eq!(n, 4, "every entry uploads");
-    assert_eq!(cloud.max_inflight(), 2, "exactly two uploads ran at once");
-    let want: Vec<String> = ids.iter().map(|(_, k)| k.clone()).collect();
-    assert_eq!(cloud.keys(), want, "every blob reached the cloud");
-    for i in 0..ids.len() {
-        assert!(
-            get_upload(&db, i as i64 + 1).await.is_none(),
-            "every uploaded entry's row was removed after the concurrent batch",
-        );
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        .await
+        .unwrap();
+    assert_eq!(outcome.uploaded, 4);
+    assert_eq!(home.max_inflight(), 2);
+    assert_eq!(home.keys().len(), 4);
+    for id in ids {
+        assert!(is_created(&journal(&fixture, &id).await));
     }
 }
 
-/// A single blob's failure is isolated under concurrency: the drain records it and
-/// keeps the failed entry queued, while every other blob uploads and clears.
 #[tokio::test]
 async fn concurrent_drain_isolates_a_failed_upload() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = open_outbox_db_with_uploads(3);
-    // Entry 2's source file is missing, so its read fails; 1 and 3 upload fine.
-    let good_a = write_temp_file(tmp.path(), "a.bin", b"aaa");
-    let missing = tmp.path().join("missing.bin").to_string_lossy().to_string();
-    let good_c = write_temp_file(tmp.path(), "c.bin", b"ccc");
-    insert_upload(&db, 1, "fa", "ka", Some(good_a), 0, None).await;
-    insert_upload(&db, 2, "fb", "kb", Some(missing), 0, None).await;
-    insert_upload(&db, 3, "fc", "kc", Some(good_c), 0, None).await;
-    let cloud = InMemoryCloudHome::new();
-
-    let n = run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        None,
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 3).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let paths = plant_uploads(
+        &fixture,
+        &store_dir,
+        &[
+            ("good000a", b"aaa"),
+            ("bad0000b", b"bbb"),
+            ("good000c", b"ccc"),
+        ],
+        false,
     )
-    .await
-    .unwrap()
-    .uploaded;
+    .await;
+    tokio::fs::remove_file(&paths[1]).await.unwrap();
 
-    assert_eq!(n, 2, "the two good blobs upload despite the failure");
-    assert!(cloud.get("ka").is_some());
-    assert!(cloud.get("kc").is_some());
-    assert!(cloud.get("kb").is_none(), "the failed blob did not land");
-    assert!(get_upload(&db, 1).await.is_none(), "good entry cleared");
-    assert!(get_upload(&db, 3).await.is_none(), "good entry cleared");
-    let (attempt, err, _) = get_upload(&db, 2).await.expect("failed entry stays queued");
-    assert_eq!(attempt, 1);
-    assert!(err.is_some());
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), None)
+        .await
+        .unwrap();
+    assert_eq!(outcome.uploaded, 2);
+    assert_eq!(outcome.failures.failures().len(), 1);
+    assert!(is_created(&journal(&fixture, "good000a").await));
+    assert!(is_created(&journal(&fixture, "good000c").await));
+    assert_eq!(journal_attempt(&fixture, "bad0000b").await.0, 1);
 }
 
-/// A queue paused up front admits nothing under concurrency: no write, no started
-/// event, every row left queued.
 #[tokio::test]
 async fn paused_queue_admits_nothing_under_concurrency() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = open_outbox_db_with_uploads(3);
-    seed_uploads(&db, tmp.path(), 3).await;
-    let cloud = InMemoryCloudHome::new();
-    let observer = PausingObserver::new(0); // pause before the first admission
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 3).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let ids = seed_uploads(&fixture, &store_dir, 3).await;
+    let observer = PausingObserver::new(0);
 
-    let n = run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        Some(&observer),
-    )
-    .await
-    .unwrap()
-    .uploaded;
-
-    assert_eq!(n, 0, "a paused queue uploads nothing");
-    assert!(cloud.is_empty(), "no object reached the cloud");
-    assert!(observer.started().is_empty(), "no upload started");
-    for i in 1..=3 {
-        assert!(get_upload(&db, i).await.is_some(), "every row stays queued");
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+        .await
+        .unwrap();
+    assert_eq!(outcome.uploaded, 0);
+    assert_eq!(fixture.home.create_calls(), 0);
+    assert!(observer.started().is_empty());
+    for id in ids {
+        assert!(!is_created(&journal(&fixture, &id).await));
     }
 }
 
-/// A pause that trips after the first admission (limit 1) lets the in-flight upload
-/// finish and stops admitting the rest: the first entry uploads and clears, the
-/// second is untouched.
 #[tokio::test]
 async fn pause_after_first_finishes_inflight_and_stops_admitting() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = open_outbox_db_with_uploads(1);
-    seed_uploads(&db, tmp.path(), 2).await;
-    let cloud = InMemoryCloudHome::new();
-    let observer = PausingObserver::new(1); // admit one, then pause
+    let fixture = upload_fixture(crate::WritePolicy::MergeConcurrent, 1).await;
+    let (_temp, store_dir) = crate::sync::test_helpers::temp_store_dir();
+    let ids = seed_uploads(&fixture, &store_dir, 2).await;
+    let observer = PausingObserver::new(1);
 
-    let n = run_drain(
-        &db,
-        &cloud,
-        &enc(),
-        &StoreDir::new(tmp.path()),
-        &fixed_clock(T0),
-        Some(&observer),
-    )
-    .await
-    .unwrap()
-    .uploaded;
-
-    assert_eq!(
-        n, 1,
-        "the first entry uploads before the pause takes effect"
-    );
-    assert_eq!(
-        observer.started(),
-        vec!["f0".to_string()],
-        "only one started"
-    );
-    assert!(cloud.get("k0").is_some(), "the admitted blob landed");
-    assert!(
-        cloud.get("k1").is_none(),
-        "the paused-out blob did not land"
-    );
-    assert!(
-        get_upload(&db, 1).await.is_none(),
-        "the uploaded entry cleared"
-    );
-    assert!(
-        get_upload(&db, 2).await.is_some(),
-        "the paused-out entry stays queued",
-    );
+    let outcome = run_drain(&fixture, &store_dir, &fixed_clock(T0), Some(&observer))
+        .await
+        .unwrap();
+    assert_eq!(outcome.uploaded, 1);
+    assert_eq!(observer.started(), vec![ids[0].clone()]);
+    assert!(is_created(&journal(&fixture, &ids[0]).await));
+    assert!(!is_created(&journal(&fixture, &ids[1]).await));
 }

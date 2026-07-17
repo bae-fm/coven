@@ -17,10 +17,10 @@
 //!
 //! A host-provided Remote blob can also have a short-lived upload staging file here:
 //! `CovenHandle::write` stores newly written bytes in the local store, then the sync
-//! cycle uploads those bytes and drops this file. The Remote read path checks
-//! `pinned/` and `cache/` first, then reads this staging file for host-provided
-//! Remote blobs only, and finally reads the cloud. A host-provided Local blob still
-//! reads this store as its required source.
+//! cycle uploads those bytes and drops this file. A `PendingRemote` row reads this
+//! verified staging source; once its exact locator is published, Remote reads use
+//! cache/cloud and cleanup may remove the staging file. A host-provided Local blob
+//! still reads this store as its required source.
 //!
 //! See the [blob concept tree](crate::blob) for where the local store sits in the
 //! whole storage model.
@@ -75,10 +75,8 @@ pub async fn store(
 }
 
 /// Read a host-provided blob from the local store, or `None` when no file is stored
-/// there. For a host-provided Local blob, absence is fail-loud corruption to
-/// [`cache::read_blob`](super::cache::read_blob). For a host-provided Remote blob,
-/// absence means the upload staging file is gone and the Remote read continues to
-/// cloud.
+/// there. For a host-provided Local or PendingRemote blob, absence is fail-loud
+/// corruption to [`cache::read_blob`](super::cache::read_blob).
 pub async fn read(
     store_dir: &StoreDir,
     namespace: &str,

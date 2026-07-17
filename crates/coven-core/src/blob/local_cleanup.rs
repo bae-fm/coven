@@ -1,7 +1,7 @@
 //! Durable deletion of a blob's on-device copies after its last row reference.
 
 use rusqlite::Connection;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::blob::decl::BlobDecls;
 use crate::database::{Database, DbError};
@@ -62,8 +62,9 @@ pub fn record_if_unreferenced_on(
     Ok(true)
 }
 
-/// Drain every committed cleanup obligation. A filesystem failure leaves that
-/// intent durable and returns `true`; database failures are surfaced.
+/// Drain every committed cleanup obligation. A filesystem or database failure
+/// leaves the intent durable and fails the operation. `true` means every
+/// remaining intent is blocked by an active Store-write lease.
 pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError> {
     #[cfg(any(test, feature = "test-utils"))]
     db.reach_test_point(crate::database::DatabaseTestPoint::LocalBlobCleanupRequested)
@@ -122,14 +123,11 @@ pub async fn drain(db: &Database, store_dir: &StoreDir) -> Result<bool, DbError>
         )
         .await
         {
-            warn!(
-                namespace = %intent.namespace(),
-                blob_id = %intent.blob_id(),
-                error = %error,
-                "local blob cleanup intent remains pending"
-            );
-            pending = true;
-            continue;
+            return Err(DbError::Message(format!(
+                "remove local copies for {}/{}: {error}",
+                intent.namespace(),
+                intent.blob_id()
+            )));
         }
 
         let namespace = intent.namespace;

@@ -161,6 +161,18 @@ impl From<rusqlite::Error> for BlobDeclError {
 /// pull needs to download and verify a blob before its row is applied.
 pub type ChangesetBlobDownload = (BlobRef, Option<u64>, Option<String>);
 
+/// Exact row facts captured with a durable Store write for one blob-bearing row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublicationBlob {
+    pub(crate) table: String,
+    pub(crate) row_id: String,
+    pub(crate) row_stamp: String,
+    pub(crate) column: String,
+    pub(crate) blob: BlobRef,
+    pub(crate) plaintext_size: u64,
+    pub(crate) plaintext_hash: String,
+}
+
 /// A blob-bearing table's columns resolved to indices in the live schema (the
 /// same order a changeset reports its columns, so an index reads either source).
 struct TableBlob {
@@ -324,6 +336,10 @@ impl TableBlob {
             table: table.to_string(),
             value,
         })
+    }
+
+    fn hash_from_row(&self, row: &rusqlite::Row<'_>) -> Result<String, BlobDeclError> {
+        row.get(self.hash_col).map_err(BlobDeclError::from)
     }
 }
 
@@ -517,7 +533,7 @@ impl BlobDecls {
         &self,
         conn: &Connection,
         change: &RowChange,
-    ) -> Result<Option<(BlobRef, u64)>, BlobDeclError> {
+    ) -> Result<Option<PublicationBlob>, BlobDeclError> {
         if !matches!(change.op, ChangeOp::Insert | ChangeOp::Update) {
             return Ok(None);
         }
@@ -556,7 +572,17 @@ impl BlobDecls {
             });
         }
         let size = tb.size_from_row(&change.table, row)?;
-        Ok(Some((blob, size)))
+        let plaintext_hash = tb.hash_from_row(row)?;
+        let row_stamp = row.get::<_, String>("_updated_at")?;
+        Ok(Some(PublicationBlob {
+            table: change.table.clone(),
+            row_id: pk.to_string(),
+            row_stamp,
+            column: tb.id_col_name.clone(),
+            blob,
+            plaintext_size: size,
+            plaintext_hash,
+        }))
     }
 
     /// Every blob the rows currently in `conn` reference — the snapshot-bootstrap
@@ -577,6 +603,42 @@ impl BlobDecls {
                 }
             }
         }
+        Ok(out)
+    }
+
+    /// Every exact blob-bearing row version currently present in `conn`.
+    pub(crate) fn publication_blobs_in_db(
+        &self,
+        conn: &Connection,
+    ) -> Result<Vec<PublicationBlob>, BlobDeclError> {
+        let mut out = Vec::new();
+        for (table, blob) in &self.tables {
+            let sql = format!("SELECT * FROM {}", quote_ident(table));
+            let mut statement = conn.prepare(&sql)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let Some(reference) = blob.ref_from_row(table, row)? else {
+                    continue;
+                };
+                out.push(PublicationBlob {
+                    table: table.clone(),
+                    row_id: row.get("id")?,
+                    row_stamp: row.get("_updated_at")?,
+                    column: blob.id_col_name.clone(),
+                    blob: reference,
+                    plaintext_size: blob.size_from_row(table, row)?,
+                    plaintext_hash: blob.hash_from_row(row)?,
+                });
+            }
+        }
+        out.sort_by(|left, right| {
+            (&left.table, &left.row_id, &left.column, &left.row_stamp).cmp(&(
+                &right.table,
+                &right.row_id,
+                &right.column,
+                &right.row_stamp,
+            ))
+        });
         Ok(out)
     }
 
@@ -746,41 +808,6 @@ impl BlobDecls {
         };
         column_on_row::<String>(conn, table, &tb.hash_col_name, pk)
     }
-
-    /// The `(table, primary key)` of a live row whose declared blob resolves to
-    /// `cloud_key`. Hashed homes encode namespace + blob id in the key itself;
-    /// readable homes encode namespace + declared `cloud_path`. This is the GC-side
-    /// lookup: before honoring a tombstone for `cloud_key`, ask whether current DB
-    /// state still names that exact cloud object.
-    pub fn row_for_blob_cloud_key(
-        &self,
-        conn: &Connection,
-        cloud_key: &str,
-    ) -> Result<Option<(String, String)>, BlobDeclError> {
-        if let Some((namespace, blob_id)) = hashed_blob_key_parts(cloud_key) {
-            if let Some(row) = self.row_for_blob_in_namespace(conn, &namespace, &blob_id)? {
-                return Ok(Some(row));
-            }
-        }
-
-        for (table, tb) in &self.tables {
-            let Some(cloud_path_col_name) = &tb.cloud_path_col_name else {
-                continue;
-            };
-            let Some(cloud_path) = cloud_key
-                .strip_prefix(&tb.namespace)
-                .and_then(|rest| rest.strip_prefix('/'))
-            else {
-                continue;
-            };
-            if let Some(pk) = pk_carrying_cloud_path(conn, table, cloud_path_col_name, cloud_path)?
-            {
-                return Ok(Some((table.clone(), pk)));
-            }
-        }
-
-        Ok(None)
-    }
 }
 
 /// The primary key (`id`) of the row in `table` whose declared blob-id column equals
@@ -881,29 +908,6 @@ fn column_on_row<T: rusqlite::types::FromSql>(
         .optional()
         .map(Option::flatten)
         .map_err(BlobDeclError::from)
-}
-
-fn pk_carrying_cloud_path(
-    conn: &Connection,
-    table: &str,
-    cloud_path_col_name: &str,
-    cloud_path: &str,
-) -> Result<Option<String>, BlobDeclError> {
-    let sql = format!(
-        "SELECT id FROM {} WHERE {} = ?1",
-        quote_ident(table),
-        quote_ident(cloud_path_col_name),
-    );
-    conn.query_row(&sql, [cloud_path], |row| row.get::<_, String>(0))
-        .optional()
-        .map_err(BlobDeclError::from)
-}
-
-fn hashed_blob_key_parts(cloud_key: &str) -> Option<(String, String)> {
-    // Map a key back to its DB row, which is keyed by namespace + id, not by who
-    // uploaded it — so the uploader segment is parsed and dropped.
-    crate::store_dir::StoreDir::parse_uploader_hashed_key(cloud_key)
-        .map(|(namespace, _uploader, id)| (namespace, id))
 }
 
 /// Column names of `table`, in declared (schema) order, via `PRAGMA table_info`.

@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::blob::BlobScope;
 use crate::encryption::KeyFingerprint;
-use crate::store_dir::{validate_cloud_path, validate_path_token, StoreDir};
+use crate::store_dir::{validate_cloud_path, validate_path_token};
 use crate::sync::circle::{Audience, CircleId};
-use crate::sync::store_commit::ObjectHash;
+use crate::sync::storage::ExactObjectRef;
+use crate::sync::store_commit::{ObjectHash, StoreDeviceRegistrationRef};
 
 const RESERVED_READABLE_VERSION_SEGMENT: &str = ".coven-versions";
 
@@ -29,29 +30,148 @@ impl TryFrom<Audience> for RemoteAudience {
 }
 
 /// The exact semantic cloud slot and verification facts committed with one row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "protection", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BlobLocator {
     Opaque {
         namespace: String,
         blob_id: String,
-        uploader: String,
+        uploader: StoreDeviceRegistrationRef,
         audience: RemoteAudience,
         scope: BlobScope,
         key_fingerprint: KeyFingerprint,
-        semantic_key: String,
         plaintext_size: u64,
         plaintext_hash: ObjectHash,
     },
     Browsable {
         namespace: String,
         blob_id: String,
-        uploader: String,
+        uploader: StoreDeviceRegistrationRef,
         cloud_path: String,
-        semantic_key: String,
         plaintext_size: u64,
         plaintext_hash: ObjectHash,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredBlobRef {
+    locator: BlobLocator,
+    object: ExactObjectRef,
+}
+
+impl StoredBlobRef {
+    pub fn new(locator: BlobLocator, object: ExactObjectRef) -> Result<Self, BlobLocatorError> {
+        let stored = Self { locator, object };
+        stored.validate()?;
+        Ok(stored)
+    }
+
+    pub fn locator(&self) -> &BlobLocator {
+        &self.locator
+    }
+
+    pub fn object(&self) -> &ExactObjectRef {
+        &self.object
+    }
+
+    fn validate(&self) -> Result<(), BlobLocatorError> {
+        self.locator.validate()?;
+        let expected = self.locator.semantic_key();
+        if self.object.slot().logical_key() != expected {
+            return Err(BlobLocatorError::ObjectKeyMismatch {
+                expected,
+                actual: self.object.slot().logical_key().to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for StoredBlobRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            locator: BlobLocator,
+            object: ExactObjectRef,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        Self::new(fields.locator, fields.object).map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for BlobLocator {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "protection", rename_all = "snake_case", deny_unknown_fields)]
+        enum Fields {
+            Opaque {
+                namespace: String,
+                blob_id: String,
+                uploader: StoreDeviceRegistrationRef,
+                audience: RemoteAudience,
+                scope: BlobScope,
+                key_fingerprint: KeyFingerprint,
+                plaintext_size: u64,
+                plaintext_hash: ObjectHash,
+            },
+            Browsable {
+                namespace: String,
+                blob_id: String,
+                uploader: StoreDeviceRegistrationRef,
+                cloud_path: String,
+                plaintext_size: u64,
+                plaintext_hash: ObjectHash,
+            },
+        }
+
+        let locator = match Fields::deserialize(deserializer)? {
+            Fields::Opaque {
+                namespace,
+                blob_id,
+                uploader,
+                audience,
+                scope,
+                key_fingerprint,
+                plaintext_size,
+                plaintext_hash,
+            } => Self::Opaque {
+                namespace,
+                blob_id,
+                uploader,
+                audience,
+                scope,
+                key_fingerprint,
+                plaintext_size,
+                plaintext_hash,
+            },
+            Fields::Browsable {
+                namespace,
+                blob_id,
+                uploader,
+                cloud_path,
+                plaintext_size,
+                plaintext_hash,
+            } => Self::Browsable {
+                namespace,
+                blob_id,
+                uploader,
+                cloud_path,
+                plaintext_size,
+                plaintext_hash,
+            },
+        };
+        locator.validate().map_err(serde::de::Error::custom)?;
+        Ok(locator)
+    }
 }
 
 impl BlobLocator {
@@ -59,7 +179,7 @@ impl BlobLocator {
     pub fn opaque(
         namespace: impl Into<String>,
         blob_id: impl Into<String>,
-        uploader: impl Into<String>,
+        uploader: StoreDeviceRegistrationRef,
         audience: RemoteAudience,
         scope: BlobScope,
         key_fingerprint: KeyFingerprint,
@@ -68,44 +188,41 @@ impl BlobLocator {
     ) -> Result<Self, BlobLocatorError> {
         let namespace = namespace.into();
         let blob_id = blob_id.into();
-        let uploader = uploader.into();
-        let semantic_key = opaque_semantic_key(&namespace, &uploader, key_fingerprint, &blob_id)?;
-        Ok(Self::Opaque {
+        let locator = Self::Opaque {
             namespace,
             blob_id,
             uploader,
             audience,
             scope,
             key_fingerprint,
-            semantic_key,
             plaintext_size,
             plaintext_hash,
-        })
+        };
+        locator.validate()?;
+        Ok(locator)
     }
 
     pub fn browsable(
         namespace: impl Into<String>,
         blob_id: impl Into<String>,
-        uploader: impl Into<String>,
+        uploader: StoreDeviceRegistrationRef,
         cloud_path: impl Into<String>,
         plaintext_size: u64,
         plaintext_hash: ObjectHash,
     ) -> Result<Self, BlobLocatorError> {
         let namespace = namespace.into();
         let blob_id = blob_id.into();
-        let uploader = uploader.into();
         let cloud_path = cloud_path.into();
-        let semantic_key =
-            browsable_semantic_key(&namespace, &cloud_path, &uploader, &blob_id, plaintext_hash)?;
-        Ok(Self::Browsable {
+        let locator = Self::Browsable {
             namespace,
             blob_id,
             uploader,
             cloud_path,
-            semantic_key,
             plaintext_size,
             plaintext_hash,
-        })
+        };
+        locator.validate()?;
+        Ok(locator)
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, BlobLocatorError> {
@@ -126,11 +243,19 @@ impl BlobLocator {
         ObjectHash::digest(&self.to_bytes())
     }
 
-    pub fn semantic_key(&self) -> &str {
+    pub fn semantic_key(&self) -> String {
         match self {
-            Self::Opaque { semantic_key, .. } | Self::Browsable { semantic_key, .. } => {
-                semantic_key
+            Self::Opaque { namespace, .. } => {
+                format!("{namespace}/opaque/{}", self.locator_hash())
             }
+            Self::Browsable {
+                namespace,
+                cloud_path,
+                ..
+            } => format!(
+                "{namespace}/readable/{cloud_path}/{RESERVED_READABLE_VERSION_SEGMENT}/{}",
+                self.locator_hash()
+            ),
         }
     }
 
@@ -146,7 +271,7 @@ impl BlobLocator {
         }
     }
 
-    pub fn uploader(&self) -> &str {
+    pub fn uploader(&self) -> &StoreDeviceRegistrationRef {
         match self {
             Self::Opaque { uploader, .. } | Self::Browsable { uploader, .. } => uploader,
         }
@@ -198,71 +323,37 @@ impl BlobLocator {
         }
     }
 
-    pub(crate) fn storage_suffix(&self) -> &'static str {
-        match self {
-            Self::Opaque { .. } => ".enc",
-            Self::Browsable { .. } => "",
-        }
-    }
-
     pub(crate) fn validate(&self) -> Result<(), BlobLocatorError> {
-        let expected = match self {
+        match self {
             Self::Opaque {
-                namespace,
-                blob_id,
-                uploader,
-                key_fingerprint,
-                ..
-            } => opaque_semantic_key(namespace, uploader, *key_fingerprint, blob_id)?,
+                namespace, blob_id, ..
+            } => {
+                validate_namespace(namespace)?;
+                validate_blob_id(blob_id)?;
+            }
             Self::Browsable {
                 namespace,
                 blob_id,
-                uploader,
                 cloud_path,
-                plaintext_hash,
                 ..
-            } => browsable_semantic_key(namespace, cloud_path, uploader, blob_id, *plaintext_hash)?,
-        };
-        if self.semantic_key() != expected {
-            return Err(BlobLocatorError::SemanticKeyMismatch {
-                expected,
-                actual: self.semantic_key().to_string(),
-            });
+            } => {
+                validate_namespace(namespace)?;
+                validate_blob_id(blob_id)?;
+                validate_readable_path(cloud_path)?;
+            }
         }
         Ok(())
     }
 }
 
-fn opaque_semantic_key(
-    namespace: &str,
-    uploader: &str,
-    key_fingerprint: KeyFingerprint,
-    blob_id: &str,
-) -> Result<String, BlobLocatorError> {
-    validate_namespace(namespace)?;
-    validate_uploader(uploader)?;
-    let shard = StoreDir::id_shard(blob_id).map_err(|error| BlobLocatorError::UnsafeBlobId {
-        value: blob_id.to_string(),
-        reason: error.to_string(),
-    })?;
-    Ok(format!(
-        "{namespace}/opaque/{uploader}/{key_fingerprint}/{shard}"
-    ))
-}
-
-fn browsable_semantic_key(
-    namespace: &str,
-    cloud_path: &str,
-    uploader: &str,
-    blob_id: &str,
-    plaintext_hash: ObjectHash,
-) -> Result<String, BlobLocatorError> {
-    validate_namespace(namespace)?;
-    validate_uploader(uploader)?;
+fn validate_blob_id(blob_id: &str) -> Result<(), BlobLocatorError> {
     validate_path_token(blob_id).map_err(|error| BlobLocatorError::UnsafeBlobId {
         value: blob_id.to_string(),
         reason: error.to_string(),
-    })?;
+    })
+}
+
+fn validate_readable_path(cloud_path: &str) -> Result<(), BlobLocatorError> {
     validate_cloud_path(cloud_path).map_err(|error| BlobLocatorError::UnsafeCloudPath {
         value: cloud_path.to_string(),
         reason: error.to_string(),
@@ -275,9 +366,7 @@ fn browsable_semantic_key(
             value: cloud_path.to_string(),
         });
     }
-    Ok(format!(
-        "{namespace}/readable/{cloud_path}/{RESERVED_READABLE_VERSION_SEGMENT}/{uploader}/{blob_id}/{plaintext_hash}"
-    ))
+    Ok(())
 }
 
 fn validate_namespace(namespace: &str) -> Result<(), BlobLocatorError> {
@@ -285,24 +374,6 @@ fn validate_namespace(namespace: &str) -> Result<(), BlobLocatorError> {
         value: namespace.to_string(),
         reason: error.to_string(),
     })
-}
-
-fn validate_uploader(uploader: &str) -> Result<(), BlobLocatorError> {
-    validate_path_token(uploader).map_err(|error| BlobLocatorError::UnsafeUploader {
-        value: uploader.to_string(),
-        reason: error.to_string(),
-    })?;
-    if uploader.len() != 64
-        || uploader
-            .bytes()
-            .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
-    {
-        return Err(BlobLocatorError::UnsafeUploader {
-            value: uploader.to_string(),
-            reason: "uploader must be a 32-byte lowercase hexadecimal public key".to_string(),
-        });
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -313,14 +384,12 @@ pub enum BlobLocatorError {
     UnsafeNamespace { value: String, reason: String },
     #[error("unsafe blob id {value:?}: {reason}")]
     UnsafeBlobId { value: String, reason: String },
-    #[error("unsafe blob uploader {value:?}: {reason}")]
-    UnsafeUploader { value: String, reason: String },
     #[error("unsafe readable blob path {value:?}: {reason}")]
     UnsafeCloudPath { value: String, reason: String },
     #[error("readable blob path uses reserved segment: {value:?}")]
     ReservedCloudPath { value: String },
-    #[error("blob semantic key mismatch: expected {expected:?}, found {actual:?}")]
-    SemanticKeyMismatch { expected: String, actual: String },
+    #[error("stored blob object key mismatch: expected {expected:?}, found {actual:?}")]
+    ObjectKeyMismatch { expected: String, actual: String },
     #[error("malformed blob locator: {0}")]
     Malformed(String),
     #[error("blob locator bytes are not canonical")]
@@ -330,20 +399,47 @@ pub enum BlobLocatorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::cloud::ObjectSlot;
     use crate::sync::circle::{Audience, CircleId};
-    use crate::sync::store_commit::ObjectHash;
+    use crate::sync::storage::ExactObjectRef;
+    use crate::sync::store_commit::{ObjectHash, StoreDeviceRegistrationRef};
     use crate::{BlobScope, KeyFingerprint};
 
     fn hash(bytes: &[u8]) -> ObjectHash {
         ObjectHash::digest(bytes)
     }
 
+    fn uploader() -> StoreDeviceRegistrationRef {
+        let bytes = b"blob-locator uploader registration";
+        StoreDeviceRegistrationRef {
+            device_id: "11".repeat(32).parse().unwrap(),
+            registration_hash: hash(bytes),
+            object: ExactObjectRef::new(
+                ObjectSlot::logical("store-v1/devices/blob-locator-uploader.json".to_string())
+                    .unwrap(),
+                bytes.len() as u64,
+                hash(bytes),
+            ),
+        }
+    }
+
+    fn stored(locator: BlobLocator) -> StoredBlobRef {
+        let key = locator.semantic_key();
+        StoredBlobRef::new(
+            locator,
+            ExactObjectRef::new(ObjectSlot::logical(key).unwrap(), 4, hash(b"body")),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn opaque_locator_round_trips_canonical_bytes_and_path() {
+        let uploader = uploader();
+        let uploader_json = serde_json::to_string(&uploader).unwrap();
         let locator = BlobLocator::opaque(
             "covers",
             "a1b2-blob",
-            "11".repeat(32),
+            uploader,
             RemoteAudience::Circle(CircleId::from_bytes([3; 16])),
             BlobScope::Derived("release-a".to_string()),
             KeyFingerprint::from_bytes([4; 8]),
@@ -354,19 +450,14 @@ mod tests {
 
         assert_eq!(
             locator.semantic_key(),
-            format!(
-                "covers/opaque/{}/0404040404040404/a1/b2/a1b2-blob",
-                "11".repeat(32)
-            )
+            format!("covers/opaque/{}", locator.locator_hash())
         );
         assert_eq!(BlobLocator::parse(&locator.to_bytes()).unwrap(), locator);
         assert_eq!(
             String::from_utf8(locator.to_bytes()).unwrap(),
             format!(
-                "{{\"protection\":\"opaque\",\"namespace\":\"covers\",\"blob_id\":\"a1b2-blob\",\"uploader\":\"{}\",\"audience\":{{\"circle\":\"{}\"}},\"scope\":{{\"Derived\":\"release-a\"}},\"key_fingerprint\":\"0404040404040404\",\"semantic_key\":\"covers/opaque/{}/0404040404040404/a1/b2/a1b2-blob\",\"plaintext_size\":27,\"plaintext_hash\":\"{}\"}}",
-                "11".repeat(32),
+                "{{\"protection\":\"opaque\",\"namespace\":\"covers\",\"blob_id\":\"a1b2-blob\",\"uploader\":{uploader_json},\"audience\":{{\"circle\":\"{}\"}},\"scope\":{{\"Derived\":\"release-a\"}},\"key_fingerprint\":\"0404040404040404\",\"plaintext_size\":27,\"plaintext_hash\":\"{}\"}}",
                 CircleId::from_bytes([3; 16]),
-                "11".repeat(32),
                 hash(b"cover"),
             )
         );
@@ -377,7 +468,7 @@ mod tests {
         let locator = BlobLocator::browsable(
             "audio",
             "abcd-track",
-            "22".repeat(32),
+            uploader(),
             "Artist/Album/01 Track.flac",
             91,
             hash(b"track"),
@@ -387,12 +478,42 @@ mod tests {
         assert_eq!(
             locator.semantic_key(),
             format!(
-                "audio/readable/Artist/Album/01 Track.flac/.coven-versions/{}/abcd-track/{}",
-                "22".repeat(32),
-                hash(b"track")
+                "audio/readable/Artist/Album/01 Track.flac/.coven-versions/{}",
+                locator.locator_hash()
             )
         );
         assert_eq!(BlobLocator::parse(&locator.to_bytes()).unwrap(), locator);
+    }
+
+    #[test]
+    fn stored_blob_ref_rejects_an_object_from_another_locator() {
+        let locator = BlobLocator::opaque(
+            "covers",
+            "a1b2-blob",
+            uploader(),
+            RemoteAudience::Store,
+            BlobScope::Master,
+            KeyFingerprint::from_bytes([4; 8]),
+            4,
+            hash(b"body"),
+        )
+        .unwrap();
+        let wrong = ExactObjectRef::new(
+            ObjectSlot::logical("covers/opaque/wrong.enc".to_string()).unwrap(),
+            4,
+            hash(b"body"),
+        );
+
+        assert!(matches!(
+            StoredBlobRef::new(locator.clone(), wrong),
+            Err(BlobLocatorError::ObjectKeyMismatch { .. })
+        ));
+        let valid = stored(locator);
+        let bytes = serde_json::to_vec(&valid).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<StoredBlobRef>(&bytes).unwrap(),
+            valid
+        );
     }
 
     #[test]
@@ -401,7 +522,7 @@ mod tests {
             BlobLocator::opaque(
                 "../covers",
                 "a1b2-blob",
-                "11".repeat(32),
+                uploader(),
                 RemoteAudience::Store,
                 BlobScope::Master,
                 KeyFingerprint::from_bytes([4; 8]),
@@ -414,7 +535,7 @@ mod tests {
             BlobLocator::browsable(
                 "audio",
                 "abcd-track",
-                "22".repeat(32),
+                uploader(),
                 "Artist/.coven-versions/track.flac",
                 1,
                 hash(b"x"),
@@ -436,7 +557,7 @@ mod tests {
                 BlobLocator::browsable(
                     "audio",
                     "abcd-track",
-                    "22".repeat(32),
+                    uploader(),
                     cloud_path,
                     1,
                     hash(b"x"),
@@ -448,7 +569,7 @@ mod tests {
         let locator = BlobLocator::opaque(
             "covers",
             "a1b2-blob",
-            "11".repeat(32),
+            uploader(),
             RemoteAudience::Store,
             BlobScope::Master,
             KeyFingerprint::from_bytes([4; 8]),
@@ -460,8 +581,7 @@ mod tests {
         value["semantic_key"] = serde_json::json!("covers/opaque/relocated");
         assert!(matches!(
             BlobLocator::parse(&serde_json::to_vec(&value).unwrap()),
-            Err(BlobLocatorError::SemanticKeyMismatch { .. })
-                | Err(BlobLocatorError::NonCanonicalEncoding)
+            Err(BlobLocatorError::Malformed(_))
         ));
     }
 
@@ -470,7 +590,7 @@ mod tests {
         let locator = BlobLocator::opaque(
             "covers",
             "a1b2-blob",
-            "11".repeat(32),
+            uploader(),
             RemoteAudience::Store,
             BlobScope::Master,
             KeyFingerprint::from_bytes([4; 8]),
@@ -507,7 +627,7 @@ mod tests {
         let locator = BlobLocator::browsable(
             "audio",
             "abcd-track",
-            "22".repeat(32),
+            uploader(),
             "Artist/Album/track.flac",
             91,
             hash(b"track"),
@@ -518,25 +638,11 @@ mod tests {
     }
 
     #[test]
-    fn locator_rejects_uppercase_uploader_keys() {
-        assert!(matches!(
-            BlobLocator::opaque(
-                "covers",
-                "a1b2-blob",
-                "AA".repeat(32),
-                RemoteAudience::Store,
-                BlobScope::Master,
-                KeyFingerprint::from_bytes([4; 8]),
-                1,
-                hash(b"x"),
-            ),
-            Err(BlobLocatorError::UnsafeUploader { .. })
-        ));
-
+    fn locator_parse_rejects_malformed_uploader_registration_reference() {
         let locator = BlobLocator::opaque(
             "covers",
             "a1b2-blob",
-            "11".repeat(32),
+            uploader(),
             RemoteAudience::Store,
             BlobScope::Master,
             KeyFingerprint::from_bytes([4; 8]),
@@ -545,10 +651,10 @@ mod tests {
         )
         .unwrap();
         let mut value: serde_json::Value = serde_json::from_slice(&locator.to_bytes()).unwrap();
-        value["uploader"] = serde_json::json!("AA".repeat(32));
+        value["uploader"]["device_id"] = serde_json::json!("AA".repeat(32));
         assert!(matches!(
             BlobLocator::parse(&serde_json::to_vec(&value).unwrap()),
-            Err(BlobLocatorError::UnsafeUploader { .. })
+            Err(BlobLocatorError::Malformed(_))
         ));
     }
 

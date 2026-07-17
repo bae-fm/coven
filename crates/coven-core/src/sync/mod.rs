@@ -15,23 +15,25 @@ pub mod circle_roster;
 pub mod cloud_storage;
 pub mod conflict;
 pub mod cycle;
-#[cfg(test)]
-mod cycle_tests;
+pub mod device_join;
 pub mod gate;
 pub mod hlc;
 // Exercises the register clock through `Database::hlc()`.
+#[cfg(test)]
+mod cycle_tests;
 #[cfg(test)]
 mod hlc_register_tests;
 pub mod invite;
 pub mod loop_policy;
 pub mod membership;
 pub mod membership_ops;
-pub(crate) mod publish_blobs;
+pub mod provider;
 pub mod pull;
 #[cfg(test)]
 mod pull_tests;
 #[cfg(test)]
 mod refresh_tests;
+pub(crate) mod remote_object;
 pub mod restore_code;
 #[cfg(test)]
 mod rotation_pending_tests;

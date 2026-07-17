@@ -6,7 +6,7 @@
 //! that enable the `test-utils` feature.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -14,16 +14,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::{
-    AppendedListing, AppendedObject, BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState,
+    BlobBody, BoxPartSink, CloudAccessOutcome, CloudAccessState, CloudFileReadError,
     CloudHeadCreateError, CloudHeadReplaceError, CloudHeadStorage, CloudHeadVersion, CloudHome,
-    CloudHomeError, CloudVersionedHead, ListingCoverage, PartSink, UploadProgress,
+    CloudHomeError, CloudVersionedHead, ExactSlotStorage, ObjectSlot, PartSink, UploadProgress,
 };
-
-#[derive(Clone)]
-struct MemoryAppendedObject {
-    locator: AppendedObject,
-    bytes: Vec<u8>,
-}
 
 #[derive(Clone)]
 struct AppendPause {
@@ -32,10 +26,20 @@ struct AppendPause {
     release: Arc<tokio::sync::Notify>,
 }
 
+struct ExactStreamReadGuard {
+    inflight: Arc<AtomicUsize>,
+}
+
 #[derive(Clone)]
-struct ListingPause {
+struct ProbePause {
     reached: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for ExactStreamReadGuard {
+    fn drop(&mut self) {
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// In-memory CloudHome backed by a HashMap. `Clone` shares one backing store, so
@@ -51,26 +55,27 @@ struct ListingPause {
 /// arming state is shared across clones, like the backing store.
 #[derive(Clone)]
 pub struct InMemoryCloudHome {
+    provider_binding: crate::sync::storage::ResolvedProviderBinding,
     writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    exact_slot_allocations: Arc<Mutex<HashMap<String, usize>>>,
     head_versions: Arc<Mutex<HashMap<String, u64>>>,
-    appended: Arc<Mutex<Vec<MemoryAppendedObject>>>,
-    next_appended_id: Arc<AtomicU64>,
     deletes: Arc<Mutex<Vec<String>>>,
     fail_writes: Arc<AtomicBool>,
     fail_next_range_reads: Arc<AtomicUsize>,
     sort_listings: Arc<AtomicBool>,
-    append_count: Arc<AtomicUsize>,
-    fail_append_before: Arc<AtomicUsize>,
-    fail_append_after: Arc<AtomicUsize>,
-    corrupt_append_readback: Arc<AtomicUsize>,
-    append_pause: Arc<Mutex<Option<AppendPause>>>,
-    appended_listing_pause: Arc<Mutex<Option<ListingPause>>>,
-    appended_list_count: Arc<AtomicUsize>,
-    appended_full_read_count: Arc<AtomicUsize>,
-    appended_stream_read_count: Arc<AtomicUsize>,
-    listing_coverage: Arc<Mutex<ListingCoverage>>,
-    appended_delete_count: Arc<AtomicUsize>,
-    fail_appended_delete_on: Arc<AtomicUsize>,
+    exact_create_count: Arc<AtomicUsize>,
+    fail_exact_create_before: Arc<AtomicUsize>,
+    fail_exact_create_after: Arc<AtomicUsize>,
+    corrupt_exact_readback: Arc<AtomicUsize>,
+    exact_create_pause: Arc<Mutex<Option<AppendPause>>>,
+    probe_pause: Arc<Mutex<Option<ProbePause>>>,
+    exact_full_read_count: Arc<AtomicUsize>,
+    exact_stream_read_count: Arc<AtomicUsize>,
+    exact_stream_read_inflight: Arc<AtomicUsize>,
+    exact_stream_read_max_inflight: Arc<AtomicUsize>,
+    exact_stream_read_barrier: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    exact_delete_count: Arc<AtomicUsize>,
+    fail_exact_delete_on: Arc<AtomicUsize>,
     fail_head_cleanup: Arc<AtomicBool>,
     head_mutation_count: Arc<AtomicUsize>,
     fail_head_after_mutation: Arc<AtomicBool>,
@@ -80,31 +85,59 @@ pub struct InMemoryCloudHome {
 impl InMemoryCloudHome {
     pub fn new() -> Self {
         Self {
+            provider_binding: crate::sync::storage::ResolvedProviderBinding {
+                store: crate::sync::storage::StoreProviderBinding::S3 {
+                    endpoint: crate::sync::storage::S3EndpointBinding::Custom {
+                        origin: "https://in-memory.invalid".to_string(),
+                    },
+                    region: "test".to_string(),
+                    bucket: "in-memory".to_string(),
+                    key_prefix: None,
+                },
+                device: crate::sync::storage::ProviderDeviceBinding {
+                    principal: crate::sync::storage::ProviderPrincipalId::CustomS3Credential {
+                        access_key_id_hash: crate::sync::store_commit::ObjectHash::digest(
+                            b"coven.s3-access-key-id.v1\0in-memory",
+                        ),
+                    },
+                },
+            },
             writes: Arc::new(Mutex::new(HashMap::new())),
+            exact_slot_allocations: Arc::new(Mutex::new(HashMap::new())),
             head_versions: Arc::new(Mutex::new(HashMap::new())),
-            appended: Arc::new(Mutex::new(Vec::new())),
-            next_appended_id: Arc::new(AtomicU64::new(0)),
             deletes: Arc::new(Mutex::new(Vec::new())),
             fail_writes: Arc::new(AtomicBool::new(false)),
             fail_next_range_reads: Arc::new(AtomicUsize::new(0)),
             sort_listings: Arc::new(AtomicBool::new(false)),
-            append_count: Arc::new(AtomicUsize::new(0)),
-            fail_append_before: Arc::new(AtomicUsize::new(0)),
-            fail_append_after: Arc::new(AtomicUsize::new(0)),
-            corrupt_append_readback: Arc::new(AtomicUsize::new(0)),
-            append_pause: Arc::new(Mutex::new(None)),
-            appended_listing_pause: Arc::new(Mutex::new(None)),
-            appended_list_count: Arc::new(AtomicUsize::new(0)),
-            appended_full_read_count: Arc::new(AtomicUsize::new(0)),
-            appended_stream_read_count: Arc::new(AtomicUsize::new(0)),
-            listing_coverage: Arc::new(Mutex::new(ListingCoverage::CompleteAtScan)),
-            appended_delete_count: Arc::new(AtomicUsize::new(0)),
-            fail_appended_delete_on: Arc::new(AtomicUsize::new(0)),
+            exact_create_count: Arc::new(AtomicUsize::new(0)),
+            fail_exact_create_before: Arc::new(AtomicUsize::new(0)),
+            fail_exact_create_after: Arc::new(AtomicUsize::new(0)),
+            corrupt_exact_readback: Arc::new(AtomicUsize::new(0)),
+            exact_create_pause: Arc::new(Mutex::new(None)),
+            probe_pause: Arc::new(Mutex::new(None)),
+            exact_full_read_count: Arc::new(AtomicUsize::new(0)),
+            exact_stream_read_count: Arc::new(AtomicUsize::new(0)),
+            exact_stream_read_inflight: Arc::new(AtomicUsize::new(0)),
+            exact_stream_read_max_inflight: Arc::new(AtomicUsize::new(0)),
+            exact_stream_read_barrier: Arc::new(Mutex::new(None)),
+            exact_delete_count: Arc::new(AtomicUsize::new(0)),
+            fail_exact_delete_on: Arc::new(AtomicUsize::new(0)),
             fail_head_cleanup: Arc::new(AtomicBool::new(false)),
             head_mutation_count: Arc::new(AtomicUsize::new(0)),
             fail_head_after_mutation: Arc::new(AtomicBool::new(false)),
             head_after_mutation_override: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn with_provider_binding(
+        mut self,
+        binding: crate::sync::storage::ResolvedProviderBinding,
+    ) -> Self {
+        binding
+            .validate()
+            .expect("in-memory provider binding must be valid");
+        self.provider_binding = binding;
+        self
     }
 
     /// Return `list` results in sorted key order instead of the backing map's
@@ -132,41 +165,37 @@ impl InMemoryCloudHome {
         self.fail_next_range_reads.store(n, Ordering::SeqCst);
     }
 
-    /// Reset the immutable-append counter and fail before the selected call
-    /// stores a physical copy.
-    pub fn fail_append_before_call(&self, call: usize) {
-        assert!(call > 0, "append call numbers are 1-based");
-        self.append_count.store(0, Ordering::SeqCst);
-        self.fail_append_before.store(call, Ordering::SeqCst);
+    /// Reset the exact-create counter and fail before the selected call stores bytes.
+    pub fn fail_exact_create_before_call(&self, call: usize) {
+        assert!(call > 0, "create call numbers are 1-based");
+        self.exact_create_count.store(0, Ordering::SeqCst);
+        self.fail_exact_create_before.store(call, Ordering::SeqCst);
     }
 
-    /// Reset the immutable-append counter and fail after the selected call has
-    /// stored its physical copy, modeling an ambiguous provider response.
-    pub fn fail_append_after_call(&self, call: usize) {
-        assert!(call > 0, "append call numbers are 1-based");
-        self.append_count.store(0, Ordering::SeqCst);
-        self.fail_append_after.store(call, Ordering::SeqCst);
+    /// Reset the exact-create counter and lose the response after the selected create.
+    pub fn fail_exact_create_after_call(&self, call: usize) {
+        assert!(call > 0, "create call numbers are 1-based");
+        self.exact_create_count.store(0, Ordering::SeqCst);
+        self.fail_exact_create_after.store(call, Ordering::SeqCst);
     }
 
-    /// Reset the immutable-append counter and replace the selected physical
-    /// copy before its immediate verification read.
-    pub fn corrupt_append_readback_on_call(&self, call: usize) {
-        assert!(call > 0, "append call numbers are 1-based");
-        self.append_count.store(0, Ordering::SeqCst);
-        self.corrupt_append_readback.store(call, Ordering::SeqCst);
+    /// Replace the selected exact object's bytes before its verification read.
+    pub fn corrupt_exact_readback_on_call(&self, call: usize) {
+        assert!(call > 0, "create call numbers are 1-based");
+        self.exact_create_count.store(0, Ordering::SeqCst);
+        self.corrupt_exact_readback.store(call, Ordering::SeqCst);
     }
 
-    /// Pause after the selected immutable append is physically visible. The
-    /// returned notifications report that visibility and release the call.
-    pub fn pause_after_append_call(
+    /// Pause after the selected exact create is physically visible.
+    pub fn pause_after_exact_create_call(
         &self,
         call: usize,
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        assert!(call > 0, "append call numbers are 1-based");
-        self.append_count.store(0, Ordering::SeqCst);
+        assert!(call > 0, "create call numbers are 1-based");
+        self.exact_create_count.store(0, Ordering::SeqCst);
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        *self.append_pause.lock().unwrap() = Some(AppendPause {
+        *self.exact_create_pause.lock().unwrap() = Some(AppendPause {
             call,
             reached: reached.clone(),
             release: release.clone(),
@@ -174,47 +203,50 @@ impl InMemoryCloudHome {
         (reached, release)
     }
 
-    /// Pause the next immutable-object listing before it reads provider state.
-    pub fn pause_next_appended_listing(
-        &self,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+    /// Pause the next reachability probe after it starts and before it succeeds.
+    pub fn pause_next_probe(&self) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        *self.appended_listing_pause.lock().unwrap() = Some(ListingPause {
+        *self.probe_pause.lock().unwrap() = Some(ProbePause {
             reached: reached.clone(),
             release: release.clone(),
         });
         (reached, release)
     }
 
-    pub fn append_count(&self) -> usize {
-        self.append_count.load(Ordering::SeqCst)
+    pub fn exact_create_count(&self) -> usize {
+        self.exact_create_count.load(Ordering::SeqCst)
     }
 
-    pub fn appended_list_count(&self) -> usize {
-        self.appended_list_count.load(Ordering::SeqCst)
+    pub fn exact_full_read_count(&self) -> usize {
+        self.exact_full_read_count.load(Ordering::SeqCst)
     }
 
-    pub fn appended_full_read_count(&self) -> usize {
-        self.appended_full_read_count.load(Ordering::SeqCst)
+    pub fn exact_stream_read_count(&self) -> usize {
+        self.exact_stream_read_count.load(Ordering::SeqCst)
     }
 
-    pub fn appended_stream_read_count(&self) -> usize {
-        self.appended_stream_read_count.load(Ordering::SeqCst)
+    pub fn arm_exact_stream_read_concurrency_probe(&self, width: usize) {
+        assert!(width > 0, "exact stream read probe width must be positive");
+        self.exact_stream_read_inflight.store(0, Ordering::SeqCst);
+        self.exact_stream_read_max_inflight
+            .store(0, Ordering::SeqCst);
+        *self.exact_stream_read_barrier.lock().unwrap() =
+            Some(Arc::new(tokio::sync::Barrier::new(width)));
     }
 
-    pub fn appended_delete_count(&self) -> usize {
-        self.appended_delete_count.load(Ordering::SeqCst)
+    pub fn exact_stream_read_max_inflight(&self) -> usize {
+        self.exact_stream_read_max_inflight.load(Ordering::SeqCst)
     }
 
-    pub fn set_listing_coverage(&self, coverage: ListingCoverage) {
-        *self.listing_coverage.lock().unwrap() = coverage;
+    pub fn exact_delete_count(&self) -> usize {
+        self.exact_delete_count.load(Ordering::SeqCst)
     }
 
-    pub fn fail_appended_delete_on_call(&self, call: usize) {
-        assert!(call > 0, "append-delete call numbers are 1-based");
-        self.appended_delete_count.store(0, Ordering::SeqCst);
-        self.fail_appended_delete_on.store(call, Ordering::SeqCst);
+    pub fn fail_exact_delete_on_call(&self, call: usize) {
+        assert!(call > 0, "exact-delete call numbers are 1-based");
+        self.exact_delete_count.store(0, Ordering::SeqCst);
+        self.fail_exact_delete_on.store(call, Ordering::SeqCst);
     }
 
     pub fn fail_coordination_probe_cleanup(&self) {
@@ -246,36 +278,6 @@ impl InMemoryCloudHome {
         self.writes.lock().unwrap().keys().cloned().collect()
     }
 
-    /// Snapshot of every immutable physical-copy key currently in the cloud.
-    pub fn appended_keys(&self) -> Vec<String> {
-        self.appended
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|candidate| candidate.locator.logical_key().to_string())
-            .collect()
-    }
-
-    /// Snapshot of one immutable physical copy's stored bytes.
-    pub fn get_appended(&self, logical_key: &str) -> Option<Vec<u8>> {
-        self.appended
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|candidate| candidate.locator.logical_key() == logical_key)
-            .map(|candidate| candidate.bytes.clone())
-    }
-
-    fn appended_bytes(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-        self.appended
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|candidate| candidate.locator == *object)
-            .map(|candidate| candidate.bytes.clone())
-            .ok_or_else(|| CloudHomeError::NotFound(object.opaque_provider_id().to_string()))
-    }
-
     /// Snapshot of the bytes at `key`, or `None` if absent. Cloned so the
     /// caller can hold the result across `await` points without retaining
     /// the internal lock.
@@ -298,40 +300,30 @@ impl InMemoryCloudHome {
         self.deletes.lock().unwrap().clone()
     }
 
-    /// Insert a physical append candidate with caller-selected bytes. This is
-    /// the collision/fork test hook; it does not pass through protocol parsing.
-    pub fn insert_appended_candidate(&self, logical_key: &str, bytes: Vec<u8>) -> AppendedObject {
-        let id = self.next_appended_id.fetch_add(1, Ordering::SeqCst);
-        let locator = AppendedObject::from_provider(
-            logical_key.to_string(),
-            format!("in-memory-append-{id}"),
-        )
-        .expect("in-memory appended identity is non-empty");
-        self.appended.lock().unwrap().push(MemoryAppendedObject {
-            locator: locator.clone(),
-            bytes,
-        });
-        locator
-    }
-
-    /// Remove exactly one appended physical object without recording a protocol
-    /// delete, simulating provider-side disappearance.
-    pub fn remove_appended_candidate(&self, locator: &AppendedObject) {
-        self.appended
+    /// Insert caller-selected bytes at one exact logical slot.
+    pub fn insert_exact_object(&self, logical_key: &str, bytes: Vec<u8>) -> ObjectSlot {
+        let slot =
+            ObjectSlot::logical(logical_key.to_string()).expect("test logical key is non-empty");
+        self.writes
             .lock()
             .unwrap()
-            .retain(|candidate| candidate.locator != *locator);
+            .insert(logical_key.to_string(), bytes);
+        slot
     }
 
-    /// Replace the bytes at one exact physical locator without changing its
-    /// logical key or provider id.
-    pub fn replace_appended_candidate(&self, locator: &AppendedObject, bytes: Vec<u8>) {
-        let mut appended = self.appended.lock().unwrap();
-        let candidate = appended
-            .iter_mut()
-            .find(|candidate| candidate.locator == *locator)
-            .expect("appended locator exists");
-        candidate.bytes = bytes;
+    /// Remove one exact object without recording a protocol delete.
+    pub fn remove_exact_object(&self, slot: &ObjectSlot) {
+        let key = Self::exact_storage_key(slot).expect("test exact slot is valid");
+        self.writes.lock().unwrap().remove(&key);
+    }
+
+    /// Replace bytes at one exact slot without changing its locator.
+    pub fn replace_exact_object(&self, slot: &ObjectSlot, bytes: Vec<u8>) {
+        let previous = self.writes.lock().unwrap().insert(
+            Self::exact_storage_key(slot).expect("test exact slot is valid"),
+            bytes,
+        );
+        assert!(previous.is_some(), "exact slot exists");
     }
 }
 
@@ -521,33 +513,58 @@ impl InMemoryCloudHome {
         // size matches so a multi-part blob ticks progress several times.
         super::PROGRESS_CHUNK_SIZE as u64
     }
-    async fn append_object(
+    fn validate_exact_slot(slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        slot.validate()?;
+        Ok(())
+    }
+
+    fn exact_storage_key(slot: &ObjectSlot) -> Result<String, CloudHomeError> {
+        Self::validate_exact_slot(slot)?;
+        Ok(match slot.physical() {
+            super::PhysicalObjectLocator::LogicalKey => slot.logical_key().to_string(),
+            super::PhysicalObjectLocator::Opaque(provider_id) => {
+                format!("{}#exact#{provider_id}", slot.logical_key())
+            }
+        })
+    }
+
+    async fn create_at_slot(
         &self,
-        full_logical_key: &str,
+        slot: &ObjectSlot,
         body: BlobBody,
         progress: &UploadProgress<'_>,
-    ) -> Result<AppendedObject, CloudHomeError> {
+    ) -> Result<(), CloudHomeError> {
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err(CloudHomeError::Transport(
                 "InMemoryCloudHome: armed write failure".into(),
             ));
         }
-        let call = self.append_count.fetch_add(1, Ordering::SeqCst) + 1;
-        if self.fail_append_before.load(Ordering::SeqCst) == call {
-            self.fail_append_before.store(0, Ordering::SeqCst);
+        let key = Self::exact_storage_key(slot)?;
+        let call = self.exact_create_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_exact_create_before.load(Ordering::SeqCst) == call {
+            self.fail_exact_create_before.store(0, Ordering::SeqCst);
             return Err(CloudHomeError::Transport(format!(
-                "InMemoryCloudHome: forced failure before append call {call}"
+                "InMemoryCloudHome: forced failure before exact create call {call}"
             )));
         }
         let bytes = body.collect().await?;
         progress(bytes.len() as u64);
-        let appended = self.insert_appended_candidate(full_logical_key, bytes);
-        if self.corrupt_append_readback.load(Ordering::SeqCst) == call {
-            self.corrupt_append_readback.store(0, Ordering::SeqCst);
-            self.replace_appended_candidate(&appended, b"corrupt readback".to_vec());
+        {
+            let mut writes = self.writes.lock().unwrap();
+            if writes.contains_key(&key) {
+                return Err(CloudHomeError::AlreadyExists(key));
+            }
+            writes.insert(key.clone(), bytes);
+        }
+        if self.corrupt_exact_readback.load(Ordering::SeqCst) == call {
+            self.corrupt_exact_readback.store(0, Ordering::SeqCst);
+            self.writes
+                .lock()
+                .unwrap()
+                .insert(key.clone(), b"corrupt readback".to_vec());
         }
         let pause = self
-            .append_pause
+            .exact_create_pause
             .lock()
             .unwrap()
             .clone()
@@ -555,84 +572,71 @@ impl InMemoryCloudHome {
         if let Some(pause) = pause {
             pause.reached.notify_one();
             pause.release.notified().await;
-            self.append_pause.lock().unwrap().take();
+            self.exact_create_pause.lock().unwrap().take();
         }
-        if self.fail_append_after.load(Ordering::SeqCst) == call {
-            self.fail_append_after.store(0, Ordering::SeqCst);
+        if self.fail_exact_create_after.load(Ordering::SeqCst) == call {
+            self.fail_exact_create_after.store(0, Ordering::SeqCst);
             return Err(CloudHomeError::Transport(format!(
-                "InMemoryCloudHome: forced failure after append call {call}"
+                "InMemoryCloudHome: forced failure after exact create call {call}"
             )));
         }
-        Ok(appended)
+        Ok(())
     }
 
-    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
-        self.appended_list_count.fetch_add(1, Ordering::SeqCst);
-        let pause = self.appended_listing_pause.lock().unwrap().clone();
-        if let Some(pause) = pause {
-            pause.reached.notify_one();
-            pause.release.notified().await;
-            self.appended_listing_pause.lock().unwrap().take();
-        }
-        let mut objects: Vec<AppendedObject> = self
-            .appended
+    async fn read_exact(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
+        self.exact_full_read_count.fetch_add(1, Ordering::SeqCst);
+        let key = Self::exact_storage_key(slot)?;
+        self.writes
             .lock()
             .unwrap()
-            .iter()
-            .filter(|candidate| candidate.locator.logical_key().starts_with(prefix))
-            .map(|candidate| candidate.locator.clone())
-            .collect();
-        if self.sort_listings.load(Ordering::SeqCst) {
-            objects.sort_by(|left, right| {
-                left.logical_key()
-                    .cmp(right.logical_key())
-                    .then_with(|| left.opaque_provider_id().cmp(right.opaque_provider_id()))
-            });
-        }
-        Ok(AppendedListing {
-            objects,
-            coverage: *self.listing_coverage.lock().unwrap(),
-        })
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))
     }
 
-    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-        self.appended_full_read_count.fetch_add(1, Ordering::SeqCst);
-        self.appended_bytes(object)
-    }
-
-    async fn read_appended_to_file(
+    async fn read_exact_to_file(
         &self,
-        object: &AppendedObject,
+        slot: &ObjectSlot,
         destination: &std::path::Path,
-    ) -> Result<(), super::CloudFileReadError> {
-        self.appended_stream_read_count
-            .fetch_add(1, Ordering::SeqCst);
-        let bytes = self.appended_bytes(object)?;
+    ) -> Result<(), CloudFileReadError> {
+        self.exact_stream_read_count.fetch_add(1, Ordering::SeqCst);
+        let inflight = self
+            .exact_stream_read_inflight
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        self.exact_stream_read_max_inflight
+            .fetch_max(inflight, Ordering::SeqCst);
+        let _guard = ExactStreamReadGuard {
+            inflight: self.exact_stream_read_inflight.clone(),
+        };
+        let barrier = self.exact_stream_read_barrier.lock().unwrap().clone();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+        let key = Self::exact_storage_key(slot)?;
+        let bytes = self
+            .writes
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| CloudHomeError::NotFound(slot.logical_key().to_string()))?;
         let stream = futures_util::stream::once(async move { Ok(bytes::Bytes::from(bytes)) });
         super::write_cloud_object_stream(destination, Box::pin(stream)).await?;
         Ok(())
     }
 
-    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
-        let call = self.appended_delete_count.fetch_add(1, Ordering::SeqCst) + 1;
-        if self.fail_appended_delete_on.load(Ordering::SeqCst) == call {
-            self.fail_appended_delete_on.store(0, Ordering::SeqCst);
+    async fn delete_exact(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        let key = Self::exact_storage_key(slot)?;
+        let call = self.exact_delete_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_exact_delete_on.load(Ordering::SeqCst) == call {
+            self.fail_exact_delete_on.store(0, Ordering::SeqCst);
             return Err(CloudHomeError::Transport(format!(
-                "InMemoryCloudHome: forced appended delete failure on call {call}"
+                "InMemoryCloudHome: forced exact delete failure on call {call}"
             )));
         }
-        let mut appended = self.appended.lock().unwrap();
-        let before = appended.len();
-        appended.retain(|candidate| candidate.locator != *object);
-        if appended.len() == before {
-            return Err(CloudHomeError::NotFound(
-                object.opaque_provider_id().to_string(),
-            ));
-        }
-        self.deletes
-            .lock()
-            .unwrap()
-            .push(object.logical_key().to_string());
+        self.writes.lock().unwrap().remove(&key);
+        self.deletes.lock().unwrap().push(key);
         Ok(())
     }
     async fn read(&self, key: &str) -> Result<Vec<u8>, CloudHomeError> {
@@ -695,21 +699,37 @@ impl InMemoryCloudHome {
         &self,
         desired: super::CloudAccessState,
     ) -> Result<super::CloudAccessOutcome, CloudHomeError> {
-        match desired {
-            super::CloudAccessState::Present { .. } => Err(CloudHomeError::Transport(
-                "InMemoryCloudHome does not grant access".into(),
-            )),
-            super::CloudAccessState::Absent { .. } => Ok(super::CloudAccessOutcome::Absent(
-                super::RevokeOutcome::Unsupported,
-            )),
-        }
+        Ok(match desired {
+            super::CloudAccessState::Present { .. } => {
+                super::CloudAccessOutcome::Present(super::CloudHomeJoinInfo::S3 {
+                    bucket: "in-memory".to_string(),
+                    region: "test".to_string(),
+                    endpoint: Some("https://in-memory.invalid".to_string()),
+                    access_key: "in-memory".to_string(),
+                    secret_key: "in-memory".to_string(),
+                    key_prefix: None,
+                })
+            }
+            super::CloudAccessState::Absent { .. } => {
+                super::CloudAccessOutcome::Absent(super::RevokeOutcome::Unsupported)
+            }
+        })
     }
 }
 
 #[async_trait]
 impl CloudHome for InMemoryCloudHome {
-    fn immutable_copy_storage(self: Arc<Self>) -> Option<Arc<dyn super::ImmutableCopyStorage>> {
+    fn exact_slot_storage(self: Arc<Self>) -> Option<Arc<dyn ExactSlotStorage>> {
         Some(self)
+    }
+
+    async fn probe(&self) -> Result<(), CloudHomeError> {
+        let pause = self.probe_pause.lock().unwrap().take();
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
+        Ok(())
     }
 
     async fn put_object(&self, key: &str, data: Vec<u8>) -> Result<(), CloudHomeError> {
@@ -757,34 +777,74 @@ impl CloudHome for InMemoryCloudHome {
 }
 
 #[async_trait]
-impl super::ImmutableCopyStorage for InMemoryCloudHome {
-    async fn append_object(
+impl ExactSlotStorage for InMemoryCloudHome {
+    async fn provider_binding(
         &self,
-        key: &str,
+    ) -> Result<crate::sync::storage::ResolvedProviderBinding, CloudHomeError> {
+        Ok(self.provider_binding.clone())
+    }
+
+    async fn allocate_slot(&self, logical_key: &str) -> Result<ObjectSlot, CloudHomeError> {
+        match &self.provider_binding.store {
+            crate::sync::storage::StoreProviderBinding::GoogleDrive { .. } => {
+                let allocation = {
+                    let mut allocations = self.exact_slot_allocations.lock().unwrap();
+                    let allocation = allocations.entry(logical_key.to_string()).or_insert(0);
+                    *allocation += 1;
+                    *allocation
+                };
+                ObjectSlot::opaque(logical_key.to_string(), format!("in-memory-{allocation}"))
+            }
+            crate::sync::storage::StoreProviderBinding::S3 { .. }
+            | crate::sync::storage::StoreProviderBinding::Dropbox { .. }
+            | crate::sync::storage::StoreProviderBinding::OneDrive { .. }
+            | crate::sync::storage::StoreProviderBinding::CloudKit { .. } => {
+                ObjectSlot::logical(logical_key.to_string())
+            }
+        }
+    }
+
+    async fn create_at(
+        &self,
+        slot: &ObjectSlot,
         body: BlobBody,
         progress: &UploadProgress<'_>,
-    ) -> Result<AppendedObject, CloudHomeError> {
-        InMemoryCloudHome::append_object(self, key, body, progress).await
+    ) -> Result<(), CloudHomeError> {
+        InMemoryCloudHome::create_at_slot(self, slot, body, progress).await
     }
 
-    async fn list_appended(&self, prefix: &str) -> Result<AppendedListing, CloudHomeError> {
-        InMemoryCloudHome::list_appended(self, prefix).await
+    async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError> {
+        InMemoryCloudHome::read_exact(self, slot).await
     }
 
-    async fn read_appended(&self, object: &AppendedObject) -> Result<Vec<u8>, CloudHomeError> {
-        InMemoryCloudHome::read_appended(self, object).await
-    }
-
-    async fn read_appended_to_file(
+    async fn read_range_at(
         &self,
-        object: &AppendedObject,
-        destination: &std::path::Path,
-    ) -> Result<(), super::CloudFileReadError> {
-        InMemoryCloudHome::read_appended_to_file(self, object, destination).await
+        slot: &ObjectSlot,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, CloudHomeError> {
+        let bytes = InMemoryCloudHome::read_exact(self, slot).await?;
+        let start = start as usize;
+        let end = (end as usize).min(bytes.len());
+        if start > bytes.len() {
+            return Err(CloudHomeError::NotFound(format!(
+                "range past end of {}",
+                slot.logical_key()
+            )));
+        }
+        Ok(bytes[start..end].to_vec())
     }
 
-    async fn delete_appended(&self, object: &AppendedObject) -> Result<(), CloudHomeError> {
-        InMemoryCloudHome::delete_appended(self, object).await
+    async fn read_at_to_file(
+        &self,
+        slot: &ObjectSlot,
+        destination: &std::path::Path,
+    ) -> Result<(), CloudFileReadError> {
+        InMemoryCloudHome::read_exact_to_file(self, slot, destination).await
+    }
+
+    async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError> {
+        InMemoryCloudHome::delete_exact(self, slot).await
     }
 }
 
@@ -936,14 +996,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_harness_pauses_after_visibility_and_can_inspect_replace_and_remove() {
+    async fn exact_create_is_visible_before_a_lost_response() {
         let h = InMemoryCloudHome::new();
-        let (reached, release) = h.pause_after_append_call(1);
+        let slot = h.allocate_slot("store-v1/test/one.json").await.unwrap();
+        let (reached, release) = h.pause_after_exact_create_call(1);
         let writer = h.clone();
+        let writer_slot = slot.clone();
         let task = tokio::spawn(async move {
             writer
-                .append_object(
-                    "store-v1/test/copies/one.json",
+                .create_at(
+                    &writer_slot,
                     BlobBody::from_bytes(b"first".to_vec()),
                     &no_progress(),
                 )
@@ -951,62 +1013,108 @@ mod tests {
         });
 
         reached.notified().await;
-        assert_eq!(h.append_count(), 1);
-        assert_eq!(
-            h.get_appended("store-v1/test/copies/one.json"),
-            Some(b"first".to_vec()),
-            "the physical copy is inspectable while the append call is paused",
-        );
+        assert_eq!(h.exact_create_count(), 1);
+        assert_eq!(h.read_at(&slot).await.unwrap(), b"first");
         release.notify_one();
-        let locator = task.await.unwrap().unwrap();
-
-        h.replace_appended_candidate(&locator, b"replacement".to_vec());
-        assert_eq!(
-            h.get_appended(locator.logical_key()),
-            Some(b"replacement".to_vec())
-        );
-        h.remove_appended_candidate(&locator);
-        assert_eq!(h.get_appended(locator.logical_key()), None);
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]
-    async fn appended_read_rejects_an_unknown_physical_id_for_a_mutable_object() {
+    async fn exact_create_never_overwrites() {
         let h = InMemoryCloudHome::new();
-        h.write(
-            "store-v1/test/copies/one.json",
-            BlobBody::from_bytes(b"mutable".to_vec()),
+        let slot = h.allocate_slot("store-v1/test/one.json").await.unwrap();
+        h.create_at(
+            &slot,
+            BlobBody::from_bytes(b"winner".to_vec()),
             &no_progress(),
         )
         .await
-        .unwrap();
-        let unknown = AppendedObject::from_provider(
-            "store-v1/test/copies/one.json".to_string(),
-            "unknown-physical-id".to_string(),
-        )
         .unwrap();
 
         assert!(matches!(
-            h.read_appended(&unknown).await,
-            Err(CloudHomeError::NotFound(_))
+            h.create_at(
+                &slot,
+                BlobBody::from_bytes(b"loser".to_vec()),
+                &no_progress(),
+            )
+            .await,
+            Err(CloudHomeError::AlreadyExists(_))
         ));
+        assert_eq!(h.read_at(&slot).await.unwrap(), b"winner");
     }
 
     #[tokio::test]
-    async fn immutable_listing_excludes_mutable_objects_under_the_same_prefix() {
-        let h = InMemoryCloudHome::new();
-        h.write(
-            "store-v1/test/copies/mutable.json",
-            BlobBody::from_bytes(b"mutable".to_vec()),
+    async fn google_drive_exact_slots_with_one_logical_key_remain_independent() {
+        let h = InMemoryCloudHome::new().with_provider_binding(
+            crate::sync::storage::ResolvedProviderBinding {
+                store: crate::sync::storage::StoreProviderBinding::GoogleDrive {
+                    corpus: crate::sync::storage::GoogleDriveCorpus::SharedDrive {
+                        drive_id: "drive-id".to_string(),
+                        folder_id: "folder-id".to_string(),
+                    },
+                },
+                device: crate::sync::storage::ProviderDeviceBinding {
+                    principal: crate::sync::storage::ProviderPrincipalId::GoogleDrive {
+                        permission_id: "permission-id".to_string(),
+                    },
+                },
+            },
+        );
+        let first = h.allocate_slot("store-v1/test/one.json").await.unwrap();
+        let second = h.allocate_slot("store-v1/test/one.json").await.unwrap();
+        assert_ne!(first, second);
+        h.create_at(
+            &first,
+            BlobBody::from_bytes(b"first".to_vec()),
             &no_progress(),
         )
         .await
         .unwrap();
+        h.create_at(
+            &second,
+            BlobBody::from_bytes(b"second".to_vec()),
+            &no_progress(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(h.read_at(&first).await.unwrap(), b"first");
+        assert_eq!(h.read_at(&second).await.unwrap(), b"second");
+        h.delete_at(&first).await.unwrap();
+        assert!(matches!(
+            h.read_at(&first).await,
+            Err(CloudHomeError::NotFound(_))
+        ));
+        assert_eq!(h.read_at(&second).await.unwrap(), b"second");
+    }
 
-        assert!(h
-            .list_appended("store-v1/test/copies/")
+    #[tokio::test]
+    async fn access_matches_the_in_memory_s3_binding() {
+        let h = InMemoryCloudHome::new();
+        let desired = CloudAccessState::Present {
+            member_pubkey: "member".to_string(),
+            provider_account_email: None,
+        };
+
+        let first = h.set_access(desired.clone()).await.unwrap();
+        let second = h.set_access(desired).await.unwrap();
+        let expected = CloudAccessOutcome::Present(super::super::CloudHomeJoinInfo::S3 {
+            bucket: "in-memory".to_string(),
+            region: "test".to_string(),
+            endpoint: Some("https://in-memory.invalid".to_string()),
+            access_key: "in-memory".to_string(),
+            secret_key: "in-memory".to_string(),
+            key_prefix: None,
+        });
+        assert_eq!(first, expected);
+        assert_eq!(second, expected);
+        assert_eq!(
+            h.set_access(CloudAccessState::Absent {
+                member_pubkey: "member".to_string(),
+                provider_account_email: None,
+            })
             .await
-            .unwrap()
-            .objects
-            .is_empty());
+            .unwrap(),
+            CloudAccessOutcome::Absent(super::super::RevokeOutcome::Unsupported)
+        );
     }
 }
