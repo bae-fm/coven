@@ -239,7 +239,10 @@ pub use sync::store_pull::{HeldStoreCoordinate, HeldStorePosition, HeldStorePosi
 // synced, and when" from.
 pub use sync::loop_policy::{SyncLoopAlerts, SyncLoopSuccess};
 pub use sync::status::DeviceActivity;
-pub use sync::store_commit::{CommitFrontier, CommitPosition, ObjectHash, StoreCommitOrder};
+pub use sync::store_commit::{
+    CommitFrontier, ObjectHash, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOrder,
+    StoreSerialPredecessor,
+};
 
 // In-memory cloud home for host integration tests.
 #[cfg(any(test, feature = "test-utils"))]

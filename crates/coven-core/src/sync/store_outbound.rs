@@ -19,6 +19,7 @@ use super::store_commit::{
 use super::store_objects::StoreObjectError;
 
 const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
+const SERIAL_COORDINATION_HEAD: &str = "serial_coordination_head";
 use crate::database::{
     Database, PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage,
     PreparedProtocolObject, PreparedSerialStoreBranch, PreparedStoreWrite,
@@ -74,8 +75,8 @@ pub enum StoreOutboundError {
     Coordination(#[source] CoordinationError),
     #[error("Serial control branch is stale: expected {expected:?}, current {current:?}")]
     SerialControlConflict {
-        expected: Option<crate::sync::store_commit::CommitPosition>,
-        current: Option<crate::sync::store_commit::CommitPosition>,
+        expected: Box<StoreSerialPredecessor>,
+        current: Box<StoreSerialPredecessor>,
     },
 }
 
@@ -1327,7 +1328,6 @@ enum SerialHeadObservation {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparedSerialControl {
-    pub base: Option<StoreBatchCommitRef>,
     pub base_head_bytes: Option<Vec<u8>>,
     pub base_head_version: Option<VersionToken>,
     pub commit: StoreBatchCommit,
@@ -1363,40 +1363,19 @@ pub(crate) async fn current_serial_authorization_snapshot(
 ) -> Result<SerialAuthorizationSnapshot, StoreOutboundError> {
     let root_ref = required_store_root(db).await?;
     let observed = observe_serial_head(db, coordination).await?;
-    let authorization = match observed.head() {
-        Some(head) => {
-            super::store_pull::load_serial_authorization_at_head(storage, &root_ref, head)
-                .await
-                .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))
-        }
-        None => {
-            if db.latest_local_store_position().await?.is_some() {
-                return Err(StoreOutboundError::InvalidState {
-                    key: STORE_ROOT_AUTHORITY,
-                    reason: "Serial head is absent after a Serial commit was materialized"
-                        .to_string(),
-                });
-            }
-            let root = super::store_objects::load_store_protocol_root(storage, &root_ref)
-                .await?
-                .value;
-            let founder =
-                super::store_objects::load_founder_registration(storage, &root_ref).await?;
-            let founder_ref = StoreDeviceRegistrationRef::from_registration(
-                &founder.value,
-                founder.object.clone(),
-            );
-            Ok(SerialAuthorizationState::from_founder(
-                &root_ref,
-                &root,
-                &founder_ref,
-                &founder.value,
-            )
-            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?)
-        }
-    }?;
+    let head = observed.head().ok_or(StoreOutboundError::MissingState {
+        key: SERIAL_COORDINATION_HEAD,
+    })?;
+    let authorization =
+        super::store_pull::load_serial_authorization_at_head(storage, &root_ref, head)
+            .await
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let base = match observed.predecessor()? {
+        StoreSerialPredecessor::Genesis { .. } => None,
+        StoreSerialPredecessor::Commit(commit) => Some(commit),
+    };
     Ok(SerialAuthorizationSnapshot {
-        base: observed.commit_ref(),
+        base,
         base_head_bytes: observed.bytes().map(<[u8]>::to_vec),
         base_head_version: observed.version().cloned(),
         authorization,
@@ -1500,7 +1479,6 @@ pub(crate) async fn prepare_serial_control(
     )
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
     Ok(PreparedSerialControl {
-        base,
         base_head_bytes,
         base_head_version,
         commit,
@@ -1521,7 +1499,6 @@ pub(crate) async fn activate_serial_control(
         db,
         storage,
         coordination,
-        prepared.base.clone(),
         prepared.base_head_bytes.as_deref(),
         prepared.base_head_version.as_ref(),
         &prepared.commit,
@@ -1543,7 +1520,6 @@ pub(crate) async fn activate_serial_commit_head(
     db: &Database,
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,
-    base: Option<StoreBatchCommitRef>,
     base_head_bytes: Option<&[u8]>,
     base_head_version: Option<&VersionToken>,
     commit: &StoreBatchCommit,
@@ -1574,9 +1550,18 @@ pub(crate) async fn activate_serial_commit_head(
         return Ok(());
     }
     if observed.bytes() != base_head_bytes || observed.version() != base_head_version {
+        let StoreCommitOrder::Serial {
+            predecessor: expected,
+            ..
+        } = &commit.order
+        else {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Serial activation carries a Merge commit".to_string(),
+            ));
+        };
         return Err(StoreOutboundError::SerialControlConflict {
-            expected: base.as_ref().map(StoreBatchCommitRef::position),
-            current: observed.position(),
+            expected: Box::new(expected.clone()),
+            current: Box::new(observed.predecessor()?),
         });
     }
     storage
@@ -1633,9 +1618,18 @@ pub(crate) async fn activate_serial_commit_head(
     if let Err(Some(error)) = activation {
         return Err(error);
     }
+    let StoreCommitOrder::Serial {
+        predecessor: expected,
+        ..
+    } = &commit.order
+    else {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "Serial activation carries a Merge commit".to_string(),
+        ));
+    };
     Err(StoreOutboundError::SerialControlConflict {
-        expected: base.as_ref().map(StoreBatchCommitRef::position),
-        current: after.position(),
+        expected: Box::new(expected.clone()),
+        current: Box::new(after.predecessor()?),
     })
 }
 
@@ -1661,17 +1655,24 @@ impl SerialHeadObservation {
         }
     }
 
-    fn commit_ref(&self) -> Option<StoreBatchCommitRef> {
-        self.head().and_then(|head| match &head.state {
-            StoreSerialHeadState::Genesis { .. } => None,
-            StoreSerialHeadState::Commit { commit, .. } => Some(commit.clone()),
-        })
-    }
-
-    fn position(&self) -> Option<crate::sync::store_commit::CommitPosition> {
-        self.commit_ref()
-            .as_ref()
-            .map(StoreBatchCommitRef::position)
+    fn predecessor(&self) -> Result<StoreSerialPredecessor, StoreOutboundError> {
+        match self {
+            Self::Absent => Err(StoreOutboundError::MissingState {
+                key: SERIAL_COORDINATION_HEAD,
+            }),
+            Self::Present { head, .. } => match &head.state {
+                StoreSerialHeadState::Genesis {
+                    root,
+                    founder_registration,
+                } => Ok(StoreSerialPredecessor::Genesis {
+                    root: root.clone(),
+                    founder_registration: founder_registration.clone(),
+                }),
+                StoreSerialHeadState::Commit { commit, .. } => {
+                    Ok(StoreSerialPredecessor::Commit(commit.clone()))
+                }
+            },
+        }
     }
 
     fn versioned(&self) -> Option<super::storage::VersionedObject> {
@@ -1689,7 +1690,10 @@ pub async fn current_serial_head_ref(
     db: &Database,
     coordination: &dyn CoordinationStorage,
 ) -> Result<Option<StoreBatchCommitRef>, StoreOutboundError> {
-    Ok(observe_serial_head(db, coordination).await?.commit_ref())
+    match observe_serial_head(db, coordination).await?.predecessor()? {
+        StoreSerialPredecessor::Genesis { .. } => Ok(None),
+        StoreSerialPredecessor::Commit(commit) => Ok(Some(commit)),
+    }
 }
 
 async fn observe_serial_head(
@@ -1758,7 +1762,8 @@ async fn prepare_serial_store_branch(
         }
     };
     if snapshot.base != branch.base {
-        db.mark_serial_branch_conflict(branch.branch_id, branch.base, snapshot.base)
+        let current = db.exact_serial_predecessor(snapshot.base).await?;
+        db.mark_serial_branch_conflict(branch.branch_id, branch.base, current)
             .await?;
         return Ok(false);
     }
@@ -2026,10 +2031,46 @@ fn serial_head_activates_branch(
     observed.bytes() == Some(branch.head.bytes.as_slice())
 }
 
+enum PreparedSerialBaseObservation {
+    Matches,
+    Conflicts(StoreSerialPredecessor),
+}
+
+fn prepared_serial_base_observation(
+    observed: &SerialHeadObservation,
+    branch: &PreparedSerialStoreBranch,
+) -> Result<PreparedSerialBaseObservation, StoreOutboundError> {
+    let first = branch.writes.first().ok_or_else(|| {
+        StoreOutboundError::InvalidOutbound("prepared Serial branch has no writes".to_string())
+    })?;
+    let StoreCommitOrder::Serial {
+        predecessor: expected,
+        ..
+    } = &first.commit.value.order
+    else {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "prepared Serial branch carries a Merge commit".to_string(),
+        ));
+    };
+    let current = observed.predecessor()?;
+    if &current != expected {
+        return Ok(PreparedSerialBaseObservation::Conflicts(current));
+    }
+    if observed.bytes() != branch.base_head_bytes.as_deref()
+        || observed.version() != branch.base_head_version.as_ref()
+    {
+        return Err(StoreOutboundError::InvalidState {
+            key: SERIAL_COORDINATION_HEAD,
+            reason: "bytes or provider version changed at the same exact predecessor".to_string(),
+        });
+    }
+    Ok(PreparedSerialBaseObservation::Matches)
+}
+
 async fn conflict_serial_branch(
     db: &Database,
     branch: PreparedSerialStoreBranch,
-    current: Option<StoreBatchCommitRef>,
+    current: StoreSerialPredecessor,
 ) -> Result<u64, StoreOutboundError> {
     db.mark_serial_branch_conflict(branch.branch_id, branch.base, current)
         .await?;
@@ -2056,10 +2097,9 @@ async fn drain_serial_store_branch(
             .await
             .map_err(Into::into);
     }
-    if observed.bytes() != branch.base_head_bytes.as_deref()
-        || observed.version() != branch.base_head_version.as_ref()
+    if let PreparedSerialBaseObservation::Conflicts(current) =
+        prepared_serial_base_observation(&observed, &branch)?
     {
-        let current = observed.commit_ref();
         return conflict_serial_branch(db, branch, current).await;
     }
     let store_root_hash = required_store_root(db).await?.store_root_hash;
@@ -2089,11 +2129,10 @@ async fn drain_serial_store_branch(
         }
     }
     let current = observe_serial_head(db, coordination).await?;
-    if current.bytes() != branch.base_head_bytes.as_deref()
-        || current.version() != branch.base_head_version.as_ref()
+    if let PreparedSerialBaseObservation::Conflicts(current) =
+        prepared_serial_base_observation(&current, &branch)?
     {
-        let accepted = current.commit_ref();
-        return conflict_serial_branch(db, branch, accepted).await;
+        return conflict_serial_branch(db, branch, current).await;
     }
     let activation = match current.version() {
         None => coordination
@@ -2131,8 +2170,9 @@ async fn drain_serial_store_branch(
                     )
                 })?
             } else {
-                if after.commit_ref() != branch.base {
-                    let current = after.commit_ref();
+                if let PreparedSerialBaseObservation::Conflicts(current) =
+                    prepared_serial_base_observation(&after, &branch)?
+                {
                     return conflict_serial_branch(db, branch, current).await;
                 }
                 if let Some(error) = error {
@@ -2407,7 +2447,6 @@ pub(crate) struct DeviceJoinCommitPlan {
 }
 
 struct DeviceJoinSerialPlan {
-    base: Option<StoreBatchCommitRef>,
     base_head_bytes: Option<Vec<u8>>,
     base_head_version: Option<VersionToken>,
     authorization: SerialAuthorizationState,
@@ -2505,7 +2544,6 @@ pub(crate) async fn prepare_device_join_commit(
             )
             .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
             let serial = DeviceJoinSerialPlan {
-                base: snapshot.base,
                 base_head_bytes: snapshot.base_head_bytes,
                 base_head_version: snapshot.base_head_version,
                 authorization: snapshot.authorization,
@@ -2661,7 +2699,6 @@ pub(crate) async fn activate_device_join_commit(
                 db,
                 storage,
                 coordination,
-                serial.base,
                 serial.base_head_bytes.as_deref(),
                 serial.base_head_version.as_ref(),
                 &commit,
@@ -3093,13 +3130,23 @@ mod tests {
             .expect("second Serial commit");
         assert!(matches!(
             db.write_status(&pending[0].write_id).await.unwrap(),
-            crate::WriteStatus::Published(crate::PublishedPosition::Serial { position })
-                if position.seq == 1 && position.commit_hash == first.commit_hash
+            crate::WriteStatus::Published(position)
+                if matches!(
+                    position.as_ref(),
+                    crate::PublishedPosition::Serial { commit }
+                        if commit.coord.sequence() == 1
+                            && commit.commit_hash == first.commit_hash
+                )
         ));
         assert!(matches!(
             db.write_status(&pending[1].write_id).await.unwrap(),
-            crate::WriteStatus::Published(crate::PublishedPosition::Serial { position })
-                if position.seq == 2 && position.commit_hash == second.commit_hash
+            crate::WriteStatus::Published(position)
+                if matches!(
+                    position.as_ref(),
+                    crate::PublishedPosition::Serial { commit }
+                        if commit.coord.sequence() == 2
+                            && commit.commit_hash == second.commit_hash
+                )
         ));
         let head = storage
             .serial_coordination()
@@ -3235,13 +3282,18 @@ mod tests {
 
         assert_eq!(home.head_mutation_count(), head_mutations_before + 1);
         for write in pending {
+            let status = db.write_status(&write.write_id).await.unwrap();
             assert!(matches!(
-                db.write_status(&write.write_id).await.unwrap(),
-                crate::WriteStatus::Conflict(crate::SerializationConflict {
-                    base: None,
-                    current: Some(ref current),
-                    ..
-                }) if Some(current.clone()) == serial_commit_ref(&other).map(StoreBatchCommitRef::position)
+                status,
+                crate::WriteStatus::Conflict(ref conflict)
+                    if matches!(
+                        conflict.as_ref(),
+                        crate::SerializationConflict {
+                            base: StoreSerialPredecessor::Genesis { .. },
+                            current: StoreSerialPredecessor::Commit(current),
+                            ..
+                        } if Some(current) == serial_commit_ref(&other)
+                    )
             ));
         }
     }
@@ -3280,7 +3332,8 @@ mod tests {
         for write in pending {
             assert!(matches!(
                 db.write_status(&write.write_id).await.unwrap(),
-                crate::WriteStatus::Published(crate::PublishedPosition::Serial { .. })
+                crate::WriteStatus::Published(position)
+                    if matches!(position.as_ref(), crate::PublishedPosition::Serial { .. })
             ));
         }
     }
@@ -3318,12 +3371,17 @@ mod tests {
         );
         assert_eq!(home.head_mutation_count(), head_mutations_before + 2);
         for write in pending {
+            let status = db.write_status(&write.write_id).await.unwrap();
             assert!(matches!(
-                db.write_status(&write.write_id).await.unwrap(),
-                crate::WriteStatus::Conflict(crate::SerializationConflict {
-                    current: Some(ref current),
-                    ..
-                }) if Some(current.clone()) == serial_commit_ref(&other).map(StoreBatchCommitRef::position)
+                status,
+                crate::WriteStatus::Conflict(ref conflict)
+                    if matches!(
+                        conflict.as_ref(),
+                        crate::SerializationConflict {
+                            current: StoreSerialPredecessor::Commit(current),
+                            ..
+                        } if Some(current) == serial_commit_ref(&other)
+                    )
             ));
         }
     }
@@ -3449,8 +3507,12 @@ mod tests {
         );
         assert!(matches!(
             db.write_status(&suffix).await.unwrap(),
-            crate::WriteStatus::Published(crate::PublishedPosition::Serial { position })
-                if position.seq == 3
+            crate::WriteStatus::Published(position)
+                if matches!(
+                    position.as_ref(),
+                    crate::PublishedPosition::Serial { commit }
+                        if commit.coord.sequence() == 3
+                )
         ));
     }
 
@@ -3494,10 +3556,11 @@ mod tests {
         let expected_branch = crate::PendingBranchId::from_first_write(pending[0].write_id.clone());
         assert_eq!(all_writes.len(), 3);
         for write in all_writes {
+            let status = db.write_status(&write.write_id).await.unwrap();
             assert!(matches!(
-                db.write_status(&write.write_id).await.unwrap(),
-                crate::WriteStatus::Conflict(crate::SerializationConflict { branch_id, .. })
-                    if branch_id == expected_branch
+                status,
+                crate::WriteStatus::Conflict(ref conflict)
+                    if conflict.branch_id == expected_branch
             ));
         }
     }
@@ -3531,8 +3594,78 @@ mod tests {
         assert!(matches!(
             current_serial_authorization(&db, &storage, storage.serial_coordination().unwrap())
                 .await,
-            Err(StoreOutboundError::InvalidState { .. })
+            Err(StoreOutboundError::MissingState {
+                key: SERIAL_COORDINATION_HEAD
+            })
         ));
+        assert!(matches!(
+            current_serial_head_ref(&db, storage.serial_coordination().unwrap()).await,
+            Err(StoreOutboundError::MissingState {
+                key: SERIAL_COORDINATION_HEAD
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_serial_genesis_head_fails_before_the_first_commit() {
+        let (home, storage, db, _keypair, _root, _pending) =
+            serial_fixture("serial-missing-genesis-head").await;
+        home.remove(serial_head_key());
+
+        assert!(matches!(
+            current_serial_authorization(&db, &storage, storage.serial_coordination().unwrap())
+                .await,
+            Err(StoreOutboundError::MissingState {
+                key: SERIAL_COORDINATION_HEAD
+            })
+        ));
+        assert!(matches!(
+            current_serial_head_ref(&db, storage.serial_coordination().unwrap()).await,
+            Err(StoreOutboundError::MissingState {
+                key: SERIAL_COORDINATION_HEAD
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_serial_head_during_activation_names_the_coordination_head() {
+        let (home, storage, db, keypair, _root, pending) =
+            serial_fixture("serial-missing-head-during-activation").await;
+        let (_temp, store_dir) = temp_store_dir();
+        assert!(prepare_pending_store_write_with_coordination(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().unwrap()),
+            &local_device_id(&db).await,
+            "2026-01-01T00:00:00Z",
+            &keypair,
+            &store_dir,
+            None,
+        )
+        .await
+        .expect("prepare exact Serial write"));
+        home.remove(serial_head_key());
+
+        let error = drain_store_writes_with_coordination(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().unwrap()),
+        )
+        .await
+        .expect_err("an absent coordination head blocks activation");
+        assert!(matches!(
+            error,
+            StoreOutboundError::MissingState {
+                key: SERIAL_COORDINATION_HEAD
+            }
+        ));
+        for write in pending {
+            let status = db.write_status(&write.write_id).await.unwrap();
+            assert!(
+                matches!(status, crate::WriteStatus::Publishing),
+                "unexpected missing-head status: {status:?}"
+            );
+        }
     }
 
     struct PreparedWriteFixture {
@@ -3688,12 +3821,14 @@ mod tests {
             );
             assert!(matches!(
                 fixture.db.write_status(&fixture.write_id).await.unwrap(),
-                crate::WriteStatus::Published(crate::PublishedPosition::MergeConcurrent {
-                    device_id,
-                    position,
-                }) if device_id == fixture.device_id
-                        && position.seq == 1
-                        && position.commit_hash == fixture.commit_ref.commit_hash
+                crate::WriteStatus::Published(position)
+                    if matches!(
+                        position.as_ref(),
+                        crate::PublishedPosition::MergeConcurrent { device_id, commit }
+                            if device_id == &fixture.device_id
+                                && commit.coord.sequence() == 1
+                                && commit.commit_hash == fixture.commit_ref.commit_hash
+                    )
             ));
         }
     }
@@ -3755,11 +3890,13 @@ mod tests {
         );
         assert!(matches!(
             fixture.db.write_status(&fixture.write_id).await.unwrap(),
-            crate::WriteStatus::Published(crate::PublishedPosition::MergeConcurrent {
-                position,
-                ..
-            }) if position.seq == 1
-                    && position.commit_hash == fixture.commit_ref.commit_hash
+            crate::WriteStatus::Published(position)
+                if matches!(
+                    position.as_ref(),
+                    crate::PublishedPosition::MergeConcurrent { commit, .. }
+                        if commit.coord.sequence() == 1
+                            && commit.commit_hash == fixture.commit_ref.commit_hash
+                )
         ));
     }
 
@@ -3826,11 +3963,13 @@ mod tests {
         );
         assert!(matches!(
             fixture.db.write_status(&fixture.write_id).await.unwrap(),
-            crate::WriteStatus::Published(crate::PublishedPosition::MergeConcurrent {
-                position,
-                ..
-            }) if position.seq == 1
-                    && position.commit_hash == fixture.commit_ref.commit_hash
+            crate::WriteStatus::Published(position)
+                if matches!(
+                    position.as_ref(),
+                    crate::PublishedPosition::MergeConcurrent { commit, .. }
+                        if commit.coord.sequence() == 1
+                            && commit.commit_hash == fixture.commit_ref.commit_hash
+                )
         ));
     }
 

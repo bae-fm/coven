@@ -20,14 +20,13 @@ use super::storage::{
 };
 use super::store_commit::{
     head_slot_prefix, serial_head_key, ActivatedStoreDeviceRegistrationRef, CommitFrontier,
-    CommitPosition, DeviceJoinAttempt, DeviceJoinOutcomeBody, DeviceStreamAnchor, ObjectHash,
-    OwnerRecoveryNode, OwnerRecoveryNodeRef, ResolvedStoreDeviceState, StoreBatchCommit,
-    StoreBatchCommitRef, StoreCommitAnchor, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationActivation,
-    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolError,
-    StoreRootRef, StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor,
-    StreamActivationId, SERIAL_STREAM_ID,
+    DeviceJoinAttempt, DeviceJoinOutcomeBody, DeviceStreamAnchor, ObjectHash, OwnerRecoveryNode,
+    OwnerRecoveryNodeRef, ResolvedStoreDeviceState, StoreBatchCommit, StoreBatchCommitRef,
+    StoreCommitAnchor, StoreCommitCoord, StoreDeviceHead, StoreDeviceRegistration,
+    StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
+    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
+    StoreHistoryCut, StoreProtocolError, StoreRootRef, StoreSerialHead, StoreSerialHeadState,
+    StoreSerialPredecessor, StreamActivationId, SERIAL_STREAM_ID,
 };
 use super::store_objects::{
     load_commit_ref, load_device_join_attempt_ref, load_device_join_outcome_ref,
@@ -48,10 +47,10 @@ pub enum HeldStorePositionReason {
         revision: u64,
         registration_hash: ObjectHash,
     },
-    MissingPredecessor(CommitPosition),
+    MissingPredecessor(StoreBatchCommitRef),
     MissingDependency {
         device_id: String,
-        position: CommitPosition,
+        commit: StoreBatchCommitRef,
     },
     NewerSchema {
         local: u32,
@@ -68,7 +67,7 @@ pub enum HeldStorePositionReason {
     ConstraintConflict(Vec<String>),
     HashMismatch {
         referenced_device_id: String,
-        referenced_position: CommitPosition,
+        referenced_commit: StoreBatchCommitRef,
         materialized_hash: ObjectHash,
     },
     InvalidSignature,
@@ -90,7 +89,7 @@ pub enum HeldStoreCoordinate {
     },
     Commit {
         device_id: String,
-        position: CommitPosition,
+        commit: StoreBatchCommitRef,
     },
     Package {
         device_id: String,
@@ -99,9 +98,9 @@ pub enum HeldStoreCoordinate {
     },
     Dependency {
         dependent_device_id: String,
-        dependent_position: CommitPosition,
+        dependent_commit: StoreBatchCommitRef,
         required_device_id: String,
-        required_position: CommitPosition,
+        required_commit: StoreBatchCommitRef,
     },
 }
 
@@ -121,10 +120,10 @@ impl HeldStoreCoordinate {
     pub fn seq(&self) -> u64 {
         match self {
             Self::Head { seq, .. } | Self::Package { seq, .. } => *seq,
-            Self::Commit { position, .. } => position.seq,
+            Self::Commit { commit, .. } => commit.coord.sequence(),
             Self::Dependency {
-                dependent_position, ..
-            } => dependent_position.seq,
+                dependent_commit, ..
+            } => dependent_commit.coord.sequence(),
         }
     }
 }
@@ -1316,7 +1315,7 @@ pub async fn pull_store_commits_with_identity(
                     &commit_ref,
                     HeldStorePositionReason::HashMismatch {
                         referenced_device_id: stream_id,
-                        referenced_position: commit_ref.position(),
+                        referenced_commit: commit_ref.clone(),
                         materialized_hash: materialized.commit_hash,
                     },
                 ));
@@ -2564,7 +2563,7 @@ pub(crate) async fn load_serial_cycle_authorization(
     let visible_activations = authorized
         .iter()
         .map(|commit| {
-            super::wrapped_store_key::WrappedKeyActivation::Serial(commit.commit_ref.position())
+            super::wrapped_store_key::WrappedKeyActivation::Serial(commit.commit_ref.clone())
         })
         .collect();
     let head = match head.state {
@@ -3189,33 +3188,32 @@ async fn readiness(
                 }
             }
         }
-        if commit_ref.coord.sequence() != current.coord.sequence() + 1
-            || commit.order.predecessor() != Some(current)
-        {
-            let missing = commit.order.predecessor().map_or_else(
-                || CommitPosition {
-                    seq: commit_ref.coord.sequence().saturating_sub(1),
-                    commit_hash: current.commit_hash,
-                },
-                StoreBatchCommitRef::position,
-            );
+        if commit.order.predecessor() != Some(current) {
+            let reason = match commit.order.predecessor() {
+                Some(missing) => HeldStorePositionReason::MissingPredecessor(missing.clone()),
+                None => HeldStorePositionReason::InvalidObject(
+                    "non-genesis Merge commit omits its exact predecessor".to_string(),
+                ),
+            };
+            return Ok(Readiness::Held(held_commit(commit_ref, reason)));
+        }
+        if commit_ref.coord.sequence() != current.coord.sequence() + 1 {
             return Ok(Readiness::Held(held_commit(
                 commit_ref,
-                HeldStorePositionReason::MissingPredecessor(missing),
+                HeldStorePositionReason::InvalidObject(
+                    "Merge commit sequence does not immediately follow its materialized frontier"
+                        .to_string(),
+                ),
             )));
         }
     } else if commit_ref.coord.sequence() != 1 || commit.order.predecessor().is_some() {
-        let missing = commit.order.predecessor().map_or_else(
-            || CommitPosition {
-                seq: commit_ref.coord.sequence().saturating_sub(1),
-                commit_hash: commit_ref.commit_hash,
-            },
-            StoreBatchCommitRef::position,
-        );
-        return Ok(Readiness::Held(held_commit(
-            commit_ref,
-            HeldStorePositionReason::MissingPredecessor(missing),
-        )));
+        let reason = match commit.order.predecessor() {
+            Some(missing) => HeldStorePositionReason::MissingPredecessor(missing.clone()),
+            None => HeldStorePositionReason::InvalidObject(
+                "Merge commit beyond genesis omits its exact predecessor".to_string(),
+            ),
+        };
+        return Ok(Readiness::Held(held_commit(commit_ref, reason)));
     }
 
     for (required_stream, required_ref) in commit.merge_dependencies().map_err(|error| {
@@ -3233,7 +3231,7 @@ async fn readiness(
                     required_ref,
                     HeldStorePositionReason::MissingDependency {
                         device_id: required_stream.clone(),
-                        position: required_ref.position(),
+                        commit: required_ref.clone(),
                     },
                 )))
             }
@@ -3274,7 +3272,7 @@ async fn reference_is_materialized(
             return Ok(MaterializedCheck::Held(
                 HeldStorePositionReason::HashMismatch {
                     referenced_device_id: stream_id.to_string(),
-                    referenced_position: reference.position(),
+                    referenced_commit: reference.clone(),
                     materialized_hash: actual.commit_hash,
                 },
             ));
@@ -3297,7 +3295,7 @@ async fn reference_is_materialized(
             return Ok(MaterializedCheck::Held(
                 HeldStorePositionReason::HashMismatch {
                     referenced_device_id: stream_id.to_string(),
-                    referenced_position: reference.position(),
+                    referenced_commit: reference.clone(),
                     materialized_hash: cursor.commit_hash,
                 },
             ));
@@ -3498,7 +3496,7 @@ fn held_commit(
     HeldStorePosition {
         coordinate: HeldStoreCoordinate::Commit {
             device_id: commit_stream_id(&reference.coord),
-            position: reference.position(),
+            commit: reference.clone(),
         },
         reason,
     }
@@ -3531,9 +3529,9 @@ fn held_dependency(
     HeldStorePosition {
         coordinate: HeldStoreCoordinate::Dependency {
             dependent_device_id: commit_stream_id(&dependent.coord),
-            dependent_position: dependent.position(),
+            dependent_commit: dependent.clone(),
             required_device_id: required_device_id.to_string(),
-            required_position: required.position(),
+            required_commit: required.clone(),
         },
         reason,
     }
@@ -3543,5 +3541,81 @@ fn commit_stream_id(coord: &StoreCommitCoord) -> String {
     match coord {
         StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
         StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn merge_gap_reports_the_exact_signed_predecessor() {
+        let source = crate::sync::test_helpers::open_test_db();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &source,
+            "exact-predecessor-test",
+            crate::keys::UserKeypair::generate(),
+        )
+        .await
+        .expect("create exact predecessor test Store");
+        let changeset = crate::sync::test_helpers::capture_bytes(
+            &crate::sync::test_helpers::open_test_db(),
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+               VALUES ('gap-row', 'gap', NULL, '0000000001000-0000-gap', '2026-01-01')",
+            ],
+        )
+        .await;
+        let first = store
+            .publish_changeset("founder", 1, &changeset, source.schema_version())
+            .await
+            .expect("publish first exact commit");
+        let second = store
+            .publish_changeset("founder", 2, &changeset, source.schema_version())
+            .await
+            .expect("publish second exact commit");
+        let third = store
+            .publish_changeset("founder", 3, &changeset, source.schema_version())
+            .await
+            .expect("publish third exact commit");
+        let (_, founder, _) = store
+            .founder_device_authority()
+            .await
+            .expect("load founder authority");
+        let commit = super::super::store_objects::load_commit_ref(
+            &store.storage,
+            store.root.store_root_hash,
+            &third,
+            &founder,
+        )
+        .await
+        .expect("load third exact commit")
+        .value;
+        let stream_id = commit_stream_id(&first.coord);
+        let frontier = BTreeMap::from([(stream_id.clone(), first.clone())]);
+        let coverage =
+            CommitFrontier::from_refs(crate::WritePolicy::MergeConcurrent, frontier.clone())
+                .expect("build exact frontier");
+        let target = crate::sync::test_helpers::open_test_db();
+
+        let readiness = readiness(
+            &target,
+            &store.storage,
+            &store.root,
+            &coverage,
+            &frontier,
+            &third,
+            &commit,
+        )
+        .await
+        .expect("evaluate exact predecessor gap");
+
+        assert!(matches!(
+            readiness,
+            Readiness::Held(HeldStorePosition {
+                reason: HeldStorePositionReason::MissingPredecessor(missing),
+                ..
+            }) if missing == second
+        ));
     }
 }

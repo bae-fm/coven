@@ -753,10 +753,11 @@ pub use coven_core::{
 // the status enum, its completed-cycle success payload, the per-cycle alert
 // bundle, the per-device activity, and the held-changeset detail the alerts carry.
 pub use coven_core::{
-    AffectedRow, CommitPosition, DeviceActivity, HeldStoreCoordinate, HeldStorePosition,
-    HeldStorePositionReason, ObjectHash, PendingBranch, PendingBranchId, PendingWrite,
-    PublishedPosition, SyncLoopAlerts, SyncLoopSuccess, WriteBlock, WriteId, WriteReceipt,
-    WriteResolution, WriteStatus,
+    AffectedRow, DeviceActivity, HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason,
+    ObjectHash, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition,
+    SerializationConflict, StoreBatchCommitRef, StoreCommitCoord, StoreSerialPredecessor,
+    SyncLoopAlerts, SyncLoopSuccess, WriteBlock, WriteId, WriteReceipt, WriteResolution,
+    WriteStatus,
 };
 pub use sync::sync_loop::SyncLoopStatus;
 

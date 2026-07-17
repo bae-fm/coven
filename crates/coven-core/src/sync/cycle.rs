@@ -735,9 +735,17 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     ) {
         let stale = branch.base != authoritative_head;
         if !branch.conflicted && stale {
-            db.mark_serial_branch_conflict(branch.branch_id, branch.base, authoritative_head)
-                .await
-                .map_err(|error| format!("record Serial branch conflict: {error}"))?;
+            let authoritative_predecessor =
+                db.exact_serial_predecessor(authoritative_head)
+                    .await
+                    .map_err(|error| format!("resolve exact Serial head: {error}"))?;
+            db.mark_serial_branch_conflict(
+                branch.branch_id,
+                branch.base,
+                authoritative_predecessor,
+            )
+            .await
+            .map_err(|error| format!("record Serial branch conflict: {error}"))?;
         }
         if branch.conflicted || stale {
             return Ok(SyncCycleResult {

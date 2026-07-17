@@ -208,7 +208,9 @@ async fn public_serial_invite_activates_one_control_only_commit() {
     .await
     .unwrap()
     .value;
-    assert_eq!(commit.position(), commit_ref.position());
+    commit_ref
+        .verify_commit(&commit)
+        .expect("prepared exact commit ref verifies its signed commit");
     assert!(matches!(
         commit.control(),
         Some(crate::sync::store_commit::StoreControl::SerialMembership { .. })

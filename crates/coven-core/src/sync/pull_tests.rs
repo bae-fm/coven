@@ -42,15 +42,6 @@ fn commit_stream_id(reference: &crate::sync::store_commit::StoreBatchCommitRef) 
     }
 }
 
-fn commit_position(
-    reference: &crate::sync::store_commit::StoreBatchCommitRef,
-) -> crate::sync::store_commit::CommitPosition {
-    crate::sync::store_commit::CommitPosition {
-        seq: reference.coord.sequence(),
-        commit_hash: reference.commit_hash,
-    }
-}
-
 async fn local_announcement_stream(
     db: &crate::database::Database,
 ) -> crate::sync::membership::AuthorStreamId {
@@ -1932,7 +1923,7 @@ async fn uniqueness_conflict_rolls_back_the_entire_changeset_and_position() {
         conflicts[0].coordinate,
         HeldStoreCoordinate::Commit {
             device_id: stream_id.clone(),
-            position: commit_position(&commit),
+            commit: commit.clone(),
         }
     );
     assert_eq!(
@@ -2223,7 +2214,7 @@ async fn a_forged_newer_schema_changeset_reports_tamper_not_a_schema_skip() {
         HeldStorePosition {
             coordinate: HeldStoreCoordinate::Commit {
                 device_id: expected_stream_id.clone(),
-                position: commit_position(&commit_ref),
+                commit: commit_ref.clone(),
             },
             reason: HeldStorePositionReason::InvalidSignature,
         }
@@ -2987,9 +2978,9 @@ async fn malformed_store_package_isolates_to_one_device() {
         &result.held_positions[0].coordinate,
         HeldStoreCoordinate::Commit {
             device_id,
-            position,
+            commit,
         } if device_id == &bad_stream_id
-            && position == &commit_position(&bad_reference)
+            && commit == &bad_reference
     ));
     assert!(matches!(
         result.held_positions[0].reason,
@@ -5226,10 +5217,10 @@ async fn pull_rejects_store_commit_missing_its_signature_when_chain_exists() {
         matches!(
             &result.held_positions[0],
             HeldStorePosition {
-                coordinate: HeldStoreCoordinate::Commit { device_id, position },
+                coordinate: HeldStoreCoordinate::Commit { device_id, commit },
                 reason: HeldStorePositionReason::ObjectUnreadable { key, detail },
             } if device_id == &expected_stream_id
-                && *position == commit_position(&commit_ref)
+                && commit == &commit_ref
                 && key == commit_ref.object.slot().logical_key()
                 && detail.contains("missing field `signature`")
         ),
@@ -5871,7 +5862,6 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
     )
     .await;
     let stream_id = commit_stream_id(&reference);
-    let position = commit_position(&reference);
 
     let db2 = open_test_db();
     db2.set_protocol_state(OWNER_PUBKEY_STATE_KEY, &owner_pk)
@@ -5889,7 +5879,7 @@ async fn pull_skips_and_surfaces_a_forged_changeset_whose_grant_does_not_authori
         unauthorized[0].coordinate,
         HeldStoreCoordinate::Commit {
             device_id: stream_id.clone(),
-            position,
+            commit: reference,
         }
     );
     assert_eq!(updated.get(&stream_id), None);
@@ -5960,7 +5950,7 @@ async fn pull_holds_and_surfaces_a_changeset_with_an_invalid_signature() {
         HeldStorePosition {
             coordinate: HeldStoreCoordinate::Commit {
                 device_id: expected_stream_id.clone(),
-                position: commit_position(&commit_ref),
+                commit: commit_ref.clone(),
             },
             reason: HeldStorePositionReason::InvalidSignature,
         }

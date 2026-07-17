@@ -868,7 +868,7 @@ impl DeviceJoinClient {
                     signer,
                     &self.code.store_id,
                     &self.code.key_author_pubkey,
-                    &reference.position(),
+                    reference,
                 )
                 .await?
             }

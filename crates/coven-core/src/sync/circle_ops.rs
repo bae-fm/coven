@@ -1179,7 +1179,7 @@ async fn publish_circle_operation(
         }
         CircleOperationPolicy::Serial {
             head,
-            base,
+            base: _,
             base_head_bytes,
             base_head_version,
             ..
@@ -1193,7 +1193,6 @@ async fn publish_circle_operation(
                 db,
                 storage,
                 coordination,
-                base,
                 base_head_bytes.as_deref(),
                 base_head_version.as_ref(),
                 &commit,

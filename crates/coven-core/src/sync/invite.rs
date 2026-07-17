@@ -264,7 +264,7 @@ pub(crate) fn signed_serial_wrapped_key(
     recipient_ed25519_pubkey: &str,
     encryption: &EncryptionService,
     owner_keypair: &UserKeypair,
-    activation: super::store_commit::CommitPosition,
+    activation: super::store_commit::StoreBatchCommitRef,
 ) -> Result<Vec<u8>, InviteError> {
     let recipient_x25519_pk = ed25519_hex_to_x25519(recipient_ed25519_pubkey)?;
     let payload = encryption
@@ -892,7 +892,7 @@ pub async fn unwrap_serial_store_keyring(
     keypair: &UserKeypair,
     store_id: &str,
     key_author_pubkey: &str,
-    activation: &super::store_commit::CommitPosition,
+    activation: &super::store_commit::StoreBatchCommitRef,
 ) -> Result<EncryptionService, InviteError> {
     let recipient = hex::encode(keypair.public_key());
     let wrapped = fetch_wrapped_key(cloud_home.as_ref(), key_author_pubkey, &recipient).await?;

@@ -162,13 +162,6 @@ impl<'de> Deserialize<'de> for ObjectHash {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommitPosition {
-    pub seq: u64,
-    pub commit_hash: ObjectHash,
-}
-
 /// Closed coordinate of one Store commit under the Store's signed policy.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -337,13 +330,6 @@ impl StoreBatchCommitRef {
             });
         }
         Ok(())
-    }
-
-    pub fn position(&self) -> CommitPosition {
-        CommitPosition {
-            seq: self.coord.sequence(),
-            commit_hash: self.commit_hash,
-        }
     }
 }
 
@@ -1720,13 +1706,6 @@ impl StoreBatchCommit {
 
     pub fn commit_hash(&self) -> ObjectHash {
         ObjectHash::digest(&self.canonical_signed_bytes())
-    }
-
-    pub fn position(&self) -> CommitPosition {
-        CommitPosition {
-            seq: self.order.seq(),
-            commit_hash: self.commit_hash(),
-        }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {

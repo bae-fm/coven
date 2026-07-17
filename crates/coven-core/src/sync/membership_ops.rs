@@ -543,7 +543,7 @@ async fn invite_serial_member(
                 public_key_hex,
                 encryption,
                 user_keypair,
-                prepared.commit.position(),
+                prepared.commit_ref.clone(),
             )?;
             let author = crate::keys::public_key_hex(user_keypair);
             let prior_wrapped_key = match storage.get_wrapped_key(&author, public_key_hex).await {
@@ -825,7 +825,7 @@ async fn remove_serial_member(
                     &recipient,
                     &new_keyring,
                     user_keypair,
-                    prepared.commit.position(),
+                    prepared.commit_ref.clone(),
                 )?;
                 wraps.push(SerialReplacementWrap {
                     recipient,

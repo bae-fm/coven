@@ -83,6 +83,32 @@ fn load_store_device_genesis_state_on(
         .map_err(|error| DbError::Message(format!("parse Store device genesis state: {error}")))
 }
 
+fn store_serial_predecessor_on(
+    conn: &Connection,
+    commit: Option<&StoreBatchCommitRef>,
+) -> Result<StoreSerialPredecessor, DbError> {
+    if let Some(commit) = commit {
+        return Ok(StoreSerialPredecessor::Commit(commit.clone()));
+    }
+    let root = required_store_root_authority_on(conn)?;
+    let genesis = load_store_device_genesis_state_on(conn)?;
+    let mut devices = genesis.devices.values();
+    let Some(founder) = devices.next() else {
+        return Err(DbError::Message(
+            "Serial genesis must contain exactly one founder registration".to_string(),
+        ));
+    };
+    if devices.next().is_some() {
+        return Err(DbError::Message(
+            "Serial genesis must contain exactly one founder registration".to_string(),
+        ));
+    }
+    Ok(StoreSerialPredecessor::Genesis {
+        root,
+        founder_registration: founder.registration.clone(),
+    })
+}
+
 fn load_store_device_snapshot_on(
     conn: &Connection,
     reference: &StoreBatchCommitRef,
@@ -3029,9 +3055,8 @@ impl Database {
                         "MergeConcurrent base carries a Serial conflict".to_string(),
                     ));
                 };
-                if branch_id != &candidate.branch_id
-                    || stored_base.as_ref().map(StoreBatchCommitRef::position) != candidate.base
-                {
+                let exact_base = store_serial_predecessor_on(conn, stored_base.as_ref())?;
+                if branch_id != &candidate.branch_id || exact_base != candidate.base {
                     return Err(DbError::Message(
                         "Serial conflict status differs from its durable branch base".to_string(),
                     ));
@@ -3052,6 +3077,7 @@ impl Database {
             let Some(conflict) = conflict else {
                 return Ok(None);
             };
+            let conflict = *conflict;
             let expected_base = StoreWriteBase::Serial {
                 branch_id: conflict.branch_id.clone(),
                 base: conflict_exact_base.expect("conflict row carries exact base"),
@@ -5597,10 +5623,10 @@ impl Database {
                     "prepared Store write disappeared".to_string(),
                 ));
             }
-            let status = WriteStatus::Published(PublishedPosition::MergeConcurrent {
+            let status = WriteStatus::Published(Box::new(PublishedPosition::MergeConcurrent {
                 device_id: local_device_id,
-                position: accepted.position(),
-            });
+                commit: accepted.clone(),
+            }));
             Self::set_write_status_on(&tx, &write_id, &status)?;
             tx.commit().map_err(DbError::from)?;
             Self::notify_write_status_in(&statuses, &write_id, status);
@@ -5613,7 +5639,7 @@ impl Database {
         &self,
         branch_id: PendingBranchId,
         base: Option<StoreBatchCommitRef>,
-        current: Option<StoreBatchCommitRef>,
+        current: StoreSerialPredecessor,
     ) -> Result<(), DbError> {
         let statuses = self.state.write_statuses.clone();
         self.call(move |conn| {
@@ -5624,10 +5650,10 @@ impl Database {
             };
             let conflict = crate::SerializationConflict {
                 branch_id: branch_id.clone(),
-                base: base.as_ref().map(StoreBatchCommitRef::position),
-                current: current.as_ref().map(StoreBatchCommitRef::position),
+                base: store_serial_predecessor_on(&tx, base.as_ref())?,
+                current,
             };
-            let status = WriteStatus::Conflict(conflict);
+            let status = WriteStatus::Conflict(Box::new(conflict));
             let status_json = serde_json::to_string(&status)
                 .map_err(|error| DbError::Message(format!("serialize Serial conflict: {error}")))?;
             let mut statement = tx
@@ -5672,6 +5698,14 @@ impl Database {
             Ok(())
         })
         .await
+    }
+
+    pub(crate) async fn exact_serial_predecessor(
+        &self,
+        commit: Option<StoreBatchCommitRef>,
+    ) -> Result<StoreSerialPredecessor, DbError> {
+        self.call(move |conn| store_serial_predecessor_on(conn, commit.as_ref()))
+            .await
     }
 
     pub(crate) async fn complete_prepared_serial_branch(
@@ -5844,9 +5878,9 @@ impl Database {
                         "prepared Serial write {write_id} disappeared during completion"
                     )));
                 }
-                let status = WriteStatus::Published(PublishedPosition::Serial {
-                    position: commit_ref.position(),
-                });
+                let status = WriteStatus::Published(Box::new(PublishedPosition::Serial {
+                    commit: commit_ref.clone(),
+                }));
                 Self::set_write_status_on(&tx, &write_id, &status)?;
                 if let Some(bytes) = tip_head_bytes {
                     if prepared_tip_head.replace(bytes).is_some() {
@@ -5994,8 +6028,7 @@ impl Database {
             match status {
                 WriteStatus::Conflict(conflict) => {
                     if conflict.branch_id != stored_branch_id
-                        || conflict.base
-                            != base.as_ref().map(StoreBatchCommitRef::position)
+                        || conflict.base != store_serial_predecessor_on(tx, base.as_ref())?
                     {
                         return Err(DbError::Message(
                             "Serial conflict status differs from its durable branch base"

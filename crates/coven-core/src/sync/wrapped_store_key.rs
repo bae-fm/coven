@@ -4,13 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::keys::{self, UserKeypair};
 use crate::sync::membership::MembershipCoord;
-use crate::sync::store_commit::CommitPosition;
+use crate::sync::store_commit::StoreBatchCommitRef;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum WrappedKeyActivation {
     MergeConcurrent(MembershipCoord),
-    Serial(CommitPosition),
+    Serial(StoreBatchCommitRef),
 }
 
 /// Serialized form of `keys/{recipient_pubkey}{suffix}`: the store encryption

@@ -60,7 +60,6 @@ enum RetirementPublication {
         head_prepared: PreparedExactObject,
     },
     Serial {
-        base: Option<StoreBatchCommitRef>,
         base_head_bytes: Option<Vec<u8>>,
         base_head_version: Option<super::storage::VersionToken>,
         head_bytes: Vec<u8>,
@@ -571,7 +570,6 @@ async fn prepare_self_retirement(
             )
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
             RetirementPublication::Serial {
-                base: snapshot.base,
                 base_head_bytes: snapshot.base_head_bytes,
                 base_head_version: snapshot.base_head_version,
                 head_bytes: head.to_bytes(),
@@ -728,7 +726,6 @@ async fn publish_self_retirement(
             None
         }
         RetirementPublication::Serial {
-            base,
             base_head_bytes,
             base_head_version,
             head_bytes,
@@ -745,7 +742,6 @@ async fn publish_self_retirement(
                 db,
                 storage,
                 coordination,
-                base.clone(),
                 base_head_bytes.as_deref(),
                 base_head_version.as_ref(),
                 &commit,
@@ -2118,7 +2114,6 @@ pub async fn recover_owner_device_serial(
         db,
         storage,
         coordination,
-        snapshot.base,
         snapshot.base_head_bytes.as_deref(),
         snapshot.base_head_version.as_ref(),
         &commit,

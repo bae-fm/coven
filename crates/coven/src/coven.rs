@@ -1572,7 +1572,7 @@ mod tests {
 
         first_status.changed().await.expect("published status");
         let first_sequence = match &*first_status.borrow() {
-            coven_core::WriteStatus::Published(position) => position.position().seq,
+            coven_core::WriteStatus::Published(position) => position.commit().coord.sequence(),
             status => panic!("first host transaction is not published: {status:?}"),
         };
         assert_eq!(
@@ -1588,7 +1588,7 @@ mod tests {
             .await
             .expect("second status")
         {
-            coven_core::WriteStatus::Published(position) => position.position().seq,
+            coven_core::WriteStatus::Published(position) => position.commit().coord.sequence(),
             status => panic!("second host transaction is not published: {status:?}"),
         };
         assert_eq!(second_sequence, first_sequence + 1);
@@ -2486,7 +2486,7 @@ mod tests {
             .await
             .expect("first status")
         {
-            coven_core::WriteStatus::Published(position) => position.position().seq,
+            coven_core::WriteStatus::Published(position) => position.commit().coord.sequence(),
             status => panic!("first replacement write is not published: {status:?}"),
         };
         assert_eq!(
@@ -2504,7 +2504,7 @@ mod tests {
             .await
             .expect("second status")
         {
-            coven_core::WriteStatus::Published(position) => position.position().seq,
+            coven_core::WriteStatus::Published(position) => position.commit().coord.sequence(),
             status => panic!("second replacement write is not published: {status:?}"),
         };
         assert_eq!(

@@ -3447,17 +3447,25 @@ async fn serial_cycle_publishes_a_suffix_rebased_by_its_initial_drain() {
         assert!(
             matches!(
                 &first_status,
-                crate::WriteStatus::Published(crate::PublishedPosition::Serial { position })
-                    if position.seq == 1
+                crate::WriteStatus::Published(position)
+                    if matches!(
+                        position.as_ref(),
+                        crate::PublishedPosition::Serial { commit }
+                            if commit.coord.sequence() == 1
+                    )
             ),
             "unexpected first status: {first_status:?}"
         );
         let suffix_status = db.write_status(&suffix).await.unwrap();
         assert!(
             matches!(
-            &suffix_status,
-                crate::WriteStatus::Published(crate::PublishedPosition::Serial { position })
-                    if position.seq == 2
+                &suffix_status,
+                crate::WriteStatus::Published(position)
+                    if matches!(
+                        position.as_ref(),
+                        crate::PublishedPosition::Serial { commit }
+                            if commit.coord.sequence() == 2
+                    )
             ),
             "unexpected suffix status: {suffix_status:?}"
         );
@@ -4725,15 +4733,15 @@ async fn rotation_pending_defers_a_host_blob_changeset_until_adoption() {
         .await
         .expect("read adopted Store write status")
     {
-        crate::WriteStatus::Published(crate::PublishedPosition::MergeConcurrent {
-            position,
-            ..
-        }) => position,
+        crate::WriteStatus::Published(position) => match *position {
+            crate::PublishedPosition::MergeConcurrent { commit, .. } => commit,
+            position => panic!("adopted Store write has wrong policy: {position:?}"),
+        },
         status => panic!("adopted Store write is not published: {status:?}"),
     };
     let stream_id = local_store_stream_id(&db).await;
     assert!(
-        db.exact_materialized_ref(&stream_id, published.seq)
+        db.exact_materialized_ref(&stream_id, published.coord.sequence())
             .await
             .expect("read adopted exact Store position")
             .is_some(),
@@ -5306,22 +5314,25 @@ async fn fresh_push_failure_keeps_cache_lazy_local_copy_until_retry_publishes() 
         .write_status(&write_id)
         .await
         .expect("read retried Store write status");
-    let position = match status {
-        crate::WriteStatus::Published(crate::PublishedPosition::MergeConcurrent {
-            device_id: published_device,
-            position,
-        }) if published_device == device_id => position,
+    let commit = match status {
+        crate::WriteStatus::Published(position) => match *position {
+            crate::PublishedPosition::MergeConcurrent {
+                device_id: published_device,
+                commit,
+            } if published_device == device_id => commit,
+            position => panic!("retried Store write has wrong position: {position:?}"),
+        },
         status => panic!("retried Store write is not published: {status:?}"),
     };
     let stream_id = local_store_stream_id(&db).await;
     let published = db
-        .exact_materialized_ref(&stream_id, position.seq)
+        .exact_materialized_ref(&stream_id, commit.coord.sequence())
         .await
         .expect("read retried exact Store position")
         .expect("retried exact Store position is materialized");
-    assert_eq!(published.commit_hash, position.commit_hash);
+    assert_eq!(published, commit);
     let (published_ref, published_commit) =
-        load_exact_materialized_commit(&db, &storage.storage, &stream_id, position.seq)
+        load_exact_materialized_commit(&db, &storage.storage, &stream_id, commit.coord.sequence())
             .await
             .expect("load retried exact Store commit")
             .expect("retried exact Store commit exists");
@@ -5425,15 +5436,15 @@ async fn push_cycle_writes_rfc3339_ack_timestamp() {
         .await
         .expect("read push-timestamp write status")
     {
-        crate::WriteStatus::Published(crate::PublishedPosition::MergeConcurrent {
-            position,
-            ..
-        }) => position,
+        crate::WriteStatus::Published(position) => match *position {
+            crate::PublishedPosition::MergeConcurrent { commit, .. } => commit,
+            position => panic!("push-timestamp write has wrong policy: {position:?}"),
+        },
         status => panic!("push-timestamp write is not published: {status:?}"),
     };
     let stream_id = local_store_stream_id(&db).await;
     assert!(db
-        .exact_materialized_ref(&stream_id, published.seq)
+        .exact_materialized_ref(&stream_id, published.coord.sequence())
         .await
         .expect("read push-timestamp materialization")
         .is_some());
@@ -5748,12 +5759,14 @@ async fn missing_user_blob_blocks_prepared_write_before_publish() {
         .expect("read first write status");
     assert!(
         matches!(
-                &first_write_status,
-                crate::WriteStatus::Published(crate::PublishedPosition::MergeConcurrent {
-                    position,
-                    ..
-        }) if position.seq == 1
-            ),
+            &first_write_status,
+            crate::WriteStatus::Published(position)
+                if matches!(
+                    position.as_ref(),
+                    crate::PublishedPosition::MergeConcurrent { commit, .. }
+                        if commit.coord.sequence() == 1
+                )
+        ),
         "first write status after blocking its successor: {first_write_status:?}",
     );
     let pending = db.pending_writes().await.expect("read pending writes");
@@ -5883,15 +5896,15 @@ async fn outgoing_preparation_failure_keeps_pending_write_for_retry() {
         .await
         .expect("read retried preparation write status")
     {
-        crate::WriteStatus::Published(crate::PublishedPosition::MergeConcurrent {
-            position,
-            ..
-        }) => position,
+        crate::WriteStatus::Published(position) => match *position {
+            crate::PublishedPosition::MergeConcurrent { commit, .. } => commit,
+            position => panic!("retried preparation has wrong policy: {position:?}"),
+        },
         status => panic!("retried preparation write is not published: {status:?}"),
     };
     let stream_id = local_store_stream_id(&db).await;
     assert!(db
-        .exact_materialized_ref(&stream_id, published.seq)
+        .exact_materialized_ref(&stream_id, published.coord.sequence())
         .await
         .expect("read retried preparation materialization")
         .is_some());

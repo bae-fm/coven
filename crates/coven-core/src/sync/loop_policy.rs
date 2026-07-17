@@ -141,7 +141,9 @@ pub fn after_failure(
 mod tests {
     use super::*;
 
-    use crate::sync::store_commit::{CommitPosition, ObjectHash};
+    use crate::sync::causal_grants::AuthorStreamId;
+    use crate::sync::storage::ExactObjectRef;
+    use crate::sync::store_commit::{ObjectHash, StoreBatchCommitRef, StoreCommitCoord};
     use crate::sync::store_pull::{
         HeldStoreCoordinate, HeldStorePosition, HeldStorePositionReason,
     };
@@ -151,9 +153,20 @@ mod tests {
             .map(|i| HeldStorePosition {
                 coordinate: HeldStoreCoordinate::Commit {
                     device_id: format!("dev-{i}"),
-                    position: CommitPosition {
-                        seq: i as u64 + 1,
+                    commit: StoreBatchCommitRef {
+                        coord: StoreCommitCoord::MergeConcurrent {
+                            stream_id: AuthorStreamId::from_digest(ObjectHash::digest(
+                                format!("stream-{i}").as_bytes(),
+                            )),
+                            sequence: i as u64 + 1,
+                        },
                         commit_hash: ObjectHash::digest(format!("commit-{i}").as_bytes()),
+                        object: ExactObjectRef::new(
+                            crate::storage::cloud::ObjectSlot::logical(format!("test-commit-{i}"))
+                                .expect("test commit slot"),
+                            0,
+                            ObjectHash::digest(&[]),
+                        ),
                     },
                 },
                 reason: HeldStorePositionReason::InvalidChangeset("boom".to_string()),

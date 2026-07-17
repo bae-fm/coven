@@ -618,9 +618,10 @@ mod tests {
         db: &crate::database::Database,
         write_id: &'static str,
         branch_id: &'static str,
-        status: &'static str,
+        status: crate::WriteStatus,
     ) {
         let base = format!(r#"{{"serial":{{"branch_id":"{branch_id}","base":null}}}}"#);
+        let status = serde_json::to_string(&status).expect("serialize durable write status");
         db.call(move |conn| {
             conn.execute(
                 r#"INSERT INTO store_writes
@@ -642,7 +643,10 @@ mod tests {
             &db,
             "blocked-write",
             "blocked-write",
-            r#"{"blocked":{"missing_blob":{"namespace":"audio","id":"missing"}}}"#,
+            crate::WriteStatus::Blocked(crate::WriteBlock::MissingBlob {
+                namespace: "audio".to_string(),
+                id: "missing".to_string(),
+            }),
         )
         .await;
         let blocked = current_success_status(&db, success())
@@ -664,11 +668,43 @@ mod tests {
         .await
         .expect("remove blocked projection fixture");
 
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "status-test",
+            crate::keys::UserKeypair::generate(),
+        )
+        .await
+        .expect("create exact Serial status test Store");
+        let founder_registration = db
+            .call(|conn| {
+                let encoded: String = conn
+                    .query_row(
+                        "SELECT registration_object FROM store_device_registration_activations",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(crate::DbError::from)?;
+                serde_json::from_str(&encoded)
+                    .map_err(|error| crate::DbError::Message(error.to_string()))
+            })
+            .await
+            .expect("read exact founder registration reference");
+        let genesis = crate::StoreSerialPredecessor::Genesis {
+            root: store.root.clone(),
+            founder_registration,
+        };
+        let branch_id =
+            serde_json::from_str(r#""branch-write""#).expect("parse test pending branch identity");
+
         insert_write_status(
             &db,
             "branch-write",
             "branch-write",
-            r#"{"conflict":{"branch_id":"branch-write","base":null,"current":null}}"#,
+            crate::WriteStatus::Conflict(Box::new(crate::SerializationConflict {
+                branch_id,
+                base: genesis.clone(),
+                current: genesis,
+            })),
         )
         .await;
         let conflict = current_success_status(&db, success())

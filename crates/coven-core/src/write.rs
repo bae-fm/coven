@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::sync::store_commit::CommitPosition;
+use crate::sync::store_commit::{StoreBatchCommitRef, StoreSerialPredecessor};
 
 /// Store-wide ordering policy selected by the application and signed into the
 /// Store protocol root.
@@ -42,17 +42,17 @@ impl fmt::Display for WriteId {
 pub enum PublishedPosition {
     MergeConcurrent {
         device_id: String,
-        position: CommitPosition,
+        commit: StoreBatchCommitRef,
     },
     Serial {
-        position: CommitPosition,
+        commit: StoreBatchCommitRef,
     },
 }
 
 impl PublishedPosition {
-    pub fn position(&self) -> &CommitPosition {
+    pub fn commit(&self) -> &StoreBatchCommitRef {
         match self {
-            Self::MergeConcurrent { position, .. } | Self::Serial { position } => position,
+            Self::MergeConcurrent { commit, .. } | Self::Serial { commit } => commit,
         }
     }
 }
@@ -77,8 +77,8 @@ impl PendingBranchId {
 #[serde(deny_unknown_fields)]
 pub struct SerializationConflict {
     pub branch_id: PendingBranchId,
-    pub base: Option<CommitPosition>,
-    pub current: Option<CommitPosition>,
+    pub base: StoreSerialPredecessor,
+    pub current: StoreSerialPredecessor,
 }
 
 /// A semantic write fault. Retrying transport cannot change this result.
@@ -98,8 +98,8 @@ pub enum WriteStatus {
     LocalOnly,
     Pending,
     Publishing,
-    Published(PublishedPosition),
-    Conflict(SerializationConflict),
+    Published(Box<PublishedPosition>),
+    Conflict(Box<SerializationConflict>),
     Blocked(WriteBlock),
     Resolved(WriteResolution),
 }
@@ -130,8 +130,8 @@ pub struct PendingWrite {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingBranch {
     pub branch_id: PendingBranchId,
-    pub base: Option<CommitPosition>,
-    pub current: Option<CommitPosition>,
+    pub base: StoreSerialPredecessor,
+    pub current: StoreSerialPredecessor,
     pub writes: Vec<PendingWrite>,
 }
 
