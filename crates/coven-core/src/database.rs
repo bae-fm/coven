@@ -66,6 +66,7 @@ const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
 pub const SERIAL_MEMBERSHIP_STATE_KEY: &str = "serial_membership_state";
 pub const SERIAL_KEY_GENERATION_STATE_KEY: &str = "serial_key_generation";
 pub const SERIAL_PROVIDER_ADMIN_STATE_KEY: &str = "serial_provider_admin_state";
+pub const SERIAL_WRAPPED_KEYS_STATE_KEY: &str = "serial_wrapped_keys";
 const SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY: &str = "serial_candidate_abandonment";
 const STORE_DEVICE_GENESIS_STATE_KEY: &str = "store_device_genesis_state";
 const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
@@ -13053,10 +13054,18 @@ impl Database {
                     "serialize Serial provider administrator state: {error}"
                 ))
             })?;
+        let wrapped_keys = serde_json::to_string(&authorization.active_wrapped_keys)
+            .map_err(|error| DbError::Message(format!("serialize Serial wrapped keys: {error}")))?;
         conn.execute(
             "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (SERIAL_MEMBERSHIP_STATE_KEY, membership),
+        )
+        .map_err(DbError::from)?;
+        conn.execute(
+            "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (SERIAL_WRAPPED_KEYS_STATE_KEY, wrapped_keys),
         )
         .map_err(DbError::from)?;
         conn.execute(
@@ -13096,9 +13105,12 @@ impl Database {
         let key_generation = self
             .get_protocol_state(SERIAL_KEY_GENERATION_STATE_KEY)
             .await?;
-        match (membership, provider_admin, key_generation) {
-            (None, None, None) => Ok(None),
-            (Some(membership), Some(provider_admin), Some(key_generation)) => {
+        let wrapped_keys = self
+            .get_protocol_state(SERIAL_WRAPPED_KEYS_STATE_KEY)
+            .await?;
+        match (membership, provider_admin, key_generation, wrapped_keys) {
+            (None, None, None, None) => Ok(None),
+            (Some(membership), Some(provider_admin), Some(key_generation), Some(wrapped_keys)) => {
                 let membership = serde_json::from_str(&membership).map_err(|error| {
                     DbError::Message(format!("parse Serial membership state: {error}"))
                 })?;
@@ -13111,10 +13123,14 @@ impl Database {
                 let key_generation = key_generation.parse::<u64>().map_err(|error| {
                     DbError::Message(format!("parse Serial key generation: {error}"))
                 })?;
+                let active_wrapped_keys = serde_json::from_str(&wrapped_keys).map_err(|error| {
+                    DbError::Message(format!("parse Serial wrapped keys: {error}"))
+                })?;
                 Ok(Some(SerialAuthorizationState {
                     membership,
                     provider_admin,
                     key_generation,
+                    active_wrapped_keys,
                 }))
             }
             _ => Err(DbError::Message(
@@ -13148,12 +13164,13 @@ impl Database {
         }
         let existing_state: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM protocol_state WHERE key IN (?1, ?2, ?3, ?4)",
+                "SELECT COUNT(*) FROM protocol_state WHERE key IN (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![
                     crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
                     SERIAL_MEMBERSHIP_STATE_KEY,
                     SERIAL_KEY_GENERATION_STATE_KEY,
                     SERIAL_PROVIDER_ADMIN_STATE_KEY,
+                    SERIAL_WRAPPED_KEYS_STATE_KEY,
                 ],
                 |row| row.get(0),
             )
@@ -13174,6 +13191,10 @@ impl Database {
                     "serialize Serial founder provider administrator state: {error}"
                 ))
             })?;
+        let wrapped_keys =
+            serde_json::to_string(&authorization.active_wrapped_keys).map_err(|error| {
+                DbError::Message(format!("serialize Serial founder wrapped keys: {error}"))
+            })?;
         for (key, value) in [
             (
                 crate::sync::membership_ops::OWNER_PUBKEY_STATE_KEY,
@@ -13185,6 +13206,7 @@ impl Database {
                 SERIAL_KEY_GENERATION_STATE_KEY,
                 authorization.key_generation.to_string(),
             ),
+            (SERIAL_WRAPPED_KEYS_STATE_KEY, wrapped_keys),
         ] {
             conn.execute(
                 "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
@@ -13256,10 +13278,20 @@ impl Database {
                     ))
                 },
             )?;
+            let wrapped_keys = serde_json::to_string(&authorization.active_wrapped_keys)
+                .map_err(|error| {
+                    DbError::Message(format!("serialize Serial wrapped keys: {error}"))
+                })?;
             tx.execute(
                 "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (SERIAL_MEMBERSHIP_STATE_KEY, membership),
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (SERIAL_WRAPPED_KEYS_STATE_KEY, wrapped_keys),
             )
             .map_err(DbError::from)?;
             tx.execute(

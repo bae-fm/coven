@@ -343,7 +343,7 @@ pub async fn invite_member_with_coordination(
 
     // Create the invitation
     let invite_ts = hlc.now().to_string();
-    let join_info = super::invite::create_invitation_with_encryption_durable(
+    let (join_info, wrapped_key) = super::invite::create_invitation_with_encryption_durable(
         storage,
         cloud_home,
         store_root_hash,
@@ -395,7 +395,7 @@ pub async fn invite_member_with_coordination(
         store_name: store_name.to_string(),
         join_info,
         owner_pubkey,
-        key_author_pubkey: user_pubkey_hex,
+        wrapped_key,
         store_root: root_ref,
         membership_floor: crate::join_code::MembershipFloor::MergeConcurrent(membership_floor),
     })
@@ -409,9 +409,8 @@ struct SerialInvitePlan {
     invitee_email: Option<String>,
     role: MemberRole,
     desired_access: CloudAccessState,
-    prior_wrapped_key: Option<Vec<u8>>,
     invitee_was_member: bool,
-    wrapped_key: Vec<u8>,
+    wrapped_key: super::wrapped_store_key::PreparedWrappedStoreKey,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -426,21 +425,11 @@ enum SerialInviteProgress {
 async fn rollback_serial_invite(
     storage: &dyn SyncStorage,
     cloud_home: &dyn crate::storage::cloud::CloudHome,
-    author: &str,
     plan: &SerialInvitePlan,
 ) -> Result<(), MembershipOpsError> {
-    match plan.prior_wrapped_key.as_ref() {
-        Some(bytes) => {
-            storage
-                .put_wrapped_key(author, &plan.invitee_pubkey, bytes.clone())
-                .await?;
-        }
-        None => {
-            storage
-                .delete_wrapped_key(author, &plan.invitee_pubkey)
-                .await?
-        }
-    }
+    storage
+        .delete_protocol_object(&plan.wrapped_key.reference.object)
+        .await?;
     if !plan.invitee_was_member {
         let outcome = cloud_home
             .set_access(CloudAccessState::Absent {
@@ -515,13 +504,46 @@ async fn invite_serial_member(
                 .current_members()
                 .iter()
                 .any(|(pubkey, _)| pubkey == public_key_hex);
+            let authority_refs =
+                authorization.active_wrapped_keys_for(&crate::keys::public_key_hex(user_keypair));
+            let authorized_keyring = super::invite::load_authorized_owner_keyring(
+                storage,
+                root_ref.store_root_hash,
+                user_keypair,
+                &protocol_store_id,
+                &authority_refs,
+                encryption,
+            )
+            .await?;
+            if authorized_keyring.current_generation() != authorization.key_generation {
+                return Err(MembershipOpsError::Invite(
+                    InviteError::InvalidDurableMutation(format!(
+                        "authorized key generation {} differs from committed Serial generation {}",
+                        authorized_keyring.current_generation(),
+                        authorization.key_generation
+                    )),
+                ));
+            }
+            let wrapped_key = super::wrapped_store_key::prepare_wrapped_store_key(
+                storage,
+                root_ref.store_root_hash,
+                public_key_hex,
+                super::invite::signed_serial_wrapped_key(
+                    &protocol_store_id,
+                    public_key_hex,
+                    &authorized_keyring,
+                    user_keypair,
+                )?,
+            )
+            .await?;
             let entry = authorization
                 .membership
-                .signed_set_member(
+                .signed_set_member_with_wrapped_key(
                     user_keypair,
                     public_key_hex.to_string(),
                     invitee_email.map(str::to_string),
                     role.clone(),
+                    wrapped_key.reference.clone(),
                     hlc.now().to_string(),
                 )
                 .map_err(|error| {
@@ -538,19 +560,6 @@ async fn invite_serial_member(
                 user_keypair,
             )
             .await?;
-            let wrapped_key = super::invite::signed_serial_wrapped_key(
-                &protocol_store_id,
-                public_key_hex,
-                encryption,
-                user_keypair,
-                prepared.commit_ref.clone(),
-            )?;
-            let author = crate::keys::public_key_hex(user_keypair);
-            let prior_wrapped_key = match storage.get_wrapped_key(&author, public_key_hex).await {
-                Ok(bytes) => Some(bytes),
-                Err(StorageError::NotFound(_)) => None,
-                Err(error) => return Err(error.into()),
-            };
             let plan = SerialInvitePlan {
                 prepared,
                 invitee_pubkey: public_key_hex.to_string(),
@@ -560,7 +569,6 @@ async fn invite_serial_member(
                     member_pubkey: public_key_hex.to_string(),
                     provider_account_email: invitee_email.map(str::to_string),
                 },
-                prior_wrapped_key,
                 invitee_was_member,
                 wrapped_key,
             };
@@ -619,13 +627,12 @@ async fn invite_serial_member(
                 join_info.clone()
             }
         };
-    let author = crate::keys::public_key_hex(user_keypair);
     if let Err(error) = storage
-        .put_wrapped_key(&author, &plan.invitee_pubkey, plan.wrapped_key.clone())
+        .create_protocol_object(&plan.wrapped_key.object)
         .await
     {
         if error.definitely_uncommitted() {
-            rollback_serial_invite(storage, cloud_home, &author, &plan).await?;
+            rollback_serial_invite(storage, cloud_home, &plan).await?;
             db.complete_membership_mutation(intent_hash)
                 .await
                 .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
@@ -637,7 +644,7 @@ async fn invite_serial_member(
     {
         Ok(()) => {}
         Err(error) if error.definitely_uncommitted() => {
-            rollback_serial_invite(storage, cloud_home, &author, &plan).await?;
+            rollback_serial_invite(storage, cloud_home, &plan).await?;
             db.complete_membership_mutation(intent_hash)
                 .await
                 .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
@@ -663,7 +670,7 @@ async fn invite_serial_member(
         store_name: store_name.to_string(),
         join_info,
         owner_pubkey: root.descriptor.founder_pubkey,
-        key_author_pubkey: crate::keys::public_key_hex(user_keypair),
+        wrapped_key: plan.wrapped_key.reference.clone(),
         store_root: root_ref,
         membership_floor: crate::join_code::MembershipFloor::Serial(Some(
             plan.prepared.commit_ref.clone(),
@@ -674,9 +681,7 @@ async fn invite_serial_member(
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerialReplacementWrap {
-    recipient: String,
-    prior: Option<Vec<u8>>,
-    replacement: Option<Vec<u8>>,
+    prepared: super::wrapped_store_key::PreparedWrappedStoreKey,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -692,18 +697,12 @@ struct SerialRemovalPlan {
 async fn rollback_serial_removal(
     storage: &dyn SyncStorage,
     cloud_home: &dyn crate::storage::cloud::CloudHome,
-    author: &str,
     plan: &SerialRemovalPlan,
 ) -> Result<(), MembershipOpsError> {
     for wrap in &plan.wraps {
-        match wrap.prior.as_ref() {
-            Some(bytes) => {
-                storage
-                    .put_wrapped_key(author, &wrap.recipient, bytes.clone())
-                    .await?
-            }
-            None => storage.delete_wrapped_key(author, &wrap.recipient).await?,
-        }
+        storage
+            .delete_protocol_object(&wrap.prepared.reference.object)
+            .await?;
     }
     let outcome = cloud_home
         .set_access(CloudAccessState::Present {
@@ -736,6 +735,7 @@ async fn remove_serial_member(
     new_key: [u8; 32],
     db: &Database,
 ) -> Result<EncryptionService, MembershipOpsError> {
+    let root_ref = required_store_root_ref(db).await?;
     let _mutation = db.lock_membership_mutation().await;
     let (plan, intent_hash) = match db
         .outbound_membership_mutation()
@@ -760,11 +760,22 @@ async fn remove_serial_member(
             let authorization =
                 super::store_outbound::current_serial_authorization(db, storage, coordination)
                     .await?;
-            if current_encryption.current_generation() != authorization.key_generation {
+            let authority_refs =
+                authorization.active_wrapped_keys_for(&crate::keys::public_key_hex(user_keypair));
+            let current_keyring = super::invite::load_authorized_owner_keyring(
+                storage,
+                root_ref.store_root_hash,
+                user_keypair,
+                store_id,
+                &authority_refs,
+                current_encryption,
+            )
+            .await?;
+            if current_keyring.current_generation() != authorization.key_generation {
                 return Err(MembershipOpsError::Invite(
                     InviteError::InvalidDurableMutation(format!(
-                        "live key generation {} differs from committed Serial generation {}",
-                        current_encryption.current_generation(),
+                        "authorized key generation {} differs from committed Serial generation {}",
+                        current_keyring.current_generation(),
                         authorization.key_generation
                     )),
                 ));
@@ -796,53 +807,51 @@ async fn remove_serial_member(
                     "Serial key generation overflow".to_string(),
                 ))
             })?;
-            let prepared = super::store_outbound::prepare_serial_control(
-                db,
-                storage,
-                coordination,
-                device_id,
-                StoreControl::SerialMembershipAndKeyRotation { entry, generation },
-                user_keypair,
-            )
-            .await?;
-            let new_keyring = current_encryption
+            let new_keyring = current_keyring
                 .with_appended_generation(generation, new_key)
                 .map_err(|error| {
                     MembershipOpsError::Invite(InviteError::Crypto(format!(
                         "append Serial key generation: {error}"
                     )))
                 })?;
-            let author = crate::keys::public_key_hex(user_keypair);
+            let membership_after = authorization.membership.apply(&entry).map_err(|error| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(error.to_string()))
+            })?;
             let mut wraps = Vec::new();
-            for (recipient, _) in prepared.authorization_after.membership.current_members() {
-                let prior = match storage.get_wrapped_key(&author, &recipient).await {
-                    Ok(bytes) => Some(bytes),
-                    Err(StorageError::NotFound(_)) => None,
-                    Err(error) => return Err(error.into()),
-                };
-                let replacement = super::invite::signed_serial_wrapped_key(
-                    store_id,
-                    &recipient,
-                    &new_keyring,
-                    user_keypair,
-                    prepared.commit_ref.clone(),
-                )?;
+            for (recipient, _) in membership_after.current_members() {
                 wraps.push(SerialReplacementWrap {
-                    recipient,
-                    prior,
-                    replacement: Some(replacement),
+                    prepared: super::wrapped_store_key::prepare_wrapped_store_key(
+                        storage,
+                        root_ref.store_root_hash,
+                        &recipient,
+                        super::invite::signed_serial_wrapped_key(
+                            store_id,
+                            &recipient,
+                            &new_keyring,
+                            user_keypair,
+                        )?,
+                    )
+                    .await?,
                 });
             }
-            let revokee_prior = match storage.get_wrapped_key(&author, public_key_hex).await {
-                Ok(bytes) => Some(bytes),
-                Err(StorageError::NotFound(_)) => None,
-                Err(error) => return Err(error.into()),
-            };
-            wraps.push(SerialReplacementWrap {
-                recipient: public_key_hex.to_string(),
-                prior: revokee_prior,
-                replacement: None,
-            });
+            wraps.sort_by(|left, right| left.prepared.reference.cmp(&right.prepared.reference));
+            let wrapped_keys = wraps
+                .iter()
+                .map(|wrap| wrap.prepared.reference.clone())
+                .collect();
+            let prepared = super::store_outbound::prepare_serial_control(
+                db,
+                storage,
+                coordination,
+                device_id,
+                StoreControl::SerialMembershipAndKeyRotation {
+                    entry,
+                    generation,
+                    wrapped_keys,
+                },
+                user_keypair,
+            )
+            .await?;
             let keyring_payload = new_keyring.to_keyring_payload().map_err(|error| {
                 MembershipOpsError::Invite(InviteError::Crypto(format!(
                     "serialize Serial rotated keyring: {error}"
@@ -860,7 +869,11 @@ async fn remove_serial_member(
                     "serialize Serial removal plan: {error}"
                 )))
             })?;
-            let progress = serde_json::to_vec(&SerialInviteProgress::Pending).unwrap();
+            let progress = serde_json::to_vec(&SerialInviteProgress::Pending).map_err(|error| {
+                MembershipOpsError::Invite(InviteError::InvalidDurableMutation(format!(
+                    "serialize Serial removal progress: {error}"
+                )))
+            })?;
             let intent_hash = db
                 .stage_membership_mutation(plan_bytes, progress)
                 .await
@@ -882,19 +895,11 @@ async fn remove_serial_member(
             ),
         ));
     }
-    let author = crate::keys::public_key_hex(user_keypair);
     for wrap in &plan.wraps {
-        let result = match wrap.replacement.as_ref() {
-            Some(bytes) => {
-                storage
-                    .put_wrapped_key(&author, &wrap.recipient, bytes.clone())
-                    .await
-            }
-            None => storage.delete_wrapped_key(&author, &wrap.recipient).await,
-        };
+        let result = storage.create_protocol_object(&wrap.prepared.object).await;
         if let Err(error) = result {
             if error.definitely_uncommitted() {
-                rollback_serial_removal(storage, cloud_home, &author, &plan).await?;
+                rollback_serial_removal(storage, cloud_home, &plan).await?;
                 db.complete_membership_mutation(intent_hash)
                     .await
                     .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
@@ -907,7 +912,7 @@ async fn remove_serial_member(
     {
         Ok(()) => {}
         Err(error) if error.definitely_uncommitted() => {
-            rollback_serial_removal(storage, cloud_home, &author, &plan).await?;
+            rollback_serial_removal(storage, cloud_home, &plan).await?;
             db.complete_membership_mutation(intent_hash)
                 .await
                 .map_err(|db_error| MembershipOpsError::Database(db_error.to_string()))?;
@@ -1196,7 +1201,7 @@ async fn traverse_exact_membership_stream(
             "membership stream uses a recovery anchor".to_string(),
         ));
     };
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreMembershipHead,
     );
@@ -1458,7 +1463,7 @@ pub(crate) async fn load_exact_membership_head(
     reference: &MembershipHeadRef,
 ) -> Result<AuthorHead, AnchoredChainError> {
     let coord = &reference.coord;
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreMembershipHead,
     );
@@ -1962,7 +1967,7 @@ mod tests {
             .delete_protocol_object(&reference.object)
             .await
             .expect("delete exact head before replacement");
-        let context = ProtocolObjectContext::store(
+        let context = ProtocolObjectContext::signed_plaintext(
             fixture.store.root.store_root_hash,
             ProtocolObjectDomain::StoreMembershipHead,
         );

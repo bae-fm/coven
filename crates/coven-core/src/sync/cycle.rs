@@ -486,74 +486,50 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     // aborts the cycle and retries next time — a refresh that can't complete must
     // not also corrupt state. Adoption itself failing is not this kind of failure —
     // see `rotation_pending` below.
-    if let Some(ch) = cloud_home {
-        let (current_owners, visible_activations) =
-            match (merge_membership.as_ref(), serial_authorization.as_ref()) {
-                (Some(membership), None) => {
-                    let chain = match (
-                        membership.pinned_owner.as_deref(),
-                        membership.chain.as_ref(),
-                    ) {
-                        (Some(_), Some(chain)) => chain,
-                        (None, _) => {
-                            return Err("MergeConcurrent cycle has no pinned membership founder"
-                                .to_string()
-                                .into())
-                        }
-                        (Some(owner), None) => {
-                            return Err(format!(
-                                "owner {owner} is pinned but the cycle has no membership chain"
-                            )
-                            .into())
-                        }
-                    };
-                    let owners: Vec<String> = chain
-                        .current_members()
-                        .into_iter()
-                        .filter_map(|(pubkey, role)| {
-                            (role == super::membership::MemberRole::Owner).then_some(pubkey)
-                        })
-                        .collect();
-                    let visible = membership
-                        .listed_entries
-                        .iter()
-                        .cloned()
-                        .map(super::wrapped_store_key::WrappedKeyActivation::MergeConcurrent)
-                        .collect();
-                    (owners, visible)
-                }
-                (None, Some(serial)) => {
-                    let owners: Vec<String> = serial
-                        .authorization
-                        .membership
-                        .current_members()
-                        .into_iter()
-                        .filter_map(|(pubkey, role)| {
-                            (role == super::membership::MemberRole::Owner).then_some(pubkey)
-                        })
-                        .collect();
-                    (owners, serial.visible_activations.clone())
-                }
-                _ => {
-                    return Err("cycle has no single policy-shaped membership state"
+    let recipient = crate::keys::public_key_hex(user_keypair);
+    let wrapped_keys = match (merge_membership.as_ref(), serial_authorization.as_ref()) {
+        (Some(membership), None) => {
+            let chain = match (
+                membership.pinned_owner.as_deref(),
+                membership.chain.as_ref(),
+            ) {
+                (Some(_), Some(chain)) => chain,
+                (None, _) => {
+                    return Err("MergeConcurrent cycle has no pinned membership founder"
                         .to_string()
                         .into())
                 }
+                (Some(owner), None) => {
+                    return Err(format!(
+                        "owner {owner} is pinned but the cycle has no membership chain"
+                    )
+                    .into())
+                }
             };
-        refresh_authorization_state(
-            ch,
-            cipher,
-            pending_rotation,
-            db,
-            user_keypair,
-            custody,
-            &protocol_store_id,
-            &current_owners,
-            &visible_activations,
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("refresh authorization state", error))?;
-    }
+            chain
+                .wrapped_key_authority_for(&recipient)
+                .map_err(|error| error.to_string())?
+        }
+        (None, Some(serial)) => serial.authorization.active_wrapped_keys_for(&recipient),
+        _ => {
+            return Err("cycle has no single policy-shaped membership state"
+                .to_string()
+                .into())
+        }
+    };
+    refresh_authorization_state(
+        storage,
+        store_root_hash,
+        cipher,
+        pending_rotation,
+        db,
+        user_keypair,
+        custody,
+        &protocol_store_id,
+        &wrapped_keys,
+    )
+    .await
+    .map_err(|error| SyncCycleFailure::operation("refresh authorization state", error))?;
 
     // Whether this device has adopted everything the store has committed. Read
     // once, right after the refresh that is the one place this cycle could adopt
@@ -563,9 +539,8 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     // write drain, both changeset-push paths, and the snapshot. Pull, local writes,
     // and delete-only tombstone GC are unaffected — the gate
     // is on sealing for the cloud, not on using the store. An unadoptable
-    // rotation — including one whose activation entry is not yet visible — is
-    // marked pending by the refresh and pauses exactly this set; it never aborts
-    // the cycle.
+    // rotation is marked pending by the refresh and pauses exactly this set; it
+    // never aborts the cycle.
     let rotation_pending = pending_rotation.check(&cipher.snapshot()).err();
     if let Some(pending) = &rotation_pending {
         warn!(
@@ -1063,7 +1038,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
 /// cycle, or custody's own persist fails) is not a reason to abort the cycle —
 /// `pending_rotation` marks the committed generation instead, and the caller
 /// gates every seal on it for the rest of this cycle. Membership state that
-/// can't be resolved at all (an invisible activation, a read failure) still
+/// can't be resolved at all (a conflict or exact-object read failure) still
 /// aborts: those mean this device doesn't reliably know the current state, which
 /// is a different condition from "knows the state and can't adopt it yet".
 #[derive(Debug, thiserror::Error)]
@@ -1078,15 +1053,15 @@ enum AuthorizationRefreshError {
 
 #[allow(clippy::too_many_arguments)]
 async fn refresh_authorization_state(
-    cloud_home: &dyn CloudHome,
+    storage: &dyn SyncStorage,
+    store_root_hash: super::store_commit::ObjectHash,
     cipher: &dyn CloudCipherAccess,
     pending_rotation: &PendingRotation,
     db: &Database,
     user_keypair: &UserKeypair,
     custody: Option<&dyn MasterKeyCustody>,
     store_id: &str,
-    current_owners: &[String],
-    visible_activations: &[super::wrapped_store_key::WrappedKeyActivation],
+    wrapped_keys: &[super::wrapped_store_key::WrappedStoreKeyRef],
 ) -> Result<(), AuthorizationRefreshError> {
     // A plaintext home has no encrypted store key to rotate. Its membership
     // chain remains load-bearing elsewhere in the cycle.
@@ -1095,14 +1070,11 @@ async fn refresh_authorization_state(
         return Ok(());
     }
 
-    // 2. Adopt a rotated store key. Scan the current Owners' prefixes for this
-    //    device's re-wrapped key (`keys/{owner}/{self}`), authenticating each
-    //    against the owner whose prefix it sits under and taking the highest
-    //    generation. The signature binds (store_id, recipient, author, sealed),
-    //    so a bucket writer can't substitute it, relocate it, or change its signer.
-    //    If the decrypted keyring carries a strictly newer generation, swap the
-    //    live cipher (and persist to the keyring) via `apply_key_rotation`, so
-    //    this same cycle's push/pull/blob ops use it.
+    // Adopt every exact wrapped-key ref selected by current membership or Serial
+    // commit authority. Each ref binds its semantic path and bytes; the value's
+    // signature binds the Store, recipient, generation, author, and sealed keyring.
+    // A new key is persisted and installed through `apply_key_rotation`, so this
+    // same cycle's push, pull, and blob operations use it.
     let live_keyring = match cipher.snapshot() {
         super::cloud_storage::CloudCipher::Encrypted(encryption) => encryption,
         super::cloud_storage::CloudCipher::Plaintext => {
@@ -1111,29 +1083,32 @@ async fn refresh_authorization_state(
             ))
         }
     };
-    match super::invite::unwrap_store_keyring_for_owners_with_activation(
-        cloud_home,
+    if wrapped_keys.is_empty() {
+        debug!("refresh: no activated wrapped key for this device; keeping the live key");
+        return Ok(());
+    }
+    match super::invite::unwrap_store_keyring_for_refs(
+        storage,
+        store_root_hash,
         user_keypair,
         store_id,
-        current_owners.iter().map(String::as_str),
-        Some(visible_activations),
+        wrapped_keys,
     )
     .await
     {
         Ok(new_encryption) => {
             // Key identity is the key itself, not its generation number: adopt if
-            // the scan resolved any key the live keyring does not already hold —
+            // the authority resolved any key the live keyring does not already hold —
             // including a fork at the SAME generation number two owners minted at
             // once, which a generation comparison would wrongly ignore. Merging
             // (not comparing generations) is what makes a concurrent-rotation fork
             // converge instead of partition.
             let merged = live_keyring.merged_with(&new_encryption);
             if merged.key_count() == live_keyring.key_count() {
-                // Every key this scan resolved is already held. Not adopted — and,
+                // Every authority-selected key is already held. Not adopted — and,
                 // crucially, `pending_rotation` is NOT cleared here (only a
-                // successful adoption clears it), so an earlier mark that a stale
-                // rescan (a decoy wrap from a non-rotating owner, or a LIST lag)
-                // can't re-observe still survives.
+                // successful adoption clears it), so an earlier failed local
+                // adoption remains visible until that key is installed.
                 debug!("refresh: wrapped store key adds nothing new; keeping the live keyring");
             } else {
                 match custody {
@@ -1162,37 +1137,6 @@ async fn refresh_authorization_state(
                     }
                 }
             }
-        }
-        // No wrapped key for this device under any current owner: a solo store
-        // that has never shared (its creation key is the store key), or a device
-        // removed from the store (each owner deleted its `keys/{owner}/{self}`).
-        // Nothing to adopt; keep the live key. A *remaining* member always has a
-        // `keys/{owner}/{self}` re-wrapped on rotation, so this is never a current
-        // member silently stuck on a stale key.
-        Err(super::invite::InviteError::CloudHome(
-            crate::storage::cloud::CloudHomeError::NotFound(_),
-        )) => {
-            debug!("refresh: no wrapped key for this device; keeping the live key");
-        }
-        Err(super::invite::InviteError::InactiveWrappedKey {
-            activation,
-            generation,
-        }) => {
-            // A rotated wrap whose activation entry is not yet visible names a
-            // committed generation this device cannot yet adopt (an owner
-            // overwrote the wrap before its Remove entry uploaded, or the reader's
-            // LIST lags the entry). This is a pending rotation, not a cycle
-            // failure: pause sealing at the wrap's committed generation and let
-            // the cycle proceed — pull and local writes run, every seal path is
-            // gated on `rotation_pending`. Adoption completes on a later cycle
-            // once the activation entry is visible.
-            pending_rotation.mark_committed(generation);
-            info!(
-                committed_generation = generation,
-                activation = ?activation,
-                "refresh: a rotated wrapped store key's activation entry is not yet \
-                 visible; sealing is paused until it is and this device adopts"
-            );
         }
         Err(error) => return Err(AuthorizationRefreshError::WrappedKey(error)),
     }
@@ -1454,8 +1398,7 @@ pub async fn ensure_owner_anchored_chain(
     .await
     .map_err(|error| error.to_string())?;
     let founder = chain
-        .entries()
-        .first()
+        .founder_entry()
         .ok_or_else(|| "membership founder is absent from Store membership chain".to_string())?;
     if store_protocol_root
         .descriptor

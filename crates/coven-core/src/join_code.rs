@@ -8,7 +8,7 @@ use crate::sync::membership::{MembershipCoord, MembershipGrantId};
 #[cfg(test)]
 use crate::sync::store_commit::ObjectHash;
 
-pub const INVITE_CODE_VERSION: u8 = 3;
+pub const INVITE_CODE_VERSION: u8 = 4;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -41,7 +41,7 @@ pub struct InviteCode {
     pub store_name: String,
     pub join_info: CloudHomeJoinInfo,
     pub owner_pubkey: String,
-    pub key_author_pubkey: String,
+    pub wrapped_key: crate::sync::wrapped_store_key::WrappedStoreKeyRef,
     pub store_root: crate::sync::store_commit::StoreRootRef,
     /// The exact membership state the joiner must observe: causal author
     /// heads for MergeConcurrent stores, or the exact global commit for Serial
@@ -75,10 +75,19 @@ pub fn decode(s: &str) -> Result<InviteCode, JoinCodeError> {
         .map_err(JoinCodeError::InvalidOwnerPubkey)?;
     crate::sync::restore_code::decode_hex_bytes(
         "wrapped-key author public key",
-        &code.key_author_pubkey,
+        &code.wrapped_key.owner_pubkey,
         32,
     )
-    .map_err(JoinCodeError::InvalidOwnerPubkey)?;
+    .map_err(|error| JoinCodeError::InvalidWrappedKey(error.to_string()))?;
+    crate::sync::restore_code::decode_hex_bytes(
+        "wrapped-key recipient public key",
+        &code.wrapped_key.recipient_pubkey,
+        32,
+    )
+    .map_err(|error| JoinCodeError::InvalidWrappedKey(error.to_string()))?;
+    code.wrapped_key
+        .validate_identity()
+        .map_err(|error| JoinCodeError::InvalidWrappedKey(error.to_string()))?;
     match &code.membership_floor {
         MembershipFloor::MergeConcurrent(floor) => {
             if floor.is_empty() {
@@ -187,6 +196,8 @@ pub enum JoinCodeError {
         "The owner key in this invite code is invalid. Ask the inviter to generate a new one. ({0})"
     )]
     InvalidOwnerPubkey(String),
+    #[error("The wrapped key in this invite code is invalid. Ask the inviter to generate a new one. ({0})")]
+    InvalidWrappedKey(String),
     #[error("The invite code has no membership floor. Ask the inviter to generate a new one.")]
     EmptyMembershipFloor,
     #[error("The membership floor in this invite code is invalid. Ask the inviter to generate a new one. ({0})")]
@@ -236,6 +247,26 @@ mod tests {
         }]
     }
 
+    fn test_wrapped_key() -> crate::sync::wrapped_store_key::WrappedStoreKeyRef {
+        let owner = test_owner_pubkey();
+        let recipient = hex::encode([0xCD_u8; 32]);
+        let wrap_hash = ObjectHash::digest(b"invite wrapped key");
+        crate::sync::wrapped_store_key::WrappedStoreKeyRef {
+            owner_pubkey: owner.clone(),
+            recipient_pubkey: recipient.clone(),
+            generation: 1,
+            wrap_hash,
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(format!(
+                    "keys/{owner}/{recipient}/1/{wrap_hash}.json"
+                ))
+                .expect("valid test wrapped-key slot"),
+                4,
+                ObjectHash::digest(b"wrap"),
+            ),
+        }
+    }
+
     fn sample_s3_code(store_id: &str) -> InviteCode {
         InviteCode {
             v: INVITE_CODE_VERSION,
@@ -250,7 +281,7 @@ mod tests {
                 key_prefix: None,
             },
             owner_pubkey: test_owner_pubkey(),
-            key_author_pubkey: test_owner_pubkey(),
+            wrapped_key: test_wrapped_key(),
             store_root: crate::sync::store_commit::StoreRootRef {
                 store_root_id: crate::sync::store_commit::ObjectHash::digest(
                     b"invite store protocol root",
@@ -495,6 +526,34 @@ mod tests {
         assert!(matches!(
             decode(&encoded),
             Err(JoinCodeError::InvalidOwnerPubkey(_))
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_a_relocated_wrapped_key_reference() {
+        let mut code = sample_s3_code("lib-relocated-wrap");
+        code.wrapped_key.object = crate::sync::storage::ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(
+                "keys/attacker/recipient/1/different.json".to_string(),
+            )
+            .expect("syntactically valid but semantically relocated slot"),
+            4,
+            ObjectHash::digest(b"wrap"),
+        );
+        assert!(matches!(
+            decode(&encode(&code)),
+            Err(JoinCodeError::InvalidWrappedKey(_))
+        ));
+    }
+
+    #[test]
+    fn decode_reports_an_invalid_wrapped_key_recipient_as_a_wrapped_key_error() {
+        let mut code = sample_s3_code("lib-invalid-wrap-recipient");
+        code.wrapped_key.recipient_pubkey = "not-a-public-key".to_string();
+
+        assert!(matches!(
+            decode(&encode(&code)),
+            Err(JoinCodeError::InvalidWrappedKey(_))
         ));
     }
 

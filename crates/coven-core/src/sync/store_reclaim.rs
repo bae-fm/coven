@@ -176,7 +176,7 @@ async fn choose_snapshot(
                 }
             };
             if owner {
-                let context = ProtocolObjectContext::store(
+                let context = ProtocolObjectContext::store_encrypted(
                     root.store_root_hash,
                     ProtocolObjectDomain::StoreSnapshotImage,
                 );
@@ -222,7 +222,7 @@ async fn load_snapshot_stream(
             ))
         }
     };
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreSnapshotMeta,
     );
@@ -299,8 +299,10 @@ async fn load_ack_stream(
             ))
         }
     };
-    let context =
-        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreAck);
+    let context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreAck,
+    );
     let mut sequence = 1_u64;
     let mut predecessor = None;
     let mut acknowledgements = Vec::new();

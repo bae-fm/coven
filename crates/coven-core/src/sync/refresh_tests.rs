@@ -17,20 +17,21 @@ use crate::clock::SystemClock;
 use crate::encryption::EncryptionService;
 use crate::keys::{MasterKeyCustody, UserKeypair};
 use crate::store_dir::StoreDir;
-use crate::sync::cloud_storage::{CloudCipher, PendingRotation, PENDING_ROTATION_STATE_KEY};
+use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
 use crate::sync::invite::{
-    revoke_member_durable, signed_wrapped_key_for_test, signed_wrapped_keyring_for_test,
-    unwrap_store_keyring_for_owners_with_activation,
+    revoke_member_durable, signed_wrapped_keyring_for_test, unwrap_store_keyring_for_refs,
 };
-use crate::sync::membership::{MemberRole, MembershipChain, MembershipCoord};
+use crate::sync::membership::{MemberRole, MembershipChain};
 use crate::sync::membership_ops::{invite_member, remove_member, MembershipOpsError};
 use crate::sync::storage::SyncStorage;
 use crate::sync::test_helpers::{
     capture_bytes, open_test_db, pubkey_hex, temp_store_dir, TestCustody, TestStore,
 };
-use crate::sync::wrapped_store_key::WrappedKeyActivation;
+use crate::sync::wrapped_store_key::{
+    load_wrapped_store_key, prepare_wrapped_store_key, WrappedStoreKeyRef,
+};
 
 const LIB_ID: &str = "lib-refresh-test";
 
@@ -97,6 +98,36 @@ async fn load_exact_chain(storage: &TestStore, db: &crate::database::Database) -
         .open_into(db)
         .await
         .expect("load exact refresh membership chain")
+}
+
+async fn create_unreferenced_wrapped_key(
+    storage: &TestStore,
+    recipient: &UserKeypair,
+    encryption: &EncryptionService,
+    signer: &UserKeypair,
+) -> WrappedStoreKeyRef {
+    let recipient_pubkey = pubkey_hex(recipient);
+    let wrapped = signed_wrapped_keyring_for_test(
+        &storage.root.store_root_id.to_string(),
+        &recipient_pubkey,
+        &recipient.to_x25519_public_key(),
+        encryption,
+        signer,
+    );
+    let prepared = prepare_wrapped_store_key(
+        &storage.storage,
+        storage.root.store_root_hash,
+        &recipient_pubkey,
+        wrapped,
+    )
+    .await
+    .expect("prepare exact wrapped Store key");
+    storage
+        .storage
+        .create_protocol_object(&prepared.object)
+        .await
+        .expect("create exact wrapped Store key");
+    prepared.reference
 }
 
 /// Run one real sync cycle for `device_id` over the test Store's encrypted home,
@@ -351,43 +382,12 @@ impl SyncStorage for MembershipReadCounter<'_> {
     ) -> Result<(), crate::sync::storage::StorageError> {
         self.inner.delete_blob_object(blob).await
     }
-
-    async fn put_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-        data: Vec<u8>,
-    ) -> Result<(), crate::sync::storage::StorageError> {
-        self.inner
-            .put_wrapped_key(owner_pubkey, recipient_pubkey, data)
-            .await
-    }
-
-    async fn get_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-    ) -> Result<Vec<u8>, crate::sync::storage::StorageError> {
-        self.inner
-            .get_wrapped_key(owner_pubkey, recipient_pubkey)
-            .await
-    }
-
-    async fn delete_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-    ) -> Result<(), crate::sync::storage::StorageError> {
-        self.inner
-            .delete_wrapped_key(owner_pubkey, recipient_pubkey)
-            .await
-    }
 }
 
 /// A non-rotating running device B adopts a rotated store key on its next cycle,
 /// with no restart. Device A removes a member, which rotates the key and re-wraps
-/// B's `keys/{A}/{B}` under the new key; B's next `run_single_sync_cycle` re-reads
-/// that wrapped key, authenticates it against the current Owner set, and swaps
+/// an immutable key object for B and names it in the removal authority; B's next
+/// `run_single_sync_cycle` reads that exact object, authenticates it, and swaps
 /// its live cipher — so it can now decrypt content sealed under the new key, and
 /// its keyring holds the new key for the next restart.
 ///
@@ -400,7 +400,6 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     let owner = UserKeypair::generate(); // device A, the founder/owner
     let device_b = UserKeypair::generate();
     let victim = UserKeypair::generate(); // the member A will remove
-    let owner_pk = pubkey_hex(&owner);
     let old_key: [u8; 32] = [11u8; 32];
 
     let encryption = EncryptionService::from_key(old_key);
@@ -423,21 +422,6 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         &encryption,
     )
     .await;
-
-    // The owner wraps the OLD key for B (what B adopted at join), signed by the
-    // owner B pins, so B's refresh can authenticate it.
-    let b_x = device_b.to_x25519_public_key();
-    let wrapped_old = signed_wrapped_key_for_test(
-        &storage.root.store_root_id.to_string(),
-        &pubkey_hex(&device_b),
-        &b_x,
-        &old_key,
-        &owner,
-    );
-    storage
-        .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&device_b), wrapped_old)
-        .await
-        .unwrap();
 
     // B's local state: pinned owner + its keyring holds the OLD key + its live
     // cipher is the OLD key. This is the just-joined steady state.
@@ -468,7 +452,7 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         "before any rotation B keeps the key it joined with",
     );
 
-    // --- Device A removes the victim: rotates the key, re-wraps B's keys/{A}/{B}. ---
+    // Device A removes the victim, rotates the key, and activates B's new exact wrap.
     let new_key = revoke_member_durable(
         &storage.storage,
         storage.home.as_ref(),
@@ -517,19 +501,14 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
         "B persisted the rotated key to its keyring, so its restart reads the current key",
     );
 
-    // And the rotated key B now holds is exactly the one the owner re-wrapped for
-    // it — i.e. B can independently unwrap keys/{A}/{B} to the same bytes.
-    let visible_activations: Vec<_> = chain
-        .author_heads()
-        .into_iter()
-        .map(WrappedKeyActivation::MergeConcurrent)
-        .collect();
-    let reunwrapped = unwrap_store_keyring_for_owners_with_activation(
-        storage.home.as_ref(),
+    // The chain supplies the exact refs; no path search chooses the key.
+    let references = chain.active_wrapped_keys_for(&pubkey_hex(&device_b));
+    let reunwrapped = unwrap_store_keyring_for_refs(
+        &storage.storage,
+        storage.root.store_root_hash,
         &device_b,
         &storage.root.store_root_id.to_string(),
-        std::iter::once(owner_pk.as_str()),
-        Some(&visible_activations),
+        &references,
     )
     .await
     .expect("B can unwrap its re-wrapped key")
@@ -537,21 +516,73 @@ async fn non_rotating_device_adopts_rotated_key_without_restart() {
     assert_eq!(reunwrapped, new_key.key_bytes());
 }
 
-/// The mid-removal crash state: an owner overwrote this device's wrap with a
-/// rotated keyring whose activation (the Remove entry) is not yet visible, then
-/// crashed before uploading that entry. The device cannot adopt the rotation —
-/// but it holds a working old keyring and must not be wedged. The cycle
-/// COMPLETES: the refresh marks the rotation pending (at the wrap's committed
-/// generation, read from the signed envelope without opening the sealed box),
-/// the pull still applies a peer's changeset, the live cipher is untouched, and
-/// the pause is persisted. Nothing new is sealed — the seal paths are gated on
-/// `rotation_pending`.
 #[tokio::test]
-async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
+async fn invitation_after_rotation_uses_the_membership_selected_keyring() {
+    let owner = UserKeypair::generate();
+    let removed_member = UserKeypair::generate();
+    let invited_member = UserKeypair::generate();
+    let initial = EncryptionService::from_key([52u8; 32]);
+    let (storage, owner_db) = exact_store(&owner).await;
+    let mut chain = invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &removed_member,
+        MemberRole::Member,
+        &initial,
+    )
+    .await;
+    let rotated = revoke_member_durable(
+        &storage.storage,
+        storage.home.as_ref(),
+        storage.root.store_root_hash,
+        &mut chain,
+        &owner,
+        &pubkey_hex(&removed_member),
+        &storage.root.store_root_id.to_string(),
+        "0000000004000-0000-owner",
+        &initial,
+        &owner_db,
+    )
+    .await
+    .expect("remove member and rotate the Store key");
+
+    let chain = invite_exact_member(
+        &storage,
+        &owner_db,
+        &owner,
+        &invited_member,
+        MemberRole::Member,
+        &initial,
+    )
+    .await;
+    let invited_keyring = unwrap_store_keyring_for_refs(
+        &storage.storage,
+        storage.root.store_root_hash,
+        &invited_member,
+        &storage.root.store_root_id.to_string(),
+        &chain
+            .wrapped_key_authority_for(&pubkey_hex(&invited_member))
+            .expect("invited member has complete wrapped-key authority"),
+    )
+    .await
+    .expect("invited member opens the activated exact wrap");
+    let sealed = rotated.seal_app_data(b"current Store data", b"post-rotation invite");
+    assert_eq!(
+        invited_keyring
+            .open_app_data(&sealed, b"post-rotation invite")
+            .expect("invitation retains the current Store key"),
+        b"current Store data",
+    );
+}
+
+/// Creating a wrapped key cannot make it active. Until membership authority
+/// names its exact reference, refresh ignores it and continues with the
+/// authorized keyring.
+#[tokio::test]
+async fn unreferenced_wrapped_key_does_not_change_or_pause_the_cycle() {
     let owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
-    let victim = UserKeypair::generate();
-    let owner_pk = pubkey_hex(&owner);
     let old_key: [u8; 32] = [31u8; 32];
     let rotated_key: [u8; 32] = [32u8; 32];
 
@@ -568,48 +599,18 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         &encryption,
     )
     .await;
-    let chain = invite_exact_member(
-        &storage,
-        &owner_db,
-        &owner,
-        &victim,
-        MemberRole::Member,
-        &encryption,
-    )
-    .await;
-
-    let activation = MembershipCoord {
-        author_pubkey: owner_pk.clone(),
-        author_owner_grant: chain
-            .active_owner_grant(&owner_pk)
-            .expect("founder Owner grant"),
-        stream_id: chain
-            .preferred_author_stream(
-                &owner_pk,
-                &chain
-                    .active_owner_grant(&owner_pk)
-                    .expect("founder Owner grant"),
-            )
-            .expect("founder author stream"),
-        seq: 4,
-        entry_hash: crate::sync::store_commit::ObjectHash::digest(b"pending removal"),
-    };
+    let chain = load_exact_chain(&storage, &owner_db).await;
     let pending_keyring = EncryptionService::from_key(old_key)
         .with_appended_generation(2, rotated_key)
         .unwrap();
-    let b_x = device_b.to_x25519_public_key();
-    let pending_wrapped = signed_wrapped_keyring_for_test(
-        &storage.root.store_root_id.to_string(),
-        &pubkey_hex(&device_b),
-        &b_x,
-        &pending_keyring,
-        &owner,
-        Some(activation),
+    let unreferenced =
+        create_unreferenced_wrapped_key(&storage, &device_b, &pending_keyring, &owner).await;
+    assert!(
+        !chain
+            .active_wrapped_keys_for(&pubkey_hex(&device_b))
+            .contains(&unreferenced),
+        "creating an exact object does not activate it",
     );
-    storage
-        .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&device_b), pending_wrapped)
-        .await
-        .unwrap();
 
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
@@ -626,17 +627,8 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         ],
     )
     .await;
-    let peer_sequence = u64::try_from(chain.entries().len())
-        .expect("membership entry count fits Store sequence")
-        .checked_add(1)
-        .expect("Store sequence does not overflow");
     storage
-        .publish_changeset(
-            "owner-device",
-            peer_sequence,
-            &peer_cs,
-            db_b.schema_version(),
-        )
+        .publish_changeset("owner-device", 4, &peer_cs, db_b.schema_version())
         .await
         .expect("publish exact owner changeset");
 
@@ -655,29 +647,25 @@ async fn inactive_removal_key_pauses_sealing_but_completes_the_cycle() {
         Some(&ks_b),
     )
     .await
-    .expect("the cycle completes; an inactive removal key pauses sealing, it does not abort");
+    .expect("an unreferenced wrapped key does not affect the cycle");
 
     assert_eq!(
         result.changesets_applied, 1,
-        "the pull still applies a peer's changeset while sealing is paused",
+        "the pull still applies a peer's changeset",
     );
-    let pending = result
-        .rotation_pending
-        .expect("the inactive removal key marks the rotation pending");
-    assert_eq!(pending.committed_generation, 2);
-    assert_eq!(pending.live_generation, 1);
+    assert_eq!(result.rotation_pending, None);
     assert_eq!(
         cipher_key(&cipher_b),
         old_key,
-        "the inactive key must not replace the live cipher",
+        "an unreferenced key must not replace the live cipher",
     );
-    assert_eq!(
-        db_b.get_protocol_state(PENDING_ROTATION_STATE_KEY)
-            .await
-            .unwrap(),
-        Some("2".to_string()),
-        "the pause is persisted so a restart does not forget it and seal under the old generation",
-    );
+    load_wrapped_store_key(
+        &storage.storage,
+        storage.root.store_root_hash,
+        &unreferenced,
+    )
+    .await
+    .expect("the ignored exact object remains readable by its exact reference");
 }
 
 #[tokio::test]
@@ -707,23 +695,11 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
         &encryption,
     )
     .await;
-
-    let b_x = device_b.to_x25519_public_key();
-    let wrapped_old = signed_wrapped_key_for_test(
-        &storage.root.store_root_id.to_string(),
-        &pubkey_hex(&device_b),
-        &b_x,
-        &old_key,
-        &owner,
-    );
-    storage
-        .put_wrapped_key(
-            &pubkey_hex(&owner),
-            &pubkey_hex(&device_b),
-            wrapped_old.clone(),
-        )
-        .await
-        .unwrap();
+    let old_reference = chain
+        .active_wrapped_keys_for(&pubkey_hex(&device_b))
+        .into_iter()
+        .next()
+        .expect("invitation activates the initial exact wrapped key");
 
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
@@ -761,10 +737,13 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
     .expect("adopt generation 2");
     assert_eq!(cipher_generation(&cipher_b), new_key.current_generation());
 
-    storage
-        .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&device_b), wrapped_old)
-        .await
-        .unwrap();
+    load_wrapped_store_key(
+        &storage.storage,
+        storage.root.store_root_hash,
+        &old_reference,
+    )
+    .await
+    .expect("the retained pre-rotation object remains readable");
 
     run_cycle(
         &storage,
@@ -792,7 +771,7 @@ async fn replayed_pre_rotation_wrapped_key_is_not_adopted() {
 }
 
 #[tokio::test]
-async fn same_generation_wrapped_key_is_merged_and_converges_deterministically() {
+async fn reinviting_member_supersedes_old_wrap_and_merges_same_generation_key() {
     let owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
     let current_key: [u8; 32] = [13u8; 32];
@@ -811,23 +790,20 @@ async fn same_generation_wrapped_key_is_merged_and_converges_deterministically()
         &current,
     )
     .await;
-
-    let b_x = device_b.to_x25519_public_key();
-    let same_generation_replacement = signed_wrapped_key_for_test(
-        &storage.root.store_root_id.to_string(),
-        &pubkey_hex(&device_b),
-        &b_x,
-        &replacement_key,
+    let chain = invite_exact_member(
+        &storage,
+        &owner_db,
         &owner,
+        &device_b,
+        MemberRole::Member,
+        &replacement,
+    )
+    .await;
+    assert_eq!(
+        chain.active_wrapped_keys_for(&pubkey_hex(&device_b)).len(),
+        1,
+        "the replacement grant is the sole authority for its wrapped key",
     );
-    storage
-        .put_wrapped_key(
-            &pubkey_hex(&owner),
-            &pubkey_hex(&device_b),
-            same_generation_replacement,
-        )
-        .await
-        .unwrap();
 
     let db_b = open_test_db();
     let (_tmp_b, ld_b) = temp_store_dir();
@@ -849,7 +825,7 @@ async fn same_generation_wrapped_key_is_merged_and_converges_deterministically()
         Some(&ks_b),
     )
     .await
-    .expect("same-generation wrapped key is merged");
+    .expect("replacement same-generation wrapped key is merged");
 
     assert_eq!(
         cipher_key(&cipher_b),
@@ -948,13 +924,129 @@ async fn second_owner_rotation_is_adoptable_by_existing_members() {
 }
 
 #[tokio::test]
+async fn rotation_after_concurrent_rotations_retains_every_authorized_key() {
+    let founder = UserKeypair::generate();
+    let second_owner = UserKeypair::generate();
+    let remaining_member = UserKeypair::generate();
+    let first_victim = UserKeypair::generate();
+    let second_victim = UserKeypair::generate();
+    let initial = EncryptionService::from_key([41u8; 32]);
+
+    let (storage, founder_db) = exact_store(&founder).await;
+    invite_exact_member(
+        &storage,
+        &founder_db,
+        &founder,
+        &second_owner,
+        MemberRole::Owner,
+        &initial,
+    )
+    .await;
+    invite_exact_member(
+        &storage,
+        &founder_db,
+        &founder,
+        &remaining_member,
+        MemberRole::Member,
+        &initial,
+    )
+    .await;
+    invite_exact_member(
+        &storage,
+        &founder_db,
+        &founder,
+        &first_victim,
+        MemberRole::Member,
+        &initial,
+    )
+    .await;
+    let base_chain = invite_exact_member(
+        &storage,
+        &founder_db,
+        &founder,
+        &second_victim,
+        MemberRole::Member,
+        &initial,
+    )
+    .await;
+
+    let second_owner_db = open_test_db();
+    activate_joined_device(&storage, &founder_db, &second_owner_db, &second_owner).await;
+    let mut founder_fork = base_chain.clone();
+    let mut second_owner_fork = base_chain;
+    let founder_rotation = Box::pin(revoke_member_durable(
+        &storage.storage,
+        storage.home.as_ref(),
+        storage.root.store_root_hash,
+        &mut founder_fork,
+        &founder,
+        &pubkey_hex(&first_victim),
+        &storage.root.store_root_id.to_string(),
+        "0000000005000-0000-founder",
+        &initial,
+        &founder_db,
+    ))
+    .await
+    .expect("founder publishes one rotation fork");
+    Box::pin(revoke_member_durable(
+        &storage.storage,
+        storage.home.as_ref(),
+        storage.root.store_root_hash,
+        &mut second_owner_fork,
+        &second_owner,
+        &pubkey_hex(&second_victim),
+        &storage.root.store_root_id.to_string(),
+        "0000000005000-0000-second-owner",
+        &initial,
+        &second_owner_db,
+    ))
+    .await
+    .expect("second owner publishes the concurrent rotation fork");
+
+    let mut merged_chain = load_exact_chain(&storage, &founder_db).await;
+    let authority_refs = merged_chain
+        .wrapped_key_authority_for(&pubkey_hex(&founder))
+        .expect("merged membership selects the founder's exact wraps");
+    let authority_keyring = unwrap_store_keyring_for_refs(
+        &storage.storage,
+        storage.root.store_root_hash,
+        &founder,
+        &storage.root.store_root_id.to_string(),
+        &authority_refs,
+    )
+    .await
+    .expect("founder unwraps both concurrent rotation forks");
+    assert_eq!(authority_keyring.key_count(), 3);
+
+    let next_rotation = Box::pin(revoke_member_durable(
+        &storage.storage,
+        storage.home.as_ref(),
+        storage.root.store_root_hash,
+        &mut merged_chain,
+        &founder,
+        &pubkey_hex(&remaining_member),
+        &storage.root.store_root_id.to_string(),
+        "0000000006000-0000-founder",
+        &founder_rotation,
+        &founder_db,
+    ))
+    .await
+    .expect("founder rotates after observing both forks");
+
+    assert_eq!(
+        next_rotation.key_count(),
+        authority_keyring.key_count() + 1,
+        "a later rotation extends the membership-selected keyring rather than one device's fork",
+    );
+}
+
+#[tokio::test]
 async fn removed_owner_key_is_not_adopted() {
     let founder = UserKeypair::generate();
     let second_owner = UserKeypair::generate();
     let device_b = UserKeypair::generate();
     let founder_pk = pubkey_hex(&founder);
     let current_key: [u8; 32] = [16u8; 32];
-    let removed_owner_key: [u8; 32] = [17u8; 32];
 
     let encryption = EncryptionService::from_key(current_key);
     let (storage, owner_db) = exact_store(&founder).await;
@@ -996,32 +1088,11 @@ async fn removed_owner_key_is_not_adopted() {
     .await
     .expect("second owner removes founder through exact membership graph");
 
-    let b_x = device_b.to_x25519_public_key();
-    let removed_owner_wrapped = signed_wrapped_key_for_test(
-        &storage.root.store_root_id.to_string(),
-        &pubkey_hex(&device_b),
-        &b_x,
-        &removed_owner_key,
-        &founder,
-    );
-    // The removed founder, using residual bucket write, drops its wrap into the
-    // current owner's prefix — where B's scan will read it. B authenticates the
-    // wrap against that prefix's owner (second_owner), so the founder's signature
-    // fails and the key is refused.
-    storage
-        .put_wrapped_key(
-            &pubkey_hex(&second_owner),
-            &pubkey_hex(&device_b),
-            removed_owner_wrapped,
-        )
-        .await
-        .unwrap();
-
     let ks_b = TestCustody::default();
     ks_b.set_initial_key(rotated.key_bytes());
     let cipher_b = RwLock::new(CloudCipher::Encrypted(rotated.clone()));
 
-    let result = run_cycle(
+    run_cycle(
         &storage,
         &db_b,
         &cipher_b,
@@ -1031,27 +1102,20 @@ async fn removed_owner_key_is_not_adopted() {
         &ld_b,
         Some(&ks_b),
     )
-    .await;
-
-    assert!(
-        result.is_err(),
-        "a key signed by a removed owner must fail closed, not be adopted",
-    );
+    .await
+    .expect("refresh ignores refs authored by a removed owner");
     assert_eq!(
         cipher_key(&cipher_b),
         rotated.key_bytes(),
-        "the removed owner's key must not replace the current key",
+        "a removed owner's retained historical wrap is not active",
     );
 }
 
-/// Wrapped-key adoption refuses a forged wrap — one not signed by the owner whose
-/// prefix it sits under. A bucket writer drops a key they chose, sealed to B's
-/// public key and signed by an attacker, into the current owner's `keys/{owner}/`
-/// prefix. B's refresh scans the current owners and authenticates each wrap
-/// against its prefix owner, so it does NOT adopt the attacker's key; the cycle
-/// fails closed and B keeps its real key.
+/// A valid exact object signed by an attacker has no authority. Refresh does not
+/// discover objects by listing paths, so the object is ignored unless a valid
+/// membership entry names its exact reference.
 #[tokio::test]
-async fn refresh_rejects_a_forged_wrapped_key() {
+async fn refresh_ignores_an_unreferenced_attacker_wrapped_key() {
     let owner = UserKeypair::generate();
     let attacker = UserKeypair::generate();
     let device_b = UserKeypair::generate();
@@ -1069,22 +1133,14 @@ async fn refresh_rejects_a_forged_wrapped_key() {
     )
     .await;
 
-    // The attacker forges B's wrapped key: a key THEY chose, sealed to B's real
-    // public key, signed by the attacker (not the owner), dropped into the current
-    // owner's prefix where B's scan will read it.
     let forged_key: [u8; 32] = [0xCDu8; 32];
-    let b_x = device_b.to_x25519_public_key();
-    let forged = signed_wrapped_key_for_test(
-        &storage.root.store_root_id.to_string(),
-        &pubkey_hex(&device_b),
-        &b_x,
-        &forged_key,
+    let forged = create_unreferenced_wrapped_key(
+        &storage,
+        &device_b,
+        &EncryptionService::from_key(forged_key),
         &attacker,
-    );
-    storage
-        .put_wrapped_key(&pubkey_hex(&owner), &pubkey_hex(&device_b), forged)
-        .await
-        .unwrap();
+    )
+    .await;
 
     // B holds its real key (live + keyring) and pins the owner.
     let db_b = open_test_db();
@@ -1096,8 +1152,7 @@ async fn refresh_rejects_a_forged_wrapped_key() {
         real_key,
     )));
 
-    // B's cycle aborts (refuses the forged key) rather than adopting it.
-    let result = run_cycle(
+    run_cycle(
         &storage,
         &db_b,
         &cipher_b,
@@ -1107,11 +1162,8 @@ async fn refresh_rejects_a_forged_wrapped_key() {
         &ld_b,
         Some(&ks_b),
     )
-    .await;
-    assert!(
-        result.is_err(),
-        "a forged wrapped key must abort the cycle, not be adopted: {result:?}",
-    );
+    .await
+    .expect("an unreferenced attacker object does not affect refresh");
 
     // Critically, B did NOT swap its cipher to the attacker's key.
     assert_eq!(
@@ -1124,6 +1176,9 @@ async fn refresh_rejects_a_forged_wrapped_key() {
         forged_key,
         "the attacker's key was rejected",
     );
+    load_wrapped_store_key(&storage.storage, storage.root.store_root_hash, &forged)
+        .await
+        .expect("the ignored attacker object exists at its exact reference");
 }
 
 /// For an owner-pinned store, a chain the refresh can't load must abort the
@@ -1369,7 +1424,7 @@ async fn removal_rotation_commits_even_when_local_adoption_fails_then_both_remed
     );
 
     // Remedy 1 — the next sync cycle: a still-stale device (generation 1) adopts
-    // the rotated key from its own `keys/{owner}/{owner}` wrap, no retry needed.
+    // the exact wrapped key named by the committed removal, no retry needed.
     {
         let ks_refresh = TestCustody::default();
         ks_refresh.set_initial_key(old_key);

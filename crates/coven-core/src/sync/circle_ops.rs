@@ -247,8 +247,10 @@ async fn prepare_circle_activation_objects(
         serde_json::to_vec(&creation.metadata).expect("Circle metadata serialization cannot fail"),
     )
     .await?;
-    let control_context =
-        ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::CircleControl);
+    let control_context = ProtocolObjectContext::store_encrypted(
+        store_root_hash,
+        ProtocolObjectDomain::CircleControl,
+    );
     let control_prefix = circle_semantic_prefix(CircleSemanticSlot::Control {
         circle_id: creation.circle_id,
         control: &creation.control.coord,
@@ -399,7 +401,10 @@ async fn prepare_circle_activation_objects(
         );
         let leaf = prepare_circle_object(
             storage,
-            &ProtocolObjectContext::recipient_sealed(store_root_hash),
+            &ProtocolObjectContext::recipient_sealed(
+                store_root_hash,
+                ProtocolObjectDomain::CircleAccessLeaf,
+            ),
             &leaf_prefix,
             "",
             access.leaf.bytes.clone(),
@@ -424,7 +429,7 @@ async fn prepare_circle_activation_objects(
         );
         let envelope = prepare_circle_object(
             storage,
-            &ProtocolObjectContext::store(
+            &ProtocolObjectContext::store_encrypted(
                 store_root_hash,
                 ProtocolObjectDomain::CircleAccessEnvelope,
             ),
@@ -678,8 +683,10 @@ async fn prepare_circle_operation(
                 objects,
                 &device_signer,
             )?;
-            let commit_context =
-                ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
+            let commit_context = ProtocolObjectContext::signed_plaintext(
+                store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            );
             let commit_prefix = commit_semantic_prefix(
                 commit.candidate_family(),
                 &stream_id.to_string(),
@@ -701,8 +708,10 @@ async fn prepare_circle_operation(
             )
             .map_err(|error| CircleOperationError::InvalidState(error.to_string()))?;
             prepared_objects.insert("store-commit".to_string(), commit_prepared);
-            let head_context =
-                ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead);
+            let head_context = ProtocolObjectContext::signed_plaintext(
+                store_root_hash,
+                ProtocolObjectDomain::StoreHead,
+            );
             let device_id = author_registration.device_id.to_string();
             let head_prefix = head_slot_prefix(&device_id, seq);
             let (head_slot, predecessor_head) =
@@ -825,8 +834,10 @@ async fn prepare_circle_operation(
                 objects,
                 &device_signer,
             )?;
-            let commit_context =
-                ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
+            let commit_context = ProtocolObjectContext::signed_plaintext(
+                store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            );
             let commit_prefix = commit_semantic_prefix(
                 commit.candidate_family(),
                 SERIAL_STREAM_ID,
@@ -1069,7 +1080,10 @@ async fn publish_circle_operation(
             storage,
             &mut journal,
             &format!("access-leaf-{index}"),
-            &ProtocolObjectContext::recipient_sealed(store_root_hash),
+            &ProtocolObjectContext::recipient_sealed(
+                store_root_hash,
+                ProtocolObjectDomain::CircleAccessLeaf,
+            ),
             &circle_access_leaf_semantic_prefix(
                 access.leaf.value.circle_id,
                 commit.candidate_family(),
@@ -1087,7 +1101,10 @@ async fn publish_circle_operation(
         storage,
         &mut journal,
         "control",
-        &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::CircleControl),
+        &ProtocolObjectContext::store_encrypted(
+            store_root_hash,
+            ProtocolObjectDomain::CircleControl,
+        ),
         &circle_semantic_prefix(CircleSemanticSlot::Control {
             circle_id: creation.circle_id,
             control: &creation.control.coord,
@@ -1103,7 +1120,10 @@ async fn publish_circle_operation(
             storage,
             &mut journal,
             "control-head",
-            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::CircleControl),
+            &ProtocolObjectContext::store_encrypted(
+                store_root_hash,
+                ProtocolObjectDomain::CircleControl,
+            ),
             &circle_semantic_prefix(CircleSemanticSlot::ControlHead {
                 circle_id: creation.circle_id,
                 control: &control_head.control,
@@ -1120,7 +1140,7 @@ async fn publish_circle_operation(
             storage,
             &mut journal,
             &format!("access-envelope-{index}"),
-            &ProtocolObjectContext::store(
+            &ProtocolObjectContext::store_encrypted(
                 store_root_hash,
                 ProtocolObjectDomain::CircleAccessEnvelope,
             ),
@@ -1152,7 +1172,10 @@ async fn publish_circle_operation(
                 storage,
                 &mut journal,
                 "store-commit",
-                &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
+                &ProtocolObjectContext::signed_plaintext(
+                    store_root_hash,
+                    ProtocolObjectDomain::StoreCommit,
+                ),
                 &commit_semantic_prefix(
                     commit.candidate_family(),
                     &stream_id.to_string(),
@@ -1167,7 +1190,10 @@ async fn publish_circle_operation(
                 storage,
                 &mut journal,
                 "store-head",
-                &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead),
+                &ProtocolObjectContext::signed_plaintext(
+                    store_root_hash,
+                    ProtocolObjectDomain::StoreHead,
+                ),
                 &head_slot_prefix(
                     &head.author_registration.device_id.to_string(),
                     commit.seq(),
@@ -1984,7 +2010,10 @@ mod tests {
         );
         let leaf = prepare_circle_object(
             &store.storage,
-            &ProtocolObjectContext::recipient_sealed(old_commit.store_root_hash),
+            &ProtocolObjectContext::recipient_sealed(
+                old_commit.store_root_hash,
+                ProtocolObjectDomain::CircleAccessLeaf,
+            ),
             &leaf_prefix,
             "",
             original_access.leaf.bytes.clone(),
@@ -2000,7 +2029,7 @@ mod tests {
         );
         let envelope = prepare_circle_object(
             &store.storage,
-            &ProtocolObjectContext::store(
+            &ProtocolObjectContext::store_encrypted(
                 old_commit.store_root_hash,
                 ProtocolObjectDomain::CircleAccessEnvelope,
             ),
@@ -2057,7 +2086,7 @@ mod tests {
         };
         let commit_prepared = prepare_circle_object(
             &store.storage,
-            &ProtocolObjectContext::store(
+            &ProtocolObjectContext::signed_plaintext(
                 commit.store_root_hash,
                 ProtocolObjectDomain::StoreCommit,
             ),
@@ -2118,8 +2147,10 @@ mod tests {
             .prepared_objects
             .get("store-head")
             .expect("Circle operation carries its Store head");
-        let head_context =
-            ProtocolObjectContext::store(commit.store_root_hash, ProtocolObjectDomain::StoreHead);
+        let head_context = ProtocolObjectContext::signed_plaintext(
+            commit.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
         let forged_head_object = store
             .storage
             .prepare_protocol_object(
@@ -2249,7 +2280,7 @@ mod tests {
         };
         let commit_prepared = prepare_circle_object(
             &store.storage,
-            &ProtocolObjectContext::store(
+            &ProtocolObjectContext::signed_plaintext(
                 commit.store_root_hash,
                 ProtocolObjectDomain::StoreCommit,
             ),
@@ -2409,7 +2440,10 @@ mod tests {
         };
         let commit_prepared = prepare_circle_object(
             &store.storage,
-            &ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit),
+            &ProtocolObjectContext::signed_plaintext(
+                store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            ),
             &commit_semantic_prefix(
                 commit.candidate_family(),
                 &stream_id.to_string(),
@@ -2663,8 +2697,15 @@ mod tests {
             &storage,
             coordination,
             &device_id,
-            StoreControl::SerialMembership {
+            StoreControl::SerialMembershipAndKeyRotation {
                 entry: remove_founder,
+                generation: 2,
+                wrapped_keys: vec![super::super::membership::test_wrapped_key_ref(
+                    &keys::public_key_hex(&founder),
+                    &keys::public_key_hex(&successor),
+                    2,
+                    b"circle Serial founder removal wrap",
+                )],
             },
             &founder,
         )

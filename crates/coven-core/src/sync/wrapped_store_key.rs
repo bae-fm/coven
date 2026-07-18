@@ -3,49 +3,30 @@
 use serde::{Deserialize, Serialize};
 
 use crate::keys::{self, UserKeypair};
-use crate::sync::membership::MembershipCoord;
-use crate::sync::store_commit::StoreBatchCommitRef;
+use crate::sync::storage::{
+    ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StorageError,
+    SyncStorage,
+};
+use crate::sync::store_commit::ObjectHash;
 
+/// A Store encryption keyring sealed to one member and signed by an Owner.
+///
+/// Membership or Serial commit authority names the immutable exact object
+/// through [`WrappedStoreKeyRef`]. The sealed box authenticates no sender, so
+/// the Owner signature additionally binds the Store, recipient, generation,
+/// author, and sealed bytes. The reader verifies both the exact reference and
+/// that signature before opening the keyring.
+///
+/// `recipient_pubkey` is part of the signed payload and exact path rather than
+/// duplicated in this value, so a wrap cannot be relocated to another member.
+///
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum WrappedKeyActivation {
-    MergeConcurrent(MembershipCoord),
-    Serial(StoreBatchCommitRef),
-}
-
-/// Serialized form of `keys/{recipient_pubkey}{suffix}`: the store encryption
-/// key sealed to one member, plus the owner signature that authenticates it.
-///
-/// The sealed box alone proves only that the named recipient can open it — not
-/// who produced it (the sender is an ephemeral key). Anyone who can write the
-/// bucket knows a member's public key and can overwrite this object with a box
-/// wrapping a key of their choosing; the joiner would then adopt an
-/// attacker-chosen store key. So the owner signs the binding
-/// `(store_id, recipient_pubkey, author_pubkey, sealed)`. A fresh joiner
-/// verifies that signature against the owner the invite pins (the chain founder);
-/// an existing member verifies against the current Owner set from the anchored
-/// membership chain before adopting a rotated key. A substituted box no longer
-/// carries an authorized Owner's signature over these bytes and is refused.
-///
-/// `recipient_pubkey` is the slot the object lives under (the member's hex
-/// Ed25519 pubkey). It is part of the signed payload — not stored in the JSON —
-/// so a validly-signed key for one member cannot be relocated to another
-/// member's slot.
-///
-#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WrappedStoreKey {
     /// Hex-encoded Ed25519 public key of the Owner that signed this wrapped key.
     pub author_pubkey: String,
-    /// Membership entry that must be visible before an existing member adopts
-    /// this keyring. Invitation keys have no activation coordinate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activation: Option<WrappedKeyActivation>,
-    /// The keyring's current generation — the generation this wrap would adopt
-    /// this recipient to — carried in the clear so a member can learn which
-    /// committed generation an inactive wrap (one whose activation entry is not
-    /// yet visible) names WITHOUT opening the sealed box, and pause its own
-    /// sealing at that generation. Covered by the signature, so a bucket writer
-    /// cannot forge a higher generation to wedge a member's cycle.
+    /// The keyring's current generation, covered by the Owner signature and the
+    /// exact reference.
     pub generation: u64,
     /// Hex-encoded sealed box (`seal_box_encrypt` output) carrying the store key.
     pub sealed: String,
@@ -61,8 +42,6 @@ pub struct WrappedStoreKey {
 struct WrappedKeyFields<'a> {
     store_id: &'a str,
     recipient_pubkey: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    activation: Option<&'a WrappedKeyActivation>,
     generation: u64,
     author_pubkey: &'a str,
     sealed: &'a str,
@@ -96,7 +75,6 @@ impl WrappedStoreKey {
     pub fn signed(
         store_id: &str,
         recipient_pubkey: &str,
-        activation: Option<WrappedKeyActivation>,
         generation: u64,
         sealed: Vec<u8>,
         owner: &UserKeypair,
@@ -106,7 +84,6 @@ impl WrappedStoreKey {
         let payload = wrapped_key_signing_payload(
             store_id,
             recipient_pubkey,
-            activation.as_ref(),
             generation,
             &author_pubkey,
             &sealed_hex,
@@ -114,7 +91,6 @@ impl WrappedStoreKey {
         let (_, signature) = keys::sign_hex(owner, &payload);
         WrappedStoreKey {
             author_pubkey,
-            activation,
             generation,
             sealed: sealed_hex,
             signature,
@@ -138,7 +114,6 @@ impl WrappedStoreKey {
         let payload = wrapped_key_signing_payload(
             store_id,
             recipient_pubkey,
-            self.activation.as_ref(),
             self.generation,
             &self.author_pubkey,
             &self.sealed,
@@ -161,7 +136,6 @@ impl WrappedStoreKey {
 fn wrapped_key_signing_payload(
     store_id: &str,
     recipient_pubkey: &str,
-    activation: Option<&WrappedKeyActivation>,
     generation: u64,
     author_pubkey: &str,
     sealed_hex: &str,
@@ -169,7 +143,6 @@ fn wrapped_key_signing_payload(
     let fields = WrappedKeyFields {
         store_id,
         recipient_pubkey,
-        activation,
         generation,
         author_pubkey,
         sealed: sealed_hex,
@@ -177,17 +150,167 @@ fn wrapped_key_signing_payload(
     serde_json::to_vec(&fields).expect("wrapped key fields serialization cannot fail")
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct WrappedStoreKeyRef {
+    pub owner_pubkey: String,
+    pub recipient_pubkey: String,
+    pub generation: u64,
+    pub wrap_hash: ObjectHash,
+    pub object: ExactObjectRef,
+}
+
+impl WrappedStoreKeyRef {
+    pub fn semantic_prefix(&self) -> String {
+        format!(
+            "keys/{}/{}/{}/{}",
+            self.owner_pubkey, self.recipient_pubkey, self.generation, self.wrap_hash
+        )
+    }
+
+    pub fn validate_identity(&self) -> Result<(), StorageError> {
+        for pubkey in [&self.owner_pubkey, &self.recipient_pubkey] {
+            crate::store_dir::validate_path_token(pubkey)?;
+            let bytes = hex::decode(pubkey).map_err(|_| {
+                StorageError::InvalidContent(
+                    "wrapped Store-key ref contains an invalid public key".to_string(),
+                )
+            })?;
+            if bytes.len() != keys::SIGN_PUBLICKEYBYTES || hex::encode(&bytes) != *pubkey {
+                return Err(StorageError::InvalidContent(
+                    "wrapped Store-key ref contains an invalid public key".to_string(),
+                ));
+            }
+        }
+        if self.generation == 0
+            || self.object.slot().logical_key() != format!("{}.json", self.semantic_prefix())
+        {
+            return Err(StorageError::InvalidContent(
+                "wrapped Store-key ref has an invalid semantic identity".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_value(&self, value: &WrappedStoreKey, bytes: &[u8]) -> Result<(), StorageError> {
+        self.validate_identity()?;
+        if value.author_pubkey != self.owner_pubkey
+            || value.generation != self.generation
+            || ObjectHash::digest(bytes) != self.wrap_hash
+        {
+            return Err(StorageError::InvalidContent(
+                "wrapped Store-key ref does not match its exact value".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedWrappedStoreKey {
+    pub reference: WrappedStoreKeyRef,
+    pub object: PreparedExactObject,
+}
+
+impl PreparedWrappedStoreKey {
+    pub fn validate(&self) -> Result<WrappedStoreKey, StorageError> {
+        if self.reference.object != *self.object.reference() {
+            return Err(StorageError::InvalidContent(
+                "prepared wrapped Store key carries a different exact reference".to_string(),
+            ));
+        }
+        let value: WrappedStoreKey = serde_json::from_slice(self.object.stored_bytes())
+            .map_err(|error| StorageError::Parse(format!("parse wrapped Store key: {error}")))?;
+        self.reference
+            .validate_value(&value, self.object.stored_bytes())?;
+        Ok(value)
+    }
+}
+
+pub async fn prepare_wrapped_store_key(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    recipient_pubkey: &str,
+    value: WrappedStoreKey,
+) -> Result<PreparedWrappedStoreKey, StorageError> {
+    crate::store_dir::validate_path_token(&value.author_pubkey)?;
+    crate::store_dir::validate_path_token(recipient_pubkey)?;
+    if value.generation == 0 {
+        return Err(StorageError::InvalidContent(
+            "wrapped Store-key generation must be positive".to_string(),
+        ));
+    }
+    let bytes = serde_json::to_vec(&value)
+        .map_err(|error| StorageError::Parse(format!("serialize wrapped Store key: {error}")))?;
+    let wrap_hash = ObjectHash::digest(&bytes);
+    let semantic_prefix = format!(
+        "keys/{}/{}/{}/{}",
+        value.author_pubkey, recipient_pubkey, value.generation, wrap_hash
+    );
+    let context = ProtocolObjectContext::recipient_sealed(
+        store_root_hash,
+        ProtocolObjectDomain::StoreWrappedKey,
+    );
+    let slot = storage
+        .allocate_protocol_slot(&context, &semantic_prefix, ".json")
+        .await?;
+    let object = storage.prepare_protocol_object(&context, slot, &semantic_prefix, bytes)?;
+    let reference = WrappedStoreKeyRef {
+        owner_pubkey: value.author_pubkey,
+        recipient_pubkey: recipient_pubkey.to_string(),
+        generation: value.generation,
+        wrap_hash,
+        object: object.reference().clone(),
+    };
+    let prepared = PreparedWrappedStoreKey { reference, object };
+    prepared.validate()?;
+    Ok(prepared)
+}
+
+pub async fn load_wrapped_store_key(
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    reference: &WrappedStoreKeyRef,
+) -> Result<WrappedStoreKey, StorageError> {
+    let context = ProtocolObjectContext::recipient_sealed(
+        store_root_hash,
+        ProtocolObjectDomain::StoreWrappedKey,
+    );
+    let bytes = storage
+        .read_protocol_object(&context, &reference.object, &reference.semantic_prefix())
+        .await?;
+    let value: WrappedStoreKey = serde_json::from_slice(&bytes)
+        .map_err(|error| StorageError::Parse(format!("parse wrapped Store key: {error}")))?;
+    reference.validate_value(&value, &bytes)?;
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::storage::cloud::test_utils::InMemoryCloudHome;
+    use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+
+    fn test_storage(signer: &UserKeypair) -> CloudSyncStorage {
+        CloudSyncStorage::new(
+            Arc::new(InMemoryCloudHome::new()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "wrapped-key-test",
+            signer.clone(),
+        )
+        .expect("test storage supports immutable exact objects")
+    }
 
     #[test]
     fn wrapped_key_round_trips_and_returns_sealed_bytes() {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
         let sealed = vec![1u8, 2, 3, 4, 5];
-        let wrapped =
-            WrappedStoreKey::signed("lib", "recipient-pk", None, 1, sealed.clone(), &owner);
+        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", 1, sealed.clone(), &owner);
 
         // Round-trips through JSON and yields the sealed bytes back.
         let json = serde_json::to_vec(&wrapped).expect("serialize wrapped key");
@@ -210,7 +333,7 @@ mod tests {
         let pinned_owner = UserKeypair::generate();
         let pinned_owner_hex = hex::encode(pinned_owner.public_key());
         let sealed = vec![9u8; 32];
-        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, 1, sealed, &signer);
+        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", 1, sealed, &signer);
 
         assert!(
             matches!(
@@ -230,7 +353,7 @@ mod tests {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
         let sealed = vec![9u8; 32];
-        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, 1, sealed, &owner);
+        let wrapped = WrappedStoreKey::signed("lib", "recipient-pk", 1, sealed, &owner);
 
         // The signature binds the store and the recipient slot: changing either
         // at verify time fails, so a key can't be replayed cross-store or
@@ -266,7 +389,7 @@ mod tests {
         let owner_hex = hex::encode(owner.public_key());
         let other_owner_hex = hex::encode(other_owner.public_key());
         let sealed = vec![9u8; 32];
-        let mut wrapped = WrappedStoreKey::signed("lib", "recipient-pk", None, 1, sealed, &owner);
+        let mut wrapped = WrappedStoreKey::signed("lib", "recipient-pk", 1, sealed, &owner);
         assert!(
             wrapped
                 .verify_and_unwrap("lib", "recipient-pk", std::iter::once(owner_hex.as_str()))
@@ -292,8 +415,7 @@ mod tests {
     fn wrapped_key_rejects_generation_tamper() {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
-        let mut wrapped =
-            WrappedStoreKey::signed("lib", "recipient-pk", None, 3, vec![9u8; 32], &owner);
+        let mut wrapped = WrappedStoreKey::signed("lib", "recipient-pk", 3, vec![9u8; 32], &owner);
 
         // The generation is covered by the signature, so a bucket writer cannot
         // raise it to wedge a member into pausing under a generation the owner
@@ -316,8 +438,7 @@ mod tests {
     fn wrapped_key_malformed_signature_fails_closed() {
         let owner = UserKeypair::generate();
         let owner_hex = hex::encode(owner.public_key());
-        let mut wrapped =
-            WrappedStoreKey::signed("lib", "recipient-pk", None, 1, vec![1u8; 4], &owner);
+        let mut wrapped = WrappedStoreKey::signed("lib", "recipient-pk", 1, vec![1u8; 4], &owner);
 
         // A signature that isn't valid hex can't verify against the owner.
         wrapped.signature = "not-hex!!".to_string();
@@ -338,7 +459,6 @@ mod tests {
 
         let mut wrapped = WrappedStoreKey {
             author_pubkey: owner_hex.clone(),
-            activation: None,
             generation: 1,
             sealed: "not-hex!!".to_string(),
             signature: String::new(),
@@ -346,7 +466,6 @@ mod tests {
         let payload = wrapped_key_signing_payload(
             "lib",
             "recipient-pk",
-            wrapped.activation.as_ref(),
             wrapped.generation,
             &wrapped.author_pubkey,
             &wrapped.sealed,
@@ -358,5 +477,79 @@ mod tests {
             wrapped.verify_and_unwrap("lib", "recipient-pk", std::iter::once(owner_hex.as_str())),
             Err(WrappedKeyError::MalformedSealed),
         ));
+    }
+
+    #[tokio::test]
+    async fn distinct_wraps_at_one_generation_remain_distinct_exact_objects() {
+        let owner = UserKeypair::generate();
+        let recipient = UserKeypair::generate();
+        let recipient_pubkey = hex::encode(recipient.public_key());
+        let storage = test_storage(&owner);
+        let root = ObjectHash::digest(b"wrapped key exact root");
+        let first = prepare_wrapped_store_key(
+            &storage,
+            root,
+            &recipient_pubkey,
+            WrappedStoreKey::signed("store", &recipient_pubkey, 3, vec![1; 32], &owner),
+        )
+        .await
+        .expect("prepare first exact wrap");
+        let second = prepare_wrapped_store_key(
+            &storage,
+            root,
+            &recipient_pubkey,
+            WrappedStoreKey::signed("store", &recipient_pubkey, 3, vec![2; 32], &owner),
+        )
+        .await
+        .expect("prepare second exact wrap");
+
+        assert_ne!(first.reference, second.reference);
+        storage
+            .create_protocol_object(&first.object)
+            .await
+            .expect("create first exact wrap");
+        storage
+            .create_protocol_object(&second.object)
+            .await
+            .expect("create second exact wrap");
+        assert_eq!(
+            load_wrapped_store_key(&storage, root, &first.reference)
+                .await
+                .expect("load first exact wrap"),
+            first.validate().expect("validate first prepared wrap"),
+        );
+        assert_eq!(
+            load_wrapped_store_key(&storage, root, &second.reference)
+                .await
+                .expect("load second exact wrap"),
+            second.validate().expect("validate second prepared wrap"),
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_wrap_ref_rejects_relocated_identity() {
+        let owner = UserKeypair::generate();
+        let recipient = UserKeypair::generate();
+        let recipient_pubkey = hex::encode(recipient.public_key());
+        let storage = test_storage(&owner);
+        let root = ObjectHash::digest(b"wrapped key relocation root");
+        let prepared = prepare_wrapped_store_key(
+            &storage,
+            root,
+            &recipient_pubkey,
+            WrappedStoreKey::signed("store", &recipient_pubkey, 1, vec![3; 32], &owner),
+        )
+        .await
+        .expect("prepare exact wrap");
+        storage
+            .create_protocol_object(&prepared.object)
+            .await
+            .expect("create exact wrap");
+        let mut relocated = prepared.reference;
+        relocated.recipient_pubkey = hex::encode(UserKeypair::generate().public_key());
+
+        assert!(load_wrapped_store_key(&storage, root, &relocated)
+            .await
+            .is_err());
     }
 }

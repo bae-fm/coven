@@ -16,6 +16,7 @@ use crate::store_dir::StoreDir;
 use crate::sync::apply::resolve_and_apply_changeset;
 use crate::sync::membership::{MembershipChain, MembershipEntry};
 use crate::sync::session::{BlobDecl, SyncedTable};
+use crate::sync::storage::ProtocolObjectDomain;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub fn test_membership_grant_id(label: &str) -> crate::sync::causal_grants::MembershipGrantId {
@@ -847,9 +848,9 @@ pub async fn load_exact_materialized_commit(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "materialized Store commit has no exact root authority".to_string())?;
-    let context = crate::sync::storage::ProtocolObjectContext::store(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+        ProtocolObjectDomain::StoreCommit,
     );
     let bytes = storage
         .read_protocol_object(

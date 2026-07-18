@@ -40,7 +40,7 @@ pub async fn load_provider_access_grant_ref(
         .value
         .descriptor
         .provider;
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         store_root.store_root_hash,
         ProtocolObjectDomain::ProviderAccessGrant,
     );
@@ -74,7 +74,7 @@ pub async fn load_provider_access_withdrawal_ref(
     VerifiedObject<super::provider::StoreMemberProviderAccessWithdrawalReceipt>,
     StoreObjectError,
 > {
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         store_root.store_root_hash,
         ProtocolObjectDomain::ProviderAccessWithdrawal,
     );
@@ -163,7 +163,7 @@ pub async fn load_store_protocol_root(
     storage: &dyn SyncStorage,
     reference: &StoreRootRef,
 ) -> Result<VerifiedObject<StoreProtocolRoot>, StoreObjectError> {
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         reference.store_root_hash,
         ProtocolObjectDomain::StoreProtocolRoot,
     );
@@ -185,7 +185,7 @@ pub async fn load_registration_ref(
     reference: &StoreDeviceRegistrationRef,
 ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
     let pinned_root = load_store_protocol_root(storage, store_root).await?.value;
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         store_root.store_root_hash,
         ProtocolObjectDomain::StoreDeviceRegistration,
     );
@@ -206,7 +206,7 @@ pub async fn load_founder_registration(
     root: &StoreRootRef,
 ) -> Result<VerifiedObject<StoreDeviceRegistration>, StoreObjectError> {
     let root_value = load_store_protocol_root(storage, root).await?.value;
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreDeviceRegistration,
     );
@@ -305,7 +305,7 @@ pub async fn load_device_join_attempt_ref(
     reference: &DeviceJoinAttemptRef,
     owner: &StoreDeviceRegistration,
 ) -> Result<VerifiedObject<DeviceJoinAttempt>, StoreObjectError> {
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         store_root.store_root_hash,
         ProtocolObjectDomain::DeviceJoinAttempt,
     );
@@ -344,7 +344,7 @@ pub async fn load_device_join_outcome_ref(
     reference: &DeviceJoinOutcomeRef,
     owner: &StoreDeviceRegistration,
 ) -> Result<VerifiedObject<DeviceJoinOutcome>, StoreObjectError> {
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         store_root.store_root_hash,
         ProtocolObjectDomain::DeviceJoinOutcome,
     );
@@ -389,8 +389,10 @@ pub async fn load_store_ack_ref(
     reference: &StoreAckRef,
     registration: &StoreDeviceRegistration,
 ) -> Result<VerifiedObject<StoreAck>, StoreObjectError> {
-    let context =
-        ProtocolObjectContext::store(store_root.store_root_hash, ProtocolObjectDomain::StoreAck);
+    let context = ProtocolObjectContext::signed_plaintext(
+        store_root.store_root_hash,
+        ProtocolObjectDomain::StoreAck,
+    );
     let semantic_prefix = ack_slot_prefix(&registration.device_id.to_string(), reference.sequence);
     load_exact_object(
         storage,
@@ -436,8 +438,10 @@ pub async fn load_store_ack_predecessor(
                 key: object.slot().logical_key().to_string(),
                 source: Box::new(StoreProtocolError::InvalidAckSequence(0)),
             })?;
-    let context =
-        ProtocolObjectContext::store(store_root.store_root_hash, ProtocolObjectDomain::StoreAck);
+    let context = ProtocolObjectContext::signed_plaintext(
+        store_root.store_root_hash,
+        ProtocolObjectDomain::StoreAck,
+    );
     let semantic_prefix = ack_slot_prefix(&registration.device_id.to_string(), sequence);
     let bytes = storage
         .read_protocol_object(&context, object, &semantic_prefix)
@@ -484,7 +488,7 @@ pub async fn load_owner_recovery_node_ref(
         reference.owner_grant.clone(),
         reference.sequence,
     );
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         store_root.store_root_hash,
         ProtocolObjectDomain::OwnerRecoveryNode,
     );
@@ -512,7 +516,8 @@ pub async fn load_commit_ref(
                 key: reference.object.slot().logical_key().to_string(),
                 source: Box::new(source),
             })?;
-    let context = ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
+    let context =
+        ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreCommit);
     load_exact_object(
         storage,
         &context,
@@ -538,7 +543,8 @@ pub async fn load_head_ref(
 ) -> Result<VerifiedObject<StoreDeviceHead>, StoreObjectError> {
     let semantic_prefix =
         head_slot_prefix(&registration.device_id.to_string(), commit.coord.sequence());
-    let context = ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead);
+    let context =
+        ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);
     load_exact_object(
         storage,
         &context,
@@ -587,8 +593,10 @@ pub async fn load_store_package(
         commit.seq(),
         package.content_hash,
     );
-    let context =
-        ProtocolObjectContext::store(commit.store_root_hash, ProtocolObjectDomain::StorePackage);
+    let context = ProtocolObjectContext::store_encrypted(
+        commit.store_root_hash,
+        ProtocolObjectDomain::StorePackage,
+    );
     load_exact_object(
         storage,
         &context,
@@ -617,8 +625,10 @@ pub async fn prepare_membership_entry(
         coord.seq,
         coord.entry_hash,
     );
-    let context =
-        ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipEntry);
+    let context = ProtocolObjectContext::signed_plaintext(
+        store_root_hash,
+        ProtocolObjectDomain::StoreMembershipEntry,
+    );
     let slot = storage
         .allocate_protocol_slot(&context, &semantic_prefix, ".json")
         .await?;
@@ -648,8 +658,10 @@ pub async fn load_membership_entry_ref(
         coord.seq,
         coord.entry_hash,
     );
-    let context =
-        ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipEntry);
+    let context = ProtocolObjectContext::signed_plaintext(
+        store_root_hash,
+        ProtocolObjectDomain::StoreMembershipEntry,
+    );
     load_exact_object(
         storage,
         &context,
@@ -689,8 +701,10 @@ pub async fn load_membership_head_ref(
                 "membership head slot has no .json suffix".to_string(),
             )),
         })?;
-    let context =
-        ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipHead);
+    let context = ProtocolObjectContext::signed_plaintext(
+        store_root_hash,
+        ProtocolObjectDomain::StoreMembershipHead,
+    );
     load_exact_object(
         storage,
         &context,
@@ -724,7 +738,7 @@ pub async fn load_membership_resolution_ref(
         &reference.resolver_pubkey,
         reference.resolution_hash,
     );
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         store_root_hash,
         ProtocolObjectDomain::StoreMembershipResolution,
     );

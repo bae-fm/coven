@@ -514,7 +514,7 @@ async fn load_commit_registrations(
                 "self-retirement targets a different exact registration".to_string(),
             ));
         }
-        let context = ProtocolObjectContext::store(
+        let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreDeviceSelfRetirement,
         );
@@ -570,7 +570,7 @@ async fn validate_commit_join_abandonments(
                 "device join abandonment and attempt are activated together".to_string(),
             ));
         }
-        let context = ProtocolObjectContext::store(
+        let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAbandonment,
         );
@@ -621,7 +621,7 @@ async fn validate_commit_join_cleanup_receipts(
         ));
     }
     for reference in commit.device_join_cleanup_receipts() {
-        let context = ProtocolObjectContext::store(
+        let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinCleanupReceipt,
         );
@@ -653,7 +653,7 @@ async fn validate_commit_join_cleanup_receipts(
             ));
         }
         let attempt_ref = receipt.cancellation.attempt();
-        let attempt_context = ProtocolObjectContext::store(
+        let attempt_context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAttempt,
         );
@@ -765,7 +765,7 @@ async fn validate_commit_join_outcomes(
                     .to_string(),
             ));
         }
-        let attempt_context = ProtocolObjectContext::store(
+        let attempt_context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAttempt,
         );
@@ -905,7 +905,7 @@ async fn registration_activation(
                 outcome,
             },
         ) if origin_attempt == attempt_id && outcome_slot == outcome.slot() => {
-            let attempt_context = ProtocolObjectContext::store(
+            let attempt_context = ProtocolObjectContext::signed_plaintext(
                 root.store_root_hash,
                 ProtocolObjectDomain::DeviceJoinAttempt,
             );
@@ -1671,7 +1671,7 @@ async fn discover_merge_owner_recoveries(
             "Store founder recovery authority has no recovery stream".into(),
         ));
     };
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::OwnerRecoveryNode,
     );
@@ -1767,8 +1767,10 @@ async fn discover_merge_stream(
     };
     let stream_id = super::membership::AuthorStreamId::store_announcements(root, registration_ref);
     let activation = StreamActivationId::store_announcements(root, registration_ref);
-    let context =
-        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreHead);
+    let context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreHead,
+    );
     let mut slot = first_slot.clone();
     let mut predecessor = None;
     let mut sequence = 1_u64;
@@ -1907,8 +1909,10 @@ pub(crate) async fn load_commit_with_author(
                 key: reference.object.slot().logical_key().to_string(),
                 source: Box::new(source),
             })?;
-    let context =
-        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreCommit);
+    let context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreCommit,
+    );
     let bytes = storage
         .read_protocol_object(&context, &reference.object, &semantic_prefix)
         .await
@@ -2687,7 +2691,6 @@ pub(crate) async fn load_serial_authorization_at_head(
 pub(crate) struct SerialCycleAuthorization {
     pub authorization: SerialAuthorizationState,
     pub head: Option<StoreBatchCommitRef>,
-    pub visible_activations: Vec<super::wrapped_store_key::WrappedKeyActivation>,
 }
 
 pub(crate) async fn load_serial_cycle_authorization(
@@ -2701,12 +2704,6 @@ pub(crate) async fn load_serial_cycle_authorization(
         Some(tip) => tip.authorization_after.clone(),
         None => load_serial_authorization_at_position(storage, root, None).await?,
     };
-    let visible_activations = authorized
-        .iter()
-        .map(|commit| {
-            super::wrapped_store_key::WrappedKeyActivation::Serial(commit.commit_ref.clone())
-        })
-        .collect();
     let head = match head.state {
         StoreSerialHeadState::Genesis { .. } => None,
         StoreSerialHeadState::Commit { commit, .. } => Some(commit),
@@ -2714,7 +2711,6 @@ pub(crate) async fn load_serial_cycle_authorization(
     Ok(SerialCycleAuthorization {
         authorization,
         head,
-        visible_activations,
     })
 }
 

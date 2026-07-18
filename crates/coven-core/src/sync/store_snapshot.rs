@@ -103,8 +103,10 @@ pub(crate) async fn push_store_snapshot(
     )
     .await?;
     let image_hash = ObjectHash::digest(&image_bytes);
-    let image_context =
-        ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreSnapshotImage);
+    let image_context = ProtocolObjectContext::store_encrypted(
+        store_root_hash,
+        ProtocolObjectDomain::StoreSnapshotImage,
+    );
     let image_prefix = snapshot_image_semantic_prefix(&device_id, image_hash);
     let image_slot = storage
         .allocate_protocol_slot(&image_context, &image_prefix, ".db")
@@ -123,8 +125,10 @@ pub(crate) async fn push_store_snapshot(
         object: image_prepared.reference().clone(),
     };
 
-    let meta_context =
-        ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreSnapshotMeta);
+    let meta_context = ProtocolObjectContext::signed_plaintext(
+        store_root_hash,
+        ProtocolObjectDomain::StoreSnapshotMeta,
+    );
     let semantic_prefix = snapshot_slot_prefix(&device_id, sequence);
     let next_slot = storage
         .allocate_protocol_slot(
@@ -398,7 +402,7 @@ async fn publish_durable_snapshot(
 ) -> Result<SnapshotMeta, SnapshotError> {
     let meta = &pending.meta.value;
     let device_id = meta.author_registration.device_id.to_string();
-    let image_context = ProtocolObjectContext::store(
+    let image_context = ProtocolObjectContext::store_encrypted(
         meta.store_root_hash,
         ProtocolObjectDomain::StoreSnapshotImage,
     );
@@ -442,7 +446,7 @@ async fn publish_durable_snapshot(
         ));
     }
 
-    let meta_context = ProtocolObjectContext::store(
+    let meta_context = ProtocolObjectContext::signed_plaintext(
         meta.store_root_hash,
         ProtocolObjectDomain::StoreSnapshotMeta,
     );
@@ -506,7 +510,7 @@ pub async fn load_store_snapshot_ref(
             "Store snapshot registration reference names another device".to_string(),
         ));
     }
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
         ProtocolObjectDomain::StoreSnapshotMeta,
     );
@@ -645,7 +649,7 @@ pub(crate) async fn select_store_snapshot(
                 ))
             }
         };
-        let context = ProtocolObjectContext::store(
+        let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::StoreSnapshotMeta,
         );
@@ -711,7 +715,7 @@ pub(crate) async fn select_store_snapshot(
             supported: binary_schema_version,
         });
     }
-    let image_context = ProtocolObjectContext::store(
+    let image_context = ProtocolObjectContext::store_encrypted(
         root.store_root_hash,
         ProtocolObjectDomain::StoreSnapshotImage,
     );

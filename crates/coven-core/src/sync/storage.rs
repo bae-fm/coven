@@ -32,6 +32,7 @@ pub(crate) enum ProtectedObjectDomain {
     StoreMembershipEntry,
     StoreMembershipHead,
     StoreMembershipResolution,
+    StoreWrappedKey,
     StorePackage,
     CircleControl,
     CircleRoster,
@@ -312,6 +313,14 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
+            Self::StoreWrappedKey => ProtocolObjectMetadata {
+                aad_label: b"store-wrapped-key",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 5,
+                    fixed_components: &[(0, "keys")],
+                }]),
+                extension: ".json",
+            },
             Self::StorePackage => ProtocolObjectMetadata {
                 aad_label: b"store-package",
                 path: ProtocolPathRule::StoreCandidate {
@@ -412,11 +421,20 @@ impl ProtectedObjectDomain {
 
 /// A domain protected by the Store key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StoreProtocolObjectDomain(ProtectedObjectDomain);
+pub struct StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain);
+
+/// A signed Store control-plane domain whose bytes must remain readable before
+/// the reader has adopted the Store data key named by those bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignedStoreProtocolObjectDomain(ProtectedObjectDomain);
 
 /// A domain protected by a Circle epoch key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CircleProtocolObjectDomain(ProtectedObjectDomain);
+
+/// A domain whose canonical bytes already carry recipient-specific encryption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecipientSealedProtocolObjectDomain(ProtectedObjectDomain);
 
 /// Typed protocol-object domain names. Each name's value carries the only
 /// protection class its object kind permits.
@@ -424,48 +442,52 @@ pub struct ProtocolObjectDomain;
 
 #[allow(non_upper_case_globals)]
 impl ProtocolObjectDomain {
-    pub const StoreProtocolRoot: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreProtocolRoot);
-    pub const StoreCommit: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreCommit);
-    pub const StoreHead: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreHead);
-    pub const StoreAck: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreAck);
-    pub const StoreDeviceRegistration: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceRegistration);
-    pub const StoreDeviceSelfRetirement: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceSelfRetirement);
-    pub const DeviceJoinAttempt: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAttempt);
-    pub const DeviceJoinOutcome: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinOutcome);
-    pub const DeviceJoinAbandonment: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAbandonment);
-    pub const DeviceJoinCleanupReceipt: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinCleanupReceipt);
-    pub const ProviderAccessGrant: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessGrant);
-    pub const ProviderAccessWithdrawal: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessWithdrawal);
-    pub const OwnerRecoveryNode: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::OwnerRecoveryNode);
-    pub const StoreSnapshotMeta: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreSnapshotMeta);
-    pub const StoreSnapshotImage: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreSnapshotImage);
-    pub const StoreMembershipEntry: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipEntry);
-    pub const StoreMembershipHead: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipHead);
-    pub const StoreMembershipResolution: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipResolution);
-    pub const StorePackage: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::StorePackage);
-    pub const CircleControl: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::CircleControl);
-    pub const CircleAccessEnvelope: StoreProtocolObjectDomain =
-        StoreProtocolObjectDomain(ProtectedObjectDomain::CircleAccessEnvelope);
+    pub const StoreProtocolRoot: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreProtocolRoot);
+    pub const StoreCommit: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreCommit);
+    pub const StoreHead: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreHead);
+    pub const StoreAck: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreAck);
+    pub const StoreDeviceRegistration: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceRegistration);
+    pub const StoreDeviceSelfRetirement: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceSelfRetirement);
+    pub const DeviceJoinAttempt: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAttempt);
+    pub const DeviceJoinOutcome: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinOutcome);
+    pub const DeviceJoinAbandonment: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAbandonment);
+    pub const DeviceJoinCleanupReceipt: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinCleanupReceipt);
+    pub const ProviderAccessGrant: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessGrant);
+    pub const ProviderAccessWithdrawal: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessWithdrawal);
+    pub const OwnerRecoveryNode: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::OwnerRecoveryNode);
+    pub const StoreSnapshotMeta: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreSnapshotMeta);
+    pub const StoreSnapshotImage: StoreEncryptedProtocolObjectDomain =
+        StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::StoreSnapshotImage);
+    pub const StoreMembershipEntry: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipEntry);
+    pub const StoreMembershipHead: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipHead);
+    pub const StoreMembershipResolution: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreMembershipResolution);
+    pub const StoreWrappedKey: RecipientSealedProtocolObjectDomain =
+        RecipientSealedProtocolObjectDomain(ProtectedObjectDomain::StoreWrappedKey);
+    pub const CircleAccessLeaf: RecipientSealedProtocolObjectDomain =
+        RecipientSealedProtocolObjectDomain(ProtectedObjectDomain::CircleAccessLeaf);
+    pub const StorePackage: StoreEncryptedProtocolObjectDomain =
+        StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::StorePackage);
+    pub const CircleControl: StoreEncryptedProtocolObjectDomain =
+        StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::CircleControl);
+    pub const CircleAccessEnvelope: StoreEncryptedProtocolObjectDomain =
+        StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::CircleAccessEnvelope);
     pub const CircleRoster: CircleProtocolObjectDomain =
         CircleProtocolObjectDomain(ProtectedObjectDomain::CircleRoster);
     pub const CircleRosterResolution: CircleProtocolObjectDomain =
@@ -485,7 +507,7 @@ impl ProtocolObjectDomain {
 /// use coven_core::ObjectHash;
 ///
 /// let root = ObjectHash::digest(b"store");
-/// let _ = ProtocolObjectContext::store(root, ProtocolObjectDomain::CircleMetadata);
+/// let _ = ProtocolObjectContext::signed_plaintext(root, ProtocolObjectDomain::CircleMetadata);
 /// ```
 ///
 /// Circle protection cannot be paired with a Store domain:
@@ -510,17 +532,32 @@ pub struct ProtocolObjectContext {
 
 #[derive(Clone)]
 pub(crate) enum ProtocolObjectProtection {
-    Store,
+    StoreEncrypted,
+    SignedPlaintext,
     Circle(crate::encryption::EncryptionService),
     RecipientSealed,
 }
 
 impl ProtocolObjectContext {
-    pub fn store(store_root_hash: ObjectHash, domain: StoreProtocolObjectDomain) -> Self {
+    pub fn store_encrypted(
+        store_root_hash: ObjectHash,
+        domain: StoreEncryptedProtocolObjectDomain,
+    ) -> Self {
         Self {
             store_root_hash,
             domain: domain.0,
-            protection: ProtocolObjectProtection::Store,
+            protection: ProtocolObjectProtection::StoreEncrypted,
+        }
+    }
+
+    pub fn signed_plaintext(
+        store_root_hash: ObjectHash,
+        domain: SignedStoreProtocolObjectDomain,
+    ) -> Self {
+        Self {
+            store_root_hash,
+            domain: domain.0,
+            protection: ProtocolObjectProtection::SignedPlaintext,
         }
     }
 
@@ -536,10 +573,13 @@ impl ProtocolObjectContext {
         }
     }
 
-    pub fn recipient_sealed(store_root_hash: ObjectHash) -> Self {
+    pub fn recipient_sealed(
+        store_root_hash: ObjectHash,
+        domain: RecipientSealedProtocolObjectDomain,
+    ) -> Self {
         Self {
             store_root_hash,
-            domain: ProtectedObjectDomain::CircleAccessLeaf,
+            domain: domain.0,
             protection: ProtocolObjectProtection::RecipientSealed,
         }
     }
@@ -1329,41 +1369,6 @@ pub trait SyncStorage: Send + Sync {
         &self,
         blob: &crate::blob::locator::StoredBlobRef,
     ) -> Result<(), StorageError>;
-
-    /// Upload a wrapped store key that `owner_pubkey` sealed for `recipient_pubkey`.
-    /// Writes to `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`. An owner
-    /// wraps only into its own prefix, so a recipient can hold a wrap from each
-    /// owner and no two owners contend for one slot. The bytes are already a sealed
-    /// box, so the home cipher stores them verbatim regardless of suffix.
-    async fn put_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError>;
-
-    /// Download the wrapped store key `owner_pubkey` sealed for `recipient_pubkey`.
-    /// Reads from `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`.
-    /// `create_invitation` reads the inviting owner's existing slot for the invitee
-    /// before overwriting it, so a failed invite can restore the exact prior object
-    /// rather than stripping a re-invited member's wrapped key. Returns `NotFound`
-    /// when that owner has no wrapped key for the recipient yet.
-    async fn get_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-    ) -> Result<Vec<u8>, StorageError>;
-
-    /// Delete the wrapped store key `owner_pubkey` sealed for `recipient_pubkey`.
-    /// Removes `keys/{owner_pubkey_hex}/{recipient_pubkey_hex}{suffix}`. An owner
-    /// can delete only wraps in its own prefix; a revoked member's wraps under
-    /// other owners' prefixes are pre-rotation (they wrap a key the member already
-    /// held) and are reclaimed when those owners next rotate.
-    async fn delete_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-    ) -> Result<(), StorageError>;
 }
 
 #[cfg(test)]
@@ -1380,7 +1385,7 @@ mod tests {
         ProtocolObjectContext {
             store_root_hash: ObjectHash::digest(b"protocol path grammar"),
             domain,
-            protection: ProtocolObjectProtection::Store,
+            protection: ProtocolObjectProtection::StoreEncrypted,
         }
         .validate_path(path)
         .is_ok()
@@ -1483,6 +1488,11 @@ mod tests {
             DomainPathCase {
                 domain: ProtectedObjectDomain::StoreMembershipResolution,
                 valid: &["store-v1/membership/resolutions/conflict/resolver/hash"],
+                cross_domain: "store-v1/membership/entries/owner/grant/stream/1/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreWrappedKey,
+                valid: &["keys/owner/recipient/1/hash"],
                 cross_domain: "store-v1/membership/entries/owner/grant/stream/1/hash",
             },
             DomainPathCase {

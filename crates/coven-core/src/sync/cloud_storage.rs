@@ -5,7 +5,8 @@
 //! in raw bytes and flat keys; this layer applies the [`CloudCipher`] — sealing
 //! every object under the store key for an encrypted home, or storing it
 //! verbatim for a plaintext one — and drives the object-key suffix off the same
-//! choice (`.enc` for an encrypted home, no suffix for a plaintext one).
+//! choice (`.enc` for encrypted data-plane objects, no suffix for signed
+//! control-plane and recipient-sealed objects).
 
 use async_trait::async_trait;
 use std::path::Path;
@@ -23,6 +24,8 @@ use crate::keys::UserKeypair;
 use crate::storage::cloud::{
     BlobBody, CloudFileReadError, CloudHeadStorage, CloudHome, ExactSlotStorage, ObjectSlot,
 };
+#[cfg(test)]
+use crate::sync::storage::ProtocolObjectDomain;
 use crate::sync::store_commit::ObjectHash;
 
 /// Every encrypted object carries this cleartext prefix naming the key it was
@@ -680,11 +683,6 @@ impl CloudSyncStorage {
         self.cipher.snapshot()
     }
 
-    /// The object-key suffix the current cipher implies.
-    fn suffix(&self) -> &'static str {
-        self.cipher().suffix()
-    }
-
     /// This device's hex public key — the `{uploader}` segment its own blob
     /// uploads are keyed under. A device only ever writes blobs it authored, so a
     /// write always keys under itself; a read resolves the uploader of the blob it
@@ -710,7 +708,8 @@ impl CloudSyncStorage {
         context: &ProtocolObjectContext,
     ) -> Result<CloudCipher, StorageError> {
         match context.protection() {
-            ProtocolObjectProtection::Store => self.cipher_for_seal(),
+            ProtocolObjectProtection::StoreEncrypted => self.cipher_for_seal(),
+            ProtocolObjectProtection::SignedPlaintext => Ok(CloudCipher::Plaintext),
             ProtocolObjectProtection::Circle(encryption) => {
                 Ok(CloudCipher::Encrypted(encryption.clone()))
             }
@@ -720,7 +719,8 @@ impl CloudSyncStorage {
 
     fn protocol_cipher_for_open(&self, context: &ProtocolObjectContext) -> CloudCipher {
         match context.protection() {
-            ProtocolObjectProtection::Store => self.cipher(),
+            ProtocolObjectProtection::StoreEncrypted => self.cipher(),
+            ProtocolObjectProtection::SignedPlaintext => CloudCipher::Plaintext,
             ProtocolObjectProtection::Circle(encryption) => {
                 CloudCipher::Encrypted(encryption.clone())
             }
@@ -1556,13 +1556,7 @@ impl SyncStorage for CloudSyncStorage {
         semantic_prefix: &str,
         data: Vec<u8>,
     ) -> Result<PreparedExactObject, StorageError> {
-        let expected = format!("{semantic_prefix}{}", context.domain().extension());
-        if slot.logical_key() != expected {
-            return Err(StorageError::Parse(format!(
-                "protocol slot {:?} does not match semantic object {expected:?}",
-                slot.logical_key()
-            )));
-        }
+        context.validate_slot(&slot, semantic_prefix)?;
         let aad = protocol_object_aad_context(context, semantic_prefix);
         let stored = self.protocol_cipher_for_seal(context)?.seal(data, &aad);
         let reference = ExactObjectRef::new(
@@ -2092,50 +2086,6 @@ impl SyncStorage for CloudSyncStorage {
         self.delete_protocol_object(object).await?;
         Ok(())
     }
-
-    async fn put_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        crate::store_dir::validate_path_token(owner_pubkey)?;
-        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}{}", self.suffix());
-        // Wrapped keys are already sealed boxes; store as-is. The suffix is kept
-        // uniform with the rest of the layout, but the bytes are never sealed by
-        // the home cipher — wrapping a store key is meaningful only for a
-        // shared (encrypted) home.
-        self.home
-            .write(
-                &key,
-                BlobBody::from_bytes(data),
-                &crate::storage::cloud::no_progress(),
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn get_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-    ) -> Result<Vec<u8>, StorageError> {
-        crate::store_dir::validate_path_token(owner_pubkey)?;
-        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}{}", self.suffix());
-        // Wrapped keys are already sealed boxes; return as-is.
-        self.home.read(&key).await.map_err(StorageError::from)
-    }
-
-    async fn delete_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-    ) -> Result<(), StorageError> {
-        crate::store_dir::validate_path_token(owner_pubkey)?;
-        let key = format!("keys/{owner_pubkey}/{recipient_pubkey}{}", self.suffix());
-        self.home.delete(&key).await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -2484,9 +2434,9 @@ mod tests {
         .expect("test cloud storage supports exact slots");
         let root = crate::sync::store_commit::ObjectHash::digest(b"reserved slot root");
         let semantic = "store-v1/heads/device-a/1".to_string();
-        let context = crate::sync::storage::ProtocolObjectContext::store(
+        let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             root,
-            crate::sync::storage::ProtocolObjectDomain::StoreHead,
+            ProtocolObjectDomain::StoreHead,
         );
         let slot = storage
             .allocate_protocol_slot(&context, &semantic, ".json")
@@ -2514,6 +2464,35 @@ mod tests {
         assert_eq!(&completed, prepared.reference());
     }
 
+    #[test]
+    fn protocol_object_prepare_rejects_a_path_outside_its_domain() {
+        let storage = CloudSyncStorage::new(
+            Arc::new(InMemoryCloudHome::new()),
+            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+            BlobPathScheme::Hashed,
+            "prepare-domain-path",
+            UserKeypair::generate(),
+        )
+        .expect("test cloud storage supports exact slots");
+        let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
+            ObjectHash::digest(b"prepare domain root"),
+            ProtocolObjectDomain::StoreHead,
+        );
+        let invalid_semantic = "store-v1/commits/device-a/1";
+        let slot = ObjectSlot::logical(format!("{invalid_semantic}.json"))
+            .expect("valid logical object slot");
+
+        assert!(matches!(
+            storage.prepare_protocol_object(
+                &context,
+                slot,
+                invalid_semantic,
+                b"signed bytes".to_vec(),
+            ),
+            Err(StorageError::Parse(_))
+        ));
+    }
+
     #[tokio::test]
     async fn exact_delete_refuses_to_remove_different_bytes_in_the_same_slot() {
         let home = InMemoryCloudHome::new();
@@ -2527,9 +2506,9 @@ mod tests {
         .expect("test cloud storage supports exact slots");
         let root = ObjectHash::digest(b"exact delete root");
         let semantic = "store-v1/heads/device-a/1";
-        let context = crate::sync::storage::ProtocolObjectContext::store(
+        let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             root,
-            crate::sync::storage::ProtocolObjectDomain::StoreHead,
+            ProtocolObjectDomain::StoreHead,
         );
         let slot = storage
             .allocate_protocol_slot(&context, semantic, ".json")
@@ -2566,9 +2545,9 @@ mod tests {
         )
         .expect("test cloud storage supports exact slots");
         let root = crate::sync::store_commit::ObjectHash::digest(b"reserved slot root");
-        let context = crate::sync::storage::ProtocolObjectContext::store(
+        let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             root,
-            crate::sync::storage::ProtocolObjectDomain::StoreHead,
+            ProtocolObjectDomain::StoreHead,
         );
         let original = "store-v1/heads/device-a/1".to_string();
         let relocated = "store-v1/heads/device-b/1".to_string();
@@ -2586,7 +2565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protocol_object_read_rejects_root_domain_and_path_substitution() {
+    async fn protocol_object_read_rejects_domain_and_path_substitution() {
         let home = InMemoryCloudHome::new();
         let storage = CloudSyncStorage::new(
             Arc::new(home),
@@ -2604,9 +2583,9 @@ mod tests {
         );
         let semantic =
             crate::sync::store_commit::commit_semantic_prefix(family, "device", 1, commit_hash);
-        let context = crate::sync::storage::ProtocolObjectContext::store(
+        let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             root,
-            crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+            ProtocolObjectDomain::StoreCommit,
         );
         let slot = storage
             .allocate_protocol_slot(&context, &semantic, ".json")
@@ -2628,16 +2607,17 @@ mod tests {
                 .expect("read with the exact authenticated context"),
             b"signed commit",
         );
-        let other_root_context = crate::sync::storage::ProtocolObjectContext::store(
+        let other_root_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             other_root,
-            crate::sync::storage::ProtocolObjectDomain::StoreCommit,
+            ProtocolObjectDomain::StoreCommit,
         );
-        assert!(matches!(
+        assert_eq!(
             storage
                 .read_protocol_object(&other_root_context, &object, &semantic)
-                .await,
-            Err(crate::sync::storage::StorageError::Decryption(_))
-        ));
+                .await
+                .expect("signed plaintext bytes are opened before their root signature is parsed"),
+            b"signed commit",
+        );
 
         let other_semantic =
             crate::sync::store_commit::commit_semantic_prefix(family, "device", 2, commit_hash);
@@ -2648,15 +2628,100 @@ mod tests {
             Err(crate::sync::storage::StorageError::Parse(_))
         ));
 
-        let other_domain_context = crate::sync::storage::ProtocolObjectContext::store(
+        let other_domain_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
             root,
-            crate::sync::storage::ProtocolObjectDomain::StoreHead,
+            ProtocolObjectDomain::StoreHead,
         );
         assert!(matches!(
             storage
                 .read_protocol_object(&other_domain_context, &object, &semantic)
                 .await,
             Err(crate::sync::storage::StorageError::Parse(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn signed_control_is_readable_across_store_key_rotations_but_packages_are_not() {
+        let home = Arc::new(InMemoryCloudHome::new());
+        let writer = CloudSyncStorage::new(
+            home.clone(),
+            CloudCipher::Encrypted(EncryptionService::from_key([8u8; 32])),
+            BlobPathScheme::Hashed,
+            "control-plane-rotation",
+            UserKeypair::generate(),
+        )
+        .expect("writer storage");
+        let stale_reader = CloudSyncStorage::new(
+            home,
+            CloudCipher::Encrypted(EncryptionService::from_key([9u8; 32])),
+            BlobPathScheme::Hashed,
+            "control-plane-rotation",
+            UserKeypair::generate(),
+        )
+        .expect("stale reader storage");
+        let root = ObjectHash::digest(b"control plane root");
+        let head_semantic = "store-v1/heads/device-a/1";
+        let head_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
+            root,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let head_slot = writer
+            .allocate_protocol_slot(&head_context, head_semantic, ".json")
+            .await
+            .expect("allocate signed head");
+        let head = writer
+            .prepare_protocol_object(
+                &head_context,
+                head_slot,
+                head_semantic,
+                b"signed control bytes".to_vec(),
+            )
+            .expect("prepare signed head");
+        writer
+            .create_protocol_object(&head)
+            .await
+            .expect("create signed head");
+        assert_eq!(
+            stale_reader
+                .read_protocol_object(&head_context, head.reference(), head_semantic)
+                .await
+                .expect("read signed control with a different Store key"),
+            b"signed control bytes",
+        );
+
+        let family = crate::sync::store_commit::CandidateFamilyId::from_hash(ObjectHash::digest(
+            b"control plane package family",
+        ));
+        let package_hash = ObjectHash::digest(b"encrypted package");
+        let package_semantic = format!(
+            "store-v1/candidates/{}/packages/device-a/1/{package_hash}",
+            family.as_hash()
+        );
+        let package_context = crate::sync::storage::ProtocolObjectContext::store_encrypted(
+            root,
+            ProtocolObjectDomain::StorePackage,
+        );
+        let package_slot = writer
+            .allocate_protocol_slot(&package_context, &package_semantic, ".pkg")
+            .await
+            .expect("allocate encrypted package");
+        let package = writer
+            .prepare_protocol_object(
+                &package_context,
+                package_slot,
+                &package_semantic,
+                b"encrypted package".to_vec(),
+            )
+            .expect("prepare encrypted package");
+        writer
+            .create_protocol_object(&package)
+            .await
+            .expect("create encrypted package");
+        assert!(matches!(
+            stale_reader
+                .read_protocol_object(&package_context, package.reference(), &package_semantic,)
+                .await,
+            Err(StorageError::Decryption(_))
         ));
     }
 

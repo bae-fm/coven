@@ -24,7 +24,8 @@ use crate::sync::provider::{
     StoreMemberProviderAccessGrantRef,
 };
 use crate::sync::storage::{
-    CoordinationStorage, ExactObjectRef, ProviderDeviceBinding, StoreProviderBinding, SyncStorage,
+    CoordinationStorage, ExactObjectRef, ProtocolObjectDomain, ProviderDeviceBinding,
+    StoreProviderBinding, SyncStorage,
 };
 use crate::sync::store_commit::{
     DeviceJoinAttempt, DeviceJoinAttemptId, DeviceJoinAttemptRef, DeviceJoinOutcomeRef,
@@ -1744,9 +1745,9 @@ pub async fn begin_device_join(
     let binding = storage.provider_binding().await?;
     let attempt_id =
         DeviceJoinAttemptId::from_hash(ObjectHash::digest(db.new_write_id().as_str().as_bytes()));
-    let attempt_context = crate::sync::storage::ProtocolObjectContext::store(
+    let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAttempt,
+        ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let attempt_slot = storage
         .allocate_protocol_slot(
@@ -1755,9 +1756,9 @@ pub async fn begin_device_join(
             ".json",
         )
         .await?;
-    let outcome_context = crate::sync::storage::ProtocolObjectContext::store(
+    let outcome_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinOutcome,
+        ProtocolObjectDomain::DeviceJoinOutcome,
     );
     let outcome_slot = storage
         .allocate_protocol_slot(
@@ -1827,9 +1828,9 @@ pub async fn abandon_device_join(
     }
     let owner_signer = owner.device_signer(identity_signer)?;
     let abandonment_object = DeviceJoinAbandonmentObject::signed(&offer, &owner, &owner_signer)?;
-    let context = crate::sync::storage::ProtocolObjectContext::store(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         offer.store_root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAbandonment,
+        ProtocolObjectDomain::DeviceJoinAbandonment,
     );
     let prefix =
         crate::sync::store_commit::device_join_abandonment_semantic_prefix(offer.attempt_id);
@@ -2065,9 +2066,9 @@ pub async fn prepare_device_registration_request(
         &approval.request.offer.store_root,
         &origin,
     );
-    let registration_context = crate::sync::storage::ProtocolObjectContext::store(
+    let registration_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         approval.request.offer.store_root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+        ProtocolObjectDomain::StoreDeviceRegistration,
     );
     let registration_slot = storage
         .allocate_protocol_slot(
@@ -2078,9 +2079,9 @@ pub async fn prepare_device_registration_request(
         .await?;
     let store_commits = match root_value.descriptor.write_policy {
         crate::WritePolicy::MergeConcurrent => {
-            let context = crate::sync::storage::ProtocolObjectContext::store(
+            let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
                 approval.request.offer.store_root.store_root_hash,
-                crate::sync::storage::ProtocolObjectDomain::StoreHead,
+                ProtocolObjectDomain::StoreHead,
             );
             let first_slot = storage
                 .allocate_protocol_slot(
@@ -2097,9 +2098,9 @@ pub async fn prepare_device_registration_request(
         }
         crate::WritePolicy::Serial => crate::sync::store_commit::StoreCommitAnchor::Serial,
     };
-    let ack_context = crate::sync::storage::ProtocolObjectContext::store(
+    let ack_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         approval.request.offer.store_root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::StoreAck,
+        ProtocolObjectDomain::StoreAck,
     );
     let first_ack = storage
         .allocate_protocol_slot(
@@ -2108,9 +2109,9 @@ pub async fn prepare_device_registration_request(
             ".json",
         )
         .await?;
-    let snapshot_context = crate::sync::storage::ProtocolObjectContext::store(
+    let snapshot_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         approval.request.offer.store_root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::StoreSnapshotMeta,
+        ProtocolObjectDomain::StoreSnapshotMeta,
     );
     let first_snapshot = storage
         .allocate_protocol_slot(
@@ -2268,9 +2269,9 @@ pub async fn accept_device_registration_request(
         &owner,
         &owner_signer,
     )?;
-    let context = crate::sync::storage::ProtocolObjectContext::store(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         offer.store_root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAttempt,
+        ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let prefix = crate::sync::store_commit::device_join_attempt_semantic_prefix(offer.attempt_id);
     let prepared = storage.prepare_protocol_object(
@@ -2813,9 +2814,9 @@ pub async fn cancel_device_join(
         .await
         .map_err(database_error)?
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    let attempt_context = crate::sync::storage::ProtocolObjectContext::store(
+    let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAttempt,
+        ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let attempt_prefix =
         crate::sync::store_commit::device_join_attempt_semantic_prefix(attempt_ref.attempt_id);
@@ -2854,9 +2855,9 @@ pub async fn cancel_device_join(
         &owner,
         &owner_signer,
     )?;
-    let context = crate::sync::storage::ProtocolObjectContext::store(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinOutcome,
+        ProtocolObjectDomain::DeviceJoinOutcome,
     );
     let prefix =
         crate::sync::store_commit::device_join_outcome_semantic_prefix(attempt_ref.attempt_id);
@@ -2990,9 +2991,9 @@ pub async fn prepare_device_join_cleanup(
         .await
         .map_err(database_error)?
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    let attempt_context = crate::sync::storage::ProtocolObjectContext::store(
+    let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAttempt,
+        ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let attempt_prefix =
         crate::sync::store_commit::device_join_attempt_semantic_prefix(attempt_ref.attempt_id);
@@ -3089,9 +3090,9 @@ pub async fn prepare_device_join_cleanup(
         &executor,
         &executor_signer,
     )?;
-    let context = crate::sync::storage::ProtocolObjectContext::store(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinCleanupReceipt,
+        ProtocolObjectDomain::DeviceJoinCleanupReceipt,
     );
     let prefix = crate::sync::store_commit::device_join_cleanup_receipt_semantic_prefix(
         attempt_ref.attempt_id,
@@ -3189,9 +3190,9 @@ pub async fn close_device_provider_admission(
         .await
         .map_err(database_error)?
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    let attempt_context = crate::sync::storage::ProtocolObjectContext::store(
+    let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAttempt,
+        ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let attempt_prefix =
         crate::sync::store_commit::device_join_attempt_semantic_prefix(attempt_ref.attempt_id);
@@ -3372,9 +3373,9 @@ pub async fn close_joining_device(
     if !allowed {
         return Err(DeviceJoinError::JournalConflict);
     }
-    let attempt_context = crate::sync::storage::ProtocolObjectContext::store(
+    let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAttempt,
+        ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let attempt_prefix =
         crate::sync::store_commit::device_join_attempt_semantic_prefix(attempt_ref.attempt_id);
@@ -3511,9 +3512,9 @@ async fn sign_device_join_producer_write_revocation(
         .await
         .map_err(database_error)?
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    let attempt_context = crate::sync::storage::ProtocolObjectContext::store(
+    let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAttempt,
+        ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let attempt_prefix =
         crate::sync::store_commit::device_join_attempt_semantic_prefix(attempt_ref.attempt_id);
@@ -3794,9 +3795,9 @@ pub async fn activate_device_join_cleanup(
         .await
         .map_err(database_error)?
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    let context = crate::sync::storage::ProtocolObjectContext::store(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinCleanupReceipt,
+        ProtocolObjectDomain::DeviceJoinCleanupReceipt,
     );
     let prefix = crate::sync::store_commit::device_join_cleanup_receipt_semantic_prefix(
         receipt.receipt.attempt_id,
@@ -4122,9 +4123,9 @@ pub async fn observe_device_join_abandonment(
         }
         return Err(DeviceJoinError::JournalConflict);
     }
-    let context = crate::sync::storage::ProtocolObjectContext::store(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAbandonment,
+        ProtocolObjectDomain::DeviceJoinAbandonment,
     );
     let prefix = crate::sync::store_commit::device_join_abandonment_semantic_prefix(
         abandonment.abandonment.attempt_id,
@@ -4284,9 +4285,9 @@ pub async fn finalize_device_join(
         &owner,
         &owner_signer,
     )?;
-    let context = crate::sync::storage::ProtocolObjectContext::store(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         offer.store_root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinOutcome,
+        ProtocolObjectDomain::DeviceJoinOutcome,
     );
     let prefix = crate::sync::store_commit::device_join_outcome_semantic_prefix(attempt_id);
     let prepared = storage.prepare_protocol_object(
@@ -4405,9 +4406,9 @@ pub async fn materialize_device_join_activation(
         .map_err(database_error)?
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
     let attempt_ref = activation.outcome.attempt().clone();
-    let attempt_context = crate::sync::storage::ProtocolObjectContext::store(
+    let attempt_context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::DeviceJoinAttempt,
+        ProtocolObjectDomain::DeviceJoinAttempt,
     );
     let attempt_bytes = storage
         .read_protocol_object(
@@ -4649,9 +4650,9 @@ pub async fn authorize_device_provider_access(
                 &administrator_signer,
             )
             .map_err(provider_error)?;
-            let context = crate::sync::storage::ProtocolObjectContext::store(
+            let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
                 request.offer.store_root.store_root_hash,
-                crate::sync::storage::ProtocolObjectDomain::ProviderAccessGrant,
+                ProtocolObjectDomain::ProviderAccessGrant,
             );
             let prefix =
                 crate::sync::store_commit::provider_access_grant_semantic_prefix(&grant.grant_id);
@@ -4675,9 +4676,9 @@ pub async fn authorize_device_provider_access(
         }
         _ => return Err(DeviceJoinError::JournalConflict),
     };
-    let context = crate::sync::storage::ProtocolObjectContext::store(
+    let context = crate::sync::storage::ProtocolObjectContext::signed_plaintext(
         request.offer.store_root.store_root_hash,
-        crate::sync::storage::ProtocolObjectDomain::ProviderAccessGrant,
+        ProtocolObjectDomain::ProviderAccessGrant,
     );
     let prefix = crate::sync::store_commit::provider_access_grant_semantic_prefix(&grant.grant_id);
     storage.create_protocol_object(&prepared).await?;

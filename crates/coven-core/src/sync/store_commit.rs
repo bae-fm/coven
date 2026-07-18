@@ -918,6 +918,7 @@ pub enum StoreControl {
     SerialMembershipAndKeyRotation {
         entry: super::membership::SerialMembershipEntry,
         generation: u64,
+        wrapped_keys: Vec<super::wrapped_store_key::WrappedStoreKeyRef>,
     },
     ProviderAdmin {
         change: super::provider::ProviderAdminChange,
@@ -6899,7 +6900,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let entry = state
+        let add = state
             .signed_set_member(
                 &fixture.signer,
                 keys::public_key_hex(&member),
@@ -6908,6 +6909,20 @@ mod tests {
                 "add".to_string(),
             )
             .unwrap();
+        let state = state.apply(&add).unwrap();
+        let entry = state
+            .signed_remove_member(
+                &fixture.signer,
+                keys::public_key_hex(&member),
+                "remove".to_string(),
+            )
+            .unwrap();
+        let wrapped_keys = vec![crate::sync::membership::test_wrapped_key_ref(
+            &keys::public_key_hex(&fixture.signer),
+            &keys::public_key_hex(&fixture.signer),
+            2,
+            b"Store commit Serial rotation wrap",
+        )];
         let device_signer = fixture.registration.device_signer(&fixture.signer).unwrap();
         let commit = StoreBatchCommit::signed_with_control(
             fixture.root_ref.store_root_hash,
@@ -6922,6 +6937,7 @@ mod tests {
             Some(StoreControl::SerialMembershipAndKeyRotation {
                 entry: entry.clone(),
                 generation: 2,
+                wrapped_keys,
             }),
             None,
             &device_signer,

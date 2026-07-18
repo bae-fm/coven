@@ -20,6 +20,7 @@ use super::store_commit::{
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreProtocolRoot, StoreRootRef,
     SuccessorLink, STORE_PROTOCOL_VERSION,
 };
+use super::wrapped_store_key::WrappedStoreKeyRef;
 use crate::keys::{self, UserKeypair};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,6 +54,7 @@ pub struct SerialAuthorizationState {
     pub membership: SerialMembershipState,
     pub provider_admin: super::provider::ProviderAdminState,
     pub key_generation: u64,
+    pub(crate) active_wrapped_keys: BTreeSet<WrappedStoreKeyRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +67,7 @@ pub enum SerialMembershipChange {
         role: MemberRole,
         grant_id: MembershipGrantId,
         replaces: BTreeSet<MembershipGrantId>,
+        wrapped_key: WrappedStoreKeyRef,
     },
     RemoveMember {
         user_pubkey: String,
@@ -123,6 +126,8 @@ pub enum SerialMembershipError {
     KeyGeneration { expected: u64, actual: u64 },
     #[error("Serial commit reference does not authenticate the accepted commit")]
     InvalidCommitRef,
+    #[error("Serial membership change carries invalid wrapped Store-key authority")]
+    InvalidWrappedKey,
     #[error("Serial provider administrator history is invalid: {0}")]
     ProviderAdmin(#[from] super::provider::ProviderAdminReducerError),
 }
@@ -136,7 +141,8 @@ impl SerialAuthorizationState {
         Ok(Self {
             membership,
             provider_admin: test_provider_admin_genesis(std::slice::from_ref(founder))?,
-            key_generation: 0,
+            key_generation: crate::encryption::INITIAL_KEY_GENERATION,
+            active_wrapped_keys: BTreeSet::new(),
         })
     }
 
@@ -185,6 +191,7 @@ impl SerialAuthorizationState {
                 &root_value.descriptor.founder_provider_admin,
             ),
             key_generation: crate::encryption::INITIAL_KEY_GENERATION,
+            active_wrapped_keys: BTreeSet::new(),
         })
     }
 
@@ -237,11 +244,14 @@ impl SerialAuthorizationState {
                 membership,
                 provider_admin: self.provider_admin.clone(),
                 key_generation: self.key_generation,
+                active_wrapped_keys: self.active_wrapped_keys.clone(),
             });
         };
         let key_generation = match control {
             StoreControl::SerialMembership { .. } => self.key_generation,
-            StoreControl::SerialMembershipAndKeyRotation { entry, generation } => {
+            StoreControl::SerialMembershipAndKeyRotation {
+                entry, generation, ..
+            } => {
                 if !entry.change.is_removal() {
                     return Err(SerialMembershipError::RotationWithoutRemoval);
                 }
@@ -272,11 +282,76 @@ impl SerialAuthorizationState {
                 },
             )?;
         }
+        let active_wrapped_keys = match control {
+            StoreControl::SerialMembership { entry } => {
+                let SerialMembershipChange::SetMember {
+                    wrapped_key,
+                    user_pubkey,
+                    ..
+                } = &entry.change
+                else {
+                    return Err(SerialMembershipError::InvalidWrappedKey);
+                };
+                if wrapped_key.owner_pubkey != entry.author_pubkey
+                    || wrapped_key.recipient_pubkey != *user_pubkey
+                    || wrapped_key.generation != self.key_generation
+                    || wrapped_key.validate_identity().is_err()
+                {
+                    return Err(SerialMembershipError::InvalidWrappedKey);
+                }
+                let mut keys = self.active_wrapped_keys.clone();
+                keys.retain(|reference| reference.recipient_pubkey != *user_pubkey);
+                keys.insert(wrapped_key.clone());
+                keys
+            }
+            StoreControl::SerialMembershipAndKeyRotation {
+                entry,
+                generation,
+                wrapped_keys,
+            } => {
+                let SerialMembershipChange::RemoveMember { user_pubkey, .. } = &entry.change else {
+                    return Err(SerialMembershipError::RotationWithoutRemoval);
+                };
+                let expected_recipients = membership
+                    .current_members()
+                    .into_iter()
+                    .map(|(pubkey, _)| pubkey)
+                    .collect::<BTreeSet<_>>();
+                let actual_recipients = wrapped_keys
+                    .iter()
+                    .map(|reference| reference.recipient_pubkey.clone())
+                    .collect::<BTreeSet<_>>();
+                if wrapped_keys.is_empty()
+                    || !wrapped_keys.windows(2).all(|pair| pair[0] < pair[1])
+                    || expected_recipients != actual_recipients
+                    || actual_recipients.len() != wrapped_keys.len()
+                    || wrapped_keys.iter().any(|reference| {
+                        reference.owner_pubkey != entry.author_pubkey
+                            || reference.recipient_pubkey == *user_pubkey
+                            || reference.generation != *generation
+                            || reference.validate_identity().is_err()
+                    })
+                {
+                    return Err(SerialMembershipError::InvalidWrappedKey);
+                }
+                wrapped_keys.iter().cloned().collect()
+            }
+            StoreControl::ProviderAdmin { .. } => self.active_wrapped_keys.clone(),
+        };
         Ok(Self {
             membership,
             provider_admin,
             key_generation,
+            active_wrapped_keys,
         })
+    }
+
+    pub fn active_wrapped_keys_for(&self, recipient_pubkey: &str) -> Vec<WrappedStoreKeyRef> {
+        self.active_wrapped_keys
+            .iter()
+            .filter(|reference| reference.recipient_pubkey == recipient_pubkey)
+            .cloned()
+            .collect()
     }
 }
 
@@ -428,12 +503,13 @@ impl SerialMembershipState {
         })
     }
 
-    pub fn signed_set_member(
+    pub fn signed_set_member_with_wrapped_key(
         &self,
         signer: &UserKeypair,
         user_pubkey: String,
         provider_account_email: Option<String>,
         role: MemberRole,
+        wrapped_key: WrappedStoreKeyRef,
         created_at: String,
     ) -> Result<SerialMembershipEntry, SerialMembershipError> {
         let created_at_generation = self.next_generation()?;
@@ -448,8 +524,34 @@ impl SerialMembershipState {
                 role,
                 grant_id,
                 replaces,
+                wrapped_key,
             },
             created_at_generation,
+            created_at,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn signed_set_member(
+        &self,
+        signer: &UserKeypair,
+        user_pubkey: String,
+        provider_account_email: Option<String>,
+        role: MemberRole,
+        created_at: String,
+    ) -> Result<SerialMembershipEntry, SerialMembershipError> {
+        let wrapped_key = test_wrapped_key_ref(
+            &keys::public_key_hex(signer),
+            &user_pubkey,
+            crate::encryption::INITIAL_KEY_GENERATION,
+            b"Serial membership test wrap",
+        );
+        self.signed_set_member_with_wrapped_key(
+            signer,
+            user_pubkey,
+            provider_account_email,
+            role,
+            wrapped_key,
             created_at,
         )
     }
@@ -550,7 +652,14 @@ impl SerialMembershipState {
                 role,
                 grant_id,
                 replaces,
+                wrapped_key,
             } => {
+                if wrapped_key.owner_pubkey != entry.author_pubkey
+                    || wrapped_key.recipient_pubkey != *user_pubkey
+                    || wrapped_key.validate_identity().is_err()
+                {
+                    return Err(SerialMembershipError::InvalidWrappedKey);
+                }
                 if *replaces != self.active_grants_for(user_pubkey)
                     || next.active_grants.contains_key(grant_id)
                 {
@@ -693,6 +802,38 @@ impl MemberRole {
     }
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn test_wrapped_key_ref(
+    owner_pubkey: &str,
+    recipient_pubkey: &str,
+    generation: u64,
+    label: &[u8],
+) -> WrappedStoreKeyRef {
+    let wrap_hash = ObjectHash::digest(
+        &[
+            label,
+            owner_pubkey.as_bytes(),
+            recipient_pubkey.as_bytes(),
+            &generation.to_le_bytes(),
+        ]
+        .concat(),
+    );
+    let logical_key =
+        format!("keys/{owner_pubkey}/{recipient_pubkey}/{generation}/{wrap_hash}.json");
+    WrappedStoreKeyRef {
+        owner_pubkey: owner_pubkey.to_string(),
+        recipient_pubkey: recipient_pubkey.to_string(),
+        generation,
+        wrap_hash,
+        object: ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(logical_key)
+                .expect("test wrapped-key slot is valid"),
+            label.len() as u64,
+            ObjectHash::digest(label),
+        ),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MemberInfo {
     pub pubkey: String,
@@ -718,11 +859,13 @@ pub enum MembershipChange {
         membership: Option<GrantStreamAnchor>,
         replaces: BTreeSet<MembershipGrantId>,
         owner_barriers: BTreeMap<MembershipGrantId, OwnerStreamBarrier>,
+        wrapped_key: WrappedStoreKeyRef,
     },
     RemoveMember {
         user_pubkey: String,
         removes: BTreeSet<MembershipGrantId>,
         owner_barriers: BTreeMap<MembershipGrantId, OwnerStreamBarrier>,
+        wrapped_keys: Vec<WrappedStoreKeyRef>,
     },
     ProviderAdmin,
     ResolutionActivation {
@@ -969,6 +1112,15 @@ pub enum MembershipError {
     },
     #[error("membership entry {0} carries an invalid Owner membership stream anchor")]
     InvalidOwnerMembershipAnchor(usize),
+    #[error("membership entry {0} carries invalid wrapped Store-key authority")]
+    InvalidWrappedKeys(usize),
+    #[error(
+        "current member {recipient_pubkey} lacks wrapped Store-key coverage for rotation {rotation:?}"
+    )]
+    MissingWrappedKeyCoverage {
+        recipient_pubkey: String,
+        rotation: Box<MembershipCoord>,
+    },
     #[error("membership history leaves no active Owner")]
     NoActiveOwner,
     #[error(
@@ -1706,8 +1858,14 @@ impl MembershipChain {
         })
     }
 
+    pub fn founder_entry(&self) -> Option<&MembershipEntry> {
+        self.entries
+            .iter()
+            .find(|entry| matches!(entry.change, MembershipChange::Founder { .. }))
+    }
+
     pub fn founder_pubkey(&self) -> Option<&str> {
-        self.entries.iter().find_map(|entry| match &entry.change {
+        self.founder_entry().and_then(|entry| match &entry.change {
             MembershipChange::Founder { owner_pubkey, .. } => Some(owner_pubkey.as_str()),
             MembershipChange::SetMember { .. }
             | MembershipChange::RemoveMember { .. }
@@ -1802,6 +1960,80 @@ impl MembershipChain {
         members.into_iter().collect()
     }
 
+    pub fn active_wrapped_keys_for(&self, recipient_pubkey: &str) -> Vec<WrappedStoreKeyRef> {
+        let active_grants = self.active_grant_ids(recipient_pubkey);
+        self.entries_with_coords()
+            .filter(|(coord, _)| self.included.contains(*coord))
+            .flat_map(|(_, entry)| match &entry.change {
+                MembershipChange::SetMember {
+                    grant_id,
+                    wrapped_key,
+                    ..
+                } if active_grants.contains(grant_id) => std::slice::from_ref(wrapped_key),
+                MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.as_slice(),
+                MembershipChange::Founder { .. }
+                | MembershipChange::SetMember { .. }
+                | MembershipChange::ProviderAdmin
+                | MembershipChange::ResolutionActivation { .. } => &[],
+            })
+            .filter(|reference| reference.recipient_pubkey == recipient_pubkey)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn wrapped_key_authority_for(
+        &self,
+        recipient_pubkey: &str,
+    ) -> Result<Vec<WrappedStoreKeyRef>, MembershipError> {
+        let active_grants = self.active_grants_for(recipient_pubkey);
+        for (index, (rotation_coord, entry)) in self
+            .entries_with_coords()
+            .enumerate()
+            .filter(|(_, (coord, _))| self.included.contains(*coord))
+        {
+            let MembershipChange::RemoveMember { wrapped_keys, .. } = &entry.change else {
+                continue;
+            };
+            if wrapped_keys
+                .iter()
+                .any(|reference| reference.recipient_pubkey == recipient_pubkey)
+            {
+                continue;
+            }
+            let rotation_generation = wrapped_keys
+                .first()
+                .ok_or(MembershipError::InvalidWrappedKeys(index))?
+                .generation;
+            let covered_by_later_grant = !active_grants.is_empty()
+                && active_grants.iter().all(|(active_grant, _)| {
+                    let Some((_, creation)) = self.entries_with_coords().find(|(_, entry)| {
+                        matches!(
+                            &entry.change,
+                            MembershipChange::SetMember { grant_id, .. }
+                                if grant_id == *active_grant
+                        )
+                    }) else {
+                        return false;
+                    };
+                    let MembershipChange::SetMember { wrapped_key, .. } = &creation.change else {
+                        return false;
+                    };
+                    wrapped_key.generation >= rotation_generation
+                        && membership_history_closure(&self.entries, &creation.dependencies)
+                            .contains(rotation_coord)
+                });
+            if !covered_by_later_grant {
+                return Err(MembershipError::MissingWrappedKeyCoverage {
+                    recipient_pubkey: recipient_pubkey.to_string(),
+                    rotation: Box::new(rotation_coord.clone()),
+                });
+            }
+        }
+        Ok(self.active_wrapped_keys_for(recipient_pubkey))
+    }
+
     pub fn current_member_provider_email(&self, pubkey: &str) -> Option<&str> {
         self.active_grants_for(pubkey)
             .into_iter()
@@ -1855,17 +2087,6 @@ impl MembershipChain {
             })
             .map(|coord| coord.stream_id)
             .collect()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn preferred_author_stream(
-        &self,
-        author_pubkey: &str,
-        grant: &MembershipGrantId,
-    ) -> Option<AuthorStreamId> {
-        self.reusable_author_streams(author_pubkey, grant)
-            .into_iter()
-            .next_back()
     }
 
     /// Raw signed coverage: the greatest loaded coordinate in every stream,
@@ -1952,7 +2173,7 @@ impl MembershipChain {
         ))
     }
 
-    pub(crate) fn signed_set_member_with_anchor_in_stream(
+    pub(crate) fn signed_set_member_with_anchor_and_wrapped_key_in_stream(
         &self,
         signer: &UserKeypair,
         stream_id: AuthorStreamId,
@@ -1960,6 +2181,7 @@ impl MembershipChain {
         provider_account_email: Option<String>,
         role: MemberRole,
         membership: Option<GrantStreamAnchor>,
+        wrapped_key: WrappedStoreKeyRef,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
         let author = keys::public_key_hex(signer);
@@ -2004,6 +2226,7 @@ impl MembershipChain {
                 membership,
                 replaces,
                 owner_barriers,
+                wrapped_key,
             },
             provider_admin: None,
             signature: String::new(),
@@ -2037,27 +2260,44 @@ impl MembershipChain {
             ))
             .expect("test membership head slot is a valid logical key"),
         });
-        self.signed_set_member_with_anchor_in_stream(
+        let dependencies = self.frontier();
+        let wrapped_key = test_wrapped_key_ref(
+            &keys::public_key_hex(signer),
+            &user_pubkey,
+            membership_causal_generation(&self.entries, &dependencies),
+            b"Merge membership test wrap",
+        );
+        self.signed_set_member_with_anchor_and_wrapped_key_in_stream(
             signer,
             stream_id,
             user_pubkey,
             provider_account_email,
             role,
             membership,
+            wrapped_key,
             created_at,
         )
     }
 
-    pub fn signed_remove_member_in_stream(
+    pub fn signed_remove_member_with_wrapped_keys_in_stream(
         &self,
         signer: &UserKeypair,
         stream_id: AuthorStreamId,
         user_pubkey: String,
+        wrapped_keys: Vec<WrappedStoreKeyRef>,
         created_at: String,
     ) -> Result<MembershipEntry, MembershipError> {
         let removes = self.active_grant_ids(&user_pubkey);
         if removes.is_empty() {
             return Err(MembershipError::NotAMember(user_pubkey));
+        }
+        let retains_owner = self.state.grants.iter().any(|(grant, record)| {
+            !self.state.removed.contains(grant)
+                && !removes.contains(grant)
+                && record.role == MemberRole::Owner
+        });
+        if !retains_owner {
+            return Err(MembershipError::NoActiveOwner);
         }
         let author = keys::public_key_hex(signer);
         let author_grant = self
@@ -2083,6 +2323,7 @@ impl MembershipChain {
                 user_pubkey,
                 removes,
                 owner_barriers,
+                wrapped_keys,
             },
             provider_admin: None,
             signature: String::new(),
@@ -2091,6 +2332,36 @@ impl MembershipChain {
         let mut candidate = self.clone();
         candidate.add_entry(entry.clone())?;
         Ok(entry)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn signed_remove_member_in_stream(
+        &self,
+        signer: &UserKeypair,
+        stream_id: AuthorStreamId,
+        user_pubkey: String,
+        created_at: String,
+    ) -> Result<MembershipEntry, MembershipError> {
+        let owner = keys::public_key_hex(signer);
+        let dependencies = self.frontier();
+        let generation = membership_causal_generation(&self.entries, &dependencies)
+            .checked_add(1)
+            .ok_or(MembershipError::InvalidWrappedKeys(self.entries.len()))?;
+        let wrapped_keys = self
+            .current_members()
+            .into_iter()
+            .filter(|(member, _)| member != &user_pubkey)
+            .map(|(member, _)| {
+                test_wrapped_key_ref(&owner, &member, generation, b"Merge removal test wrap")
+            })
+            .collect();
+        self.signed_remove_member_with_wrapped_keys_in_stream(
+            signer,
+            stream_id,
+            user_pubkey,
+            wrapped_keys,
+            created_at,
+        )
     }
 
     pub fn signed_provider_admin_change_in_stream(
@@ -2409,6 +2680,7 @@ impl MembershipChain {
         }
 
         validate_provider_admin_controls(&self.entries, self.resolution_checkpoint.as_ref())?;
+        validate_membership_wrapped_keys(&self.entries, self.resolution_checkpoint.as_ref())?;
 
         let reduced = match &self.resolution_checkpoint {
             Some(checkpoint) => reduce_store_membership_from_checkpoint(&self.entries, checkpoint)?,
@@ -2729,6 +3001,109 @@ impl MembershipChain {
     }
 }
 
+fn validate_membership_wrapped_keys(
+    entries: &[MembershipEntry],
+    checkpoint: Option<&MembershipResolutionCheckpoint>,
+) -> Result<(), MembershipError> {
+    for (index, entry) in entries.iter().enumerate() {
+        let included = membership_history_closure(entries, &entry.dependencies);
+        let causal_generation = membership_causal_generation(entries, &entry.dependencies);
+        let references = match &entry.change {
+            MembershipChange::SetMember {
+                user_pubkey,
+                wrapped_key,
+                ..
+            } => {
+                if wrapped_key.owner_pubkey != entry.author_pubkey
+                    || wrapped_key.recipient_pubkey != *user_pubkey
+                    || wrapped_key.generation != causal_generation
+                    || wrapped_key.validate_identity().is_err()
+                {
+                    return Err(MembershipError::InvalidWrappedKeys(index));
+                }
+                continue;
+            }
+            MembershipChange::RemoveMember {
+                user_pubkey,
+                wrapped_keys,
+                ..
+            } => (user_pubkey, wrapped_keys),
+            MembershipChange::Founder { .. }
+            | MembershipChange::ProviderAdmin
+            | MembershipChange::ResolutionActivation { .. } => continue,
+        };
+        let (removed_pubkey, wrapped_keys) = references;
+        let rotation_generation = wrapped_keys.first().map(|reference| reference.generation);
+        if causal_generation.checked_add(1) != rotation_generation
+            || !wrapped_keys.windows(2).all(|pair| pair[0] < pair[1])
+            || wrapped_keys.iter().any(|reference| {
+                reference.owner_pubkey != entry.author_pubkey
+                    || reference.recipient_pubkey == *removed_pubkey
+                    || Some(reference.generation) != rotation_generation
+                    || reference.validate_identity().is_err()
+            })
+        {
+            return Err(MembershipError::InvalidWrappedKeys(index));
+        }
+        let causal_past = entries
+            .iter()
+            .filter(|candidate| included.contains(&candidate.coord()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let precedes_checkpoint = checkpoint.is_some_and(|checkpoint| {
+            checkpoint.raw_heads.iter().any(|head| {
+                head.stream_key() == entry.coord().stream_key() && entry.seq <= head.seq
+            })
+        });
+        let reduced = match (checkpoint, precedes_checkpoint) {
+            (Some(checkpoint), false) => {
+                reduce_store_membership_from_checkpoint(&causal_past, checkpoint)?
+            }
+            (None, _) | (Some(_), true) => reduce_store_membership(&causal_past)?,
+        };
+        let CausalGrantStatus::Resolved(reduced) = reduced else {
+            return Err(MembershipError::InvalidWrappedKeys(index));
+        };
+        let expected_recipients = reduced
+            .grants
+            .iter()
+            .filter(|(grant, record)| {
+                !reduced.removed.contains(*grant) && record.member_pubkey != *removed_pubkey
+            })
+            .map(|(_, record)| record.member_pubkey.clone())
+            .collect::<BTreeSet<_>>();
+        let actual_recipients = wrapped_keys
+            .iter()
+            .map(|reference| reference.recipient_pubkey.clone())
+            .collect::<BTreeSet<_>>();
+        if expected_recipients != actual_recipients || actual_recipients.len() != wrapped_keys.len()
+        {
+            return Err(MembershipError::InvalidWrappedKeys(index));
+        }
+    }
+    Ok(())
+}
+
+fn membership_causal_generation(
+    entries: &[MembershipEntry],
+    dependencies: &[MembershipCoord],
+) -> u64 {
+    let included = membership_history_closure(entries, dependencies);
+    entries
+        .iter()
+        .filter(|candidate| included.contains(&candidate.coord()))
+        .flat_map(|candidate| match &candidate.change {
+            MembershipChange::SetMember { wrapped_key, .. } => std::slice::from_ref(wrapped_key),
+            MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys.as_slice(),
+            MembershipChange::Founder { .. }
+            | MembershipChange::ProviderAdmin
+            | MembershipChange::ResolutionActivation { .. } => &[],
+        })
+        .map(|reference| reference.generation)
+        .max()
+        .unwrap_or(crate::encryption::INITIAL_KEY_GENERATION)
+}
+
 fn reduce_store_membership(
     entries: &[MembershipEntry],
 ) -> Result<CausalGrantStatus<MembershipCoord, StoreAssignment>, MembershipError> {
@@ -2884,6 +3259,7 @@ fn normalize_store_membership(
                     membership: _,
                     replaces,
                     owner_barriers,
+                    ..
                 } => CausalChange::SetMember {
                     member_pubkey: user_pubkey.clone(),
                     assignment: StoreAssignment {
@@ -2901,6 +3277,7 @@ fn normalize_store_membership(
                     user_pubkey,
                     removes,
                     owner_barriers,
+                    ..
                 } => CausalChange::RemoveMember {
                     member_pubkey: user_pubkey.clone(),
                     removes: removes.clone(),
@@ -4200,6 +4577,205 @@ mod tests {
             ),
             Err(MembershipError::NoActiveOwner)
         ));
+    }
+
+    #[test]
+    fn membership_candidates_require_exact_wrapped_key_recipient_coverage() {
+        let owner = key();
+        let member = key();
+        let owner_pubkey = keys::public_key_hex(&owner);
+        let member_pubkey = keys::public_key_hex(&member);
+        let mut chain = founded("store", &owner);
+        let wrong_recipient = test_wrapped_key_ref(
+            &owner_pubkey,
+            &owner_pubkey,
+            crate::encryption::INITIAL_KEY_GENERATION,
+            b"wrong invitation recipient",
+        );
+        assert!(matches!(
+            chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
+                &owner,
+                stream(1),
+                member_pubkey.clone(),
+                None,
+                MemberRole::Member,
+                None,
+                wrong_recipient,
+                "invalid invitation".to_string(),
+            ),
+            Err(MembershipError::InvalidWrappedKeys(_))
+        ));
+
+        let add = chain
+            .signed_set_member_in_stream(
+                &owner,
+                stream(1),
+                member_pubkey.clone(),
+                None,
+                MemberRole::Member,
+                "add member".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(add).unwrap();
+        assert!(matches!(
+            chain.signed_remove_member_with_wrapped_keys_in_stream(
+                &owner,
+                stream(1),
+                member_pubkey,
+                Vec::new(),
+                "missing owner wrap".to_string(),
+            ),
+            Err(MembershipError::InvalidWrappedKeys(_))
+        ));
+    }
+
+    #[test]
+    fn wrapped_key_generations_follow_the_causal_membership_history() {
+        let owner = key();
+        let first_member = key();
+        let second_member = key();
+        let later_member = key();
+        let owner_pubkey = keys::public_key_hex(&owner);
+        let first_pubkey = keys::public_key_hex(&first_member);
+        let second_pubkey = keys::public_key_hex(&second_member);
+        let later_pubkey = keys::public_key_hex(&later_member);
+        let mut chain = founded("wrapped-generation-history", &owner);
+        for member in [&first_pubkey, &second_pubkey] {
+            let add = chain
+                .signed_set_member_in_stream(
+                    &owner,
+                    stream(1),
+                    member.clone(),
+                    None,
+                    MemberRole::Member,
+                    format!("add {member}"),
+                )
+                .unwrap();
+            chain.add_entry(add).unwrap();
+        }
+        let mut first_rotation_wraps = vec![
+            test_wrapped_key_ref(&owner_pubkey, &owner_pubkey, 2, b"first owner rotation"),
+            test_wrapped_key_ref(&owner_pubkey, &second_pubkey, 2, b"first member rotation"),
+        ];
+        first_rotation_wraps.sort();
+        let first_rotation = chain
+            .signed_remove_member_with_wrapped_keys_in_stream(
+                &owner,
+                stream(1),
+                first_pubkey,
+                first_rotation_wraps,
+                "first rotation".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(first_rotation).unwrap();
+
+        assert!(matches!(
+            chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
+                &owner,
+                stream(1),
+                later_pubkey.clone(),
+                None,
+                MemberRole::Member,
+                None,
+                test_wrapped_key_ref(&owner_pubkey, &later_pubkey, 1, b"stale later invitation",),
+                "stale later invitation".to_string(),
+            ),
+            Err(MembershipError::InvalidWrappedKeys(_))
+        ));
+        assert!(matches!(
+            chain.signed_remove_member_with_wrapped_keys_in_stream(
+                &owner,
+                stream(1),
+                second_pubkey,
+                vec![test_wrapped_key_ref(
+                    &owner_pubkey,
+                    &owner_pubkey,
+                    2,
+                    b"reused rotation generation",
+                )],
+                "reused rotation generation".to_string(),
+            ),
+            Err(MembershipError::InvalidWrappedKeys(_))
+        ));
+    }
+
+    #[test]
+    fn concurrent_add_and_rotation_has_incomplete_wrapped_key_authority() {
+        let owner = key();
+        let removed = key();
+        let concurrent_member = key();
+        let owner_pubkey = keys::public_key_hex(&owner);
+        let removed_pubkey = keys::public_key_hex(&removed);
+        let concurrent_pubkey = keys::public_key_hex(&concurrent_member);
+        let mut chain = founded("concurrent-add-rotation", &owner);
+        let add_removed = chain
+            .signed_set_member_in_stream(
+                &owner,
+                stream(1),
+                removed_pubkey.clone(),
+                None,
+                MemberRole::Member,
+                "add member that will be removed".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(add_removed).unwrap();
+
+        let add_concurrent = chain
+            .signed_set_member_in_stream(
+                &owner,
+                stream(2),
+                concurrent_pubkey.clone(),
+                None,
+                MemberRole::Member,
+                "concurrent add".to_string(),
+            )
+            .unwrap();
+        let owner_rotation = test_wrapped_key_ref(
+            &owner_pubkey,
+            &owner_pubkey,
+            2,
+            b"rotation missing concurrent member",
+        );
+        let remove = chain
+            .signed_remove_member_with_wrapped_keys_in_stream(
+                &owner,
+                stream(3),
+                removed_pubkey,
+                vec![owner_rotation],
+                "concurrent removal".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(add_concurrent).unwrap();
+        chain.add_entry(remove).unwrap();
+
+        assert!(matches!(
+            chain.wrapped_key_authority_for(&concurrent_pubkey),
+            Err(MembershipError::MissingWrappedKeyCoverage { .. })
+        ));
+
+        let replacement_wrap = test_wrapped_key_ref(
+            &owner_pubkey,
+            &concurrent_pubkey,
+            2,
+            b"post-rotation replacement invitation",
+        );
+        let replacement = chain
+            .signed_set_member_with_anchor_and_wrapped_key_in_stream(
+                &owner,
+                stream(4),
+                concurrent_pubkey.clone(),
+                None,
+                MemberRole::Member,
+                None,
+                replacement_wrap.clone(),
+                "replace concurrent invitation after rotation".to_string(),
+            )
+            .unwrap();
+        chain.add_entry(replacement).unwrap();
+        assert_eq!(
+            chain.wrapped_key_authority_for(&concurrent_pubkey).unwrap(),
+            vec![replacement_wrap],
+        );
     }
 
     #[test]

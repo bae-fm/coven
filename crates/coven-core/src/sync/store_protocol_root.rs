@@ -4,7 +4,7 @@ use crate::database::Database;
 use crate::keys::UserKeypair;
 
 use super::membership::{AuthorHead, MembershipHeadRef};
-use super::storage::SyncStorage;
+use super::storage::{ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     ack_slot_prefix, membership_head_slot_prefix, owner_recovery_semantic_prefix, CommitFrontier,
     DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, ResolvedStoreDeviceState, StoreAck,
@@ -291,9 +291,9 @@ async fn durable_descriptor_reservation(
             "durable Store creation authority differs from this creation request".to_string(),
         ));
     }
-    let allocation_context = super::storage::ProtocolObjectContext::store(
+    let allocation_context = super::storage::ProtocolObjectContext::signed_plaintext(
         ObjectHash::digest(authority.creation_id.to_string().as_bytes()),
-        super::storage::ProtocolObjectDomain::StoreProtocolRoot,
+        ProtocolObjectDomain::StoreProtocolRoot,
     );
     if let StoreCreationAttempt::Initialized(authority) = &attempt {
         let root_slot = storage
@@ -316,9 +316,9 @@ async fn durable_descriptor_reservation(
     if let StoreCreationAttempt::RootReserved(root) = &attempt {
         let prefix =
             super::store_commit::founder_registration_semantic_prefix(root.authority.creation_id);
-        let context = super::storage::ProtocolObjectContext::store(
+        let context = super::storage::ProtocolObjectContext::signed_plaintext(
             allocation_context.store_root_hash(),
-            super::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+            ProtocolObjectDomain::StoreDeviceRegistration,
         );
         let registration_slot = storage
             .allocate_protocol_slot(&context, &prefix, ".json")
@@ -340,7 +340,7 @@ async fn durable_descriptor_reservation(
                 let prefix = super::store_commit::founder_membership_head_semantic_prefix(
                     founder.root.authority.creation_id,
                 );
-                let context = super::storage::ProtocolObjectContext::store(
+                let context = super::storage::ProtocolObjectContext::signed_plaintext(
                     allocation_context.store_root_hash(),
                     super::storage::ProtocolObjectDomain::StoreMembershipHead,
                 );
@@ -370,9 +370,9 @@ async fn durable_descriptor_reservation(
             authority.founder_grant.clone(),
             1,
         );
-        let context = super::storage::ProtocolObjectContext::store(
+        let context = super::storage::ProtocolObjectContext::signed_plaintext(
             allocation_context.store_root_hash(),
-            super::storage::ProtocolObjectDomain::OwnerRecoveryNode,
+            ProtocolObjectDomain::OwnerRecoveryNode,
         );
         let recovery_slot = storage
             .allocate_protocol_slot(&context, &prefix, ".json")
@@ -436,9 +436,9 @@ async fn durable_founder_graph_reservation(
         creation_id: authority.creation_id,
     };
     let device = super::store_commit::StoreDeviceId::derive(root, &origin).to_string();
-    let ack_context = super::storage::ProtocolObjectContext::store(
+    let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreAck,
+        ProtocolObjectDomain::StoreAck,
     );
 
     if let StoreCreationAttempt::DescriptorReserved(current) = &attempt {
@@ -453,9 +453,9 @@ async fn durable_founder_graph_reservation(
                     announcements: DeviceStreamAnchor::StoreAnnouncements {
                         first_slot: storage
                             .allocate_protocol_slot(
-                                &super::storage::ProtocolObjectContext::store(
+                                &super::storage::ProtocolObjectContext::signed_plaintext(
                                     root.store_root_hash,
-                                    super::storage::ProtocolObjectDomain::StoreHead,
+                                    ProtocolObjectDomain::StoreHead,
                                 ),
                                 &super::store_commit::head_slot_prefix(&device, 1),
                                 ".json",
@@ -500,9 +500,9 @@ async fn durable_founder_graph_reservation(
             snapshots: DeviceStreamAnchor::StoreSnapshots {
                 first_slot: storage
                     .allocate_protocol_slot(
-                        &super::storage::ProtocolObjectContext::store(
+                        &super::storage::ProtocolObjectContext::signed_plaintext(
                             root.store_root_hash,
-                            super::storage::ProtocolObjectDomain::StoreSnapshotMeta,
+                            ProtocolObjectDomain::StoreSnapshotMeta,
                         ),
                         &super::store_commit::snapshot_slot_prefix(&device, 1),
                         ".json",
@@ -545,7 +545,7 @@ async fn durable_founder_graph_reservation(
                 FounderMembershipPublicationReservation::MergeConcurrent {
                     next_head_slot: storage
                         .allocate_protocol_slot(
-                            &super::storage::ProtocolObjectContext::store(
+                            &super::storage::ProtocolObjectContext::signed_plaintext(
                                 root.store_root_hash,
                                 super::storage::ProtocolObjectDomain::StoreMembershipHead,
                             ),
@@ -682,9 +682,9 @@ async fn prepare_founder_graph(
     let root_id = root_value.descriptor.store_root_id();
     let root_hash = root_value.object_hash();
     let root_prefix = super::store_commit::store_protocol_root_logical_key();
-    let root_context = super::storage::ProtocolObjectContext::store(
+    let root_context = super::storage::ProtocolObjectContext::signed_plaintext(
         root_hash,
-        super::storage::ProtocolObjectDomain::StoreProtocolRoot,
+        ProtocolObjectDomain::StoreProtocolRoot,
     );
     let root_bytes = root_value.to_bytes();
     let root_prepared = storage
@@ -735,9 +735,9 @@ async fn prepare_founder_graph(
             "founder registration has no acknowledgement anchor".to_string(),
         ));
     };
-    let ack_context = super::storage::ProtocolObjectContext::store(
+    let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
         root_hash,
-        super::storage::ProtocolObjectDomain::StoreAck,
+        ProtocolObjectDomain::StoreAck,
     );
     let next_ack_slot = graph_reservation.next_ack_slot.clone();
     let frontier = match db.write_policy() {
@@ -818,7 +818,7 @@ async fn prepare_founder_graph(
             let (entry_prepared, entry_ref) =
                 super::store_objects::prepare_membership_entry(storage, root_hash, &founder)
                     .await?;
-            let head_context = super::storage::ProtocolObjectContext::store(
+            let head_context = super::storage::ProtocolObjectContext::signed_plaintext(
                 root_hash,
                 super::storage::ProtocolObjectDomain::StoreMembershipHead,
             );
@@ -1332,9 +1332,9 @@ pub async fn open_store(
     expected: &StoreRootRef,
 ) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
     let write_policy = db.write_policy();
-    let context = super::storage::ProtocolObjectContext::store(
+    let context = super::storage::ProtocolObjectContext::signed_plaintext(
         expected.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreProtocolRoot,
+        ProtocolObjectDomain::StoreProtocolRoot,
     );
     let bytes = storage
         .read_protocol_object(

@@ -84,9 +84,6 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let invite_code = encode(&invite);
     let app = tempfile::tempdir().expect("join app directory");
     let layout = crate::store_dir::StoreLayout::new(app.path());
-    let keyring = crate::encryption::MasterKeyring::from(
-        crate::encryption::EncryptionService::from_key([42; 32]),
-    );
     let new_client = || {
         crate::DeviceJoinClient::new(
             &invite_code,
@@ -104,7 +101,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             Arc::new(SystemClock),
         )
         .expect("construct DeviceJoinClient")
-        .with_test_home(store.home.clone(), keyring.clone())
+        .with_test_bootstrap_home(store.home.clone())
     };
     let offer = Box::pin(crate::sync::device_join::begin_device_join(
         &owner_db,

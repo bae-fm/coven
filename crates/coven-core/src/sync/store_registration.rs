@@ -6,7 +6,7 @@ use crate::database::Database;
 use crate::keys::UserKeypair;
 
 use super::membership::MembershipChain;
-use super::storage::{CoordinationStorage, PreparedExactObject, SyncStorage};
+use super::storage::{CoordinationStorage, PreparedExactObject, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, device_self_retirement_semantic_prefix,
     head_slot_prefix, owner_recovery_semantic_prefix, registration_semantic_prefix,
@@ -145,9 +145,9 @@ pub(crate) async fn install_existing_founder_device(
         .device_signer(signer)
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
 
-    let registration_context = super::storage::ProtocolObjectContext::store(
+    let registration_context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+        ProtocolObjectDomain::StoreDeviceRegistration,
     );
     let registration_prefix =
         super::store_commit::founder_registration_semantic_prefix(match founder.value.origin {
@@ -179,9 +179,9 @@ pub(crate) async fn install_existing_founder_device(
             "Store founder registration has no acknowledgement anchor".to_string(),
         ));
     };
-    let ack_context = super::storage::ProtocolObjectContext::store(
+    let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreAck,
+        ProtocolObjectDomain::StoreAck,
     );
     let ack_prefix = ack_slot_prefix(&founder.value.device_id.to_string(), 1);
     let (ack_bytes, ack_prepared) = storage
@@ -443,9 +443,9 @@ async fn prepare_self_retirement(
         &registration_ref.device_id,
         retirement.retirement_hash(),
     );
-    let retirement_context = super::storage::ProtocolObjectContext::store(
+    let retirement_context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreDeviceSelfRetirement,
+        ProtocolObjectDomain::StoreDeviceSelfRetirement,
     );
     let retirement_slot = storage
         .allocate_protocol_slot(&retirement_context, &retirement_prefix, ".json")
@@ -463,9 +463,9 @@ async fn prepare_self_retirement(
         &retirement,
         retirement_prepared.reference().clone(),
     );
-    let commit_context = super::storage::ProtocolObjectContext::store(
+    let commit_context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreCommit,
+        ProtocolObjectDomain::StoreCommit,
     );
     let stream = match coord {
         StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
@@ -518,9 +518,9 @@ async fn prepare_self_retirement(
                     previous.as_ref(),
                 )
                 .await?;
-            let head_context = super::storage::ProtocolObjectContext::store(
+            let head_context = super::storage::ProtocolObjectContext::signed_plaintext(
                 root.store_root_hash,
-                super::storage::ProtocolObjectDomain::StoreHead,
+                ProtocolObjectDomain::StoreHead,
             );
             let next_prefix = head_slot_prefix(
                 &registration_ref.device_id.to_string(),
@@ -647,9 +647,9 @@ async fn publish_self_retirement(
         .create_protocol_object(&durable.retirement_prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let retirement_context = super::storage::ProtocolObjectContext::store(
+    let retirement_context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreDeviceSelfRetirement,
+        ProtocolObjectDomain::StoreDeviceSelfRetirement,
     );
     let opened = storage
         .read_protocol_object(
@@ -689,9 +689,9 @@ async fn publish_self_retirement(
             };
             let opened_commit = storage
                 .read_protocol_object(
-                    &super::storage::ProtocolObjectContext::store(
+                    &super::storage::ProtocolObjectContext::signed_plaintext(
                         root.store_root_hash,
-                        super::storage::ProtocolObjectDomain::StoreCommit,
+                        ProtocolObjectDomain::StoreCommit,
                     ),
                     &durable.commit_ref.object,
                     &commit_semantic_prefix(
@@ -705,9 +705,9 @@ async fn publish_self_retirement(
                 .map_err(StoreObjectError::from)?;
             let opened_head = storage
                 .read_protocol_object(
-                    &super::storage::ProtocolObjectContext::store(
+                    &super::storage::ProtocolObjectContext::signed_plaintext(
                         root.store_root_hash,
-                        super::storage::ProtocolObjectDomain::StoreHead,
+                        ProtocolObjectDomain::StoreHead,
                     ),
                     head_prepared.reference(),
                     &head_slot_prefix(
@@ -821,9 +821,9 @@ fn prepare_registration_object(
             )
         })?
         .to_string();
-    let context = super::storage::ProtocolObjectContext::store(
+    let context = super::storage::ProtocolObjectContext::signed_plaintext(
         registration.store_root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+        ProtocolObjectDomain::StoreDeviceRegistration,
     );
     storage
         .prepare_protocol_object(&context, slot, &semantic_prefix, registration.to_bytes())
@@ -846,9 +846,9 @@ async fn prepare_or_load_recovery_registration(
     ),
     StoreRegistrationError,
 > {
-    let context = super::storage::ProtocolObjectContext::store(
+    let context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+        ProtocolObjectDomain::StoreDeviceRegistration,
     );
     match storage
         .read_prepared_protocol_slot(&context, &slot, semantic_prefix)
@@ -917,9 +917,9 @@ async fn prepare_or_load_initial_recovery_ack(
     published_at: &str,
     device_signer: &UserKeypair,
 ) -> Result<(StoreAck, Vec<u8>, StoreAckRef, PreparedExactObject, bool), StoreRegistrationError> {
-    let context = super::storage::ProtocolObjectContext::store(
+    let context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreAck,
+        ProtocolObjectDomain::StoreAck,
     );
     let prefix = ack_slot_prefix(&registration.device_id.to_string(), 1);
     match storage
@@ -1033,9 +1033,9 @@ async fn prepare_or_load_owner_recovery_node(
     ),
     StoreRegistrationError,
 > {
-    let context = super::storage::ProtocolObjectContext::store(
+    let context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::OwnerRecoveryNode,
+        ProtocolObjectDomain::OwnerRecoveryNode,
     );
     let prefix = owner_recovery_semantic_prefix(owner_pubkey, owner_grant.clone(), sequence);
     match storage
@@ -1185,9 +1185,9 @@ async fn install_activated_owner_recovery(
         ));
     }
 
-    let registration_context = super::storage::ProtocolObjectContext::store(
+    let registration_context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+        ProtocolObjectDomain::StoreDeviceRegistration,
     );
     let (registration_bytes, registration_prepared) = storage
         .read_prepared_protocol_slot(
@@ -1204,9 +1204,9 @@ async fn install_activated_owner_recovery(
             "activated Owner recovery registration differs from its prepared exact object".into(),
         ));
     }
-    let ack_context = super::storage::ProtocolObjectContext::store(
+    let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
         root.store_root_hash,
-        super::storage::ProtocolObjectDomain::StoreAck,
+        ProtocolObjectDomain::StoreAck,
     );
     let (initial_ack_bytes, initial_ack_prepared) = storage
         .read_prepared_protocol_slot(
@@ -1352,9 +1352,10 @@ pub async fn recover_owner_device_merge(
     {
         return Ok(registration);
     }
-    let context =
-        |domain| super::storage::ProtocolObjectContext::store(root.store_root_hash, domain);
-    let commit_context = context(super::storage::ProtocolObjectDomain::StoreCommit);
+    let context = |domain| {
+        super::storage::ProtocolObjectContext::signed_plaintext(root.store_root_hash, domain)
+    };
+    let commit_context = context(ProtocolObjectDomain::StoreCommit);
     let staged = db
         .latest_local_store_device_registration()
         .await
@@ -1872,9 +1873,10 @@ pub async fn recover_owner_device_serial(
     {
         return Ok(registration);
     }
-    let context =
-        |domain| super::storage::ProtocolObjectContext::store(root.store_root_hash, domain);
-    let ack_context = context(super::storage::ProtocolObjectDomain::StoreAck);
+    let context = |domain| {
+        super::storage::ProtocolObjectContext::signed_plaintext(root.store_root_hash, domain)
+    };
+    let ack_context = context(ProtocolObjectDomain::StoreAck);
     let snapshot_context = context(super::storage::ProtocolObjectDomain::StoreSnapshotMeta);
     let registration_context =
         context(super::storage::ProtocolObjectDomain::StoreDeviceRegistration);
@@ -2251,9 +2253,9 @@ pub(crate) async fn bootstrap_pending_device(
                 "join registration has no acknowledgement anchor".to_string(),
             ));
         };
-        let ack_context = super::storage::ProtocolObjectContext::store(
+        let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
             attempt.store_root.store_root_hash,
-            super::storage::ProtocolObjectDomain::StoreAck,
+            ProtocolObjectDomain::StoreAck,
         );
         let next_slot = Box::pin(storage.allocate_protocol_slot(
             &ack_context,
@@ -2406,9 +2408,9 @@ pub async fn drain_registration_outbox(
                 "durable registration columns differ from its exact signed bytes".to_string(),
             ));
         }
-        let context = super::storage::ProtocolObjectContext::store(
+        let context = super::storage::ProtocolObjectContext::signed_plaintext(
             store_root.store_root_hash,
-            super::storage::ProtocolObjectDomain::StoreDeviceRegistration,
+            ProtocolObjectDomain::StoreDeviceRegistration,
         );
         let semantic_prefix = registration_semantic_prefix(&outbound.device_id.to_string());
         storage
@@ -2424,9 +2426,9 @@ pub async fn drain_registration_outbox(
                 "Store registration exact readback differs from its durable bytes".to_string(),
             ));
         }
-        let ack_context = super::storage::ProtocolObjectContext::store(
+        let ack_context = super::storage::ProtocolObjectContext::signed_plaintext(
             store_root.store_root_hash,
-            super::storage::ProtocolObjectDomain::StoreAck,
+            ProtocolObjectDomain::StoreAck,
         );
         storage
             .create_protocol_object(&outbound.initial_ack.prepared)
@@ -2658,9 +2660,9 @@ mod tests {
                 else {
                     panic!("interrupted registration is not a Recovery registration");
                 };
-                let context = super::super::storage::ProtocolObjectContext::store(
+                let context = super::super::storage::ProtocolObjectContext::signed_plaintext(
                     store.root.store_root_hash,
-                    super::super::storage::ProtocolObjectDomain::OwnerRecoveryNode,
+                    ProtocolObjectDomain::OwnerRecoveryNode,
                 );
                 Some(
                     store
@@ -2725,9 +2727,9 @@ mod tests {
                 else {
                     panic!("completed registration is not a Recovery registration");
                 };
-                let context = super::super::storage::ProtocolObjectContext::store(
+                let context = super::super::storage::ProtocolObjectContext::signed_plaintext(
                     store.root.store_root_hash,
-                    super::super::storage::ProtocolObjectDomain::OwnerRecoveryNode,
+                    ProtocolObjectDomain::OwnerRecoveryNode,
                 );
                 let completed_node = store
                     .storage

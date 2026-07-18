@@ -464,8 +464,6 @@ pub struct DeviceJoinClient {
     clock: crate::clock::ClockRef,
     #[cfg(test)]
     test_home: Option<Arc<dyn CloudHome>>,
-    #[cfg(test)]
-    test_keyring: Option<MasterKeyring>,
 }
 
 struct DeviceJoinStorage {
@@ -534,19 +532,12 @@ impl DeviceJoinClient {
             clock,
             #[cfg(test)]
             test_home: None,
-            #[cfg(test)]
-            test_keyring: None,
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn with_test_home(
-        mut self,
-        home: Arc<dyn CloudHome>,
-        keyring: MasterKeyring,
-    ) -> Self {
+    pub(crate) fn with_test_bootstrap_home(mut self, home: Arc<dyn CloudHome>) -> Self {
         self.test_home = Some(home);
-        self.test_keyring = Some(keyring);
         self
     }
 
@@ -827,32 +818,27 @@ impl DeviceJoinClient {
         signer: &UserKeypair,
     ) -> Result<DeviceJoinStorage, BootstrapError> {
         let cloud = self.build_cloud_home().await?;
-        #[cfg(test)]
-        if let Some(keyring) = &self.test_keyring {
-            let exact = cloud.home.clone().exact_slot_storage().ok_or_else(|| {
-                BootstrapError::Provider("provider has no exact-slot adapter".to_string())
-            })?;
-            let storage = CloudSyncStorage::new(
-                cloud.home,
-                CloudCipher::Encrypted(keyring.clone().into()),
-                BlobPathScheme::for_storage(HomeStorage::Opaque),
-                self.code.store_id.clone(),
-                signer.clone(),
-            )?;
-            return Ok(DeviceJoinStorage {
-                storage,
-                exact,
-                keyring: keyring.clone(),
-            });
-        }
+        let bootstrap_storage = CloudSyncStorage::new(
+            cloud.home.clone(),
+            CloudCipher::Plaintext,
+            BlobPathScheme::for_storage(HomeStorage::Opaque),
+            self.code.store_id.clone(),
+            signer.clone(),
+        )?;
+        let bootstrap_storage = match cloud.coordination.as_ref() {
+            Some((primary, peer)) => {
+                bootstrap_storage.with_serial_coordination_clients(primary.clone(), peer.clone())
+            }
+            None => bootstrap_storage,
+        };
         let encryption = match &self.code.membership_floor {
             MembershipFloor::MergeConcurrent(floor) => {
                 unwrap_store_keyring(
-                    cloud.home.clone(),
+                    &bootstrap_storage,
                     signer,
                     &self.code.store_root,
-                    &self.code.store_id,
                     &self.code.owner_pubkey,
+                    &self.code.wrapped_key,
                     floor,
                 )
                 .await?
@@ -864,10 +850,13 @@ impl DeviceJoinClient {
                     ));
                 }
                 unwrap_serial_store_keyring(
-                    cloud.home.clone(),
+                    &bootstrap_storage,
+                    bootstrap_storage.serial_coordination().map_err(|error| {
+                        BootstrapError::Membership(format!("Serial coordination: {error}"))
+                    })?,
                     signer,
-                    &self.code.store_id,
-                    &self.code.key_author_pubkey,
+                    &self.code.store_root,
+                    &self.code.wrapped_key,
                     reference,
                 )
                 .await?

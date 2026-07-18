@@ -76,7 +76,7 @@ async fn load_verified_access_pairs(
         );
         let envelope_bytes = read_exact_circle_object(
             storage,
-            &ProtocolObjectContext::store(
+            &ProtocolObjectContext::store_encrypted(
                 commit.store_root_hash,
                 ProtocolObjectDomain::CircleAccessEnvelope,
             ),
@@ -111,7 +111,10 @@ async fn load_verified_access_pairs(
         );
         let leaf_bytes = read_exact_circle_object(
             storage,
-            &ProtocolObjectContext::recipient_sealed(commit.store_root_hash),
+            &ProtocolObjectContext::recipient_sealed(
+                commit.store_root_hash,
+                ProtocolObjectDomain::CircleAccessLeaf,
+            ),
             &reference.leaf.object,
             &leaf_prefix,
         )
@@ -209,7 +212,7 @@ pub(crate) async fn load_circle_activations(
         });
         let control_bytes = read_exact_circle_object(
             storage,
-            &ProtocolObjectContext::store(
+            &ProtocolObjectContext::store_encrypted(
                 commit.store_root_hash,
                 ProtocolObjectDomain::CircleControl,
             ),
@@ -270,7 +273,7 @@ pub(crate) async fn load_circle_activations(
             })?;
             let bytes = read_exact_circle_object(
                 storage,
-                &ProtocolObjectContext::store(
+                &ProtocolObjectContext::store_encrypted(
                     commit.store_root_hash,
                     ProtocolObjectDomain::CircleControl,
                 ),
@@ -1138,7 +1141,10 @@ async fn load_circle_control_at_reference(
     let expected_hash = reference.control().control_hash();
     let bytes = read_exact_circle_object(
         storage,
-        &ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::CircleControl),
+        &ProtocolObjectContext::store_encrypted(
+            root.store_root_hash,
+            ProtocolObjectDomain::CircleControl,
+        ),
         &reference.objects().control,
         &semantic_prefix,
     )

@@ -4140,40 +4140,6 @@ impl SyncStorage for CycleStorageInterceptor {
     ) -> Result<(), StorageError> {
         self.inner.storage.delete_blob_object(blob).await
     }
-
-    async fn put_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-        data: Vec<u8>,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .storage
-            .put_wrapped_key(owner_pubkey, recipient_pubkey, data)
-            .await
-    }
-
-    async fn get_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.inner
-            .storage
-            .get_wrapped_key(owner_pubkey, recipient_pubkey)
-            .await
-    }
-
-    async fn delete_wrapped_key(
-        &self,
-        owner_pubkey: &str,
-        recipient_pubkey: &str,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .storage
-            .delete_wrapped_key(owner_pubkey, recipient_pubkey)
-            .await
-    }
 }
 
 /// A host write made WHILE a cycle is in its push/pull network phase

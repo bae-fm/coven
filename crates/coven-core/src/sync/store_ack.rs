@@ -117,8 +117,10 @@ pub async fn stage_store_ack(
         },
         CommitFrontier::Serial(_) => StoreAckExclusionState::Serial,
     };
-    let context =
-        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreAck);
+    let context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreAck,
+    );
     let semantic_prefix = ack_slot_prefix(&device_id, sequence);
     let next_slot = storage
         .allocate_protocol_slot(
@@ -176,8 +178,10 @@ pub async fn drain_outbound_store_acks(
         .ok_or(StoreAckError::MissingState(
             crate::database::LOCAL_DEVICE_ID_STATE_KEY,
         ))?;
-    let context =
-        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreAck);
+    let context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreAck,
+    );
     let mut published = 0_u64;
     while let Some(outbound) = db.oldest_outbound_store_ack().await? {
         if let Some(activated) = db
@@ -1280,8 +1284,10 @@ mod tests {
             &device_signer,
         )
         .expect("sign alternate head");
-        let head_context =
-            ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreHead);
+        let head_context = ProtocolObjectContext::signed_plaintext(
+            root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
         let head_prefix = super::super::store_commit::head_slot_prefix(
             &outbound.reference.registration.device_id.to_string(),
             candidate.commit.seq(),

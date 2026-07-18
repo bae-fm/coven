@@ -1,6 +1,3 @@
-use std::sync::Arc;
-
-use crate::config::HomeStorage;
 use crate::database::{Database, DurableMembershipMutation};
 use crate::encryption::{self, EncryptionService};
 use crate::keys::{self, KeyError, UserKeypair};
@@ -14,10 +11,9 @@ use crate::storage::cloud::{
     RevokeOutcome,
 };
 
-use super::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
 use super::membership::{
-    AuthorHead, AuthorStreamId, MemberRole, MembershipChain, MembershipChange, MembershipCoord,
-    MembershipEntry, MembershipEntryRef, MembershipError, MembershipHeadRef,
+    AuthorHead, AuthorStreamId, MemberRole, MembershipChain, MembershipChange, MembershipEntry,
+    MembershipEntryRef, MembershipError, MembershipHeadRef,
 };
 use super::storage::{
     PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
@@ -25,7 +21,10 @@ use super::storage::{
 use super::store_commit::{
     membership_head_slot_prefix, GrantStreamAnchor, StreamActivationId, SuccessorLink,
 };
-use super::wrapped_store_key::{WrappedKeyActivation, WrappedStoreKey};
+use super::wrapped_store_key::{
+    load_wrapped_store_key, prepare_wrapped_store_key, PreparedWrappedStoreKey, WrappedStoreKey,
+    WrappedStoreKeyRef,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum InviteError {
@@ -39,21 +38,6 @@ pub enum InviteError {
     CloudHome(#[from] CloudHomeError),
     #[error("Crypto error: {0}")]
     Crypto(String),
-    #[error(
-        "wrapped store key for generation {generation} activation is not visible: {activation:?}"
-    )]
-    InactiveWrappedKey {
-        activation: Box<WrappedKeyActivation>,
-        /// The committed generation this inactive wrap names (from its signed
-        /// envelope), so a refresh can pause sealing at exactly this generation
-        /// without opening the sealed keyring the activation gate forbids adopting.
-        generation: u64,
-    },
-    #[error("wrapped store key activation {actual:?} differs from invite activation {expected:?}")]
-    WrappedKeyActivationMismatch {
-        expected: Box<WrappedKeyActivation>,
-        actual: Option<Box<WrappedKeyActivation>>,
-    },
     #[error(
         "stale membership head for {author}: committed through seq {committed}, \
          cannot write seq {attempted}"
@@ -125,7 +109,7 @@ struct InviteMutationPlan {
     invitee_email: Option<String>,
     role: MemberRole,
     desired_access: CloudAccessState,
-    wrapped_key: Vec<u8>,
+    wrapped_key: PreparedWrappedStoreKey,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -149,23 +133,10 @@ struct PreparedMembershipPublication {
     head_object: PreparedExactObject,
 }
 
-fn visible_membership_activations(
-    chain: &MembershipChain,
-    additional: Option<super::membership::MembershipCoord>,
-) -> Vec<WrappedKeyActivation> {
-    chain
-        .author_heads()
-        .into_iter()
-        .chain(additional)
-        .map(WrappedKeyActivation::MergeConcurrent)
-        .collect()
-}
-
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplacementWrappedKey {
-    recipient: String,
-    bytes: Vec<u8>,
+    prepared: PreparedWrappedStoreKey,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -235,14 +206,13 @@ fn ed25519_hex_to_x25519(
 /// because the joiner has no membership chain yet. Existing members are different:
 /// they reload the anchored chain first and authorize rotated wrapped keys
 /// against the current Owner set.
-fn signed_wrapped_key_with_activation(
+fn signed_wrapped_key(
     store_id: &str,
     recipient_ed25519_pubkey: &str,
     recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
     encryption: &EncryptionService,
     owner_keypair: &UserKeypair,
-    activation: Option<MembershipCoord>,
-) -> Result<Vec<u8>, InviteError> {
+) -> Result<WrappedStoreKey, InviteError> {
     let payload = encryption
         .to_keyring_payload()
         .map_err(|e| InviteError::Crypto(format!("serialize keyring payload: {e}")))?;
@@ -250,13 +220,11 @@ fn signed_wrapped_key_with_activation(
     let wrapped = WrappedStoreKey::signed(
         store_id,
         recipient_ed25519_pubkey,
-        activation.map(WrappedKeyActivation::MergeConcurrent),
         encryption.current_generation(),
         sealed,
         owner_keypair,
     );
-    serde_json::to_vec(&wrapped)
-        .map_err(|e| InviteError::Crypto(format!("serialize wrapped key: {e}")))
+    Ok(wrapped)
 }
 
 pub(crate) fn signed_serial_wrapped_key(
@@ -264,8 +232,7 @@ pub(crate) fn signed_serial_wrapped_key(
     recipient_ed25519_pubkey: &str,
     encryption: &EncryptionService,
     owner_keypair: &UserKeypair,
-    activation: super::store_commit::StoreBatchCommitRef,
-) -> Result<Vec<u8>, InviteError> {
+) -> Result<WrappedStoreKey, InviteError> {
     let recipient_x25519_pk = ed25519_hex_to_x25519(recipient_ed25519_pubkey)?;
     let payload = encryption
         .to_keyring_payload()
@@ -274,31 +241,11 @@ pub(crate) fn signed_serial_wrapped_key(
     let wrapped = WrappedStoreKey::signed(
         store_id,
         recipient_ed25519_pubkey,
-        Some(WrappedKeyActivation::Serial(activation)),
         encryption.current_generation(),
         sealed,
         owner_keypair,
     );
-    serde_json::to_vec(&wrapped)
-        .map_err(|error| InviteError::Crypto(format!("serialize wrapped key: {error}")))
-}
-
-#[cfg(test)]
-pub(crate) fn signed_wrapped_key_for_test(
-    store_id: &str,
-    recipient_ed25519_pubkey: &str,
-    recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
-    encryption_key: &[u8; 32],
-    owner_keypair: &UserKeypair,
-) -> Vec<u8> {
-    signed_wrapped_keyring_for_test(
-        store_id,
-        recipient_ed25519_pubkey,
-        recipient_x25519_pk,
-        &EncryptionService::from_key(*encryption_key),
-        owner_keypair,
-        None,
-    )
+    Ok(wrapped)
 }
 
 #[cfg(test)]
@@ -308,15 +255,13 @@ pub(crate) fn signed_wrapped_keyring_for_test(
     recipient_x25519_pk: &[u8; keys::CURVE25519_PUBLICKEYBYTES],
     encryption: &EncryptionService,
     owner_keypair: &UserKeypair,
-    activation: Option<MembershipCoord>,
-) -> Vec<u8> {
-    signed_wrapped_key_with_activation(
+) -> WrappedStoreKey {
+    signed_wrapped_key(
         store_id,
         recipient_ed25519_pubkey,
         recipient_x25519_pk,
         encryption,
         owner_keypair,
-        activation,
     )
     .expect("signed wrapped key")
 }
@@ -454,8 +399,10 @@ async fn prepare_membership_publication(
             }
         },
     };
-    let context =
-        ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreMembershipHead);
+    let context = ProtocolObjectContext::signed_plaintext(
+        store_root_hash,
+        ProtocolObjectDomain::StoreMembershipHead,
+    );
     let next_sequence = coord.seq.checked_add(1).ok_or_else(|| {
         InviteError::InvalidDurableMutation("membership head sequence overflow".to_string())
     })?;
@@ -552,7 +499,7 @@ async fn build_invite_mutation(
         let owner_stream = db
             .select_membership_author_stream(invitee_ed25519_pubkey, &grant_id, Default::default())
             .await?;
-        let context = ProtocolObjectContext::store(
+        let context = ProtocolObjectContext::signed_plaintext(
             store_root_hash,
             ProtocolObjectDomain::StoreMembershipHead,
         );
@@ -566,27 +513,42 @@ async fn build_invite_mutation(
     } else {
         None
     };
-    let entry = chain.signed_set_member_with_anchor_in_stream(
+    let owner_refs = chain.wrapped_key_authority_for(&keys::public_key_hex(owner_keypair))?;
+    let authorized_keyring = load_authorized_owner_keyring(
+        storage,
+        store_root_hash,
+        owner_keypair,
+        store_id,
+        &owner_refs,
+        encryption,
+    )
+    .await?;
+    let wrapped_key = prepare_wrapped_store_key(
+        storage,
+        store_root_hash,
+        invitee_ed25519_pubkey,
+        signed_wrapped_key(
+            store_id,
+            invitee_ed25519_pubkey,
+            &invitee_x25519_pk,
+            &authorized_keyring,
+            owner_keypair,
+        )?,
+    )
+    .await?;
+    let entry = chain.signed_set_member_with_anchor_and_wrapped_key_in_stream(
         owner_keypair,
         stream_id,
         invitee_ed25519_pubkey.to_string(),
         invitee_email.map(str::to_string),
         role.clone(),
         membership,
+        wrapped_key.reference.clone(),
         timestamp.to_string(),
     )?;
-    let entry_coord = entry.coord();
     let publication =
         prepare_membership_publication(storage, db, store_root_hash, chain, entry, owner_keypair)
             .await?;
-    let wrapped_key = signed_wrapped_key_with_activation(
-        store_id,
-        invitee_ed25519_pubkey,
-        &invitee_x25519_pk,
-        encryption,
-        owner_keypair,
-        Some(entry_coord),
-    )?;
     Ok(InviteMutationPlan {
         publication,
         invitee_pubkey: invitee_ed25519_pubkey.to_string(),
@@ -639,7 +601,7 @@ async fn execute_invite_mutation(
     plan: InviteMutationPlan,
     mut progress: MembershipMutationProgress,
     persistence: MutationPersistence<'_>,
-) -> Result<CloudHomeJoinInfo, InviteError> {
+) -> Result<(CloudHomeJoinInfo, WrappedStoreKeyRef), InviteError> {
     validate_prepared_publication(&plan.publication)?;
     let mut validated_chain = chain_with_exact_entry(chain, &plan.publication.entry)?;
     let root = persistence
@@ -662,13 +624,13 @@ async fn execute_invite_mutation(
             "prepared membership head has an invalid certified-device signature".to_string(),
         ));
     }
-    let wrapped: WrappedStoreKey = serde_json::from_slice(&plan.wrapped_key).map_err(|error| {
-        InviteError::InvalidDurableMutation(format!("parse planned invitation wrap: {error}"))
-    })?;
-    if wrapped.activation
-        != Some(WrappedKeyActivation::MergeConcurrent(
-            plan.publication.entry.coord(),
-        ))
+    let wrapped = plan.wrapped_key.validate()?;
+    let authority_matches = matches!(
+        &plan.publication.entry.change,
+        MembershipChange::SetMember { wrapped_key, .. }
+            if wrapped_key == &plan.wrapped_key.reference
+    );
+    if !authority_matches
         || wrapped.author_pubkey != plan.publication.entry.author_pubkey
         || wrapped
             .verify_and_unwrap(
@@ -707,13 +669,9 @@ async fn execute_invite_mutation(
             join_info
         }
     };
-    storage
-        .put_wrapped_key(
-            &plan.publication.entry.author_pubkey,
-            &plan.invitee_pubkey,
-            plan.wrapped_key.clone(),
-        )
-        .await?;
+    super::store_objects::create_exact_object(storage, &plan.wrapped_key.object)
+        .await
+        .map_err(|error| InviteError::Crypto(error.to_string()))?;
     super::store_objects::create_exact_object(storage, &plan.publication.entry_object)
         .await
         .map_err(|error| InviteError::Crypto(error.to_string()))?;
@@ -738,7 +696,7 @@ async fn execute_invite_mutation(
     validated_chain.activate_head_ref(plan.publication.head_ref.clone())?;
     *chain = validated_chain;
     persistence.complete().await?;
-    Ok(join_info)
+    Ok((join_info, plan.wrapped_key.reference))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -755,7 +713,7 @@ pub(crate) async fn create_invitation_with_encryption_durable(
     store_id: &str,
     timestamp: &str,
     db: &Database,
-) -> Result<CloudHomeJoinInfo, InviteError> {
+) -> Result<(CloudHomeJoinInfo, WrappedStoreKeyRef), InviteError> {
     let _mutation = db.lock_membership_mutation().await;
     let (plan, progress, intent_hash) = match db.outbound_membership_mutation().await? {
         Some(row) => {
@@ -819,32 +777,26 @@ pub(crate) async fn create_invitation_with_encryption_durable(
 }
 
 pub async fn unwrap_store_keyring(
-    cloud_home: Arc<dyn CloudHome>,
+    bootstrap_storage: &dyn SyncStorage,
     keypair: &UserKeypair,
     store_root: &super::store_commit::StoreRootRef,
-    store_id: &str,
     founder: &str,
+    wrapped_key: &WrappedStoreKeyRef,
     membership_floor: &[MembershipHeadRef],
 ) -> Result<EncryptionService, InviteError> {
-    // The candidate keyring: enough to read the sealed membership chain, but not
-    // yet trusted to be the real, owner-authorized store key.
-    let candidate = decrypt_wrapped_store_key_unverified(cloud_home.as_ref(), keypair).await?;
-
-    // Read + anchor the chain to the pinned founder using the candidate key. A
-    // candidate that is not the real store key cannot decrypt the sealed chain,
-    // and a chain not founded by `founder` is a takeover — both fail closed here,
-    // before the key is trusted. The joiner reads only, so `watermark_db` is None.
-    let storage = CloudSyncStorage::new(
-        cloud_home.clone(),
-        CloudCipher::Encrypted(candidate),
-        BlobPathScheme::for_storage(HomeStorage::Opaque),
-        store_id.to_string(),
-        keypair.clone(),
-    )?;
+    let recipient = hex::encode(keypair.public_key());
+    if wrapped_key.recipient_pubkey != recipient {
+        return Err(InviteError::Crypto(
+            "invite wrapped-key ref names another recipient".to_string(),
+        ));
+    }
+    // Store membership is a signed plaintext control plane: a device must read
+    // the authority that selects its current recipient-sealed keys before it has
+    // those keys. The joiner reads only, so `watermark_db` is None.
     super::membership_ops::validate_membership_floor(membership_floor)
         .map_err(InviteError::Crypto)?;
     let chain = super::membership_ops::load_exact_anchored_chain(
-        &storage,
+        bootstrap_storage,
         store_root,
         membership_floor,
         Some(founder),
@@ -852,104 +804,106 @@ pub async fn unwrap_store_keyring(
     .await
     .map_err(|e| InviteError::Crypto(format!("membership chain: {e}")))?;
 
-    // The current Owner set — the same non-temporal fold every other
-    // authorization path uses (`current_members` filtered to Owner) — is the
-    // authority a wrapped key must be signed by. Judging by current role, not by
-    // the position of the joiner's Add, is deliberate: an entry's position is set
-    // by its own author-chosen timestamp, so anchoring trust there would let a
-    // removed Owner with residual bucket write back-date a fresh Add and resurrect
-    // itself as a valid signer. The consequence is correct product behavior — an
-    // outstanding invite dies if its inviting Owner is removed or demoted before
-    // the join (a removed Owner's invites die with it, and its wrapped key wraps a
-    // pre-rotation generation regardless, so the join could not yield the current
-    // keyring anyway).
-    let owners: Vec<String> = chain
-        .current_members()
-        .into_iter()
-        .filter_map(|(pubkey, role)| (role == MemberRole::Owner).then_some(pubkey))
-        .collect();
-
-    // Authenticate the wrapped key against that Owner set — and, if a revoke
-    // re-wrapped the slot between invite and join, against the activation's
-    // now-visible Remove entry — then decrypt and adopt it.
-    let visible: Vec<_> = chain
-        .author_heads()
-        .into_iter()
-        .map(WrappedKeyActivation::MergeConcurrent)
-        .collect();
-    unwrap_store_keyring_for_owners_with_activation(
-        cloud_home.as_ref(),
+    let authorized = chain.wrapped_key_authority_for(&recipient)?;
+    if !authorized.contains(wrapped_key) {
+        return Err(InviteError::Crypto(
+            "invite wrapped-key ref is not activated by the anchored membership floor".to_string(),
+        ));
+    }
+    unwrap_store_keyring_for_refs(
+        bootstrap_storage,
+        store_root.store_root_hash,
         keypair,
-        store_id,
-        owners.iter().map(String::as_str),
-        Some(&visible),
+        &store_root.store_root_id.to_string(),
+        &authorized,
     )
     .await
 }
 
 pub async fn unwrap_serial_store_keyring(
-    cloud_home: Arc<dyn CloudHome>,
+    storage: &dyn SyncStorage,
+    coordination: &dyn super::storage::CoordinationStorage,
     keypair: &UserKeypair,
-    store_id: &str,
-    key_author_pubkey: &str,
+    store_root: &super::store_commit::StoreRootRef,
+    wrapped_key: &WrappedStoreKeyRef,
     activation: &super::store_commit::StoreBatchCommitRef,
 ) -> Result<EncryptionService, InviteError> {
     let recipient = hex::encode(keypair.public_key());
-    let wrapped = fetch_wrapped_key(cloud_home.as_ref(), key_author_pubkey, &recipient).await?;
-    if wrapped.activation != Some(WrappedKeyActivation::Serial(activation.clone())) {
-        return Err(InviteError::WrappedKeyActivationMismatch {
-            expected: Box::new(WrappedKeyActivation::Serial(activation.clone())),
-            actual: wrapped.activation.map(Box::new),
-        });
+    if wrapped_key.recipient_pubkey != recipient {
+        return Err(InviteError::Crypto(
+            "invite wrapped-key ref names another recipient".to_string(),
+        ));
     }
-    let sealed = wrapped
-        .verify_and_unwrap(store_id, &recipient, std::iter::once(key_author_pubkey))
-        .map_err(|error| InviteError::Crypto(format!("verify Serial wrapped key: {error}")))?;
-    open_sealed_keyring(&sealed, keypair)
-}
-
-/// Fetch and parse the wrapped-key object `owner_hex` sealed for `recipient_hex`,
-/// off the cloud home. The `.enc` suffix is hardcoded because reading a wrapped
-/// store key is an encrypted-home-only path — wrapping a key is meaningful only
-/// for a shared (encrypted) home — so `CloudSyncStorage::put_wrapped_key` always
-/// wrote the slot at `keys/{owner}/{recipient}.enc`. Read straight off the home,
-/// not through `CloudSyncStorage`, which the joiner has not built yet.
-async fn fetch_wrapped_key(
-    cloud_home: &dyn CloudHome,
-    owner_hex: &str,
-    recipient_hex: &str,
-) -> Result<WrappedStoreKey, InviteError> {
-    let wrapped_bytes = cloud_home
-        .read(&format!("keys/{owner_hex}/{recipient_hex}.enc"))
+    let semantic_prefix =
+        super::store_commit::semantic_prefix_from_exact_object(&activation.object, ".json")
+            .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    let context = ProtocolObjectContext::signed_plaintext(
+        store_root.store_root_hash,
+        ProtocolObjectDomain::StoreCommit,
+    );
+    let bytes = storage
+        .read_protocol_object(&context, &activation.object, &semantic_prefix)
         .await?;
-    serde_json::from_slice(&wrapped_bytes)
-        .map_err(|e| InviteError::Crypto(format!("malformed wrapped key: {e}")))
-}
-
-/// The owner prefixes that hold a wrapped-key object for `recipient_hex`, found by
-/// scanning the `keys/` keyspace off the cloud home. The joiner's candidate
-/// bootstrap uses this: it has no membership chain yet and so cannot name the
-/// current owners, so it discovers which prefixes actually hold a wrap for it.
-async fn wrap_owners_for_recipient(
-    cloud_home: &dyn CloudHome,
-    recipient_hex: &str,
-) -> Result<Vec<String>, InviteError> {
-    let keys = cloud_home.list("keys/").await?;
-    let suffix = format!("/{recipient_hex}.enc");
-    let mut owners = Vec::new();
-    for key in keys {
-        let Some(rest) = key.strip_prefix("keys/") else {
-            continue;
-        };
-        let Some(owner) = rest.strip_suffix(&suffix) else {
-            continue;
-        };
-        // The owner segment is a single slash-free hex pubkey token.
-        if !owner.is_empty() && !owner.contains('/') {
-            owners.push(owner.to_string());
-        }
+    let unverified: super::store_commit::StoreBatchCommit = serde_json::from_slice(&bytes)
+        .map_err(|error| InviteError::Crypto(format!("parse Serial invite commit: {error}")))?;
+    let author = super::store_objects::load_registration_ref(
+        storage,
+        store_root,
+        &unverified.author_registration,
+    )
+    .await
+    .map_err(|error| InviteError::Crypto(error.to_string()))?
+    .value;
+    let commit = super::store_commit::StoreBatchCommit::parse_at(
+        &bytes,
+        store_root.store_root_hash,
+        &activation.coord,
+        &author,
+    )
+    .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    activation
+        .verify_commit(&commit)
+        .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    let activated = commit.control().is_some_and(|control| {
+        control.serial_membership_entry().is_some_and(|entry| {
+            matches!(
+                &entry.change,
+                super::membership::SerialMembershipChange::SetMember {
+                    wrapped_key: authority,
+                    ..
+                } if authority == wrapped_key
+            )
+        })
+    });
+    if !activated {
+        return Err(InviteError::Crypto(
+            "Serial invite commit does not activate the supplied wrapped-key ref".to_string(),
+        ));
     }
-    Ok(owners)
+    let current =
+        super::store_pull::load_serial_cycle_authorization(storage, coordination, store_root)
+            .await
+            .map_err(|error| InviteError::Crypto(format!("current Serial authority: {error}")))?;
+    if !current
+        .authorization
+        .membership
+        .current_members()
+        .iter()
+        .any(|(pubkey, _)| pubkey == &recipient)
+    {
+        return Err(InviteError::Crypto(
+            "invite recipient is not a current Serial member".to_string(),
+        ));
+    }
+    let current_refs = current.authorization.active_wrapped_keys_for(&recipient);
+    unwrap_store_keyring_for_refs(
+        storage,
+        store_root.store_root_hash,
+        keypair,
+        &store_root.store_root_id.to_string(),
+        &current_refs,
+    )
+    .await
 }
 
 /// Open a sealed box carrying a store keyring to `keypair` and reconstruct the
@@ -965,185 +919,75 @@ fn open_sealed_keyring(
         .map_err(|e| InviteError::Crypto(format!("keyring payload: {e}")))
 }
 
-/// Open the joiner's own wrapped-key sealed box to a candidate keyring *without*
-/// authenticating who signed it. A sealed box authenticates only its recipient,
-/// so this proves nothing about authorship — the candidate is only enough to read
-/// the membership chain, every entry of which is sealed under the store key.
-/// Never adopt the returned keyring without the founder-anchored Owner-set check
-/// [`unwrap_store_keyring`] runs; it exists solely to bootstrap that check.
-async fn decrypt_wrapped_store_key_unverified(
-    cloud_home: &dyn CloudHome,
-    keypair: &UserKeypair,
-) -> Result<EncryptionService, InviteError> {
-    let recipient_hex = hex::encode(keypair.public_key());
-    let owners = wrap_owners_for_recipient(cloud_home, &recipient_hex).await?;
-
-    // The candidate is untrusted — it only has to decrypt the sealed membership
-    // chain, whose authenticated Owner set the caller then re-derives the real key
-    // against. A rotation before the join may have re-wrapped this slot under a
-    // non-founder owner, and two owners may have rotated concurrently, so MERGE
-    // every wrap that opens: the union holds every key generation any owner wrote,
-    // reading the furthest into the sealed chain regardless of which owner sealed
-    // a given entry.
-    let mut merged: Option<EncryptionService> = None;
-    for owner in &owners {
-        let wrapped = match fetch_wrapped_key(cloud_home, owner, &recipient_hex).await {
-            Ok(wrapped) => wrapped,
-            // `owners` came from a listing that just reported this prefix holds a
-            // wrap for the recipient, so a keyed miss now is a listed-then-deleted
-            // race (or an eventually-consistent listing): note it and move on.
-            Err(InviteError::CloudHome(CloudHomeError::NotFound(_))) => {
-                tracing::debug!(
-                    "candidate wrap {owner}/{recipient_hex} was listed but is now missing; skipping"
-                );
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        let Ok(sealed) = hex::decode(&wrapped.sealed) else {
-            tracing::debug!(
-                "skipping candidate wrap in {owner}'s prefix with a non-hex sealed box"
-            );
-            continue;
-        };
-        let candidate = match open_sealed_keyring(&sealed, keypair) {
-            Ok(candidate) => candidate,
-            Err(e) => {
-                tracing::debug!(
-                    "skipping candidate wrap in {owner}'s prefix this device cannot open: {e}"
-                );
-                continue;
-            }
-        };
-        merged = Some(match merged {
-            Some(existing) => existing.merged_with(&candidate),
-            None => candidate,
-        });
-    }
-    merged.ok_or_else(|| {
-        InviteError::CloudHome(CloudHomeError::NotFound(format!(
-            "keys/*/{recipient_hex}.enc"
-        )))
-    })
-}
-
-pub(crate) async fn unwrap_store_keyring_for_owners_with_activation<'a>(
-    cloud_home: &dyn CloudHome,
+pub(crate) async fn unwrap_store_keyring_for_refs(
+    storage: &dyn SyncStorage,
+    store_root_hash: super::store_commit::ObjectHash,
     keypair: &UserKeypair,
     store_id: &str,
-    expected_owners: impl IntoIterator<Item = &'a str>,
-    visible_activations: Option<&[WrappedKeyActivation]>,
+    references: &[WrappedStoreKeyRef],
 ) -> Result<EncryptionService, InviteError> {
     let recipient_hex = hex::encode(keypair.public_key());
-
-    // Scan each current owner's prefix for this recipient's wrap and MERGE every
-    // one an owner's signature authenticates. An owner writes only into its own
-    // prefix, so `keys/{owner}/{recipient}` is authenticated against THAT owner.
-    // Two owners rotating at once each wrap a distinct key at the same generation
-    // number; merging holds both, so this device can decrypt content sealed by
-    // either and, via deterministic seal selection, converges on one seal key
-    // rather than partitioning on whichever it happened to read first.
     let mut merged: Option<EncryptionService> = None;
-    // Remember why non-adoptable wraps were rejected, so "no wrap adopted" reports
-    // the real reason rather than a bare not-found (which the caller treats as
-    // "this device has no wrapped key"). For an inactive wrap, keep the highest
-    // generation seen: that is the committed generation a refresh must pause at,
-    // even if two owners each left an inactive rotation at different generations.
-    let mut saw_inactive: Option<(WrappedKeyActivation, u64)> = None;
-    let mut saw_unauthentic = false;
-    let mut owners_tried = 0usize;
-
-    for owner in expected_owners {
-        owners_tried += 1;
-        let wrapped = match fetch_wrapped_key(cloud_home, owner, &recipient_hex).await {
-            Ok(wrapped) => wrapped,
-            // This owner has never wrapped for this recipient — the common shape of
-            // a scan across owners, not an anomaly, but noted so a "no wrap found"
-            // outcome is traceable to which prefixes were empty.
-            Err(InviteError::CloudHome(CloudHomeError::NotFound(_))) => {
-                tracing::debug!("no wrapped key for {recipient_hex} under owner {owner}");
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-
-        // A rotated wrap names the Remove entry that must be visible before it is
-        // adopted; skip an owner's wrap whose activation the reader can't yet see.
-        if let Some(activation) = wrapped.activation.as_ref() {
-            let visible = visible_activations
-                .is_some_and(|entries| entries.iter().any(|entry| entry == activation));
-            if !visible {
-                if saw_inactive
-                    .as_ref()
-                    .is_none_or(|(_, gen)| wrapped.generation > *gen)
-                {
-                    saw_inactive = Some((activation.clone(), wrapped.generation));
-                }
-                continue;
-            }
+    for reference in references {
+        if reference.recipient_pubkey != recipient_hex {
+            return Err(InviteError::Crypto(
+                "activated wrapped-key ref names another recipient".to_string(),
+            ));
         }
-
-        // Authenticate against the owner whose prefix this wrap lives under. Any
-        // bucket writer can drop a forged or relocated object into an owner's
-        // prefix while no ACL enforces the layout; it fails to verify against that
-        // owner and is skipped, so it can neither be adopted nor block a valid wrap
-        // under another owner.
-        let sealed =
-            match wrapped.verify_and_unwrap(store_id, &recipient_hex, std::iter::once(owner)) {
-                Ok(sealed) => sealed,
-                Err(e) => {
-                    tracing::warn!(
-                        "skipping wrapped key in {owner}'s prefix that is not authentic: {e}"
-                    );
-                    saw_unauthentic = true;
-                    continue;
-                }
-            };
-        let keyring = match open_sealed_keyring(&sealed, keypair) {
-            Ok(keyring) => keyring,
-            Err(e) => {
-                tracing::warn!("skipping corrupt wrapped key in {owner}'s prefix: {e}");
-                saw_unauthentic = true;
-                continue;
-            }
-        };
+        let wrapped = load_wrapped_store_key(storage, store_root_hash, reference).await?;
+        let sealed = wrapped
+            .verify_and_unwrap(
+                store_id,
+                &recipient_hex,
+                std::iter::once(reference.owner_pubkey.as_str()),
+            )
+            .map_err(|error| InviteError::Crypto(format!("verify wrapped Store key: {error}")))?;
+        let keyring = open_sealed_keyring(&sealed, keypair)?;
+        if keyring.current_generation() != reference.generation {
+            return Err(InviteError::Crypto(format!(
+                "wrapped Store-key ref declares generation {}, but its keyring declares {}",
+                reference.generation,
+                keyring.current_generation(),
+            )));
+        }
         merged = Some(match merged {
             Some(existing) => existing.merged_with(&keyring),
             None => keyring,
         });
     }
+    merged.ok_or_else(|| {
+        InviteError::Bucket(StorageError::NotFound(format!(
+            "no activated wrapped Store-key ref for {recipient_hex}"
+        )))
+    })
+}
 
-    if let Some(keyring) = merged {
-        return Ok(keyring);
+pub(crate) async fn load_authorized_owner_keyring(
+    storage: &dyn SyncStorage,
+    store_root_hash: super::store_commit::ObjectHash,
+    keypair: &UserKeypair,
+    store_id: &str,
+    authority_refs: &[WrappedStoreKeyRef],
+    initial_keyring: &EncryptionService,
+) -> Result<EncryptionService, InviteError> {
+    if authority_refs.is_empty() {
+        Ok(initial_keyring.clone())
+    } else {
+        unwrap_store_keyring_for_refs(storage, store_root_hash, keypair, store_id, authority_refs)
+            .await
     }
-    if let Some((activation, generation)) = saw_inactive {
-        return Err(InviteError::InactiveWrappedKey {
-            activation: Box::new(activation),
-            generation,
-        });
-    }
-    if saw_unauthentic {
-        return Err(InviteError::Crypto(format!(
-            "no authentic wrapped store key for {recipient_hex} under any current owner"
-        )));
-    }
-    Err(InviteError::CloudHome(CloudHomeError::NotFound(format!(
-        "keys/*/{recipient_hex}.enc (no wrap under any of {owners_tried} owner prefixes)"
-    ))))
 }
 
 /// Revoke a member from the store. This:
 /// 1. Revokes access on the cloud home
 /// 2. Re-wraps a new store key to all remaining members
-/// 3. Deletes the revoked member's wrapped key
-/// 4. Publishes the signed Remove membership entry as the visible commit point
+/// 3. Publishes the signed Remove membership entry as the visible commit point
 ///
 /// Returns the new encryption key (caller must persist it and start using it).
 async fn build_revoke_mutation(
     storage: &dyn SyncStorage,
     db: &Database,
     store_root_hash: super::store_commit::ObjectHash,
-    cloud_home: &dyn CloudHome,
     chain: &MembershipChain,
     owner_keypair: &UserKeypair,
     stream_id: AuthorStreamId,
@@ -1170,67 +1014,64 @@ async fn build_revoke_mutation(
     if current_owners.is_empty() {
         return Err(InviteError::LastOwner);
     }
-    let entry = chain.signed_remove_member_in_stream(
-        owner_keypair,
-        stream_id,
-        revokee_pubkey.to_string(),
-        timestamp.to_string(),
-    )?;
-    let remove_coord = entry.coord();
-    let mut validated = chain.clone();
-    validated.add_entry_at(remove_coord.clone(), entry.clone())?;
-    let publication =
-        prepare_membership_publication(storage, db, store_root_hash, chain, entry, owner_keypair)
-            .await?;
-    let author = hex::encode(owner_keypair.public_key());
-    let visible_coords = visible_membership_activations(chain, Some(remove_coord.clone()));
-    let prior_attempt = match unwrap_store_keyring_for_owners_with_activation(
-        cloud_home,
+    let owner_pubkey = keys::public_key_hex(owner_keypair);
+    let authority_refs = chain.wrapped_key_authority_for(&owner_pubkey)?;
+    let current_keyring = load_authorized_owner_keyring(
+        storage,
+        store_root_hash,
         owner_keypair,
         store_id,
-        std::iter::once(author.as_str()),
-        Some(&visible_coords),
+        &authority_refs,
+        current_encryption,
     )
-    .await
-    {
-        Ok(keyring) if keyring.current_generation() > current_encryption.current_generation() => {
-            Some(keyring)
-        }
-        Ok(_) => None,
-        Err(InviteError::CloudHome(CloudHomeError::NotFound(_)))
-        | Err(InviteError::InactiveWrappedKey { .. }) => None,
-        Err(error) => return Err(error),
-    };
-    let new_keyring = match prior_attempt {
-        Some(prior) => current_encryption.merged_with(&prior),
-        None => current_encryption
-            .with_appended_generation(
-                current_encryption
-                    .current_generation()
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        InviteError::Crypto("store key generation overflow".to_string())
-                    })?,
-                encryption::generate_random_key(),
-            )
-            .map_err(|error| InviteError::Crypto(format!("append key generation: {error}")))?,
-    };
-    let remaining_members = validated.current_members();
+    .await?;
+    let new_keyring = current_keyring
+        .with_appended_generation(
+            current_keyring
+                .current_generation()
+                .checked_add(1)
+                .ok_or_else(|| InviteError::Crypto("store key generation overflow".to_string()))?,
+            encryption::generate_random_key(),
+        )
+        .map_err(|error| InviteError::Crypto(format!("append key generation: {error}")))?;
+    let remaining_members = members
+        .iter()
+        .filter(|(pubkey, _)| pubkey != revokee_pubkey)
+        .cloned()
+        .collect::<Vec<_>>();
     let mut wraps = Vec::with_capacity(remaining_members.len());
     for (recipient, _) in remaining_members {
         let recipient_key = ed25519_hex_to_x25519(&recipient)?;
         wraps.push(ReplacementWrappedKey {
-            recipient: recipient.clone(),
-            bytes: signed_wrapped_key_with_activation(
-                store_id,
+            prepared: prepare_wrapped_store_key(
+                storage,
+                store_root_hash,
                 &recipient,
-                &recipient_key,
-                &new_keyring,
-                owner_keypair,
-                Some(remove_coord.clone()),
-            )?,
+                signed_wrapped_key(
+                    store_id,
+                    &recipient,
+                    &recipient_key,
+                    &new_keyring,
+                    owner_keypair,
+                )?,
+            )
+            .await?,
         });
     }
+    wraps.sort_by(|left, right| left.prepared.reference.cmp(&right.prepared.reference));
+    let entry = chain.signed_remove_member_with_wrapped_keys_in_stream(
+        owner_keypair,
+        stream_id,
+        revokee_pubkey.to_string(),
+        wraps
+            .iter()
+            .map(|wrap| wrap.prepared.reference.clone())
+            .collect(),
+        timestamp.to_string(),
+    )?;
+    let publication =
+        prepare_membership_publication(storage, db, store_root_hash, chain, entry, owner_keypair)
+            .await?;
     Ok(RevokeMutationPlan {
         publication,
         revokee_pubkey: revokee_pubkey.to_string(),
@@ -1315,49 +1156,54 @@ async fn execute_revoke_mutation(
     }
     let mut planned_recipients = std::collections::BTreeSet::new();
     for wrapped in &plan.wraps {
-        if !planned_recipients.insert(wrapped.recipient.clone())
+        let reference = &wrapped.prepared.reference;
+        if !planned_recipients.insert(reference.recipient_pubkey.clone())
             || !remaining
                 .iter()
-                .any(|(member_pubkey, _)| member_pubkey == &wrapped.recipient)
+                .any(|(member_pubkey, _)| member_pubkey == &reference.recipient_pubkey)
         {
             return Err(InviteError::InvalidDurableMutation(format!(
                 "planned replacement wrap has duplicate or non-member recipient {}",
-                wrapped.recipient
+                reference.recipient_pubkey
             )));
         }
-        let envelope: WrappedStoreKey =
-            serde_json::from_slice(&wrapped.bytes).map_err(|error| {
-                InviteError::InvalidDurableMutation(format!(
-                    "parse planned replacement wrap for {}: {error}",
-                    wrapped.recipient
-                ))
-            })?;
-        if envelope.activation
-            != Some(WrappedKeyActivation::MergeConcurrent(
-                plan.publication.entry.coord(),
-            ))
-            || envelope.generation != keyring.current_generation()
+        let envelope = wrapped.prepared.validate()?;
+        if envelope.generation != keyring.current_generation()
             || envelope.author_pubkey != plan.publication.entry.author_pubkey
             || envelope
                 .verify_and_unwrap(
                     &plan.publication.entry.store_id,
-                    &wrapped.recipient,
+                    &reference.recipient_pubkey,
                     std::iter::once(plan.publication.entry.author_pubkey.as_str()),
                 )
                 .is_err()
         {
             return Err(InviteError::InvalidDurableMutation(format!(
                 "planned replacement wrap for {} is not bound to the exact removal, generation, recipient, and author",
-                wrapped.recipient
+                reference.recipient_pubkey
             )));
         }
-        storage
-            .put_wrapped_key(
-                &plan.publication.entry.author_pubkey,
-                &wrapped.recipient,
-                wrapped.bytes.clone(),
-            )
-            .await?;
+        super::store_objects::create_exact_object(storage, &wrapped.prepared.object)
+            .await
+            .map_err(|error| InviteError::Crypto(error.to_string()))?;
+    }
+    let authority_refs = match &plan.publication.entry.change {
+        MembershipChange::RemoveMember { wrapped_keys, .. } => wrapped_keys,
+        _ => {
+            return Err(InviteError::InvalidDurableMutation(
+                "planned removal publication is not a removal".to_string(),
+            ))
+        }
+    };
+    let planned_refs = plan
+        .wraps
+        .iter()
+        .map(|wrap| wrap.prepared.reference.clone())
+        .collect::<Vec<_>>();
+    if authority_refs != &planned_refs {
+        return Err(InviteError::InvalidDurableMutation(
+            "planned removal authority differs from its exact wrapped keys".to_string(),
+        ));
     }
     super::store_objects::create_exact_object(storage, &plan.publication.entry_object)
         .await
@@ -1369,9 +1215,6 @@ async fn execute_revoke_mutation(
     )
     .await
     .map_err(|error| InviteError::Crypto(error.to_string()))?;
-    storage
-        .delete_wrapped_key(&plan.publication.entry.author_pubkey, &plan.revokee_pubkey)
-        .await?;
     match cloud_home.set_access(plan.desired_access.clone()).await? {
         CloudAccessOutcome::Absent(_) => {}
         CloudAccessOutcome::Present(_) => {
@@ -1400,26 +1243,26 @@ async fn execute_revoke_mutation(
 async fn complete_already_removed_member(
     storage: &dyn SyncStorage,
     cloud_home: &dyn CloudHome,
+    store_root_hash: super::store_commit::ObjectHash,
     chain: &MembershipChain,
     owner_keypair: &UserKeypair,
     revokee_pubkey: &str,
     store_id: &str,
 ) -> Result<EncryptionService, InviteError> {
-    let owners = chain
+    if !chain
         .current_members()
         .into_iter()
-        .filter_map(|(pubkey, role)| (role == MemberRole::Owner).then_some(pubkey))
-        .collect::<Vec<_>>();
-    if owners.is_empty() {
+        .any(|(_, role)| role == MemberRole::Owner)
+    {
         return Err(InviteError::LastOwner);
     }
-    let visible = visible_membership_activations(chain, None);
-    let keyring = unwrap_store_keyring_for_owners_with_activation(
-        cloud_home,
+    let references = chain.wrapped_key_authority_for(&keys::public_key_hex(owner_keypair))?;
+    let keyring = unwrap_store_keyring_for_refs(
+        storage,
+        store_root_hash,
         owner_keypair,
         store_id,
-        owners.iter().map(String::as_str),
-        Some(&visible),
+        &references,
     )
     .await?;
     revoke_provider_access(
@@ -1430,9 +1273,6 @@ async fn complete_already_removed_member(
         },
     )
     .await?;
-    storage
-        .delete_wrapped_key(&keys::public_key_hex(owner_keypair), revokee_pubkey)
-        .await?;
     Ok(keyring)
 }
 
@@ -1482,6 +1322,7 @@ pub(crate) async fn revoke_member_durable(
                 return complete_already_removed_member(
                     storage,
                     cloud_home,
+                    store_root_hash,
                     chain,
                     owner_keypair,
                     revokee_pubkey,
@@ -1494,7 +1335,6 @@ pub(crate) async fn revoke_member_durable(
                 storage,
                 db,
                 store_root_hash,
-                cloud_home,
                 chain,
                 owner_keypair,
                 stream_id,
@@ -1540,5 +1380,63 @@ async fn revoke_provider_access(
         CloudAccessOutcome::Present(_) => Err(InviteError::Crypto(
             "provider returned present outcome for absent access request".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::storage::cloud::test_utils::InMemoryCloudHome;
+    use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
+    use crate::sync::store_commit::ObjectHash;
+
+    #[tokio::test]
+    async fn wrapped_ref_generation_must_match_its_decrypted_keyring() {
+        let owner = UserKeypair::generate();
+        let recipient = UserKeypair::generate();
+        let recipient_pubkey = keys::public_key_hex(&recipient);
+        let storage = CloudSyncStorage::new(
+            Arc::new(InMemoryCloudHome::new()),
+            CloudCipher::Encrypted(EncryptionService::from_key([3; 32])),
+            BlobPathScheme::Hashed,
+            "wrapped-generation-test",
+            owner.clone(),
+        )
+        .expect("build exact test storage");
+        let keyring = EncryptionService::from_key([7; 32]);
+        let sealed = keys::seal_box_encrypt(
+            &keyring.to_keyring_payload().expect("serialize keyring"),
+            &recipient.to_x25519_public_key(),
+        );
+        let prepared = prepare_wrapped_store_key(
+            &storage,
+            ObjectHash::digest(b"wrapped generation root"),
+            &recipient_pubkey,
+            WrappedStoreKey::signed(
+                "wrapped-generation-store",
+                &recipient_pubkey,
+                2,
+                sealed,
+                &owner,
+            ),
+        )
+        .await
+        .expect("prepare mismatched generation wrap");
+        storage
+            .create_protocol_object(&prepared.object)
+            .await
+            .expect("create mismatched generation wrap");
+
+        assert!(unwrap_store_keyring_for_refs(
+            &storage,
+            ObjectHash::digest(b"wrapped generation root"),
+            &recipient,
+            "wrapped-generation-store",
+            &[prepared.reference],
+        )
+        .await
+        .is_err());
     }
 }

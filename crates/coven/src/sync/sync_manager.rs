@@ -118,10 +118,9 @@ pub(crate) struct SyncManager {
     /// invite (wraps the key to a new member) and remove (mints a fresh key and
     /// re-wraps it to everyone remaining). Each clones the live cipher at entry
     /// and builds a new keyring on top of it; without this, two rapid ops on one
-    /// device would both clone the SAME base generation and the second would
-    /// overwrite the first's wraps before the first's head guard could catch it,
-    /// forking the fleet. Held for the whole operation so the second waits and
-    /// builds on the first's committed state.
+    /// device would both clone the same base generation and prepare competing
+    /// membership authorities. Held for the whole operation so the second waits
+    /// and builds on the first's committed state.
     member_ops_lock: tokio::sync::Mutex<()>,
 }
 
@@ -864,7 +863,7 @@ impl SyncManager {
         Box::pin(async move {
             // Serialize with any other key-minting/rotating member op on this device,
             // so a second removal builds on this one's committed state rather than
-            // cloning the same base cipher and overwriting its wraps.
+            // cloning the same base cipher and preparing competing rotations.
             let _member_ops = self.member_ops_lock.lock().await;
 
             let sync_loop = self

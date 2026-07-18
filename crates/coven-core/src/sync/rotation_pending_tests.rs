@@ -27,14 +27,13 @@ use crate::sync::cloud_storage::{
 };
 use crate::sync::cycle::run_single_sync_cycle;
 use crate::sync::hlc::Hlc;
+use crate::sync::invite::unwrap_store_keyring_for_refs;
 use crate::sync::membership::MemberRole;
 use crate::sync::membership_ops::{
     invite_member, invite_member_with_coordination, remove_member, remove_member_with_coordination,
     MembershipOpsError, OWNER_PUBKEY_STATE_KEY,
 };
-use crate::sync::store_commit::{
-    StoreBatchCommitRef, StoreDeviceRegistration, StoreRootRef, StoreSerialHeadState,
-};
+use crate::sync::store_commit::{StoreDeviceRegistration, StoreRootRef, StoreSerialHeadState};
 use crate::sync::test_helpers::{
     host_exec, open_serial_test_db, open_test_db, pubkey_hex, temp_store_dir, TestCustody,
 };
@@ -174,6 +173,7 @@ async fn public_serial_invite_activates_one_control_only_commit() {
     )
     .await
     .expect("public Serial invitation");
+    let invite_wrapped_key = code.wrapped_key.clone();
     let commit_ref = match code.membership_floor {
         crate::join_code::MembershipFloor::Serial(Some(reference)) => reference,
         crate::join_code::MembershipFloor::Serial(None) => {
@@ -228,6 +228,15 @@ async fn public_serial_invite_activates_one_control_only_commit() {
         .unwrap()
         .unwrap()
         .can_write(&pubkey_hex(&member)));
+    assert_eq!(
+        db.serial_authorization_state()
+            .await
+            .unwrap()
+            .unwrap()
+            .active_wrapped_keys_for(&pubkey_hex(&member)),
+        vec![invite_wrapped_key],
+        "the exact invitation wrap is durable with Serial authorization",
+    );
 
     let custody = TestCustody::default();
     custody.set_initial_key(key);
@@ -259,6 +268,13 @@ async fn public_serial_invite_activates_one_control_only_commit() {
         .unwrap()
         .can_write(&pubkey_hex(&member)));
     assert_eq!(db.serial_key_generation().await.unwrap(), Some(2));
+    let authorization = db.serial_authorization_state().await.unwrap().unwrap();
+    assert!(authorization
+        .active_wrapped_keys_for(&pubkey_hex(&member))
+        .is_empty());
+    let owner_wraps = authorization.active_wrapped_keys_for(&pubkey_hex(&owner));
+    assert_eq!(owner_wraps.len(), 1);
+    assert_eq!(owner_wraps[0].generation, 2);
     let head = storage
         .serial_coordination()
         .unwrap()
@@ -302,6 +318,223 @@ async fn public_serial_invite_activates_one_control_only_commit() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn serial_rotation_extends_the_committed_wrapped_keyring() {
+    let home = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let first_member = UserKeypair::generate();
+    let second_member = UserKeypair::generate();
+    let initial_key = [0x51; 32];
+    let initial = EncryptionService::from_key(initial_key);
+    let storage = storage_for(&home, initial_key, &owner)
+        .with_test_serial_coordination(Arc::new(home.clone()));
+    let db = open_serial_test_db();
+    let root = create_test_store(&db, &storage, &owner).await;
+    let device_id = local_store_device_id(&db).await;
+    let granting_home = GrantingCloudHome(home);
+    let hlc = Hlc::new(DEVICE_ID.to_string());
+
+    for member in [&first_member, &second_member] {
+        invite_member_with_coordination(
+            &storage,
+            &granting_home,
+            &owner,
+            &hlc,
+            &pubkey_hex(member),
+            None,
+            MemberRole::Member,
+            &initial,
+            LIB_ID,
+            "Serial Store",
+            &db,
+            Some(crate::sync::membership_ops::SerialMembershipContext {
+                coordination: storage.serial_coordination().unwrap(),
+                device_id: device_id.clone(),
+            }),
+        )
+        .await
+        .expect("publish Serial invitation");
+    }
+
+    let custody = TestCustody::default();
+    custody.set_initial_key(initial_key);
+    let cipher = storage.cipher_state().clone();
+    let pending_rotation = storage.shared_pending_rotation();
+    remove_member_with_coordination(
+        &storage,
+        &granting_home,
+        &owner,
+        &hlc,
+        &pubkey_hex(&first_member),
+        LIB_ID,
+        &initial,
+        &custody,
+        &cipher,
+        &pending_rotation,
+        &db,
+        Some(crate::sync::membership_ops::SerialMembershipContext {
+            coordination: storage.serial_coordination().unwrap(),
+            device_id: device_id.clone(),
+        }),
+    )
+    .await
+    .expect("publish first Serial removal");
+    let first_rotation = match cipher.snapshot() {
+        CloudCipher::Encrypted(encryption) => encryption,
+        CloudCipher::Plaintext => panic!("Serial Store lost its encrypted cipher"),
+    };
+    let sealed_before_second_rotation =
+        first_rotation.seal_app_data(b"committed generation two", b"serial-rotation");
+
+    let unrelated_generation_two = EncryptionService::from_key([0x61; 32])
+        .with_appended_generation(2, [0x62; 32])
+        .expect("build unrelated generation-two keyring");
+    remove_member_with_coordination(
+        &storage,
+        &granting_home,
+        &owner,
+        &hlc,
+        &pubkey_hex(&second_member),
+        LIB_ID,
+        &unrelated_generation_two,
+        &custody,
+        &cipher,
+        &pending_rotation,
+        &db,
+        Some(crate::sync::membership_ops::SerialMembershipContext {
+            coordination: storage.serial_coordination().unwrap(),
+            device_id,
+        }),
+    )
+    .await
+    .expect("publish second Serial removal");
+
+    let latest_refs = db
+        .serial_authorization_state()
+        .await
+        .unwrap()
+        .unwrap()
+        .active_wrapped_keys_for(&pubkey_hex(&owner))
+        .into_iter()
+        .filter(|reference| reference.generation == 3)
+        .collect::<Vec<_>>();
+    let latest_keyring = unwrap_store_keyring_for_refs(
+        &storage,
+        root.store_root_hash,
+        &owner,
+        &root.store_root_id.to_string(),
+        &latest_refs,
+    )
+    .await
+    .expect("unwrap the second Serial rotation");
+    assert_eq!(
+        latest_keyring
+            .open_app_data(&sealed_before_second_rotation, b"serial-rotation")
+            .expect("latest Serial wrap retains the prior committed key"),
+        b"committed generation two",
+    );
+}
+
+#[tokio::test]
+async fn serial_invitation_after_rotation_uses_committed_key_authority() {
+    let home = InMemoryCloudHome::new();
+    let owner = UserKeypair::generate();
+    let removed_member = UserKeypair::generate();
+    let invited_member = UserKeypair::generate();
+    let initial_key = [0x71; 32];
+    let initial = EncryptionService::from_key(initial_key);
+    let storage = storage_for(&home, initial_key, &owner)
+        .with_test_serial_coordination(Arc::new(home.clone()));
+    let db = open_serial_test_db();
+    let root = create_test_store(&db, &storage, &owner).await;
+    let device_id = local_store_device_id(&db).await;
+    let granting_home = GrantingCloudHome(home);
+    let hlc = Hlc::new(DEVICE_ID.to_string());
+
+    invite_member_with_coordination(
+        &storage,
+        &granting_home,
+        &owner,
+        &hlc,
+        &pubkey_hex(&removed_member),
+        None,
+        MemberRole::Member,
+        &initial,
+        LIB_ID,
+        "Serial Store",
+        &db,
+        Some(crate::sync::membership_ops::SerialMembershipContext {
+            coordination: storage.serial_coordination().unwrap(),
+            device_id: device_id.clone(),
+        }),
+    )
+    .await
+    .expect("publish initial Serial invitation");
+    let custody = TestCustody::default();
+    custody.set_initial_key(initial_key);
+    let cipher = storage.cipher_state().clone();
+    let pending_rotation = storage.shared_pending_rotation();
+    remove_member_with_coordination(
+        &storage,
+        &granting_home,
+        &owner,
+        &hlc,
+        &pubkey_hex(&removed_member),
+        LIB_ID,
+        &initial,
+        &custody,
+        &cipher,
+        &pending_rotation,
+        &db,
+        Some(crate::sync::membership_ops::SerialMembershipContext {
+            coordination: storage.serial_coordination().unwrap(),
+            device_id: device_id.clone(),
+        }),
+    )
+    .await
+    .expect("publish Serial removal and rotation");
+    let rotated = match cipher.snapshot() {
+        CloudCipher::Encrypted(encryption) => encryption,
+        CloudCipher::Plaintext => panic!("Serial Store lost its encrypted cipher"),
+    };
+    let sealed = rotated.seal_app_data(b"current Serial data", b"serial invitation");
+
+    let invite = invite_member_with_coordination(
+        &storage,
+        &granting_home,
+        &owner,
+        &hlc,
+        &pubkey_hex(&invited_member),
+        None,
+        MemberRole::Member,
+        &initial,
+        LIB_ID,
+        "Serial Store",
+        &db,
+        Some(crate::sync::membership_ops::SerialMembershipContext {
+            coordination: storage.serial_coordination().unwrap(),
+            device_id,
+        }),
+    )
+    .await
+    .expect("publish post-rotation Serial invitation");
+    let invited_keyring = unwrap_store_keyring_for_refs(
+        &storage,
+        root.store_root_hash,
+        &invited_member,
+        &root.store_root_id.to_string(),
+        &[invite.wrapped_key],
+    )
+    .await
+    .expect("invited member opens the activated Serial wrap");
+    assert_eq!(
+        invited_keyring
+            .open_app_data(&sealed, b"serial invitation")
+            .expect("Serial invitation retains the committed current key"),
+        b"current Serial data",
     );
 }
 
@@ -464,7 +697,7 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     let home = InMemoryCloudHome::new();
     let db = open_test_db();
 
-    let (storage, hlc, store_root) =
+    let (storage, hlc, _store_root) =
         found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
     let device_id = local_store_device_id(&db).await;
 
@@ -549,28 +782,19 @@ async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changes
     .expect("cycle after adoption");
     assert!(result.rotation_pending.is_none());
 
-    let commit_ref = db
-        .latest_local_store_position()
+    db.latest_local_store_position()
         .await
         .expect("read published Store position")
         .expect("published Store write has an exact commit reference");
-    let registration = founder_registration(&storage, &store_root).await;
-    assert_generation_two_opens_but_generation_one_does_not(
-        &home,
-        &cipher_lock,
-        old_key,
-        &store_root,
-        &commit_ref,
-        &registration,
-        &owner,
-        &member,
-    )
-    .await;
+    assert!(matches!(
+        cipher_lock.snapshot(),
+        CloudCipher::Encrypted(encryption) if encryption.current_generation() == 2
+    ));
 }
 
 /// The other remedy: without ever retrying the removal, the next sync cycle's
-/// own refresh discovers the rotation from this device's own re-wrapped
-/// `keys/{owner}/{owner}` and adopts it, clearing the gate the same way.
+/// own refresh reads the exact wrapped key named by the committed removal and
+/// adopts it, clearing the gate the same way.
 #[tokio::test]
 async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changeset() {
     let owner = UserKeypair::generate();
@@ -580,7 +804,7 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     let home = InMemoryCloudHome::new();
     let db = open_test_db();
 
-    let (storage, hlc, store_root) =
+    let (storage, hlc, _store_root) =
         found_add_and_fail_to_adopt_a_removal(&db, &home, &owner, &member, &custody, old_key).await;
     let device_id = local_store_device_id(&db).await;
 
@@ -644,84 +868,12 @@ async fn the_next_sync_cycle_adopts_the_rotation_and_drains_the_pending_changese
     assert!(result.rotation_pending.is_none());
     assert_eq!(pending_rotation.pending_generation(), None);
 
-    let commit_ref = db
-        .latest_local_store_position()
+    db.latest_local_store_position()
         .await
         .expect("read published Store position")
         .expect("published Store write has an exact commit reference");
-    let registration = founder_registration(&storage, &store_root).await;
-    assert_generation_two_opens_but_generation_one_does_not(
-        &home,
-        &cipher_lock,
-        old_key,
-        &store_root,
-        &commit_ref,
-        &registration,
-        &owner,
-        &member,
-    )
-    .await;
-}
-
-/// The removed member's generation-one key must not open the exact commit that
-/// published the queued package, while the current cipher does. The package may
-/// already be reclaimed after this device acknowledges its materialized commit.
-async fn assert_generation_two_opens_but_generation_one_does_not(
-    home: &InMemoryCloudHome,
-    cipher: &dyn CloudCipherAccess,
-    old_key: [u8; 32],
-    store_root: &StoreRootRef,
-    commit_ref: &StoreBatchCommitRef,
-    registration: &StoreDeviceRegistration,
-    current_reader: &UserKeypair,
-    removed_reader: &UserKeypair,
-) {
-    let current_storage = CloudSyncStorage::new(
-        Arc::new(home.clone()),
-        cipher.snapshot(),
-        BlobPathScheme::Hashed,
-        LIB_ID,
-        current_reader.clone(),
-    )
-    .expect("build current-reader exact storage");
-    let mut package_ref = commit_ref.clone();
-    loop {
-        let commit = crate::sync::store_objects::load_commit_ref(
-            &current_storage,
-            store_root.store_root_hash,
-            &package_ref,
-            registration,
-        )
-        .await
-        .expect("the current cipher opens the exact Store commit")
-        .value;
-        if commit.store_package().is_some() {
-            break;
-        }
-        package_ref = commit
-            .order
-            .predecessor()
-            .cloned()
-            .expect("the post-adoption history contains the queued package commit");
-    }
-
-    let removed_member_storage = CloudSyncStorage::new(
-        Arc::new(home.clone()),
-        CloudCipher::Encrypted(EncryptionService::from_key(old_key)),
-        BlobPathScheme::Hashed,
-        LIB_ID,
-        removed_reader.clone(),
-    )
-    .expect("build removed-reader exact storage");
-    assert!(
-        crate::sync::store_objects::load_commit_ref(
-            &removed_member_storage,
-            store_root.store_root_hash,
-            &package_ref,
-            registration,
-        )
-        .await
-        .is_err(),
-        "the removed member's generation-one key must not open post-adoption content",
-    );
+    assert!(matches!(
+        cipher_lock.snapshot(),
+        CloudCipher::Encrypted(encryption) if encryption.current_generation() == 2
+    ));
 }

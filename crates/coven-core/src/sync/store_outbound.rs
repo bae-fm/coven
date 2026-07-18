@@ -151,8 +151,10 @@ pub(crate) async fn exact_next_announcement_slot(
     }
     let activation =
         super::store_commit::StreamActivationId::store_announcements(root, registration_ref);
-    let context =
-        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreHead);
+    let context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreHead,
+    );
     let mut slot = first_slot.clone();
     let mut predecessor: Option<StoreDeviceHeadRef> = None;
     for sequence in 1..=target.coord.sequence() {
@@ -389,10 +391,14 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
                 .await?,
             );
         }
-        let commit_context =
-            ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
-        let head_context =
-            ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead);
+        let commit_context = ProtocolObjectContext::signed_plaintext(
+            store_root_hash,
+            ProtocolObjectDomain::StoreCommit,
+        );
+        let head_context = ProtocolObjectContext::signed_plaintext(
+            store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
         let device_id = registration_ref.device_id.to_string();
         let head_prefix = head_slot_prefix(&device_id, seq);
         let (head_slot, predecessor_head) = exact_next_announcement_slot(
@@ -684,7 +690,10 @@ async fn prepare_partition_package(
             );
             (
                 package,
-                ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StorePackage),
+                ProtocolObjectContext::store_encrypted(
+                    store_root_hash,
+                    ProtocolObjectDomain::StorePackage,
+                ),
                 prefix,
                 None,
             )
@@ -1297,8 +1306,10 @@ pub async fn prepare_merge_candidate_abandonment(
             "Serial candidate reached Merge abandonment".to_string(),
         ));
     };
-    let commit_context =
-        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreCommit);
+    let commit_context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreCommit,
+    );
     let commit_prefix = commit_semantic_prefix(
         commit.candidate_family(),
         &stream_id.to_string(),
@@ -1328,8 +1339,10 @@ pub async fn prepare_merge_candidate_abandonment(
         &device_signer,
     )
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let head_context =
-        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreHead);
+    let head_context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreHead,
+    );
     let head_prefix = head_slot_prefix(device_id, sequence);
     let head_prepared = storage
         .prepare_protocol_object(
@@ -1417,8 +1430,10 @@ pub async fn prepare_serial_candidate_abandonment(
         &device_signer,
     )
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let context =
-        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreCommit);
+    let context = ProtocolObjectContext::signed_plaintext(
+        root.store_root_hash,
+        ProtocolObjectDomain::StoreCommit,
+    );
     let prefix = commit_semantic_prefix(
         commit.candidate_family(),
         SERIAL_STREAM_ID,
@@ -1512,7 +1527,7 @@ pub async fn publish_serial_candidate_abandonment(
         .create_protocol_object(&prepared.authority.prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let context = ProtocolObjectContext::store(
+    let context = ProtocolObjectContext::signed_plaintext(
         prepared.authority.value.store_root_hash,
         ProtocolObjectDomain::StoreCommit,
     );
@@ -1771,7 +1786,8 @@ async fn read_occupied_merge_head(
     slot: &crate::storage::cloud::ObjectSlot,
     semantic_prefix: &str,
 ) -> Result<(StoreDeviceHead, PreparedExactObject), StoreOutboundError> {
-    let context = ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead);
+    let context =
+        ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreHead);
     let (winner_bytes, winner_prepared) = storage
         .read_prepared_protocol_slot(&context, slot, semantic_prefix)
         .await
@@ -1855,8 +1871,10 @@ pub(crate) async fn drain_store_writes_with_coordination(
                     ));
                 }
             };
-            let commit_context =
-                ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
+            let commit_context = ProtocolObjectContext::signed_plaintext(
+                store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            );
             let commit_prefix = commit_semantic_prefix(
                 commit.candidate_family(),
                 &stream_id,
@@ -1878,8 +1896,10 @@ pub(crate) async fn drain_store_writes_with_coordination(
             }
             db.mark_candidate_commit_uploaded(head.commit.clone())
                 .await?;
-            let head_context =
-                ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead);
+            let head_context = ProtocolObjectContext::signed_plaintext(
+                store_root_hash,
+                ProtocolObjectDomain::StoreHead,
+            );
             let head_prefix = head_slot_prefix(
                 &head.author_registration.device_id.to_string(),
                 commit.seq(),
@@ -2059,7 +2079,8 @@ pub(crate) async fn prepare_serial_control(
         &snapshot.authorization,
     )
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let context = ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
+    let context =
+        ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreCommit);
     let commit = StoreBatchCommit::signed_with_control(
         store_root_hash,
         db.new_write_id(),
@@ -2164,8 +2185,10 @@ pub(crate) async fn activate_serial_commit_head(
     let observed = observe_serial_head(db, coordination).await?;
     let head_bytes = head.to_bytes();
     if observed.bytes() == Some(head_bytes.as_slice()) {
-        let context =
-            ProtocolObjectContext::store(commit.store_root_hash, ProtocolObjectDomain::StoreCommit);
+        let context = ProtocolObjectContext::signed_plaintext(
+            commit.store_root_hash,
+            ProtocolObjectDomain::StoreCommit,
+        );
         let prefix = commit_semantic_prefix(
             commit.candidate_family(),
             SERIAL_STREAM_ID,
@@ -2202,8 +2225,10 @@ pub(crate) async fn activate_serial_commit_head(
         .create_protocol_object(commit_prepared)
         .await
         .map_err(StoreObjectError::from)?;
-    let commit_context =
-        ProtocolObjectContext::store(commit.store_root_hash, ProtocolObjectDomain::StoreCommit);
+    let commit_context = ProtocolObjectContext::signed_plaintext(
+        commit.store_root_hash,
+        ProtocolObjectDomain::StoreCommit,
+    );
     let commit_prefix = commit_semantic_prefix(
         commit.candidate_family(),
         SERIAL_STREAM_ID,
@@ -2514,8 +2539,10 @@ async fn prepare_serial_store_branch(
                     .await?,
                 );
             }
-            let context =
-                ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
+            let context = ProtocolObjectContext::signed_plaintext(
+                store_root_hash,
+                ProtocolObjectDomain::StoreCommit,
+            );
             let store_package = prepared_packages
                 .iter()
                 .find(|package| package.audience == super::circle::Audience::Store)
@@ -2745,8 +2772,10 @@ async fn drain_serial_store_branch(
             .create_protocol_object(&write.commit.prepared)
             .await
             .map_err(StoreObjectError::from)?;
-        let context =
-            ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
+        let context = ProtocolObjectContext::signed_plaintext(
+            store_root_hash,
+            ProtocolObjectDomain::StoreCommit,
+        );
         let prefix = commit_semantic_prefix(
             write.commit.value.candidate_family(),
             SERIAL_STREAM_ID,
@@ -2956,7 +2985,7 @@ async fn publish_prepared_remote_objects(
                 };
                 let (context, prefix) = match package.audience() {
                     super::audience_package::PackageAudience::Store => (
-                        ProtocolObjectContext::store(
+                        ProtocolObjectContext::store_encrypted(
                             store_root_hash,
                             ProtocolObjectDomain::StorePackage,
                         ),
@@ -3588,7 +3617,8 @@ pub(crate) async fn prepare_store_operation_candidate(
         }
     }
     .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
-    let context = ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreCommit);
+    let context =
+        ProtocolObjectContext::signed_plaintext(store_root_hash, ProtocolObjectDomain::StoreCommit);
     let stream_id = match plan.coord {
         StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
         StoreCommitCoord::Serial { .. } => SERIAL_STREAM_ID.to_string(),
@@ -3632,8 +3662,10 @@ pub(crate) async fn prepare_store_operation_candidate(
         }
         None => {
             let previous = plan.order.predecessor().cloned();
-            let head_context =
-                ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead);
+            let head_context = ProtocolObjectContext::signed_plaintext(
+                store_root_hash,
+                ProtocolObjectDomain::StoreHead,
+            );
             let device_id = plan.registration_ref.device_id.to_string();
             let (head_slot, predecessor_head) = exact_next_announcement_slot(
                 storage,
@@ -3801,7 +3833,7 @@ pub(crate) async fn publish_prepared_store_operation(
             head,
             prepared: prepared_head,
         } => {
-            let commit_context = ProtocolObjectContext::store(
+            let commit_context = ProtocolObjectContext::signed_plaintext(
                 commit.store_root_hash,
                 ProtocolObjectDomain::StoreCommit,
             );
@@ -3833,7 +3865,7 @@ pub(crate) async fn publish_prepared_store_operation(
             if commit.acknowledgement().is_some() {
                 db.mark_candidate_commit_uploaded(reference.clone()).await?;
             }
-            let head_context = ProtocolObjectContext::store(
+            let head_context = ProtocolObjectContext::signed_plaintext(
                 commit.store_root_hash,
                 ProtocolObjectDomain::StoreHead,
             );
@@ -5508,7 +5540,7 @@ mod tests {
             candidate.seq(),
             ObjectHash::digest(&package_bytes),
         );
-        let package_context = ProtocolObjectContext::store(
+        let package_context = ProtocolObjectContext::store_encrypted(
             fixture.root.store_root_hash,
             ProtocolObjectDomain::StorePackage,
         );
@@ -5556,7 +5588,7 @@ mod tests {
             winner.seq(),
             winner.commit_hash(),
         );
-        let commit_context = ProtocolObjectContext::store(
+        let commit_context = ProtocolObjectContext::signed_plaintext(
             fixture.root.store_root_hash,
             ProtocolObjectDomain::StoreCommit,
         );
@@ -5594,7 +5626,7 @@ mod tests {
             &signer,
         )
         .expect("sign competing head");
-        let head_context = ProtocolObjectContext::store(
+        let head_context = ProtocolObjectContext::signed_plaintext(
             fixture.root.store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
@@ -5636,7 +5668,7 @@ mod tests {
         let signer = registration
             .device_signer(&fixture.keypair)
             .expect("derive Merge device signer");
-        let head_context = ProtocolObjectContext::store(
+        let head_context = ProtocolObjectContext::signed_plaintext(
             fixture.root.store_root_hash,
             ProtocolObjectDomain::StoreHead,
         );
