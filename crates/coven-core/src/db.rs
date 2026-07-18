@@ -283,6 +283,22 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            store_device_exclusion_freezes,
+            "
+    proposal_id TEXT PRIMARY KEY CHECK (length(proposal_id) = 64),
+    proposal_ref TEXT NOT NULL CHECK (json_valid(proposal_ref)),
+    target_cut TEXT NOT NULL CHECK (json_valid(target_cut))
+"
+        );
+        $visit!(
+            outbound_store_device_exclusion,
+            "
+    operation_id TEXT PRIMARY KEY CHECK (length(operation_id) = 64),
+    active_key INTEGER UNIQUE CHECK (active_key IS NULL OR active_key = 1),
+    state TEXT NOT NULL CHECK (json_valid(state))
+"
+        );
+        $visit!(
             store_protocol_root_authority,
             "
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

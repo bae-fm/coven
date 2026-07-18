@@ -30,9 +30,14 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     let store_id = "device-join-client-state-machine";
     let owner = UserKeypair::generate();
     let owner_db = open_test_db();
-    let store = Box::pin(TestStore::create(&owner_db, store_id, owner.clone()))
-        .await
-        .expect("create Owner Store");
+    let create_store_db = owner_db.clone();
+    let create_store_owner = owner.clone();
+    let store = tokio::spawn(async move {
+        TestStore::create(&create_store_db, store_id, create_store_owner).await
+    })
+    .await
+    .expect("join Owner Store creation task")
+    .expect("create Owner Store");
     let join_request = crate::generate_join_request(None).expect("generate join request");
     let member_pubkey = crate::join_code::decode_join_request(&join_request)
         .expect("decode join request")

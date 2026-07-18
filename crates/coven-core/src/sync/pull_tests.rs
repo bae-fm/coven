@@ -1011,6 +1011,8 @@ fn sign_exact_commit_with_package(
             provider_access_grants: graph.commit.provider_access_grants().to_vec(),
             provider_access_withdrawals: graph.commit.provider_access_withdrawals().to_vec(),
             device_registrations: graph.commit.device_registrations().to_vec(),
+            device_exclusion_proposals: graph.commit.device_exclusion_proposals().to_vec(),
+            device_exclusion_outcomes: graph.commit.device_exclusion_outcomes().to_vec(),
             circle_controls: graph.commit.circle_controls().to_vec(),
             store_package: Some(crate::sync::store_commit::StorePackageInput {
                 candidate_family: graph.commit.candidate_family(),
@@ -3776,6 +3778,12 @@ async fn plain_scheme_host_blob_whose_cloud_path_does_not_name_it_is_refused() {
 /// Distinct browsable blob rows write distinct immutable cloud objects.
 #[tokio::test]
 async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
+    tokio::spawn(run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys())
+        .await
+        .expect("distinct browsable blob orchestration task");
+}
+
+async fn run_plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
     // A browsable home: readable keys, objects stored in the clear (the two are one
     // choice), so the test reads the cloud object back as plaintext.
     let home = InMemoryCloudHome::new();
@@ -3876,6 +3884,12 @@ async fn plain_scheme_distinct_blobs_write_objects_at_their_own_keys() {
 /// Sequential replacements write separate immutable objects.
 #[tokio::test]
 async fn plain_scheme_two_replacements_write_two_objects() {
+    tokio::spawn(run_plain_scheme_two_replacements_write_two_objects())
+        .await
+        .expect("sequential browsable blob replacement orchestration task");
+}
+
+async fn run_plain_scheme_two_replacements_write_two_objects() {
     let home = InMemoryCloudHome::new();
     let keypair = UserKeypair::generate();
     let storage = cloud_test_storage(
@@ -4249,6 +4263,12 @@ fn replaceable_photo_decl() -> BlobDecl {
 /// blob and pushes; B pulls again and must serve the new bytes and drop the old.
 #[tokio::test]
 async fn plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
+    tokio::spawn(run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key())
+        .await
+        .expect("browsable blob repointing orchestration task");
+}
+
+async fn run_plain_scheme_repointing_a_row_moves_its_blob_to_a_new_key() {
     // A browsable home: readable keys, objects stored in the clear (the two are one
     // choice), so the test reads the cloud object back as plaintext.
     let home = InMemoryCloudHome::new();

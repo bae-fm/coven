@@ -1614,7 +1614,7 @@ impl DeviceJoinAuthorization {
         }
     }
 
-    fn active_owner_grant(&self, pubkey: &str) -> Option<MembershipGrantId> {
+    pub(crate) fn active_owner_grant(&self, pubkey: &str) -> Option<MembershipGrantId> {
         match self {
             Self::MergeConcurrent(membership) => membership.active_owner_grant(pubkey),
             Self::Serial(authorization) => authorization.membership.active_owner_grant(pubkey),
@@ -1637,7 +1637,7 @@ impl DeviceJoinAuthorization {
         }
     }
 
-    fn merge_chain(&self) -> Option<&MembershipChain> {
+    pub(crate) fn merge_chain(&self) -> Option<&MembershipChain> {
         match self {
             Self::MergeConcurrent(membership) => Some(membership),
             Self::Serial(_) => None,

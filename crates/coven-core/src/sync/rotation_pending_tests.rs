@@ -690,6 +690,12 @@ async fn a_device_that_failed_to_adopt_a_rotation_seals_nothing_new() {
 /// generation, not the one the removed member holds.
 #[tokio::test]
 async fn retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changeset() {
+    tokio::spawn(run_retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changeset())
+        .await
+        .expect("removal retry and pending-write orchestration task");
+}
+
+async fn run_retrying_the_removal_adopts_the_rotation_and_drains_the_pending_changeset() {
     let owner = UserKeypair::generate();
     let member = UserKeypair::generate();
     let old_key: [u8; 32] = [41u8; 32];

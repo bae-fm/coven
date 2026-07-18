@@ -380,76 +380,22 @@ async fn capture_snapshot_cut(
 /// device's own changes.
 /// Loads/persists all cycle state (local_seq, positions, staging, snapshots) through
 /// `db`'s bookkeeping API rather than keeping mutable state across calls.
-#[cfg(test)]
-pub(crate) async fn run_single_sync_cycle(
-    storage: &dyn SyncStorage,
-    store_id: &str,
-    device_id: &str,
-    hlc: &Hlc,
-    clock: &dyn crate::clock::Clock,
-    db: &Database,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    user_keypair: &UserKeypair,
-    custody: Option<&dyn MasterKeyCustody>,
-    store_dir: &StoreDir,
-    cloud_home: Option<&dyn CloudHome>,
-    observer: Option<&dyn BlobTransitionObserver>,
-) -> Result<SyncCycleResult, SyncCycleFailure> {
-    run_single_sync_cycle_with_coordination(
-        storage,
-        None,
-        store_id,
-        device_id,
-        hlc,
-        clock,
-        db,
-        cipher,
-        pending_rotation,
-        user_keypair,
-        custody,
-        None,
-        store_dir,
-        cloud_home,
-        observer,
-    )
-    .await
+struct CycleAuthorization {
+    store_root: super::store_commit::StoreRootRef,
+    merge_membership: Option<super::pull::CycleMembership>,
+    serial_authorization: Option<super::store_pull::SerialCycleAuthorization>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_single_sync_cycle_with_coordination(
+async fn load_cycle_authorization(
     storage: &dyn SyncStorage,
     serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
-    _store_id: &str,
-    device_id: &str,
-    hlc: &Hlc,
-    clock: &dyn crate::clock::Clock,
     db: &Database,
-    cipher: &dyn CloudCipherAccess,
-    pending_rotation: &PendingRotation,
-    user_keypair: &UserKeypair,
-    custody: Option<&dyn MasterKeyCustody>,
-    routing_encryption: Option<&crate::encryption::EncryptionService>,
-    store_dir: &StoreDir,
-    cloud_home: Option<&dyn CloudHome>,
-    observer: Option<&dyn BlobTransitionObserver>,
-) -> Result<SyncCycleResult, SyncCycleFailure> {
-    // The synced-table set is owned by the Database; read it once here.
-    let tables = db.synced_tables();
-
+) -> Result<CycleAuthorization, SyncCycleFailure> {
     let store_root = db
         .local_store_root_ref()
         .await
         .map_err(|error| format!("read Store root reference: {error}"))?
         .ok_or_else(|| "Store root reference is absent".to_string())?;
-    let store_root_hash = store_root.store_root_hash;
-    let protocol_store_id = store_root.store_root_id.to_string();
-
-    // Resolve the policy's authorization state before this cycle pushes, judges,
-    // or decrypts. MergeConcurrent anchors its causal membership chain once for
-    // the cycle. Serial verifies and replays the exact chain selected by the
-    // compare-and-swap head. A missing or unverifiable state aborts the cycle;
-    // authorization never falls open to "no rules apply".
     let (merge_membership, serial_authorization) = match db.write_policy() {
         crate::WritePolicy::MergeConcurrent => (
             Some(
@@ -473,6 +419,259 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
             ),
         ),
     };
+    Ok(CycleAuthorization {
+        store_root,
+        merge_membership,
+        serial_authorization,
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn run_single_sync_cycle(
+    storage: &dyn SyncStorage,
+    store_id: &str,
+    device_id: &str,
+    hlc: &Hlc,
+    clock: &dyn crate::clock::Clock,
+    db: &Database,
+    cipher: &dyn CloudCipherAccess,
+    pending_rotation: &PendingRotation,
+    user_keypair: &UserKeypair,
+    custody: Option<&dyn MasterKeyCustody>,
+    store_dir: &StoreDir,
+    cloud_home: Option<&dyn CloudHome>,
+    observer: Option<&dyn BlobTransitionObserver>,
+) -> Result<SyncCycleResult, SyncCycleFailure> {
+    let authorization = load_cycle_authorization(storage, None, db).await?;
+    Box::pin(run_single_sync_cycle_with_authorization(
+        storage,
+        None,
+        store_id,
+        device_id,
+        hlc,
+        clock,
+        db,
+        cipher,
+        pending_rotation,
+        user_keypair,
+        custody,
+        None,
+        store_dir,
+        cloud_home,
+        observer,
+        authorization,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_single_sync_cycle_with_coordination(
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
+    _store_id: &str,
+    device_id: &str,
+    hlc: &Hlc,
+    clock: &dyn crate::clock::Clock,
+    db: &Database,
+    cipher: &dyn CloudCipherAccess,
+    pending_rotation: &PendingRotation,
+    user_keypair: &UserKeypair,
+    custody: Option<&dyn MasterKeyCustody>,
+    routing_encryption: Option<&crate::encryption::EncryptionService>,
+    store_dir: &StoreDir,
+    cloud_home: Option<&dyn CloudHome>,
+    observer: Option<&dyn BlobTransitionObserver>,
+) -> Result<SyncCycleResult, SyncCycleFailure> {
+    let authorization = load_cycle_authorization(storage, serial_coordination, db).await?;
+    Box::pin(run_single_sync_cycle_with_authorization(
+        storage,
+        serial_coordination,
+        _store_id,
+        device_id,
+        hlc,
+        clock,
+        db,
+        cipher,
+        pending_rotation,
+        user_keypair,
+        custody,
+        routing_encryption,
+        store_dir,
+        cloud_home,
+        observer,
+        authorization,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_single_sync_cycle_with_authorization(
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
+    _store_id: &str,
+    device_id: &str,
+    hlc: &Hlc,
+    clock: &dyn crate::clock::Clock,
+    db: &Database,
+    cipher: &dyn CloudCipherAccess,
+    pending_rotation: &PendingRotation,
+    user_keypair: &UserKeypair,
+    custody: Option<&dyn MasterKeyCustody>,
+    routing_encryption: Option<&crate::encryption::EncryptionService>,
+    store_dir: &StoreDir,
+    cloud_home: Option<&dyn CloudHome>,
+    observer: Option<&dyn BlobTransitionObserver>,
+    authorization: CycleAuthorization,
+) -> Result<SyncCycleResult, SyncCycleFailure> {
+    let prepared = match Box::pin(prepare_cycle_before_pull(
+        storage,
+        serial_coordination,
+        device_id,
+        hlc,
+        clock,
+        db,
+        cipher,
+        pending_rotation,
+        user_keypair,
+        custody,
+        routing_encryption,
+        store_dir,
+        cloud_home,
+        observer,
+        &authorization,
+    ))
+    .await?
+    {
+        CycleBeforePull::Continue(prepared) => prepared,
+        CycleBeforePull::Complete(result) => return Ok(result),
+    };
+    let merge_chain = authorization
+        .merge_membership
+        .as_ref()
+        .and_then(|membership| membership.chain.as_ref());
+    let store_pull = Box::pin(super::store_pull::pull_store_commits_with_identity(
+        db,
+        db.synced_tables(),
+        storage,
+        serial_coordination,
+        authorization.store_root.store_root_hash,
+        store_dir,
+        merge_chain,
+        Some(user_keypair),
+    ))
+    .await
+    .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
+    let completed = Box::pin(complete_cycle_after_pull(
+        storage,
+        serial_coordination,
+        device_id,
+        hlc,
+        clock,
+        db,
+        user_keypair,
+        store_dir,
+        &authorization,
+        prepared,
+        store_pull,
+    ))
+    .await?;
+    if completed.rotation_pending.is_none() {
+        let merge_chain = authorization
+            .merge_membership
+            .as_ref()
+            .and_then(|membership| membership.chain.as_ref());
+        Box::pin(stage_cycle_ack(
+            storage,
+            serial_coordination,
+            db,
+            user_keypair,
+            merge_chain,
+            &completed.sync_time,
+        ))
+        .await?;
+        Box::pin(super::store_ack::drain_outbound_store_acks(
+            db,
+            storage,
+            serial_coordination,
+            user_keypair,
+            merge_chain,
+        ))
+        .await
+        .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
+        Box::pin(reclaim_cycle_packages(
+            storage,
+            db,
+            &authorization,
+            completed.serial_membership_after_pull.as_ref(),
+        ))
+        .await?;
+    }
+    let core_status = super::status::build_sync_status(
+        &completed.store_pull.visible_heads,
+        device_id,
+        Some(&completed.sync_time),
+    );
+    Ok(SyncCycleResult {
+        changesets_applied: completed.store_pull.changesets_applied,
+        held_positions: completed.store_pull.held_positions,
+        device_activity: core_status.other_devices,
+        sync_time: completed.sync_time,
+        asset_downloads_failed: completed.store_pull.asset_downloads_failed,
+        local_blob_cleanup_pending: completed.local_blob_cleanup_pending,
+        row_changes: completed.store_pull.row_changes,
+        resume_drain_promptly: completed.resume_drain_promptly,
+        rotation_pending: completed.rotation_pending,
+    })
+}
+
+struct PreparedCycle {
+    last_snapshot_time: Option<chrono::DateTime<chrono::Utc>>,
+    last_snapshot_position: Option<u64>,
+    has_snapshot: bool,
+    sync_time: String,
+    resume_drain_promptly: bool,
+    rotation_pending: Option<RotationPending>,
+}
+
+enum CycleBeforePull {
+    Continue(PreparedCycle),
+    Complete(SyncCycleResult),
+}
+
+struct CompletedPullCycle {
+    store_pull: super::store_pull::StorePullResult,
+    serial_membership_after_pull: Option<super::membership::SerialMembershipState>,
+    local_blob_cleanup_pending: bool,
+    sync_time: String,
+    resume_drain_promptly: bool,
+    rotation_pending: Option<RotationPending>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_cycle_before_pull(
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
+    device_id: &str,
+    hlc: &Hlc,
+    clock: &dyn crate::clock::Clock,
+    db: &Database,
+    cipher: &dyn CloudCipherAccess,
+    pending_rotation: &PendingRotation,
+    user_keypair: &UserKeypair,
+    custody: Option<&dyn MasterKeyCustody>,
+    routing_encryption: Option<&crate::encryption::EncryptionService>,
+    store_dir: &StoreDir,
+    cloud_home: Option<&dyn CloudHome>,
+    observer: Option<&dyn BlobTransitionObserver>,
+    authorization: &CycleAuthorization,
+) -> Result<CycleBeforePull, SyncCycleFailure> {
+    let CycleAuthorization {
+        store_root,
+        merge_membership,
+        serial_authorization,
+    } = authorization;
+    let store_root_hash = store_root.store_root_hash;
+    let protocol_store_id = store_root.store_root_id.to_string();
     let merge_chain = merge_membership
         .as_ref()
         .and_then(|membership| membership.chain.as_ref());
@@ -691,7 +890,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
                 storage,
                 serial_coordination
                     .ok_or_else(|| "Serial coordination capability is absent".to_string())?,
-                &store_root,
+                store_root,
             )
             .await
             .map_err(|error| {
@@ -723,7 +922,7 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
             .map_err(|error| format!("record Serial branch conflict: {error}"))?;
         }
         if branch.conflicted || stale {
-            return Ok(SyncCycleResult {
+            return Ok(CycleBeforePull::Complete(SyncCycleResult {
                 changesets_applied: 0,
                 held_positions: Vec::new(),
                 device_activity: Vec::new(),
@@ -733,22 +932,46 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
                 row_changes: Vec::new(),
                 resume_drain_promptly: false,
                 rotation_pending,
-            });
+            }));
         }
     }
 
-    let store_pull = Box::pin(super::store_pull::pull_store_commits_with_identity(
-        db,
-        tables,
-        storage,
-        serial_coordination,
-        store_root_hash,
-        store_dir,
-        merge_chain,
-        Some(user_keypair),
-    ))
-    .await
-    .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
+    Ok(CycleBeforePull::Continue(PreparedCycle {
+        last_snapshot_time,
+        last_snapshot_position,
+        has_snapshot,
+        sync_time,
+        resume_drain_promptly,
+        rotation_pending,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_cycle_after_pull(
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
+    device_id: &str,
+    hlc: &Hlc,
+    clock: &dyn crate::clock::Clock,
+    db: &Database,
+    user_keypair: &UserKeypair,
+    store_dir: &StoreDir,
+    authorization: &CycleAuthorization,
+    prepared: PreparedCycle,
+    store_pull: super::store_pull::StorePullResult,
+) -> Result<CompletedPullCycle, SyncCycleFailure> {
+    let PreparedCycle {
+        last_snapshot_time,
+        last_snapshot_position,
+        has_snapshot,
+        sync_time,
+        resume_drain_promptly,
+        rotation_pending,
+    } = prepared;
+    let tables = db.synced_tables();
+    let store_root_hash = authorization.store_root.store_root_hash;
+    let merge_membership = authorization.merge_membership.as_ref();
+    let merge_chain = merge_membership.and_then(|membership| membership.chain.as_ref());
     let serial_membership_after_pull = match db.write_policy() {
         crate::WritePolicy::MergeConcurrent => None,
         crate::WritePolicy::Serial => Some(
@@ -941,87 +1164,85 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
         }
     }
 
-    if rotation_pending.is_none() {
-        super::store_ack::drain_outbound_store_acks(
-            db,
-            storage,
-            serial_coordination,
-            user_keypair,
-            merge_chain,
-        )
-        .await
-        .map_err(|error| {
-            SyncCycleFailure::operation("publish queued Store acknowledgement", error)
-        })?;
-        let frontier = db
-            .materialized_frontier()
-            .await
-            .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?;
-        let frontier = super::store_commit::CommitFrontier::from_refs(db.write_policy(), frontier)
-            .map_err(|error| format!("shape Store acknowledgement frontier: {error}"))?;
-        super::store_ack::stage_store_ack(db, storage, frontier, sync_time.clone(), user_keypair)
-            .await
-            .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
-        super::store_ack::drain_outbound_store_acks(
-            db,
-            storage,
-            serial_coordination,
-            user_keypair,
-            merge_chain,
-        )
-        .await
-        .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
-        let reclaim_membership = match (
-            merge_membership.as_ref(),
-            serial_membership_after_pull.as_ref(),
-        ) {
-            (Some(membership), None) => super::store_reclaim::ReclaimMembership::MergeConcurrent {
-                membership: membership
-                    .chain
-                    .as_ref()
-                    .ok_or_else(|| "MergeConcurrent cycle has no membership chain".to_string())?,
-                discovery_proof: membership.discovery_proof,
-            },
-            (None, Some(serial)) => super::store_reclaim::ReclaimMembership::Serial(serial),
-            _ => {
-                return Err("cycle has no single policy-shaped membership state"
-                    .to_string()
-                    .into())
-            }
-        };
-        match super::store_reclaim::reclaim_store_packages(
-            db,
-            storage,
-            store_root_hash,
-            reclaim_membership,
-        )
-        .await
-        {
-            Ok(result) if result.packages_deleted > 0 => info!(
-                packages = result.packages_deleted,
-                copies = result.physical_copies_deleted,
-                "Reclaimed snapshot-covered Store packages"
-            ),
-            Ok(_) => {}
-            Err(error) => warn!(%error, "Store package reclamation refused"),
-        }
-    }
-
-    // Build status from remote heads. Reuse this cycle's `sync_time` so the
-    // status's `last_sync_time` matches the head this cycle wrote.
-    let core_status =
-        super::status::build_sync_status(&store_pull.visible_heads, device_id, Some(&sync_time));
-    Ok(SyncCycleResult {
-        changesets_applied: store_pull.changesets_applied,
-        held_positions: store_pull.held_positions,
-        device_activity: core_status.other_devices,
-        sync_time,
-        asset_downloads_failed: store_pull.asset_downloads_failed,
+    Ok(CompletedPullCycle {
+        store_pull,
+        serial_membership_after_pull,
         local_blob_cleanup_pending,
-        row_changes: store_pull.row_changes,
+        sync_time,
         resume_drain_promptly,
         rotation_pending,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stage_cycle_ack(
+    storage: &dyn SyncStorage,
+    serial_coordination: Option<&dyn super::storage::CoordinationStorage>,
+    db: &Database,
+    user_keypair: &UserKeypair,
+    merge_chain: Option<&super::membership::MembershipChain>,
+    sync_time: &str,
+) -> Result<(), SyncCycleFailure> {
+    super::store_ack::drain_outbound_store_acks(
+        db,
+        storage,
+        serial_coordination,
+        user_keypair,
+        merge_chain,
+    )
+    .await
+    .map_err(|error| SyncCycleFailure::operation("publish queued Store acknowledgement", error))?;
+    let frontier = db
+        .materialized_frontier()
+        .await
+        .map_err(|error| format!("read Store acknowledgement frontier: {error}"))?;
+    let frontier = super::store_commit::CommitFrontier::from_refs(db.write_policy(), frontier)
+        .map_err(|error| format!("shape Store acknowledgement frontier: {error}"))?;
+    super::store_ack::stage_store_ack(db, storage, frontier, sync_time.to_owned(), user_keypair)
+        .await
+        .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
+    Ok(())
+}
+
+async fn reclaim_cycle_packages(
+    storage: &dyn SyncStorage,
+    db: &Database,
+    authorization: &CycleAuthorization,
+    serial_membership_after_pull: Option<&super::membership::SerialMembershipState>,
+) -> Result<(), SyncCycleFailure> {
+    let merge_membership = authorization.merge_membership.as_ref();
+    let reclaim_membership = match (merge_membership, serial_membership_after_pull) {
+        (Some(membership), None) => super::store_reclaim::ReclaimMembership::MergeConcurrent {
+            membership: membership
+                .chain
+                .as_ref()
+                .ok_or_else(|| "MergeConcurrent cycle has no membership chain".to_string())?,
+            discovery_proof: membership.discovery_proof,
+        },
+        (None, Some(serial)) => super::store_reclaim::ReclaimMembership::Serial(serial),
+        _ => {
+            return Err("cycle has no single policy-shaped membership state"
+                .to_string()
+                .into())
+        }
+    };
+    match super::store_reclaim::reclaim_store_packages(
+        db,
+        storage,
+        authorization.store_root.store_root_hash,
+        reclaim_membership,
+    )
+    .await
+    {
+        Ok(result) if result.packages_deleted > 0 => info!(
+            packages = result.packages_deleted,
+            copies = result.physical_copies_deleted,
+            "Reclaimed snapshot-covered Store packages"
+        ),
+        Ok(_) => {}
+        Err(error) => warn!(%error, "Store package reclamation refused"),
+    }
+    Ok(())
 }
 
 /// Refresh this device's authorization/decryption state at the top of a cycle:
@@ -1436,6 +1657,27 @@ struct MembershipOperationContext<'a> {
 }
 
 impl SyncComponents {
+    fn device_exclusion_coordination(
+        &self,
+    ) -> Result<
+        Option<&dyn super::storage::CoordinationStorage>,
+        super::store_device_exclusion::StoreDeviceExclusionError,
+    > {
+        match self.db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => Ok(None),
+            crate::WritePolicy::Serial => {
+                self.storage
+                    .serial_coordination()
+                    .map(Some)
+                    .map_err(|error| {
+                        super::store_device_exclusion::StoreDeviceExclusionError::InvalidState(
+                            format!("Serial coordination: {error}"),
+                        )
+                    })
+            }
+        }
+    }
+
     async fn membership_operation_context(
         &self,
     ) -> Result<MembershipOperationContext<'_>, super::membership_ops::MembershipOpsError> {
@@ -1610,6 +1852,69 @@ impl SyncComponents {
         .await
     }
 
+    pub async fn propose_device_exclusion(
+        &self,
+        target: &super::store_commit::StoreDeviceRegistrationRef,
+    ) -> Result<
+        super::store_device_exclusion::StoreDeviceExclusionResult,
+        super::store_device_exclusion::StoreDeviceExclusionError,
+    > {
+        let coordination = self.device_exclusion_coordination()?;
+        super::store_device_exclusion::propose_device_exclusion(
+            &self.db,
+            &*self.storage,
+            coordination,
+            &self.user_keypair,
+            target,
+        )
+        .await
+    }
+
+    pub async fn cancel_device_exclusion(
+        &self,
+        proposal: &super::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<
+        super::store_device_exclusion::StoreDeviceExclusionResult,
+        super::store_device_exclusion::StoreDeviceExclusionError,
+    > {
+        let coordination = self.device_exclusion_coordination()?;
+        super::store_device_exclusion::cancel_device_exclusion(
+            &self.db,
+            &*self.storage,
+            coordination,
+            &self.user_keypair,
+            proposal,
+        )
+        .await
+    }
+
+    pub async fn finalize_device_exclusion(
+        &self,
+        proposal: &super::store_commit::StoreDeviceExclusionProposalRef,
+    ) -> Result<
+        super::store_device_exclusion::StoreDeviceExclusionResult,
+        super::store_device_exclusion::StoreDeviceExclusionError,
+    > {
+        let coordination = self.device_exclusion_coordination()?;
+        super::store_device_exclusion::finalize_device_exclusion(
+            &self.db,
+            &*self.storage,
+            coordination,
+            &self.user_keypair,
+            proposal,
+        )
+        .await
+    }
+
+    pub async fn get_device_exclusion_operations(
+        &self,
+    ) -> Result<
+        Vec<super::store_device_exclusion::StoreDeviceExclusionOperationInfo>,
+        super::store_device_exclusion::StoreDeviceExclusionError,
+    > {
+        super::store_device_exclusion::get_device_exclusion_operations(&self.db).await
+    }
+
     pub async fn run_cycle(
         &self,
         clock: &dyn crate::clock::Clock,
@@ -1625,6 +1930,14 @@ impl SyncComponents {
                 })?)
             }
         };
+        super::store_device_exclusion::resume_device_exclusion(
+            &self.db,
+            &*self.storage,
+            serial_coordination,
+            &self.user_keypair,
+        )
+        .await
+        .map_err(|error| SyncCycleFailure::operation("resume device exclusion", error))?;
         super::circle_ops::resume_circle_operations(
             &self.db,
             &*self.storage,

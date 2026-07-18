@@ -9,16 +9,19 @@ use super::storage::{
     SyncStorage,
 };
 use super::store_commit::{
-    ack_slot_prefix, commit_semantic_prefix, device_join_attempt_semantic_prefix,
+    ack_slot_prefix, commit_semantic_prefix, device_exclusion_outcome_semantic_prefix,
+    device_exclusion_proposal_semantic_prefix, device_join_attempt_semantic_prefix,
     device_join_outcome_semantic_prefix, founder_registration_semantic_prefix, head_slot_prefix,
     membership_entry_semantic_prefix, membership_resolution_semantic_prefix,
     package_semantic_prefix, provider_access_grant_semantic_prefix,
     provider_access_withdrawal_semantic_prefix, registration_semantic_prefix,
     store_protocol_root_logical_key, DeviceJoinAttempt, DeviceJoinAttemptRef, DeviceJoinOutcome,
     DeviceJoinOutcomeRef, ObjectHash, OwnerRecoveryNode, OwnerRecoveryNodeRef, StoreAck,
-    StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceHeadRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreProtocolError,
-    StoreProtocolRoot, StoreRootRef, SERIAL_STREAM_ID,
+    StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    StoreDeviceExclusionOutcome, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposal,
+    StoreDeviceExclusionProposalRef, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
+    StoreDeviceRegistrationRef, StoreProtocolError, StoreProtocolRoot, StoreRootRef,
+    SERIAL_STREAM_ID,
 };
 
 #[derive(Debug)]
@@ -27,6 +30,20 @@ pub struct VerifiedObject<T> {
     pub bytes: Vec<u8>,
     pub semantic_hash: ObjectHash,
     pub object: ExactObjectRef,
+}
+
+#[derive(Debug)]
+pub struct VerifiedDeviceExclusionProposal {
+    pub reference: StoreDeviceExclusionProposalRef,
+    pub object: VerifiedObject<StoreDeviceExclusionProposal>,
+    pub target: StoreDeviceRegistration,
+    pub owner: StoreDeviceRegistration,
+}
+
+#[derive(Debug)]
+pub struct VerifiedDeviceExclusionOutcome {
+    pub object: VerifiedObject<StoreDeviceExclusionOutcome>,
+    pub owner: StoreDeviceRegistration,
 }
 
 pub async fn load_provider_access_grant_ref(
@@ -381,6 +398,125 @@ pub async fn load_device_join_outcome_ref(
         },
     )
     .await
+}
+
+pub async fn load_device_exclusion_proposal_ref(
+    storage: &dyn SyncStorage,
+    store_root: &StoreRootRef,
+    reference: &StoreDeviceExclusionProposalRef,
+) -> Result<VerifiedDeviceExclusionProposal, StoreObjectError> {
+    let context = ProtocolObjectContext::signed_plaintext(
+        store_root.store_root_hash,
+        ProtocolObjectDomain::StoreDeviceExclusionProposal,
+    );
+    let semantic_prefix = device_exclusion_proposal_semantic_prefix(
+        reference.target.device_id,
+        reference.proposal_id,
+        reference.proposal_hash,
+    );
+    let opened = load_exact_object(
+        storage,
+        &context,
+        &reference.object,
+        &semantic_prefix,
+        reference.proposal_hash,
+        |bytes| {
+            let proposal: StoreDeviceExclusionProposal = serde_json::from_slice(bytes)
+                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            reference.verify_proposal(&proposal)?;
+            if proposal.store_root_hash != store_root.store_root_hash {
+                return Err(StoreProtocolError::StoreRootMismatch {
+                    expected: store_root.store_root_hash,
+                    actual: proposal.store_root_hash,
+                });
+            }
+            Ok(proposal)
+        },
+    )
+    .await?;
+    let target = load_registration_ref(storage, store_root, &opened.value.target)
+        .await?
+        .value;
+    let owner = load_registration_ref(storage, store_root, &opened.value.owner_registration)
+        .await?
+        .value;
+    let verified =
+        StoreDeviceExclusionProposal::parse_at(&opened.bytes, reference, &target, &owner).map_err(
+            |source| StoreObjectError::InvalidObject {
+                semantic_prefix,
+                key: reference.object.slot().logical_key().to_string(),
+                source: Box::new(source),
+            },
+        )?;
+    Ok(VerifiedDeviceExclusionProposal {
+        reference: reference.clone(),
+        object: VerifiedObject {
+            value: verified,
+            ..opened
+        },
+        target,
+        owner,
+    })
+}
+
+pub async fn load_device_exclusion_outcome_ref(
+    storage: &dyn SyncStorage,
+    store_root: &StoreRootRef,
+    reference: &StoreDeviceExclusionOutcomeRef,
+    proposal: &VerifiedDeviceExclusionProposal,
+) -> Result<VerifiedDeviceExclusionOutcome, StoreObjectError> {
+    let context = ProtocolObjectContext::signed_plaintext(
+        store_root.store_root_hash,
+        ProtocolObjectDomain::StoreDeviceExclusionOutcome,
+    );
+    let semantic_prefix = device_exclusion_outcome_semantic_prefix(
+        proposal.object.value.target.device_id,
+        proposal.object.value.proposal_id,
+    );
+    let opened = load_exact_object(
+        storage,
+        &context,
+        reference.object(),
+        &semantic_prefix,
+        reference.outcome_hash(),
+        |bytes| {
+            let outcome: StoreDeviceExclusionOutcome = serde_json::from_slice(bytes)
+                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            if outcome.outcome_hash() != reference.outcome_hash()
+                || outcome.proposal() != reference.proposal()
+            {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            }
+            Ok(outcome)
+        },
+    )
+    .await?;
+    let owner_ref = match &opened.value {
+        StoreDeviceExclusionOutcome::Excluded(exclusion) => &exclusion.owner_registration,
+        StoreDeviceExclusionOutcome::Cancelled(cancellation) => &cancellation.owner_registration,
+    };
+    let owner = load_registration_ref(storage, store_root, owner_ref)
+        .await?
+        .value;
+    let verified = StoreDeviceExclusionOutcome::parse_at(
+        &opened.bytes,
+        reference,
+        &proposal.object.value,
+        &proposal.target,
+        &owner,
+    )
+    .map_err(|source| StoreObjectError::InvalidObject {
+        semantic_prefix,
+        key: reference.object().slot().logical_key().to_string(),
+        source: Box::new(source),
+    })?;
+    Ok(VerifiedDeviceExclusionOutcome {
+        object: VerifiedObject {
+            value: verified,
+            ..opened
+        },
+        owner,
+    })
 }
 
 pub async fn load_store_ack_ref(

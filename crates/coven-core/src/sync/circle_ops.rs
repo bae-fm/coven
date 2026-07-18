@@ -159,6 +159,8 @@ fn signed_circle_commit(
             provider_access_grants: Vec::new(),
             provider_access_withdrawals: Vec::new(),
             device_registrations: Vec::new(),
+            device_exclusion_proposals: Vec::new(),
+            device_exclusion_outcomes: Vec::new(),
             circle_controls: vec![creation.control_ref(objects)],
             store_package: None,
             circle_packages: &[],
@@ -1371,6 +1373,38 @@ mod tests {
             .expect("local Store device is active")
     }
 
+    async fn create_test_store_in_its_own_task(
+        db: &Database,
+        name: &str,
+        signer: &UserKeypair,
+    ) -> TestStore {
+        let db = db.clone();
+        let name = name.to_string();
+        let signer = signer.clone();
+        tokio::spawn(async move { TestStore::create(&db, &name, signer).await })
+            .await
+            .expect("join Circle test Store creation")
+            .expect("create exact Circle test Store")
+    }
+
+    async fn create_exact_serial_store_in_its_own_task(
+        db: &Database,
+        storage: CloudSyncStorage,
+        name: &str,
+        signer: &UserKeypair,
+    ) -> (CloudSyncStorage, crate::sync::store_commit::StoreRootRef) {
+        let db = db.clone();
+        let name = name.to_string();
+        let signer = signer.clone();
+        tokio::spawn(async move {
+            let root = create_exact_test_store(&db, &storage, &name, &signer).await?;
+            Ok::<_, String>((storage, root))
+        })
+        .await
+        .expect("join Serial Circle test Store creation")
+        .expect("create exact Serial Circle test Store")
+    }
+
     struct HeadChangesAfterAuthorization<'a> {
         inner: &'a dyn CoordinationStorage,
         authorization_head: Vec<u8>,
@@ -1420,9 +1454,7 @@ mod tests {
         name: &str,
     ) -> (TestStore, UserKeypair, CircleOperationJournal) {
         let signer = UserKeypair::generate();
-        let store = TestStore::create(db, name, signer.clone())
-            .await
-            .expect("create exact Circle test Store");
+        let store = create_test_store_in_its_own_task(db, name, &signer).await;
         let device_id = db
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
@@ -1673,9 +1705,13 @@ mod tests {
             &test_migrations(),
         )
         .expect("open Serial Circle database");
-        create_exact_test_store(&db, &storage, "serial-circle-restart", &founder)
-            .await
-            .expect("create exact Serial Circle Store");
+        let (storage, _root) = create_exact_serial_store_in_its_own_task(
+            &db,
+            storage,
+            "serial-circle-restart",
+            &founder,
+        )
+        .await;
         let device_id = local_device_id(&db).await;
         let coordination = storage.serial_coordination().expect("Serial coordination");
         let expected = prepare_circle_operation(
@@ -2486,9 +2522,8 @@ mod tests {
     async fn merge_resume_blocks_revoked_journals_without_stopping_later_operations() {
         let db = open_test_db();
         let founder = UserKeypair::generate();
-        let store = TestStore::create(&db, "circle-merge-revoked-grant", founder.clone())
-            .await
-            .expect("create exact revocation test Store");
+        let store =
+            create_test_store_in_its_own_task(&db, "circle-merge-revoked-grant", &founder).await;
         let successor = UserKeypair::generate();
         let successor_pubkey = keys::public_key_hex(&successor);
         let encryption = EncryptionService::from_key([42; 32]);
@@ -2634,9 +2669,13 @@ mod tests {
         let successor = UserKeypair::generate();
         let storage = serial_storage(&home, &founder, "circle-serial-authority-race");
         let db = open_serial_test_db();
-        create_exact_test_store(&db, &storage, "circle-serial-authority-race", &founder)
-            .await
-            .expect("create exact Serial authority-race Store");
+        let (storage, _root) = create_exact_serial_store_in_its_own_task(
+            &db,
+            storage,
+            "circle-serial-authority-race",
+            &founder,
+        )
+        .await;
         let device_id = local_device_id(&db).await;
         let coordination = storage.serial_coordination().expect("Serial coordination");
 
@@ -2766,9 +2805,13 @@ mod tests {
         let successor = UserKeypair::generate();
         let storage = serial_storage(&home, &founder, "circle-serial-head-bytes");
         let db = open_serial_test_db();
-        let root = create_exact_test_store(&db, &storage, "circle-serial-head-bytes", &founder)
-            .await
-            .expect("create exact Serial head-bytes Store");
+        let (storage, root) = create_exact_serial_store_in_its_own_task(
+            &db,
+            storage,
+            "circle-serial-head-bytes",
+            &founder,
+        )
+        .await;
         let device_id = local_device_id(&db).await;
         let coordination = storage.serial_coordination().expect("Serial coordination");
         let authorization =
@@ -2874,9 +2917,13 @@ mod tests {
         let founder = UserKeypair::generate();
         let storage = serial_storage(&home, &founder, "circle-serial-missing-commit");
         let db = open_serial_test_db();
-        create_exact_test_store(&db, &storage, "circle-serial-missing-commit", &founder)
-            .await
-            .expect("create exact Serial missing-commit Store");
+        let (storage, _root) = create_exact_serial_store_in_its_own_task(
+            &db,
+            storage,
+            "circle-serial-missing-commit",
+            &founder,
+        )
+        .await;
         let device_id = local_device_id(&db).await;
         let coordination = storage.serial_coordination().expect("Serial coordination");
         let journal = prepare_circle_operation(
@@ -2932,9 +2979,9 @@ mod tests {
         let signer = UserKeypair::generate();
         let storage = serial_storage(&home, &signer, "circle-stale-serial");
         let db = open_serial_test_db();
-        create_exact_test_store(&db, &storage, "circle-stale-serial", &signer)
-            .await
-            .expect("create exact stale-head Serial Store");
+        let (storage, _root) =
+            create_exact_serial_store_in_its_own_task(&db, storage, "circle-stale-serial", &signer)
+                .await;
         let device_id = local_device_id(&db).await;
         let coordination = storage.serial_coordination().expect("Serial coordination");
         let expected = prepare_circle_operation(

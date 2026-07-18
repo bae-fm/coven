@@ -69,6 +69,10 @@ pub(crate) const STORE_DEVICE_JOIN_ATTEMPT_PREFIX: &str = "store-v1/device-join-
 pub(crate) const STORE_DEVICE_JOIN_OUTCOME_PREFIX: &str = "store-v1/device-join-outcomes/";
 pub(crate) const STORE_DEVICE_JOIN_CLEANUP_RECEIPT_PREFIX: &str =
     "store-v1/device-join-cleanup-receipts/";
+pub(crate) const STORE_DEVICE_EXCLUSION_PROPOSAL_PREFIX: &str =
+    "store-v1/device-exclusion-proposals/";
+pub(crate) const STORE_DEVICE_EXCLUSION_OUTCOME_PREFIX: &str =
+    "store-v1/device-exclusion-outcomes/";
 pub(crate) const STORE_PROVIDER_ACCESS_GRANT_PREFIX: &str = "store-v1/provider-access/grants/";
 pub(crate) const STORE_PROVIDER_ACCESS_WITHDRAWAL_PREFIX: &str =
     "store-v1/provider-access/withdrawals/";
@@ -88,6 +92,10 @@ const SELF_RETIREMENT_DOMAIN: &[u8] = b"coven.store-device-self-retirement.v1\0"
 const DEVICE_JOIN_ATTEMPT_DOMAIN: &[u8] = b"coven.device-join-attempt.v1\0";
 const DEVICE_READINESS_DOMAIN: &[u8] = b"coven.device-readiness.v1\0";
 const DEVICE_JOIN_OUTCOME_DOMAIN: &[u8] = b"coven.device-join-outcome.v1\0";
+const DEVICE_EXCLUSION_PROPOSAL_DOMAIN: &[u8] = b"coven.store-device-exclusion-proposal.v1\0";
+const DEVICE_EXCLUSION_DOMAIN: &[u8] = b"coven.store-device-exclusion.v1\0";
+const DEVICE_EXCLUSION_CANCELLATION_DOMAIN: &[u8] =
+    b"coven.store-device-exclusion-cancellation.v1\0";
 const OWNER_RECOVERY_NODE_DOMAIN: &[u8] = b"coven.owner-recovery-node.v1\0";
 const ACK_DOMAIN: &[u8] = b"coven.store-ack.v1\0";
 const SNAPSHOT_DOMAIN: &[u8] = b"coven.snapshot-meta.v1\0";
@@ -514,6 +522,10 @@ impl StoreHistoryCut {
                 CommitFrontier::Serial(Some(commit.clone()))
             }
         }
+    }
+
+    pub(crate) fn join(self, other: Self) -> Result<Self, StoreProtocolError> {
+        merge_history_cuts(self, other)
     }
 }
 
@@ -983,6 +995,8 @@ pub struct StoreCommitOperations {
     pub provider_access_withdrawals:
         Vec<super::provider::StoreMemberProviderAccessWithdrawalReceiptRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
+    pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
+    pub device_exclusion_outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
     pub circle_controls: Vec<CircleControlRef>,
     pub store_package: Option<StorePackageRef>,
     pub circle_packages: Vec<CirclePackageRef>,
@@ -1006,6 +1020,8 @@ impl StoreCommitOperations {
             && self.provider_access_grants.is_empty()
             && self.provider_access_withdrawals.is_empty()
             && self.device_registrations.is_empty()
+            && self.device_exclusion_proposals.is_empty()
+            && self.device_exclusion_outcomes.is_empty()
             && self.circle_controls.is_empty()
             && self.store_package.is_none()
             && self.circle_packages.is_empty()
@@ -1038,6 +1054,8 @@ pub struct StoreCommitOperationsInput<'a> {
     pub provider_access_withdrawals:
         Vec<super::provider::StoreMemberProviderAccessWithdrawalReceiptRef>,
     pub device_registrations: Vec<ActivatedStoreDeviceRegistrationRef>,
+    pub device_exclusion_proposals: Vec<StoreDeviceExclusionProposalRef>,
+    pub device_exclusion_outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
     pub circle_controls: Vec<CircleControlRef>,
     pub store_package: Option<StorePackageInput<'a>>,
     pub circle_packages: &'a [CirclePackageInput<'a>],
@@ -1186,6 +1204,18 @@ impl StoreBatchCommit {
         }
     }
 
+    pub fn device_exclusion_proposals(&self) -> &[StoreDeviceExclusionProposalRef] {
+        self.operations().map_or(&[], |operations| {
+            operations.device_exclusion_proposals.as_slice()
+        })
+    }
+
+    pub fn device_exclusion_outcomes(&self) -> &[StoreDeviceExclusionOutcomeRef] {
+        self.operations().map_or(&[], |operations| {
+            operations.device_exclusion_outcomes.as_slice()
+        })
+    }
+
     pub fn device_retirements(&self) -> &[StoreDeviceSelfRetirementRef] {
         match &self.body {
             StoreCommitBody::SelfRetirement { retirement } => std::slice::from_ref(retirement),
@@ -1257,6 +1287,8 @@ impl StoreBatchCommit {
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: Some(package),
                 circle_packages: &[],
@@ -1300,6 +1332,8 @@ impl StoreBatchCommit {
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: package,
                 circle_packages: &[],
@@ -1342,6 +1376,8 @@ impl StoreBatchCommit {
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
                 device_registrations,
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1512,6 +1548,8 @@ impl StoreBatchCommit {
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1555,6 +1593,8 @@ impl StoreBatchCommit {
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
                 device_registrations,
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1597,6 +1637,8 @@ impl StoreBatchCommit {
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1639,6 +1681,53 @@ impl StoreBatchCommit {
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
                 device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
+                circle_controls: Vec::new(),
+                store_package: None,
+                circle_packages: &[],
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_device_exclusions(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        membership_authority: Option<MembershipGrantCreationAuthority>,
+        proposals: Vec<StoreDeviceExclusionProposalRef>,
+        outcomes: Vec<StoreDeviceExclusionOutcomeRef>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::signed_operations(
+            store_root_hash,
+            write_id,
+            coord,
+            author_registration,
+            author,
+            order,
+            membership_state,
+            device_state,
+            membership_authority,
+            StoreCommitOperationsInput {
+                acknowledgement: None,
+                control: None,
+                device_join_attempts: Vec::new(),
+                device_join_outcomes: Vec::new(),
+                device_join_abandonments: Vec::new(),
+                device_join_cleanup_receipts: Vec::new(),
+                provider_access_grants: Vec::new(),
+                provider_access_withdrawals: Vec::new(),
+                device_registrations: Vec::new(),
+                device_exclusion_proposals: proposals,
+                device_exclusion_outcomes: outcomes,
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1684,6 +1773,8 @@ impl StoreBatchCommit {
                 provider_access_grants,
                 provider_access_withdrawals,
                 device_registrations: Vec::new(),
+                device_exclusion_proposals: Vec::new(),
+                device_exclusion_outcomes: Vec::new(),
                 circle_controls: Vec::new(),
                 store_package: None,
                 circle_packages: &[],
@@ -1727,6 +1818,8 @@ impl StoreBatchCommit {
             provider_access_grants,
             provider_access_withdrawals,
             device_registrations,
+            device_exclusion_proposals,
+            device_exclusion_outcomes,
             circle_controls,
             store_package,
             circle_packages,
@@ -1764,6 +1857,7 @@ impl StoreBatchCommit {
         validate_device_join_cleanup_receipt_refs(&device_join_cleanup_receipts)?;
         validate_provider_access_refs(&provider_access_grants, &provider_access_withdrawals)?;
         validate_device_registration_refs(&device_registrations)?;
+        validate_device_exclusion_refs(&device_exclusion_proposals, &device_exclusion_outcomes)?;
         let mut seen_circles = BTreeSet::new();
         let circle_packages = circle_packages
             .iter()
@@ -1804,6 +1898,8 @@ impl StoreBatchCommit {
             provider_access_grants,
             provider_access_withdrawals,
             device_registrations,
+            device_exclusion_proposals,
+            device_exclusion_outcomes,
             circle_controls,
             store_package,
             circle_packages,
@@ -2087,6 +2183,10 @@ fn validate_commit_body(
                 &operations.provider_access_withdrawals,
             )?;
             validate_device_registration_refs(&operations.device_registrations)?;
+            validate_device_exclusion_refs(
+                &operations.device_exclusion_proposals,
+                &operations.device_exclusion_outcomes,
+            )?;
         }
         StoreCommitBody::SelfRetirement { retirement } => {
             validate_device_retirement_refs(
@@ -2525,6 +2625,39 @@ fn validate_device_registration_refs(
                 device_id: activation.registration.device_id.to_string(),
                 revision: 1,
             });
+        }
+    }
+    Ok(())
+}
+
+fn validate_device_exclusion_refs(
+    proposals: &[StoreDeviceExclusionProposalRef],
+    outcomes: &[StoreDeviceExclusionOutcomeRef],
+) -> Result<(), StoreProtocolError> {
+    if proposals.windows(2).any(|pair| pair[0] >= pair[1])
+        || outcomes.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(StoreProtocolError::DeviceStateMismatch);
+    }
+    let mut ids = BTreeSet::new();
+    for proposal in proposals {
+        proposal.validate_path()?;
+        if !ids.insert(proposal.proposal_id) {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+    }
+    for outcome in outcomes {
+        let proposal = outcome.proposal();
+        proposal.validate_path()?;
+        let expected = format!(
+            "{}.json",
+            device_exclusion_outcome_semantic_prefix(
+                proposal.target.device_id,
+                proposal.proposal_id,
+            )
+        );
+        if outcome.object().slot().logical_key() != expected || !ids.insert(proposal.proposal_id) {
+            return Err(StoreProtocolError::DeviceStateMismatch);
         }
     }
     Ok(())
@@ -3548,10 +3681,23 @@ pub struct StoreDeviceRecord {
 #[serde(transparent)]
 pub struct StoreDeviceExclusionProposalId(ObjectHash);
 
+impl StoreDeviceExclusionProposalId {
+    pub fn from_hash(hash: ObjectHash) -> Self {
+        Self(hash)
+    }
+}
+
+impl fmt::Display for StoreDeviceExclusionProposalId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreDeviceExclusionProposalRef {
     pub proposal_id: StoreDeviceExclusionProposalId,
+    pub target: StoreDeviceRegistrationRef,
     pub proposal_hash: ObjectHash,
     pub object: ExactObjectRef,
 }
@@ -3570,6 +3716,588 @@ pub struct StoreDeviceExclusionCancellationRef {
     pub proposal: StoreDeviceExclusionProposalRef,
     pub outcome_hash: ObjectHash,
     pub object: ExactObjectRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreDeviceExclusionOutcomeRef {
+    Excluded(StoreDeviceExclusionRef),
+    Cancelled(StoreDeviceExclusionCancellationRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedStoreDeviceOperations {
+    proposals: Vec<(
+        StoreDeviceExclusionProposalRef,
+        StoreDeviceExclusionProposal,
+    )>,
+    outcomes: Vec<VerifiedStoreDeviceExclusionOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VerifiedStoreDeviceExclusionOutcome {
+    Excluded {
+        reference: StoreDeviceExclusionRef,
+        accepted_cut: StoreHistoryCut,
+    },
+    Cancelled(StoreDeviceExclusionCancellationRef),
+}
+
+impl VerifiedStoreDeviceOperations {
+    pub(crate) fn proposals(
+        &self,
+    ) -> &[(
+        StoreDeviceExclusionProposalRef,
+        StoreDeviceExclusionProposal,
+    )] {
+        &self.proposals
+    }
+
+    pub(crate) fn from_commit(
+        commit: &StoreBatchCommit,
+        proposals: Vec<(
+            StoreDeviceExclusionProposalRef,
+            StoreDeviceExclusionProposal,
+        )>,
+        outcomes: Vec<VerifiedStoreDeviceExclusionOutcome>,
+    ) -> Result<Self, StoreProtocolError> {
+        let proposal_refs = proposals
+            .iter()
+            .map(|(reference, _)| reference.clone())
+            .collect::<Vec<_>>();
+        let outcome_refs = outcomes
+            .iter()
+            .map(VerifiedStoreDeviceExclusionOutcome::wire_reference)
+            .collect::<Vec<_>>();
+        if proposal_refs.as_slice() != commit.device_exclusion_proposals()
+            || outcome_refs.as_slice() != commit.device_exclusion_outcomes()
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        Ok(Self {
+            proposals,
+            outcomes,
+        })
+    }
+
+    pub(crate) fn without_exclusions(
+        commit: &StoreBatchCommit,
+    ) -> Result<Self, StoreProtocolError> {
+        Self::from_commit(commit, Vec::new(), Vec::new())
+    }
+
+    pub(crate) fn apply_to(
+        &self,
+        predecessor: ResolvedStoreDeviceState,
+        predecessor_ref: &StoreDeviceStateRef,
+    ) -> Result<ResolvedStoreDeviceState, StoreProtocolError> {
+        let mut state = predecessor;
+        for (reference, proposal) in &self.proposals {
+            state = state.propose_exclusion(reference.clone(), proposal, predecessor_ref)?;
+        }
+        for outcome in &self.outcomes {
+            state = match outcome {
+                VerifiedStoreDeviceExclusionOutcome::Excluded {
+                    reference,
+                    accepted_cut,
+                } => state.exclude(reference.clone(), accepted_cut.clone())?,
+                VerifiedStoreDeviceExclusionOutcome::Cancelled(reference) => {
+                    state.cancel_exclusion(reference.clone())?
+                }
+            };
+        }
+        Ok(state)
+    }
+}
+
+impl VerifiedStoreDeviceExclusionOutcome {
+    fn wire_reference(&self) -> StoreDeviceExclusionOutcomeRef {
+        match self {
+            Self::Excluded { reference, .. } => {
+                StoreDeviceExclusionOutcomeRef::Excluded(reference.clone())
+            }
+            Self::Cancelled(reference) => {
+                StoreDeviceExclusionOutcomeRef::Cancelled(reference.clone())
+            }
+        }
+    }
+}
+
+impl StoreDeviceExclusionOutcomeRef {
+    pub fn proposal(&self) -> &StoreDeviceExclusionProposalRef {
+        match self {
+            Self::Excluded(reference) => &reference.proposal,
+            Self::Cancelled(reference) => &reference.proposal,
+        }
+    }
+
+    pub fn object(&self) -> &ExactObjectRef {
+        match self {
+            Self::Excluded(reference) => &reference.object,
+            Self::Cancelled(reference) => &reference.object,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreDeviceExclusionProposal {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub proposal_id: StoreDeviceExclusionProposalId,
+    pub target: StoreDeviceRegistrationRef,
+    pub frozen_device_state: StoreDeviceStateRef,
+    pub outcome_slot: ObjectSlot,
+    pub owner_registration: StoreDeviceRegistrationRef,
+    pub owner_grant: MembershipGrantId,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreDeviceExclusionOutcome {
+    Excluded(StoreDeviceExclusion),
+    Cancelled(StoreDeviceExclusionCancellation),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreDeviceExclusionCancellation {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub proposal: StoreDeviceExclusionProposalRef,
+    pub owner_registration: StoreDeviceRegistrationRef,
+    pub owner_grant: MembershipGrantId,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreDeviceExclusion {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub proposal: StoreDeviceExclusionProposalRef,
+    pub target: StoreDeviceRegistrationRef,
+    pub proof: StoreDeviceExclusionProof,
+    pub owner_registration: StoreDeviceRegistrationRef,
+    pub owner_grant: MembershipGrantId,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreDeviceExclusionProof {
+    MergeConcurrent {
+        frozen_device_state: StoreDeviceStateRef,
+        remaining_device_acks: Vec<StoreAckRef>,
+        cutoff: StoreHistoryCut,
+    },
+    Serial,
+}
+
+impl StoreDeviceExclusionProposal {
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed(
+        store_root_hash: ObjectHash,
+        proposal_id: StoreDeviceExclusionProposalId,
+        target: StoreDeviceRegistrationRef,
+        target_registration: &StoreDeviceRegistration,
+        frozen_device_state: StoreDeviceStateRef,
+        outcome_slot: ObjectSlot,
+        owner_registration: StoreDeviceRegistrationRef,
+        owner_grant: MembershipGrantId,
+        owner: &StoreDeviceRegistration,
+        owner_device_signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        owner_registration.verify_registration(owner)?;
+        target.verify_registration(target_registration)?;
+        if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey
+            || owner.store_root.store_root_hash != store_root_hash
+            || target_registration.store_root.store_root_hash != store_root_hash
+        {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        let expected_outcome = format!(
+            "{}.json",
+            device_exclusion_outcome_semantic_prefix(target.device_id, proposal_id)
+        );
+        if outcome_slot.logical_key() != expected_outcome {
+            return Err(StoreProtocolError::RelocatedSlot {
+                expected: expected_outcome,
+                actual: outcome_slot.logical_key().to_string(),
+            });
+        }
+        validate_store_device_state_ref(&frozen_device_state)?;
+        let mut proposal = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            proposal_id,
+            target,
+            frozen_device_state,
+            outcome_slot,
+            owner_registration,
+            owner_grant,
+            signature: String::new(),
+        };
+        let (_, signature) =
+            keys::sign_hex(owner_device_signer, &proposal.canonical_signed_bytes());
+        proposal.signature = signature;
+        Ok(proposal)
+    }
+
+    fn canonical_signed_bytes(&self) -> Vec<u8> {
+        domain_json(
+            DEVICE_EXCLUSION_PROPOSAL_DOMAIN,
+            &(
+                self.version,
+                self.store_root_hash,
+                self.proposal_id,
+                &self.target,
+                &self.frozen_device_state,
+                &self.outcome_slot,
+                &self.owner_registration,
+                &self.owner_grant,
+            ),
+        )
+    }
+
+    pub fn proposal_hash(&self) -> ObjectHash {
+        ObjectHash::digest(&self.canonical_signed_bytes())
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("Store device exclusion proposal serialization cannot fail")
+    }
+
+    pub fn parse_at(
+        bytes: &[u8],
+        expected: &StoreDeviceExclusionProposalRef,
+        target: &StoreDeviceRegistration,
+        owner: &StoreDeviceRegistration,
+    ) -> Result<Self, StoreProtocolError> {
+        let proposal: Self = serde_json::from_slice(bytes)
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        require_version(proposal.version)?;
+        expected.verify_proposal(&proposal)?;
+        proposal.target.verify_registration(target)?;
+        proposal.owner_registration.verify_registration(owner)?;
+        validate_store_device_state_ref(&proposal.frozen_device_state)?;
+        let expected_outcome = format!(
+            "{}.json",
+            device_exclusion_outcome_semantic_prefix(
+                proposal.target.device_id,
+                proposal.proposal_id,
+            )
+        );
+        if proposal.outcome_slot.logical_key() != expected_outcome {
+            return Err(StoreProtocolError::RelocatedSlot {
+                expected: expected_outcome,
+                actual: proposal.outcome_slot.logical_key().to_string(),
+            });
+        }
+        if proposal.store_root_hash != owner.store_root.store_root_hash
+            || proposal.store_root_hash != target.store_root.store_root_hash
+            || !keys::verify_signature_hex(
+                &owner.device_signing_pubkey,
+                &proposal.signature,
+                &proposal.canonical_signed_bytes(),
+            )
+        {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        Ok(proposal)
+    }
+}
+
+impl StoreDeviceExclusionProposalRef {
+    pub fn from_proposal(
+        proposal: &StoreDeviceExclusionProposal,
+        object: ExactObjectRef,
+    ) -> Result<Self, StoreProtocolError> {
+        let reference = Self {
+            proposal_id: proposal.proposal_id,
+            target: proposal.target.clone(),
+            proposal_hash: proposal.proposal_hash(),
+            object,
+        };
+        reference.validate_path()?;
+        Ok(reference)
+    }
+
+    pub(crate) fn validate_path(&self) -> Result<(), StoreProtocolError> {
+        let expected = format!(
+            "{}.json",
+            device_exclusion_proposal_semantic_prefix(
+                self.target.device_id,
+                self.proposal_id,
+                self.proposal_hash,
+            )
+        );
+        if self.object.slot().logical_key() != expected {
+            return Err(StoreProtocolError::RelocatedSlot {
+                expected,
+                actual: self.object.slot().logical_key().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_proposal(
+        &self,
+        proposal: &StoreDeviceExclusionProposal,
+    ) -> Result<(), StoreProtocolError> {
+        self.validate_path()?;
+        if self.proposal_id != proposal.proposal_id
+            || self.target != proposal.target
+            || self.proposal_hash != proposal.proposal_hash()
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl StoreDeviceExclusionCancellation {
+    pub fn signed(
+        proposal: StoreDeviceExclusionProposalRef,
+        proposal_value: &StoreDeviceExclusionProposal,
+        owner_registration: StoreDeviceRegistrationRef,
+        owner_grant: MembershipGrantId,
+        owner: &StoreDeviceRegistration,
+        owner_device_signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        owner_registration.verify_registration(owner)?;
+        if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey
+            || proposal.proposal_hash != proposal_value.proposal_hash()
+            || proposal.target != proposal_value.target
+            || proposal_value.store_root_hash != owner.store_root.store_root_hash
+        {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        let mut cancellation = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash: owner.store_root.store_root_hash,
+            proposal,
+            owner_registration,
+            owner_grant,
+            signature: String::new(),
+        };
+        let (_, signature) =
+            keys::sign_hex(owner_device_signer, &cancellation.canonical_signed_bytes());
+        cancellation.signature = signature;
+        Ok(cancellation)
+    }
+
+    fn canonical_signed_bytes(&self) -> Vec<u8> {
+        domain_json(
+            DEVICE_EXCLUSION_CANCELLATION_DOMAIN,
+            &(
+                self.version,
+                self.store_root_hash,
+                &self.proposal,
+                &self.owner_registration,
+                &self.owner_grant,
+            ),
+        )
+    }
+
+    pub fn outcome_hash(&self) -> ObjectHash {
+        ObjectHash::digest(&self.canonical_signed_bytes())
+    }
+}
+
+impl StoreDeviceExclusion {
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed(
+        proposal: StoreDeviceExclusionProposalRef,
+        proposal_value: &StoreDeviceExclusionProposal,
+        target: StoreDeviceRegistrationRef,
+        target_registration: &StoreDeviceRegistration,
+        proof: StoreDeviceExclusionProof,
+        owner_registration: StoreDeviceRegistrationRef,
+        owner_grant: MembershipGrantId,
+        owner: &StoreDeviceRegistration,
+        owner_device_signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        owner_registration.verify_registration(owner)?;
+        target.verify_registration(target_registration)?;
+        if keys::public_key_hex(owner_device_signer) != owner.device_signing_pubkey
+            || proposal.target != target
+            || proposal.proposal_hash != proposal_value.proposal_hash()
+            || proposal.target != proposal_value.target
+            || target_registration.store_root.store_root_hash != owner.store_root.store_root_hash
+        {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        validate_device_exclusion_proof(&proof)?;
+        let mut exclusion = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash: owner.store_root.store_root_hash,
+            proposal,
+            target,
+            proof,
+            owner_registration,
+            owner_grant,
+            signature: String::new(),
+        };
+        let (_, signature) =
+            keys::sign_hex(owner_device_signer, &exclusion.canonical_signed_bytes());
+        exclusion.signature = signature;
+        Ok(exclusion)
+    }
+
+    fn canonical_signed_bytes(&self) -> Vec<u8> {
+        domain_json(
+            DEVICE_EXCLUSION_DOMAIN,
+            &(
+                self.version,
+                self.store_root_hash,
+                &self.proposal,
+                &self.target,
+                &self.proof,
+                &self.owner_registration,
+                &self.owner_grant,
+            ),
+        )
+    }
+
+    pub fn outcome_hash(&self) -> ObjectHash {
+        ObjectHash::digest(&self.canonical_signed_bytes())
+    }
+}
+
+impl StoreDeviceExclusionOutcome {
+    pub fn outcome_hash(&self) -> ObjectHash {
+        match self {
+            Self::Excluded(exclusion) => exclusion.outcome_hash(),
+            Self::Cancelled(cancellation) => cancellation.outcome_hash(),
+        }
+    }
+
+    pub fn proposal(&self) -> &StoreDeviceExclusionProposalRef {
+        match self {
+            Self::Excluded(exclusion) => &exclusion.proposal,
+            Self::Cancelled(cancellation) => &cancellation.proposal,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("Store device exclusion outcome serialization cannot fail")
+    }
+
+    pub fn parse_at(
+        bytes: &[u8],
+        expected: &StoreDeviceExclusionOutcomeRef,
+        proposal: &StoreDeviceExclusionProposal,
+        target: &StoreDeviceRegistration,
+        owner: &StoreDeviceRegistration,
+    ) -> Result<Self, StoreProtocolError> {
+        let outcome: Self = serde_json::from_slice(bytes)
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        if outcome.proposal().proposal_id != proposal.proposal_id
+            || outcome.proposal().proposal_hash != proposal.proposal_hash()
+            || outcome.proposal().target != proposal.target
+            || expected.proposal() != outcome.proposal()
+            || expected.object().slot() != &proposal.outcome_slot
+            || expected.outcome_hash() != outcome.outcome_hash()
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        match &outcome {
+            Self::Excluded(exclusion) => {
+                require_version(exclusion.version)?;
+                exclusion.target.verify_registration(target)?;
+                exclusion.owner_registration.verify_registration(owner)?;
+                validate_device_exclusion_proof(&exclusion.proof)?;
+                if exclusion.store_root_hash != proposal.store_root_hash
+                    || exclusion.store_root_hash != target.store_root.store_root_hash
+                    || exclusion.target != proposal.target
+                    || !keys::verify_signature_hex(
+                        &owner.device_signing_pubkey,
+                        &exclusion.signature,
+                        &exclusion.canonical_signed_bytes(),
+                    )
+                {
+                    return Err(StoreProtocolError::InvalidSignature);
+                }
+            }
+            Self::Cancelled(cancellation) => {
+                require_version(cancellation.version)?;
+                cancellation.owner_registration.verify_registration(owner)?;
+                if cancellation.store_root_hash != proposal.store_root_hash
+                    || !keys::verify_signature_hex(
+                        &owner.device_signing_pubkey,
+                        &cancellation.signature,
+                        &cancellation.canonical_signed_bytes(),
+                    )
+                {
+                    return Err(StoreProtocolError::InvalidSignature);
+                }
+            }
+        }
+        Ok(outcome)
+    }
+}
+
+impl StoreDeviceExclusionOutcomeRef {
+    pub fn from_outcome(
+        outcome: &StoreDeviceExclusionOutcome,
+        proposal: &StoreDeviceExclusionProposal,
+        object: ExactObjectRef,
+    ) -> Result<Self, StoreProtocolError> {
+        if object.slot() != &proposal.outcome_slot
+            || outcome.proposal().proposal_id != proposal.proposal_id
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        Ok(match outcome {
+            StoreDeviceExclusionOutcome::Excluded(exclusion) => {
+                Self::Excluded(StoreDeviceExclusionRef {
+                    proposal: exclusion.proposal.clone(),
+                    outcome_hash: exclusion.outcome_hash(),
+                    object,
+                })
+            }
+            StoreDeviceExclusionOutcome::Cancelled(cancellation) => {
+                Self::Cancelled(StoreDeviceExclusionCancellationRef {
+                    proposal: cancellation.proposal.clone(),
+                    outcome_hash: cancellation.outcome_hash(),
+                    object,
+                })
+            }
+        })
+    }
+
+    pub fn outcome_hash(&self) -> ObjectHash {
+        match self {
+            Self::Excluded(reference) => reference.outcome_hash,
+            Self::Cancelled(reference) => reference.outcome_hash,
+        }
+    }
+}
+
+fn validate_device_exclusion_proof(
+    proof: &StoreDeviceExclusionProof,
+) -> Result<(), StoreProtocolError> {
+    match proof {
+        StoreDeviceExclusionProof::MergeConcurrent {
+            frozen_device_state,
+            remaining_device_acks,
+            cutoff,
+        } => {
+            if frozen_device_state.write_policy() != WritePolicy::MergeConcurrent
+                || cutoff.policy() != WritePolicy::MergeConcurrent
+                || remaining_device_acks
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+            {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            }
+            validate_store_device_state_ref(frozen_device_state)?;
+            validate_store_history_cut(cutoff)
+        }
+        StoreDeviceExclusionProof::Serial => Ok(()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -3791,6 +4519,87 @@ impl ResolvedStoreDeviceState {
         Self::from_parts(devices, cursors)
     }
 
+    pub fn propose_exclusion(
+        &self,
+        reference: StoreDeviceExclusionProposalRef,
+        proposal: &StoreDeviceExclusionProposal,
+        predecessor_ref: &StoreDeviceStateRef,
+    ) -> Result<Self, StoreProtocolError> {
+        reference.verify_proposal(proposal)?;
+        if &proposal.frozen_device_state != predecessor_ref
+            || predecessor_ref.state_hash() != self.state_hash
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        let mut devices = self.devices.clone();
+        let record = devices
+            .get_mut(&reference.target.device_id)
+            .ok_or(StoreProtocolError::DeviceStateMismatch)?;
+        if record.registration != reference.target
+            || !matches!(record.status, StoreDeviceStatus::Active)
+            || record.proposals.contains_key(&reference.proposal_id)
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        record.proposals.insert(
+            reference.proposal_id,
+            StoreDeviceProposalState::Pending {
+                proposal: reference,
+            },
+        );
+        Self::from_parts(devices, self.recovery.clone())
+    }
+
+    pub fn cancel_exclusion(
+        &self,
+        cancellation: StoreDeviceExclusionCancellationRef,
+    ) -> Result<Self, StoreProtocolError> {
+        let mut devices = self.devices.clone();
+        let record = devices
+            .get_mut(&cancellation.proposal.target.device_id)
+            .ok_or(StoreProtocolError::DeviceStateMismatch)?;
+        let state = record
+            .proposals
+            .get_mut(&cancellation.proposal.proposal_id)
+            .ok_or(StoreProtocolError::DeviceStateMismatch)?;
+        if !matches!(state, StoreDeviceProposalState::Pending { proposal } if proposal == &cancellation.proposal)
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        *state = StoreDeviceProposalState::Cancelled {
+            outcome: cancellation,
+        };
+        Self::from_parts(devices, self.recovery.clone())
+    }
+
+    pub fn exclude(
+        &self,
+        exclusion: StoreDeviceExclusionRef,
+        accepted_cut: StoreHistoryCut,
+    ) -> Result<Self, StoreProtocolError> {
+        validate_store_history_cut(&accepted_cut)?;
+        let mut devices = self.devices.clone();
+        let record = devices
+            .get_mut(&exclusion.proposal.target.device_id)
+            .ok_or(StoreProtocolError::DeviceStateMismatch)?;
+        if record.registration != exclusion.proposal.target
+            || !matches!(record.status, StoreDeviceStatus::Active)
+            || !matches!(
+                record.proposals.get(&exclusion.proposal.proposal_id),
+                Some(StoreDeviceProposalState::Pending { proposal }) if proposal == &exclusion.proposal
+            )
+        {
+            return Err(StoreProtocolError::DeviceStateMismatch);
+        }
+        let terminals = vec![StoreDeviceTerminalRef::Excluded(exclusion)];
+        supersede_pending_proposals(&mut record.proposals, &terminals);
+        record.status = StoreDeviceStatus::Inactive {
+            terminals,
+            accepted_cut,
+        };
+        Self::from_parts(devices, self.recovery.clone())
+    }
+
     pub fn self_retire(
         &self,
         retirement: StoreDeviceSelfRetirementRef,
@@ -3808,6 +4617,10 @@ impl ResolvedStoreDeviceState {
             terminals: vec![StoreDeviceTerminalRef::SelfRetirement(retirement.clone())],
             accepted_cut: retirement.retiring_cut,
         };
+        let StoreDeviceStatus::Inactive { terminals, .. } = &record.status else {
+            unreachable!("self-retirement writes an inactive device state")
+        };
+        supersede_pending_proposals(&mut record.proposals, terminals);
         Self::from_parts(devices, self.recovery.clone())
     }
 
@@ -3821,34 +4634,20 @@ impl ResolvedStoreDeviceState {
                         entry.insert(record);
                     }
                     std::collections::btree_map::Entry::Occupied(mut entry) => {
-                        if entry.get().registration != record.registration
-                            || entry.get().proposals != record.proposals
-                        {
+                        if entry.get().registration != record.registration {
                             return Err(StoreProtocolError::DeviceStateMismatch);
                         }
-                        match (&entry.get().status, &record.status) {
-                            (StoreDeviceStatus::Active, StoreDeviceStatus::Active)
-                            | (StoreDeviceStatus::Inactive { .. }, StoreDeviceStatus::Active) => {}
-                            (StoreDeviceStatus::Active, StoreDeviceStatus::Inactive { .. }) => {
-                                entry.get_mut().status = record.status;
-                            }
-                            (
-                                StoreDeviceStatus::Inactive {
-                                    terminals: left,
-                                    accepted_cut: left_cut,
-                                },
-                                StoreDeviceStatus::Inactive {
-                                    terminals: right,
-                                    accepted_cut: right_cut,
-                                },
-                            ) if left == right && left_cut == right_cut => {}
-                            (
-                                StoreDeviceStatus::Inactive { .. },
-                                StoreDeviceStatus::Inactive { .. },
-                            ) => {
-                                return Err(StoreProtocolError::DeviceStateMismatch);
-                            }
+                        let merged_status =
+                            merge_device_status(entry.get().status.clone(), record.status)?;
+                        let mut merged_proposals = merge_device_proposals(
+                            entry.get().proposals.clone(),
+                            record.proposals,
+                        )?;
+                        if let StoreDeviceStatus::Inactive { terminals, .. } = &merged_status {
+                            supersede_pending_proposals(&mut merged_proposals, terminals);
                         }
+                        entry.get_mut().status = merged_status;
+                        entry.get_mut().proposals = merged_proposals;
                     }
                 }
             }
@@ -3896,6 +4695,191 @@ impl ResolvedStoreDeviceState {
     }
 }
 
+fn supersede_pending_proposals(
+    proposals: &mut BTreeMap<StoreDeviceExclusionProposalId, StoreDeviceProposalState>,
+    terminals: &[StoreDeviceTerminalRef],
+) {
+    for state in proposals.values_mut() {
+        if let StoreDeviceProposalState::Pending { proposal } = state {
+            *state = StoreDeviceProposalState::Superseded {
+                proposal: proposal.clone(),
+                terminals: terminals.to_vec(),
+            };
+        }
+    }
+}
+
+fn merge_device_proposals(
+    mut left: BTreeMap<StoreDeviceExclusionProposalId, StoreDeviceProposalState>,
+    right: BTreeMap<StoreDeviceExclusionProposalId, StoreDeviceProposalState>,
+) -> Result<BTreeMap<StoreDeviceExclusionProposalId, StoreDeviceProposalState>, StoreProtocolError>
+{
+    for (proposal_id, right_state) in right {
+        match left.entry(proposal_id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(right_state);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let merged = merge_device_proposal_state(entry.get().clone(), right_state)?;
+                entry.insert(merged);
+            }
+        }
+    }
+    Ok(left)
+}
+
+fn merge_device_proposal_state(
+    left: StoreDeviceProposalState,
+    right: StoreDeviceProposalState,
+) -> Result<StoreDeviceProposalState, StoreProtocolError> {
+    let left_proposal = match &left {
+        StoreDeviceProposalState::Pending { proposal }
+        | StoreDeviceProposalState::Superseded { proposal, .. } => proposal,
+        StoreDeviceProposalState::Cancelled { outcome } => &outcome.proposal,
+    };
+    let right_proposal = match &right {
+        StoreDeviceProposalState::Pending { proposal }
+        | StoreDeviceProposalState::Superseded { proposal, .. } => proposal,
+        StoreDeviceProposalState::Cancelled { outcome } => &outcome.proposal,
+    };
+    if left_proposal != right_proposal {
+        return Err(StoreProtocolError::DeviceStateMismatch);
+    }
+    match (left, right) {
+        (
+            StoreDeviceProposalState::Pending { proposal },
+            StoreDeviceProposalState::Pending { .. },
+        ) => Ok(StoreDeviceProposalState::Pending { proposal }),
+        (
+            StoreDeviceProposalState::Cancelled { outcome },
+            StoreDeviceProposalState::Cancelled { outcome: other },
+        ) => {
+            if outcome != other {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            }
+            Ok(StoreDeviceProposalState::Cancelled { outcome })
+        }
+        (StoreDeviceProposalState::Cancelled { outcome }, _)
+        | (_, StoreDeviceProposalState::Cancelled { outcome }) => {
+            Ok(StoreDeviceProposalState::Cancelled { outcome })
+        }
+        (
+            StoreDeviceProposalState::Superseded {
+                proposal,
+                terminals: left,
+            },
+            StoreDeviceProposalState::Superseded {
+                terminals: right, ..
+            },
+        ) => Ok(StoreDeviceProposalState::Superseded {
+            proposal,
+            terminals: merge_terminal_refs(left, right)?,
+        }),
+        (
+            StoreDeviceProposalState::Superseded {
+                proposal,
+                terminals,
+            },
+            _,
+        )
+        | (
+            _,
+            StoreDeviceProposalState::Superseded {
+                proposal,
+                terminals,
+            },
+        ) => Ok(StoreDeviceProposalState::Superseded {
+            proposal,
+            terminals,
+        }),
+    }
+}
+
+fn merge_device_status(
+    left: StoreDeviceStatus,
+    right: StoreDeviceStatus,
+) -> Result<StoreDeviceStatus, StoreProtocolError> {
+    match (left, right) {
+        (StoreDeviceStatus::Active, StoreDeviceStatus::Active) => Ok(StoreDeviceStatus::Active),
+        (
+            StoreDeviceStatus::Inactive {
+                terminals,
+                accepted_cut,
+            },
+            StoreDeviceStatus::Active,
+        )
+        | (
+            StoreDeviceStatus::Active,
+            StoreDeviceStatus::Inactive {
+                terminals,
+                accepted_cut,
+            },
+        ) => Ok(StoreDeviceStatus::Inactive {
+            terminals,
+            accepted_cut,
+        }),
+        (
+            StoreDeviceStatus::Inactive {
+                terminals: left_terminals,
+                accepted_cut: left_cut,
+            },
+            StoreDeviceStatus::Inactive {
+                terminals: right_terminals,
+                accepted_cut: right_cut,
+            },
+        ) => Ok(StoreDeviceStatus::Inactive {
+            terminals: merge_terminal_refs(left_terminals, right_terminals)?,
+            accepted_cut: merge_history_cuts(left_cut, right_cut)?,
+        }),
+    }
+}
+
+fn merge_terminal_refs(
+    left: Vec<StoreDeviceTerminalRef>,
+    right: Vec<StoreDeviceTerminalRef>,
+) -> Result<Vec<StoreDeviceTerminalRef>, StoreProtocolError> {
+    let terminals = left
+        .into_iter()
+        .chain(right)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    validate_terminal_refs(&terminals)?;
+    Ok(terminals)
+}
+
+fn merge_history_cuts(
+    left: StoreHistoryCut,
+    right: StoreHistoryCut,
+) -> Result<StoreHistoryCut, StoreProtocolError> {
+    match (left, right) {
+        (StoreHistoryCut::MergeConcurrent(mut left), StoreHistoryCut::MergeConcurrent(right)) => {
+            for (stream, reference) in right {
+                match left.entry(stream) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(reference);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let current = entry.get();
+                        if reference.coord.sequence() > current.coord.sequence() {
+                            entry.insert(reference);
+                        } else if reference.coord.sequence() == current.coord.sequence()
+                            && reference != *current
+                        {
+                            return Err(StoreProtocolError::DeviceStateMismatch);
+                        }
+                    }
+                }
+            }
+            Ok(StoreHistoryCut::MergeConcurrent(left))
+        }
+        (StoreHistoryCut::Serial(left), StoreHistoryCut::Serial(right)) if left == right => {
+            Ok(StoreHistoryCut::Serial(left))
+        }
+        _ => Err(StoreProtocolError::DeviceStateMismatch),
+    }
+}
+
 fn validate_store_device_records(
     devices: &BTreeMap<StoreDeviceId, StoreDeviceRecord>,
 ) -> Result<(), StoreProtocolError> {
@@ -3912,12 +4896,27 @@ fn validate_store_device_records(
             if proposal.proposal_id != *proposal_id {
                 return Err(StoreProtocolError::DeviceStateMismatch);
             }
+            if proposal.target != record.registration {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            }
             if let StoreDeviceProposalState::Superseded { terminals, .. } = state {
                 validate_terminal_refs(terminals)?;
             }
         }
-        if let StoreDeviceStatus::Inactive { terminals, .. } = &record.status {
+        if let StoreDeviceStatus::Inactive {
+            terminals,
+            accepted_cut,
+        } = &record.status
+        {
             validate_terminal_refs(terminals)?;
+            validate_store_history_cut(accepted_cut)?;
+            if record
+                .proposals
+                .values()
+                .any(|state| matches!(state, StoreDeviceProposalState::Pending { .. }))
+            {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            }
         }
     }
     Ok(())
@@ -5152,6 +6151,21 @@ pub fn device_join_cleanup_receipt_semantic_prefix(attempt_id: DeviceJoinAttempt
     format!("{STORE_DEVICE_JOIN_CLEANUP_RECEIPT_PREFIX}{}", attempt_id.0)
 }
 
+pub fn device_exclusion_proposal_semantic_prefix(
+    target: StoreDeviceId,
+    proposal_id: StoreDeviceExclusionProposalId,
+    proposal_hash: ObjectHash,
+) -> String {
+    format!("{STORE_DEVICE_EXCLUSION_PROPOSAL_PREFIX}{target}/{proposal_id}/{proposal_hash}")
+}
+
+pub fn device_exclusion_outcome_semantic_prefix(
+    target: StoreDeviceId,
+    proposal_id: StoreDeviceExclusionProposalId,
+) -> String {
+    format!("{STORE_DEVICE_EXCLUSION_OUTCOME_PREFIX}{target}/{proposal_id}")
+}
+
 pub fn provider_access_grant_semantic_prefix(
     grant_id: &super::provider::ProviderAccessGrantId,
 ) -> String {
@@ -5517,6 +6531,21 @@ fn validate_store_history_cut(frontier: &StoreHistoryCut) -> Result<(), StorePro
     }
 }
 
+fn validate_store_device_state_ref(state: &StoreDeviceStateRef) -> Result<(), StoreProtocolError> {
+    validate_recovery_cursors(state.recovery())?;
+    match state {
+        StoreDeviceStateRef::MergeConcurrent { frontier, .. } => {
+            if !matches!(frontier, CommitFrontier::MergeConcurrent(_)) {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            }
+            validate_commit_frontier(frontier)
+        }
+        StoreDeviceStateRef::Serial { position, .. } => {
+            validate_store_history_cut(&StoreHistoryCut::Serial(position.clone()))
+        }
+    }
+}
+
 fn validate_ack_history_cut(
     store_root_hash: ObjectHash,
     _author: &StoreDeviceRegistrationRef,
@@ -5591,6 +6620,10 @@ fn validate_ack_state(
             }
             for freeze in proposal_freezes {
                 validate_store_history_cut(&freeze.target_cut)?;
+                freeze.proposal.validate_path()?;
+                if !store_cut.frontier().covers(&freeze.target_cut.frontier()) {
+                    return Err(StoreProtocolError::DeviceStateMismatch);
+                }
             }
             Ok(())
         }
@@ -6960,5 +7993,173 @@ mod tests {
                     .expect("membership control")
             )
             .is_ok());
+    }
+
+    #[test]
+    fn device_exclusion_objects_drive_the_exact_pending_and_terminal_states() {
+        let fixture = fixture();
+        let resolved = ResolvedStoreDeviceState::founder(
+            &fixture.root_ref,
+            fixture.registration_ref.clone(),
+            &fixture.root.descriptor.founder_pubkey,
+            fixture.root.descriptor.founder_grant.clone(),
+            &fixture.root.descriptor.founder_recovery,
+        )
+        .expect("founder device state");
+        let predecessor = fixture.commit.device_state.clone();
+        let proposal_id = StoreDeviceExclusionProposalId::from_hash(ObjectHash::digest(
+            b"device exclusion proposal",
+        ));
+        let outcome_key = format!(
+            "{}.json",
+            device_exclusion_outcome_semantic_prefix(
+                fixture.registration_ref.device_id,
+                proposal_id,
+            )
+        );
+        let device_signer = fixture
+            .registration
+            .device_signer(&fixture.signer)
+            .expect("founder device signer");
+        let proposal = StoreDeviceExclusionProposal::signed(
+            fixture.root_ref.store_root_hash,
+            proposal_id,
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            predecessor.clone(),
+            slot(outcome_key.clone()),
+            fixture.registration_ref.clone(),
+            fixture.root.descriptor.founder_grant.clone(),
+            &fixture.registration,
+            &device_signer,
+        )
+        .expect("sign exclusion proposal");
+        let proposal_bytes = proposal.to_bytes();
+        let proposal_ref = StoreDeviceExclusionProposalRef::from_proposal(
+            &proposal,
+            exact(
+                format!(
+                    "{}.json",
+                    device_exclusion_proposal_semantic_prefix(
+                        fixture.registration_ref.device_id,
+                        proposal_id,
+                        proposal.proposal_hash(),
+                    )
+                ),
+                &proposal_bytes,
+            ),
+        )
+        .expect("exact exclusion proposal ref");
+        let parsed = StoreDeviceExclusionProposal::parse_at(
+            &proposal_bytes,
+            &proposal_ref,
+            &fixture.registration,
+            &fixture.registration,
+        )
+        .expect("parse exclusion proposal");
+        assert_eq!(parsed, proposal);
+
+        let pending = resolved
+            .propose_exclusion(proposal_ref.clone(), &proposal, &predecessor)
+            .expect("activate exclusion proposal");
+        assert!(device_state_has_exact_pending_proposal(
+            &pending,
+            &proposal_ref
+        ));
+
+        let cancellation = StoreDeviceExclusionCancellation::signed(
+            proposal_ref.clone(),
+            &proposal,
+            fixture.registration_ref.clone(),
+            fixture.root.descriptor.founder_grant.clone(),
+            &fixture.registration,
+            &device_signer,
+        )
+        .expect("sign exclusion cancellation");
+        let cancellation_value = StoreDeviceExclusionOutcome::Cancelled(cancellation);
+        let cancellation_bytes = cancellation_value.to_bytes();
+        let cancellation_ref = StoreDeviceExclusionOutcomeRef::from_outcome(
+            &cancellation_value,
+            &proposal,
+            exact(outcome_key.clone(), &cancellation_bytes),
+        )
+        .expect("exact exclusion cancellation ref");
+        let parsed = StoreDeviceExclusionOutcome::parse_at(
+            &cancellation_bytes,
+            &cancellation_ref,
+            &proposal,
+            &fixture.registration,
+            &fixture.registration,
+        )
+        .expect("parse exclusion cancellation");
+        assert_eq!(parsed, cancellation_value);
+        let StoreDeviceExclusionOutcomeRef::Cancelled(cancellation_ref) = cancellation_ref else {
+            panic!("cancellation ref changed variant")
+        };
+        let cancelled = pending
+            .cancel_exclusion(cancellation_ref.clone())
+            .expect("activate exclusion cancellation");
+        assert!(matches!(
+            cancelled
+                .devices
+                .get(&fixture.registration_ref.device_id)
+                .and_then(|record| record.proposals.get(&proposal_id)),
+            Some(StoreDeviceProposalState::Cancelled { outcome }) if outcome == &cancellation_ref
+        ));
+
+        let exclusion = StoreDeviceExclusion::signed(
+            proposal_ref.clone(),
+            &proposal,
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            StoreDeviceExclusionProof::Serial,
+            fixture.registration_ref.clone(),
+            fixture.root.descriptor.founder_grant.clone(),
+            &fixture.registration,
+            &device_signer,
+        )
+        .expect("sign device exclusion");
+        let exclusion_value = StoreDeviceExclusionOutcome::Excluded(exclusion);
+        let exclusion_bytes = exclusion_value.to_bytes();
+        let exclusion_ref = StoreDeviceExclusionOutcomeRef::from_outcome(
+            &exclusion_value,
+            &proposal,
+            exact(outcome_key, &exclusion_bytes),
+        )
+        .expect("exact exclusion ref");
+        let StoreDeviceExclusionOutcomeRef::Excluded(exclusion_ref) = exclusion_ref else {
+            panic!("exclusion ref changed variant")
+        };
+        let accepted_cut = fixture
+            .commit
+            .order
+            .predecessor_cut()
+            .expect("Serial predecessor cut");
+        let excluded = pending
+            .exclude(exclusion_ref.clone(), accepted_cut.clone())
+            .expect("activate device exclusion");
+        assert!(matches!(
+            &excluded
+                .devices
+                .get(&fixture.registration_ref.device_id)
+                .expect("excluded record")
+                .status,
+            StoreDeviceStatus::Inactive { terminals, accepted_cut: cut }
+                if terminals == &vec![StoreDeviceTerminalRef::Excluded(exclusion_ref)]
+                    && cut == &accepted_cut
+        ));
+    }
+
+    fn device_state_has_exact_pending_proposal(
+        state: &ResolvedStoreDeviceState,
+        expected: &StoreDeviceExclusionProposalRef,
+    ) -> bool {
+        state
+            .devices
+            .get(&expected.target.device_id)
+            .and_then(|record| record.proposals.get(&expected.proposal_id))
+            .is_some_and(|state| {
+                matches!(state, StoreDeviceProposalState::Pending { proposal } if proposal == expected)
+            })
     }
 }

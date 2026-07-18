@@ -1015,6 +1015,16 @@ mod tests {
             .resolve("unused-store-id", &StoreDir::new("unused-store-dir"))
     }
 
+    async fn start_sync_with_home_in_its_own_task(
+        manager: Arc<SyncManager>,
+        home: Arc<dyn CloudHome>,
+        cipher: CloudCipher,
+    ) -> Result<(), SyncError> {
+        tokio::spawn(async move { manager.start_sync_with_home(home, cipher).await })
+            .await
+            .expect("join injected-home startup task")
+    }
+
     #[tokio::test]
     async fn get_members_surfaces_malformed_cloud_credentials() {
         test_keyring::install();
@@ -1166,7 +1176,7 @@ mod tests {
             crate::Provenance::HostProvided,
             crate::CacheFill::CacheLazy,
         ));
-        let manager = SyncManager::new(
+        let manager = Arc::new(SyncManager::new(
             {
                 let config = config.clone();
                 Arc::new(move || config.read().expect("read config").clone())
@@ -1180,11 +1190,14 @@ mod tests {
             None,
             open_guard,
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
-        );
-        manager
-            .start_sync_with_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
-            .await
-            .expect("install active loop");
+        ));
+        start_sync_with_home_in_its_own_task(
+            manager.clone(),
+            Arc::new(InMemoryCloudHome::new()),
+            CloudCipher::Plaintext,
+        )
+        .await
+        .expect("install active loop");
         let active_loop = manager.sync_loop_handle().expect("active loop");
 
         {
@@ -1207,10 +1220,13 @@ mod tests {
         assert!(active_loop.is_running());
         assert!(manager.cloud_home().is_some());
 
-        let error = manager
-            .start_sync_with_home(Arc::new(NoImmutableCopyHome), CloudCipher::Plaintext)
-            .await
-            .expect_err("injected home without immutable-copy storage is refused");
+        let error = start_sync_with_home_in_its_own_task(
+            manager.clone(),
+            Arc::new(NoImmutableCopyHome),
+            CloudCipher::Plaintext,
+        )
+        .await
+        .expect_err("injected home without immutable-copy storage is refused");
         assert!(matches!(
             error,
             SyncError::StorageSetup(StorageSetupError::ExactSlotsUnavailable {
@@ -1233,7 +1249,7 @@ mod tests {
             store_dir,
             "Test Store".to_string(),
         );
-        let manager = SyncManager::new(
+        let manager = Arc::new(SyncManager::new(
             Arc::new(move || config.clone()),
             StoreKeys::new("lib-manager-restart".to_string()),
             Arc::new(NoKeyCustody),
@@ -1244,11 +1260,10 @@ mod tests {
             None,
             open_guard,
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
-        );
+        ));
 
         let home = Arc::new(InMemoryCloudHome::new());
-        manager
-            .start_sync_with_home(home.clone(), CloudCipher::Plaintext)
+        start_sync_with_home_in_its_own_task(manager.clone(), home.clone(), CloudCipher::Plaintext)
             .await
             .expect("first test home starts");
         let first_loop = manager
@@ -1256,8 +1271,7 @@ mod tests {
             .expect("first loop handle installed");
         assert!(first_loop.is_running(), "first loop starts running");
 
-        manager
-            .start_sync_with_home(home, CloudCipher::Plaintext)
+        start_sync_with_home_in_its_own_task(manager.clone(), home, CloudCipher::Plaintext)
             .await
             .expect("replacement test home starts");
         let replacement_loop = manager
@@ -1286,7 +1300,7 @@ mod tests {
             store_dir,
             "Test Store".to_string(),
         )));
-        let manager = SyncManager::new(
+        let manager = Arc::new(SyncManager::new(
             {
                 let config = config.clone();
                 Arc::new(move || config.read().unwrap().clone())
@@ -1306,12 +1320,15 @@ mod tests {
             None,
             open_guard,
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
-        );
+        ));
 
-        manager
-            .start_sync_with_home(Arc::new(InMemoryCloudHome::new()), CloudCipher::Plaintext)
-            .await
-            .expect("injected home starts");
+        start_sync_with_home_in_its_own_task(
+            manager.clone(),
+            Arc::new(InMemoryCloudHome::new()),
+            CloudCipher::Plaintext,
+        )
+        .await
+        .expect("injected home starts");
         assert!(manager.cloud_home().is_some(), "injected home is installed");
 
         config.write().unwrap().cloud_home.provider = Some(CloudProvider::S3);
@@ -1431,7 +1448,7 @@ mod tests {
 
         let victim = crate::keys::UserKeypair::generate();
         let db = crate::sync::test_helpers::open_test_db();
-        let manager = SyncManager::new(
+        let manager = Arc::new(SyncManager::new(
             Arc::new(move || config.clone()),
             StoreKeys::new(store_id.to_string()),
             Arc::new(NoKeyCustody),
@@ -1443,12 +1460,12 @@ mod tests {
             None,
             StoreOpenGuard::acquire_for_test(&store_dir),
             tokio::sync::watch::channel(SyncLoopStatus::Offline).0,
-        );
+        ));
 
-        let error = manager
-            .start_sync_with_home(home, CloudCipher::Plaintext)
-            .await
-            .expect_err("foreign founder must prevent sync startup");
+        let error =
+            start_sync_with_home_in_its_own_task(manager.clone(), home, CloudCipher::Plaintext)
+                .await
+                .expect_err("foreign founder must prevent sync startup");
         assert!(
             matches!(error, SyncError::Init(InitSyncError::StoreProtocolRoot(_))),
             "unexpected startup error: {error:?}",

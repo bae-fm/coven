@@ -45,6 +45,7 @@ pub mod status;
 pub mod storage;
 pub mod store_ack;
 pub mod store_commit;
+pub mod store_device_exclusion;
 pub mod store_objects;
 pub mod store_outbound;
 pub mod store_protocol_root;

@@ -20,6 +20,32 @@ pub(crate) enum RemoteObjectRecord {
 }
 
 impl RemoteObjectRecord {
+    fn candidate_activated_retained_authority(
+        domain: RetainedAuthorityObjectDomain,
+        semantic_hash: ObjectHash,
+        object: ExactObjectRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let record = Self::RetainedAuthority(RetainedAuthorityRecord {
+            identity: RetainedAuthorityObjectRef {
+                domain,
+                semantic_hash,
+                object: object.clone(),
+            },
+            bytes: RemoteObjectBytes::inline(canonical_signed_bytes, stored_bytes, object)?,
+            state: RetainedAuthorityObjectState::Prepared {
+                ownership: PendingCandidateOwnership {
+                    pending: BTreeSet::from([owner]),
+                    nonactivated: Vec::new(),
+                },
+            },
+        });
+        record.validate()?;
+        Ok(record)
+    }
+
     pub(crate) fn candidate_commit(
         identity: StoreBatchCommitRef,
         canonical_signed_bytes: Vec<u8>,
@@ -42,22 +68,14 @@ impl RemoteObjectRecord {
         owner: StoreBatchCommitRef,
     ) -> Result<Self, RemoteObjectRecordError> {
         let object = reference.object.clone();
-        let record = Self::RetainedAuthority(RetainedAuthorityRecord {
-            identity: RetainedAuthorityObjectRef {
-                domain: RetainedAuthorityObjectDomain::DeviceHead { reference },
-                semantic_hash: ObjectHash::digest(&canonical_signed_bytes),
-                object: object.clone(),
-            },
-            bytes: RemoteObjectBytes::inline(canonical_signed_bytes, stored_bytes, object)?,
-            state: RetainedAuthorityObjectState::Prepared {
-                ownership: PendingCandidateOwnership {
-                    pending: BTreeSet::from([owner]),
-                    nonactivated: Vec::new(),
-                },
-            },
-        });
-        record.validate()?;
-        Ok(record)
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::DeviceHead { reference },
+            ObjectHash::digest(&canonical_signed_bytes),
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
     }
 
     pub(crate) fn candidate_activated_store_acknowledgement(
@@ -67,22 +85,50 @@ impl RemoteObjectRecord {
         owner: StoreBatchCommitRef,
     ) -> Result<Self, RemoteObjectRecordError> {
         let object = reference.object.clone();
-        let record = Self::RetainedAuthority(RetainedAuthorityRecord {
-            identity: RetainedAuthorityObjectRef {
-                domain: RetainedAuthorityObjectDomain::Acknowledgement { reference },
-                semantic_hash: ObjectHash::digest(&canonical_signed_bytes),
-                object: object.clone(),
-            },
-            bytes: RemoteObjectBytes::inline(canonical_signed_bytes, stored_bytes, object)?,
-            state: RetainedAuthorityObjectState::Prepared {
-                ownership: PendingCandidateOwnership {
-                    pending: BTreeSet::from([owner]),
-                    nonactivated: Vec::new(),
-                },
-            },
-        });
-        record.validate()?;
-        Ok(record)
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::Acknowledgement { reference },
+            ObjectHash::digest(&canonical_signed_bytes),
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
+    pub(crate) fn candidate_activated_device_exclusion_proposal(
+        reference: super::store_commit::StoreDeviceExclusionProposalRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        let semantic_hash = ObjectHash::digest(&canonical_signed_bytes);
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::DeviceExclusionProposal { reference },
+            semantic_hash,
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
+    }
+
+    pub(crate) fn candidate_activated_device_exclusion_outcome(
+        reference: super::store_commit::StoreDeviceExclusionOutcomeRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let object = reference.object().clone();
+        let semantic_hash = ObjectHash::digest(&canonical_signed_bytes);
+        Self::candidate_activated_retained_authority(
+            RetainedAuthorityObjectDomain::DeviceExclusionOutcome { reference },
+            semantic_hash,
+            object,
+            canonical_signed_bytes,
+            stored_bytes,
+            owner,
+        )
     }
 
     pub(crate) fn snapshot_activated_blob(
@@ -562,6 +608,30 @@ impl RemoteObjectRecord {
                     return Err(RemoteObjectRecordError::InvalidUploadTransition);
                 }
             },
+        }
+        self.validate()
+    }
+
+    pub(crate) fn add_retained_authority_candidate(
+        &mut self,
+        candidate: StoreBatchCommitRef,
+    ) -> Result<(), RemoteObjectRecordError> {
+        let Self::RetainedAuthority(record) = self else {
+            return Err(RemoteObjectRecordError::DomainMismatch);
+        };
+        let RetainedAuthorityObjectState::UploadedVerified { ownership } = &mut record.state else {
+            return Err(RemoteObjectRecordError::InvalidActivation);
+        };
+        if ownership.activated.contains(&candidate)
+            || ownership
+                .nonactivated
+                .iter()
+                .map(CandidateNonactivation::reference)
+                .collect::<Result<BTreeSet<_>, _>>()?
+                .contains(&candidate)
+            || !ownership.pending.insert(candidate)
+        {
+            return Err(RemoteObjectRecordError::OverlappingOwnership);
         }
         self.validate()
     }
@@ -1241,6 +1311,12 @@ pub(crate) enum RetainedAuthorityObjectDomain {
     Acknowledgement {
         reference: super::store_commit::StoreAckRef,
     },
+    DeviceExclusionProposal {
+        reference: super::store_commit::StoreDeviceExclusionProposalRef,
+    },
+    DeviceExclusionOutcome {
+        reference: super::store_commit::StoreDeviceExclusionOutcomeRef,
+    },
 }
 
 fn validate_retained_authority_identity(
@@ -1280,6 +1356,28 @@ fn validate_retained_authority_identity(
                 return Err(RemoteObjectRecordError::StoredReferenceMismatch);
             }
         }
+        RetainedAuthorityObjectDomain::DeviceExclusionProposal { reference } => {
+            let proposal: super::store_commit::StoreDeviceExclusionProposal =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            reference
+                .verify_proposal(&proposal)
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if reference.object != identity.object {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::DeviceExclusionOutcome { reference } => {
+            let outcome: super::store_commit::StoreDeviceExclusionOutcome =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if outcome.proposal() != reference.proposal()
+                || outcome.outcome_hash() != reference.outcome_hash()
+                || reference.object() != &identity.object
+            {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
     }
     Ok(())
 }
@@ -1294,6 +1392,23 @@ pub(crate) struct CandidateNonactivation {
 }
 
 impl CandidateNonactivation {
+    pub(crate) fn for_candidate(
+        candidate: &StoreBatchCommitRef,
+        commit: &super::store_commit::StoreBatchCommit,
+        proof: CandidateNonactivationProof,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let value = Self {
+            candidate: StoreBatchCommitDeletionTarget {
+                coord: candidate.coord.clone(),
+                object: candidate.object.clone(),
+                canonical_signed_bytes: commit.to_bytes(),
+            },
+            proof,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
     fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         let commit: super::store_commit::StoreBatchCommit =
             serde_json::from_slice(&self.candidate.canonical_signed_bytes)

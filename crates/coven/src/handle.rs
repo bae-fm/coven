@@ -2285,10 +2285,16 @@ mod tests {
         // one. An opaque home with no key would fail here with
         // `MasterKeyNotEstablished`.
         let home = Arc::new(InMemoryCloudHome::new());
-        handle
-            .connect_sync_with_test_home_custody(home.clone())
-            .await
-            .expect("connect over the injected opaque home, resolving the cipher from custody");
+        let connect_handle = handle.clone();
+        let connect_home = home.clone();
+        tokio::task::spawn_local(async move {
+            connect_handle
+                .connect_sync_with_test_home_custody(connect_home)
+                .await
+        })
+        .await
+        .expect("join custody-resolved connection")
+        .expect("connect over the injected opaque home, resolving the cipher from custody");
 
         // Publish a host-provided row and exact blob under the opaque home. The
         // resulting row reference carries its uploader authority and stored slot.

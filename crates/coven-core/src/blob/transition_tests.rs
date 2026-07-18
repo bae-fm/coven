@@ -30,7 +30,7 @@ use crate::migration::Migration;
 use crate::storage::cloud::CloudHome;
 use crate::store_dir::StoreDir;
 use crate::sync::cloud_storage::{CloudCipher, PendingRotation};
-use crate::sync::cycle::{ensure_owner_anchored_chain, run_single_sync_cycle, SyncCycleResult};
+use crate::sync::cycle::{run_single_sync_cycle, SyncCycleResult};
 use crate::sync::hlc::Hlc;
 use crate::sync::session::{BlobDecl, RowIdentity, SyncedTable};
 use crate::sync::storage::SyncStorage;
@@ -248,19 +248,10 @@ async fn run_cycle(
         .await
         .expect("read exact local Store device")
         .expect("test database has an activated Store device");
-    ensure_owner_anchored_chain(
-        &storage.storage,
-        db,
-        &storage.root,
-        storage.protocol_root(),
-        &storage.protocol_founder_keypair(),
-    )
-    .await
-    .expect("initialize MergeConcurrent test membership");
     // A fresh gate each call: none of these transition tests exercise a rotation
     // this device can't adopt.
     let pending_rotation = PendingRotation::none();
-    run_single_sync_cycle(
+    let result = run_single_sync_cycle(
         &storage.storage,
         "test-lib",
         &store_device_id,
@@ -276,7 +267,8 @@ async fn run_cycle(
         observer,
     )
     .await
-    .expect("cycle")
+    .expect("cycle");
+    result
 }
 
 /// Like [`run_cycle`] but surfaces the cycle result instead of unwrapping it, so a
@@ -297,15 +289,6 @@ async fn try_run_cycle(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "test database has no activated Store device".to_string())?;
-    ensure_owner_anchored_chain(
-        &storage.storage,
-        db,
-        &storage.root,
-        storage.protocol_root(),
-        &storage.protocol_founder_keypair(),
-    )
-    .await
-    .expect("initialize MergeConcurrent test membership");
     let pending_rotation = PendingRotation::none();
     run_single_sync_cycle(
         &storage.storage,

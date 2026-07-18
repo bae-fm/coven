@@ -24,6 +24,8 @@ pub(crate) enum ProtectedObjectDomain {
     DeviceJoinOutcome,
     DeviceJoinAbandonment,
     DeviceJoinCleanupReceipt,
+    StoreDeviceExclusionProposal,
+    StoreDeviceExclusionOutcome,
     ProviderAccessGrant,
     ProviderAccessWithdrawal,
     OwnerRecoveryNode,
@@ -248,6 +250,22 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
+            Self::StoreDeviceExclusionProposal => ProtocolObjectMetadata {
+                aad_label: b"store-device-exclusion-proposal",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 5,
+                    fixed_components: &[(0, "store-v1"), (1, "device-exclusion-proposals")],
+                }]),
+                extension: ".json",
+            },
+            Self::StoreDeviceExclusionOutcome => ProtocolObjectMetadata {
+                aad_label: b"store-device-exclusion-outcome",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "device-exclusion-outcomes")],
+                }]),
+                extension: ".json",
+            },
             Self::ProviderAccessGrant => ProtocolObjectMetadata {
                 aad_label: b"provider-access-grant",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
@@ -462,6 +480,10 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinAbandonment);
     pub const DeviceJoinCleanupReceipt: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::DeviceJoinCleanupReceipt);
+    pub const StoreDeviceExclusionProposal: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceExclusionProposal);
+    pub const StoreDeviceExclusionOutcome: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceExclusionOutcome);
     pub const ProviderAccessGrant: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessGrant);
     pub const ProviderAccessWithdrawal: SignedStoreProtocolObjectDomain =
@@ -1044,7 +1066,7 @@ impl ExactObjectRef {
 }
 
 /// Immutable stored bytes and the exact reference derived from them.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedExactObject {
     reference: ExactObjectRef,
@@ -1446,6 +1468,16 @@ mod tests {
                 domain: ProtectedObjectDomain::DeviceJoinCleanupReceipt,
                 valid: &["store-v1/device-join-cleanup-receipts/attempt"],
                 cross_domain: "store-v1/device-join-attempts/attempt",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreDeviceExclusionProposal,
+                valid: &["store-v1/device-exclusion-proposals/device/proposal/hash"],
+                cross_domain: "store-v1/device-exclusion-outcomes/device/proposal",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreDeviceExclusionOutcome,
+                valid: &["store-v1/device-exclusion-outcomes/device/proposal"],
+                cross_domain: "store-v1/device-exclusion-proposals/device/proposal/hash",
             },
             DomainPathCase {
                 domain: ProtectedObjectDomain::ProviderAccessGrant,
