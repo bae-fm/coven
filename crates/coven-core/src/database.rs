@@ -40,14 +40,14 @@ use crate::sync::remote_object::{
 };
 use crate::sync::routing_contract::SyncRoutingContract;
 use crate::sync::session::{quote_ident, SyncedTable};
-use crate::sync::storage::{ExactObjectRef, PreparedExactObject, VersionToken, VersionedObject};
+use crate::sync::storage::{ExactObjectRef, PreparedExactObject, VersionedObject};
 use crate::sync::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix,
     CommitFrontier, ObjectHash, ResolvedStoreDeviceState, SnapshotImageRef, SnapshotMeta, StoreAck,
     StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreDeviceHead,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreProtocolRoot,
-    StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, StoreSnapshotRef,
-    StreamActivationId, SERIAL_STREAM_ID,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut,
+    StoreProtocolRoot, StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor,
+    StoreSnapshotRef, StreamActivationId, SERIAL_STREAM_ID,
 };
 use crate::write::{
     AffectedRow, PendingBranch, PendingBranchId, PendingWrite, PublishedPosition, WriteId,
@@ -125,6 +125,45 @@ fn load_store_device_snapshot_on(
         .map_err(DbError::from)?;
     serde_json::from_str(&raw)
         .map_err(|error| DbError::Message(format!("parse Store device state snapshot: {error}")))
+}
+
+fn store_device_state_for_history_cut_on(
+    conn: &Connection,
+    cut: &crate::sync::store_commit::StoreHistoryCut,
+) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
+    let genesis = load_store_device_genesis_state_on(conn)?;
+    match cut {
+        crate::sync::store_commit::StoreHistoryCut::MergeConcurrent(frontier) => {
+            let state = if frontier.is_empty() {
+                genesis
+            } else {
+                ResolvedStoreDeviceState::merge(
+                    frontier
+                        .values()
+                        .map(|reference| load_store_device_snapshot_on(conn, reference))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+                .map_err(|error| DbError::Message(error.to_string()))?
+            };
+            let reference = StoreDeviceStateRef::merge_concurrent(
+                CommitFrontier::MergeConcurrent(frontier.clone()),
+                &state,
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            Ok((reference, state))
+        }
+        crate::sync::store_commit::StoreHistoryCut::Serial(position) => {
+            let state = match position {
+                StoreSerialPredecessor::Genesis { .. } => genesis,
+                StoreSerialPredecessor::Commit(reference) => {
+                    load_store_device_snapshot_on(conn, reference)?
+                }
+            };
+            let reference = StoreDeviceStateRef::serial(position.clone(), &state)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            Ok((reference, state))
+        }
+    }
 }
 
 fn load_declared_store_device_state_on(
@@ -1051,8 +1090,7 @@ pub(crate) struct PreparedSerialStoreWriteCommit {
 pub(crate) struct PreparedSerialStoreBranch {
     pub branch_id: PendingBranchId,
     pub base: Option<StoreBatchCommitRef>,
-    pub base_head_bytes: Option<Vec<u8>>,
-    pub base_head_version: Option<VersionToken>,
+    pub base_head: VersionedObject,
     pub writes: Vec<PreparedSerialStoreWriteCommit>,
     pub head: CanonicalProtocolObject<StoreSerialHead>,
 }
@@ -1086,6 +1124,14 @@ pub(crate) struct UnresolvedSerialBranch {
 pub(crate) struct OutboundStoreAck {
     pub reference: StoreAckRef,
     pub ack: ExactProtocolObject<StoreAck>,
+    pub activation: OutboundStoreAckActivation,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum OutboundStoreAckActivation {
+    AwaitingCandidate,
+    Prepared(crate::sync::store_outbound::PreparedStoreOperationCommit),
 }
 
 #[derive(Debug, Clone)]
@@ -1454,17 +1500,18 @@ fn validate_founder_graph(graph: &DurableFounderGraph) -> Result<(), DbError> {
     );
     let initial_ack = StoreAck::parse_at(
         &graph.initial_ack.bytes,
-        root_ref.store_root_hash,
+        &root_ref,
         &graph.initial_ack_ref,
         &registration,
     )
     .map_err(|error| DbError::Message(format!("founder initial acknowledgement: {error}")))?;
     if initial_ack != graph.initial_ack.value
-        || graph.initial_ack_ref.revision != 1
+        || graph.initial_ack_ref.registration != registration_ref
+        || graph.initial_ack_ref.sequence != 1
         || graph.initial_ack_ref.object != graph.initial_ack.object
         || graph.initial_ack.object != *graph.initial_ack.prepared.reference()
-        || initial_ack.predecessor.is_some()
-        || initial_ack.author_registration != registration_ref
+        || initial_ack.successor.predecessor.is_some()
+        || initial_ack.registration != registration_ref
         || match (&root.descriptor.write_policy, &initial_ack.store_cut) {
             (
                 crate::WritePolicy::MergeConcurrent,
@@ -1843,7 +1890,7 @@ fn load_local_store_founder_graph_on(
         .map_err(|error| DbError::Message(format!("local founder initial ack ref: {error}")))?;
     let initial_ack_value = StoreAck::parse_at(
         &initial_ack_bytes,
-        root_ref.store_root_hash,
+        &root_ref,
         &initial_ack_ref,
         &registration_value,
     )
@@ -2375,8 +2422,7 @@ pub(crate) struct SerialCandidateAbandonmentPreparation {
 pub(crate) struct SerialStoreWritePreparation {
     pub branch_id: PendingBranchId,
     pub base: Option<StoreBatchCommitRef>,
-    pub base_head_bytes: Option<Vec<u8>>,
-    pub base_head_version: Option<VersionToken>,
+    pub base_head: VersionedObject,
     pub writes: Vec<SerialStoreWritePreparationEntry>,
     pub head: StoreSerialHead,
 }
@@ -2415,8 +2461,7 @@ enum PreparedStoreWriteState {
     },
     SerialPreparing,
     Serial {
-        base_head_bytes: Option<Vec<u8>>,
-        base_head_version: Option<VersionToken>,
+        base_head: VersionedObject,
         commit: DurablePreparedProtocolObject,
         tip_head_bytes: Option<Vec<u8>>,
         local_cleanup: StoreBatchLocalCleanup,
@@ -5436,8 +5481,7 @@ impl Database {
                     DbError::Message(format!("prepared Serial abandonment candidate: {error}"))
                 })?;
             let PreparedStoreWriteState::Serial {
-                base_head_bytes,
-                base_head_version,
+                base_head,
                 commit: candidate_commit,
                 ..
             } = &prepared
@@ -5446,18 +5490,7 @@ impl Database {
                     "Serial abandonment requires an exact prepared branch".to_string(),
                 ));
             };
-            let base_head = VersionedObject {
-                bytes: base_head_bytes.clone().ok_or_else(|| {
-                    DbError::Message(
-                        "Serial abandonment base has no signed coordination head".to_string(),
-                    )
-                })?,
-                version: base_head_version.clone().ok_or_else(|| {
-                    DbError::Message(
-                        "Serial abandonment base has no provider version receipt".to_string(),
-                    )
-                })?,
-            };
+            let base_head = base_head.clone();
             let candidate = parse_prepared_serial_candidate(&raw_prepared)?
                 .expect("matched exact Serial candidate");
             if candidate.reference != stage.candidate {
@@ -5625,59 +5658,45 @@ impl Database {
                 branch_id: stage.branch_id.clone(),
                 base: stage.base.clone(),
             };
-            if stage.base_head_bytes.is_some() != stage.base_head_version.is_some() {
-                return Err(DbError::Message(
-                    "Serial base head bytes and opaque version receipt must be present together"
-                        .to_string(),
-                ));
-            }
-            match stage.base_head_bytes.as_deref() {
-                Some(bytes) => {
-                    let unverified: StoreSerialHead = serde_json::from_slice(bytes)
-                        .map_err(|error| DbError::Message(format!("Serial base head: {error}")))?;
-                    let executor_ref = match &unverified.state {
-                        StoreSerialHeadState::Genesis {
-                            founder_registration,
-                            ..
-                        } => founder_registration,
-                        StoreSerialHeadState::Commit {
-                            author_registration,
-                            ..
-                        } => author_registration,
-                    };
-                    let executor = load_activated_registration_on(&tx, &root, executor_ref)?;
-                    let verified = StoreSerialHead::parse(bytes, root.store_root_hash, &executor)
-                        .map_err(|error| {
+            {
+                let bytes = stage.base_head.bytes.as_slice();
+                let unverified: StoreSerialHead = serde_json::from_slice(bytes)
+                    .map_err(|error| DbError::Message(format!("Serial base head: {error}")))?;
+                let executor_ref = match &unverified.state {
+                    StoreSerialHeadState::Genesis {
+                        founder_registration,
+                        ..
+                    } => founder_registration,
+                    StoreSerialHeadState::Commit {
+                        author_registration,
+                        ..
+                    } => author_registration,
+                };
+                let executor = load_activated_registration_on(&tx, &root, executor_ref)?;
+                let verified = StoreSerialHead::parse(bytes, root.store_root_hash, &executor)
+                    .map_err(|error| {
                         DbError::Message(format!("verify Serial base head: {error}"))
                     })?;
-                    let base_ref = match verified.state {
-                        StoreSerialHeadState::Genesis {
-                            root: head_root,
-                            founder_registration,
-                        } => {
-                            if head_root != root || founder_registration != executor_ref.clone() {
-                                return Err(DbError::Message(
-                                    "Serial genesis head differs from exact Store authority"
-                                        .to_string(),
-                                ));
-                            }
-                            None
+                let base_ref = match verified.state {
+                    StoreSerialHeadState::Genesis {
+                        root: head_root,
+                        founder_registration,
+                    } => {
+                        if head_root != root || founder_registration != executor_ref.clone() {
+                            return Err(DbError::Message(
+                                "Serial genesis head differs from exact Store authority"
+                                    .to_string(),
+                            ));
                         }
-                        StoreSerialHeadState::Commit { commit, .. } => Some(commit),
-                    };
-                    if base_ref != stage.base {
-                        return Err(DbError::Message(
-                            "Serial branch base differs from the exact observed head".to_string(),
-                        ));
+                        None
                     }
-                }
-                None if stage.base.is_some() => {
+                    StoreSerialHeadState::Commit { commit, .. } => Some(commit),
+                };
+                if base_ref != stage.base {
                     return Err(DbError::Message(
-                        "Serial branch has a base commit without observed head evidence"
-                            .to_string(),
+                        "Serial branch base differs from the exact observed head".to_string(),
                     ));
                 }
-                None => {}
             }
             let head_bytes = stage.head.to_bytes();
             let mut predecessor = stage.base.clone();
@@ -5794,8 +5813,7 @@ impl Database {
                 )?;
                 let tip_head_bytes = (index + 1 == stage.writes.len()).then(|| head_bytes.clone());
                 let durable = PreparedStoreWriteState::Serial {
-                    base_head_bytes: stage.base_head_bytes.clone(),
-                    base_head_version: stage.base_head_version.clone(),
+                    base_head: stage.base_head.clone(),
                     commit: DurablePreparedProtocolObject {
                         semantic_bytes: write.commit.value.to_bytes(),
                         prepared: write.commit.prepared.clone(),
@@ -6270,8 +6288,7 @@ impl Database {
                 drop(statement);
                 let mut branch_id = None;
                 let mut base = None;
-                let mut base_head_bytes: Option<Option<Vec<u8>>> = None;
-                let mut base_head_version: Option<Option<VersionToken>> = None;
+                let mut base_head: Option<VersionedObject> = None;
                 let mut writes = Vec::new();
                 let mut head = None;
                 let mut predecessor: Option<StoreBatchCommitRef> = None;
@@ -6290,8 +6307,7 @@ impl Database {
                         ));
                     }
                     let PreparedStoreWriteState::Serial {
-                        base_head_bytes: row_base_head_bytes,
-                        base_head_version: row_base_head_version,
+                        base_head: row_base_head,
                         commit,
                         tip_head_bytes,
                         ..
@@ -6316,12 +6332,9 @@ impl Database {
                         .as_ref()
                         .is_some_and(|value| value != &row_branch_id)
                         || base.as_ref().is_some_and(|value| value != &row_base)
-                        || base_head_bytes
+                        || base_head
                             .as_ref()
-                            .is_some_and(|value| value != &row_base_head_bytes)
-                        || base_head_version
-                            .as_ref()
-                            .is_some_and(|value| value != &row_base_head_version)
+                            .is_some_and(|value| value != &row_base_head)
                     {
                         return Err(DbError::Message(
                             "prepared Serial writes do not share one branch base".to_string(),
@@ -6329,8 +6342,7 @@ impl Database {
                     }
                     branch_id.get_or_insert(row_branch_id);
                     base.get_or_insert(row_base);
-                    base_head_bytes.get_or_insert(row_base_head_bytes);
-                    base_head_version.get_or_insert(row_base_head_version);
+                    base_head.get_or_insert(row_base_head);
                     let unverified: StoreBatchCommit =
                         serde_json::from_slice(&commit.semantic_bytes).map_err(|error| {
                             DbError::Message(format!("prepared Serial commit: {error}"))
@@ -6471,71 +6483,53 @@ impl Database {
                     ));
                 }
                 let base_value = base.expect("nonempty branch");
-                let base_bytes = base_head_bytes.expect("nonempty branch");
-                let base_version = base_head_version.expect("nonempty branch");
-                if base_bytes.is_some() != base_version.is_some() {
-                    return Err(DbError::Message(
-                        "Serial base head bytes and opaque version receipt differ in presence"
-                            .to_string(),
-                    ));
-                }
-                match base_bytes.as_deref() {
-                    Some(bytes) => {
-                        let unverified: StoreSerialHead =
-                            serde_json::from_slice(bytes).map_err(|error| {
-                                DbError::Message(format!("stored Serial base head: {error}"))
-                            })?;
-                        let executor_ref = match &unverified.state {
-                            StoreSerialHeadState::Genesis {
-                                founder_registration,
-                                ..
-                            } => founder_registration,
-                            StoreSerialHeadState::Commit {
-                                author_registration,
-                                ..
-                            } => author_registration,
-                        };
-                        let executor = load_activated_registration_on(conn, &root, executor_ref)?;
-                        let verified =
-                            StoreSerialHead::parse(bytes, root.store_root_hash, &executor)
-                                .map_err(|error| {
-                                    DbError::Message(format!(
-                                        "verify stored Serial base head: {error}"
-                                    ))
-                                })?;
-                        let observed = match verified.state {
-                            StoreSerialHeadState::Genesis {
-                                root: observed_root,
-                                ..
-                            } => {
-                                if observed_root != root {
-                                    return Err(DbError::Message(
-                                        "stored Serial genesis head has a different exact root"
-                                            .to_string(),
-                                    ));
-                                }
-                                None
+                let base_head = base_head.expect("nonempty branch");
+                {
+                    let bytes = base_head.bytes.as_slice();
+                    let unverified: StoreSerialHead =
+                        serde_json::from_slice(bytes).map_err(|error| {
+                            DbError::Message(format!("stored Serial base head: {error}"))
+                        })?;
+                    let executor_ref = match &unverified.state {
+                        StoreSerialHeadState::Genesis {
+                            founder_registration,
+                            ..
+                        } => founder_registration,
+                        StoreSerialHeadState::Commit {
+                            author_registration,
+                            ..
+                        } => author_registration,
+                    };
+                    let executor = load_activated_registration_on(conn, &root, executor_ref)?;
+                    let verified = StoreSerialHead::parse(bytes, root.store_root_hash, &executor)
+                        .map_err(|error| {
+                        DbError::Message(format!("verify stored Serial base head: {error}"))
+                    })?;
+                    let observed = match verified.state {
+                        StoreSerialHeadState::Genesis {
+                            root: observed_root,
+                            ..
+                        } => {
+                            if observed_root != root {
+                                return Err(DbError::Message(
+                                    "stored Serial genesis head has a different exact root"
+                                        .to_string(),
+                                ));
                             }
-                            StoreSerialHeadState::Commit { commit, .. } => Some(commit),
-                        };
-                        if observed != base_value {
-                            return Err(DbError::Message(
-                                "stored Serial base evidence differs from branch base".to_string(),
-                            ));
+                            None
                         }
-                    }
-                    None if base_value.is_some() => {
+                        StoreSerialHeadState::Commit { commit, .. } => Some(commit),
+                    };
+                    if observed != base_value {
                         return Err(DbError::Message(
-                            "stored Serial base commit has no head evidence".to_string(),
+                            "stored Serial base evidence differs from branch base".to_string(),
                         ));
                     }
-                    None => {}
                 }
                 Ok(Some(PreparedSerialStoreBranch {
                     branch_id: branch_id.expect("nonempty branch"),
                     base: base_value,
-                    base_head_bytes: base_bytes,
-                    base_head_version: base_version,
+                    base_head,
                     writes,
                     head,
                 }))
@@ -6605,19 +6599,14 @@ impl Database {
                     DbError::Message(format!("Serial abandonment candidate state: {error}"))
                 })?;
             let PreparedStoreWriteState::Serial {
-                base_head_bytes,
-                base_head_version,
-                commit,
-                ..
+                base_head, commit, ..
             } = prepared
             else {
                 return Err(DbError::Message(
                     "Serial abandonment target is not an exact candidate".to_string(),
                 ));
             };
-            if base_head_bytes.as_deref() != Some(durable.base_head.bytes.as_slice())
-                || base_head_version.as_ref() != Some(&durable.base_head.version)
-            {
+            if base_head != durable.base_head {
                 return Err(DbError::Message(
                     "Serial abandonment differs from its durable branch base".to_string(),
                 ));
@@ -7906,6 +7895,35 @@ impl Database {
         self.call(load_published_store_ack_on).await
     }
 
+    pub(crate) async fn activated_store_ack(
+        &self,
+        registration: &StoreDeviceRegistrationRef,
+    ) -> Result<Option<StoreAckRef>, DbError> {
+        let registration = registration.clone();
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT ack_ref FROM activated_store_acks WHERE device_id = ?1",
+                [registration.device_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?
+            .map(|raw| {
+                let reference: StoreAckRef = serde_json::from_str(&raw).map_err(|error| {
+                    DbError::Message(format!("activated Store acknowledgement ref: {error}"))
+                })?;
+                if reference.registration != registration {
+                    return Err(DbError::Message(
+                        "activated Store acknowledgement names another registration".to_string(),
+                    ));
+                }
+                Ok(reference)
+            })
+            .transpose()
+        })
+        .await
+    }
+
     pub(crate) async fn stage_store_ack(
         &self,
         ack: StoreAck,
@@ -7914,67 +7932,54 @@ impl Database {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let (root, registration_ref, registration) = local_store_authority_on(&tx)?;
-            if ack.author_registration != registration_ref {
+            if ack.registration != registration_ref {
                 return Err(DbError::Message(
                     "staged Store acknowledgement author differs from local activation".to_string(),
                 ));
             }
             let reference = StoreAckRef {
-                revision: ack.revision,
+                registration: registration_ref.clone(),
+                sequence: ack.sequence,
                 ack_hash: ack.ack_hash(),
                 object: prepared.reference().clone(),
             };
-            let verified = StoreAck::parse_at(
-                &ack.to_bytes(),
-                root.store_root_hash,
-                &reference,
-                &registration,
-            )
-            .map_err(|error| {
-                DbError::Message(format!("verify staged Store acknowledgement: {error}"))
-            })?;
+            let verified = StoreAck::parse_at(&ack.to_bytes(), &root, &reference, &registration)
+                .map_err(|error| {
+                    DbError::Message(format!("verify staged Store acknowledgement: {error}"))
+                })?;
             if verified != ack {
                 return Err(DbError::Message(
                     "staged Store acknowledgement changed during exact verification".to_string(),
                 ));
             }
             let previous = load_published_store_ack_on(&tx)?;
-            let (expected_revision, expected_predecessor, expected_slot) = match &previous {
+            let (expected_sequence, expected_predecessor, expected_slot) = match &previous {
                 Some(previous) => (
-                    previous.reference.revision.checked_add(1).ok_or_else(|| {
-                        DbError::Message("Store acknowledgement revision overflow".to_string())
+                    previous.reference.sequence.checked_add(1).ok_or_else(|| {
+                        DbError::Message("Store acknowledgement sequence overflow".to_string())
                     })?,
-                    Some(previous.reference.clone()),
+                    Some(previous.reference.object.clone()),
                     previous.successor_slot.clone(),
                 ),
                 None => (1, None, store_ack_first_slot(&registration)?.clone()),
             };
-            if ack.revision != expected_revision
-                || ack.predecessor != expected_predecessor
+            if ack.sequence != expected_sequence
+                || ack.successor.predecessor != expected_predecessor
                 || prepared.reference().slot() != &expected_slot
             {
                 return Err(DbError::Message(
                     "Store acknowledgement does not extend the exact local stream".to_string(),
                 ));
             }
-            if ack.successor.predecessor
-                != previous
-                    .as_ref()
-                    .map(|value| value.reference.object.clone())
-            {
-                return Err(DbError::Message(
-                    "Store acknowledgement successor names a different predecessor".to_string(),
-                ));
-            }
-            let next_revision = ack.revision.checked_add(1).ok_or_else(|| {
-                DbError::Message("Store acknowledgement revision overflow".to_string())
+            let next_sequence = ack.sequence.checked_add(1).ok_or_else(|| {
+                DbError::Message("Store acknowledgement sequence overflow".to_string())
             })?;
             if ack.successor.activation
                 != StreamActivationId::store_acknowledgements(&root, &registration_ref)
                 || ack.successor.next_slot.logical_key()
                     != format!(
                         "{}.json",
-                        ack_slot_prefix(&registration.device_id.to_string(), next_revision)
+                        ack_slot_prefix(&registration.device_id.to_string(), next_sequence)
                     )
             {
                 return Err(DbError::Message(
@@ -7990,11 +7995,17 @@ impl Database {
             let prepared = serde_json::to_string(&prepared).map_err(|error| {
                 DbError::Message(format!("serialize prepared Store acknowledgement: {error}"))
             })?;
+            let activation = serde_json::to_string(&OutboundStoreAckActivation::AwaitingCandidate)
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize Store acknowledgement activation state: {error}"
+                    ))
+                })?;
             tx.execute(
                 "INSERT INTO outbound_store_acks \
-                 (singleton, ack_ref, ack_bytes, prepared_object) \
-                 VALUES (1, ?1, ?2, ?3)",
-                rusqlite::params![ack_ref, ack.to_bytes(), prepared],
+                 (singleton, ack_ref, ack_bytes, prepared_object, activation) \
+                 VALUES (1, ?1, ?2, ?3, ?4)",
+                rusqlite::params![ack_ref, ack.to_bytes(), prepared, activation],
             )
             .map_err(DbError::from)?;
             tx.commit().map_err(DbError::from)?;
@@ -8007,6 +8018,74 @@ impl Database {
         &self,
     ) -> Result<Option<OutboundStoreAck>, DbError> {
         self.call(load_outbound_store_ack_on).await
+    }
+
+    pub(crate) async fn prepare_outbound_store_ack_activation(
+        &self,
+        expected: StoreAckRef,
+        prepared: crate::sync::store_outbound::PreparedStoreOperationCommit,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
+                DbError::Message("outbound Store acknowledgement is absent".to_string())
+            })?;
+            if outbound.reference != expected {
+                return Err(DbError::Message(
+                    "prepared activation names a different Store acknowledgement".to_string(),
+                ));
+            }
+            match outbound.activation {
+                OutboundStoreAckActivation::AwaitingCandidate => {}
+                OutboundStoreAckActivation::Prepared(existing)
+                    if existing.reference == prepared.reference =>
+                {
+                    return Ok(());
+                }
+                OutboundStoreAckActivation::Prepared(_) => {
+                    return Err(DbError::Message(
+                        "Store acknowledgement already has a different activation candidate"
+                            .to_string(),
+                    ));
+                }
+            }
+            for remote in prepared
+                .acknowledgement_remote_objects(&outbound.ack)
+                .map_err(|error| DbError::Message(error.to_string()))?
+            {
+                persist_exact_remote_object_on(
+                    &tx,
+                    &remote,
+                    "Store acknowledgement activation object",
+                )?;
+            }
+            let activation = serde_json::to_string(&OutboundStoreAckActivation::Prepared(prepared))
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize prepared Store acknowledgement activation: {error}"
+                    ))
+                })?;
+            let updated = tx
+                .execute(
+                    "UPDATE outbound_store_acks SET activation = ?2 \
+                     WHERE singleton = 1 AND ack_ref = ?1",
+                    rusqlite::params![
+                        serde_json::to_string(&expected).map_err(|error| DbError::Message(
+                            format!("serialize Store acknowledgement ref: {error}")
+                        ))?,
+                        activation,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "outbound Store acknowledgement disappeared during activation preparation"
+                        .to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
     }
 
     pub(crate) async fn complete_outbound_store_ack(
@@ -8991,7 +9070,7 @@ impl Database {
         }
         let initial_ack = StoreAck::parse_at(
             &continuation.initial_ack_bytes,
-            root.store_root_hash,
+            &root,
             &continuation.initial_ack,
             &registration,
         )
@@ -9001,15 +9080,17 @@ impl Database {
                 "continued acknowledgement chain is empty".into(),
             ));
         };
-        if initial_ack.revision != 1
-            || initial_ack.predecessor.is_some()
-            || latest_ack.author_registration != continuation.registration
+        if initial_ack.sequence != 1
+            || initial_ack.successor.predecessor.is_some()
+            || latest_ack.registration != continuation.registration
             || latest_ack_ref != &continuation.latest_ack
             || ack_chain.last().map(|(reference, _)| reference) != Some(&continuation.initial_ack)
             || ack_chain.windows(2).any(|pair| {
-                pair[0].1.predecessor.as_ref() != Some(&pair[1].0)
-                    || pair[0].0.revision != pair[0].1.revision
-                    || pair[1].0.revision != pair[1].1.revision
+                pair[0].1.successor.predecessor.as_ref() != Some(&pair[1].0.object)
+                    || pair[0].0.sequence != pair[0].1.sequence
+                    || pair[1].0.sequence != pair[1].1.sequence
+                    || pair[0].0.registration != pair[0].1.registration
+                    || pair[1].0.registration != pair[1].1.registration
             })
         {
             return Err(DbError::Message(
@@ -9381,8 +9462,9 @@ impl Database {
             || initial_ack.object != *initial_ack.prepared.reference()
             || initial_ack_ref.object != initial_ack.object
             || initial_ack_ref.ack_hash != initial_ack.value.ack_hash()
-            || initial_ack_ref.revision != initial_ack.value.revision
-            || initial_ack.value.author_registration != registration_ref
+            || initial_ack_ref.registration != registration_ref
+            || initial_ack_ref.sequence != initial_ack.value.sequence
+            || initial_ack.value.registration != registration_ref
         {
             return Err(DbError::Message(
                 "local registration staging graph contains mismatched exact objects".to_string(),
@@ -9482,10 +9564,11 @@ impl Database {
             || initial_ack.object != *initial_ack.prepared.reference()
             || initial_ack_ref.object != initial_ack.object
             || initial_ack_ref.ack_hash != initial_ack.value.ack_hash()
-            || initial_ack_ref.revision != 1
-            || initial_ack.value.revision != 1
-            || initial_ack.value.predecessor.is_some()
-            || initial_ack.value.author_registration != registration_ref
+            || initial_ack_ref.registration != registration_ref
+            || initial_ack_ref.sequence != 1
+            || initial_ack.value.sequence != 1
+            || initial_ack.value.successor.predecessor.is_some()
+            || initial_ack.value.registration != registration_ref
         {
             return Err(DbError::Message(
                 "existing founder device graph contains mismatched exact objects".to_string(),
@@ -9672,9 +9755,10 @@ impl Database {
             || initial_ack.object != *initial_ack.prepared.reference()
             || initial_ack_ref.object != initial_ack.object
             || initial_ack_ref.ack_hash != initial_ack.value.ack_hash()
-            || initial_ack_ref.revision != 1
-            || initial_ack.value.predecessor.is_some()
-            || initial_ack.value.author_registration != registration_ref
+            || initial_ack_ref.registration != registration_ref
+            || initial_ack_ref.sequence != 1
+            || initial_ack.value.successor.predecessor.is_some()
+            || initial_ack.value.registration != registration_ref
         {
             return Err(DbError::Message(
                 "Owner recovery registration graph contains mismatched exact objects".into(),
@@ -9978,7 +10062,7 @@ impl Database {
                         })?;
                     let initial_ack_value = StoreAck::parse_at(
                         &ack_bytes,
-                        registration.store_root.store_root_hash,
+                        &registration.store_root,
                         &initial_ack_ref,
                         &registration,
                     )
@@ -11576,13 +11660,13 @@ impl Database {
             }
             let ack = StoreAck::parse_at(
                 &local_ack_bytes,
-                registration.store_root.store_root_hash,
+                &registration.store_root,
                 &local_ack_ref,
                 registration,
             )
             .map_err(|error| DbError::Message(format!("local initial ack: {error}")))?;
-            if ack.revision != 1
-                || ack.predecessor.is_some()
+            if ack.sequence != 1
+                || ack.successor.predecessor.is_some()
                 || local_ack_prepared
                     .reference()
                     .verify(local_ack_prepared.stored_bytes())
@@ -11736,8 +11820,7 @@ impl Database {
     ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
         let order = order.clone();
         self.call(move |conn| {
-            let genesis = load_store_device_genesis_state_on(conn)?;
-            match order {
+            let cut = match order {
                 crate::sync::store_commit::StoreCommitOrder::MergeConcurrent {
                     predecessor,
                     dependencies,
@@ -11761,38 +11844,24 @@ impl Database {
                             ));
                         }
                     }
-                    let state = if frontier.is_empty() {
-                        genesis
-                    } else {
-                        ResolvedStoreDeviceState::merge(
-                            frontier
-                                .values()
-                                .map(|reference| load_store_device_snapshot_on(conn, reference))
-                                .collect::<Result<Vec<_>, _>>()?,
-                        )
-                        .map_err(|error| DbError::Message(error.to_string()))?
-                    };
-                    let reference = StoreDeviceStateRef::merge_concurrent(
-                        CommitFrontier::MergeConcurrent(frontier),
-                        &state,
-                    )
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-                    Ok((reference, state))
+                    StoreHistoryCut::MergeConcurrent(frontier)
                 }
                 crate::sync::store_commit::StoreCommitOrder::Serial { predecessor, .. } => {
-                    let state = match &predecessor {
-                        StoreSerialPredecessor::Genesis { .. } => genesis,
-                        StoreSerialPredecessor::Commit(reference) => {
-                            load_store_device_snapshot_on(conn, reference)?
-                        }
-                    };
-                    let reference = StoreDeviceStateRef::serial(predecessor, &state)
-                        .map_err(|error| DbError::Message(error.to_string()))?;
-                    Ok((reference, state))
+                    StoreHistoryCut::Serial(predecessor)
                 }
-            }
+            };
+            store_device_state_for_history_cut_on(conn, &cut)
         })
         .await
+    }
+
+    pub(crate) async fn store_device_state_for_history_cut(
+        &self,
+        cut: &StoreHistoryCut,
+    ) -> Result<(StoreDeviceStateRef, ResolvedStoreDeviceState), DbError> {
+        let cut = cut.clone();
+        self.call(move |conn| store_device_state_for_history_cut_on(conn, &cut))
+            .await
     }
 
     pub(crate) async fn activated_store_device_registration_records(
@@ -12103,6 +12172,7 @@ impl Database {
                 "materialized commit author is not active at its exact predecessor state".into(),
             ));
         }
+        record_activated_store_ack_on(conn, commit, commit_ref)?;
         for activation in commit.device_registrations() {
             if recovery_author
                 .as_ref()
@@ -12307,6 +12377,30 @@ impl Database {
                 )
                 .map_err(DbError::from)?;
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn activate_store_operation_remote_objects_on(
+        conn: &Connection,
+        commit_ref: &StoreBatchCommitRef,
+        object_ids: &[ObjectHash],
+    ) -> Result<(), DbError> {
+        let mut unique = std::collections::BTreeSet::new();
+        for object_id in object_ids {
+            if !unique.insert(*object_id) {
+                return Err(DbError::Message(
+                    "Store operation names a duplicate remote object".to_string(),
+                ));
+            }
+            let remote = load_remote_object_on(conn, *object_id)?
+                .into_activated(commit_ref)
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "activate Store operation remote object {object_id}: {error}"
+                    ))
+                })?;
+            update_remote_object_on(conn, *object_id, &remote)?;
         }
         Ok(())
     }
@@ -13356,7 +13450,7 @@ impl Database {
                 RemoteObjectRecord::RetainedAuthority(record)
                     if matches!(
                         &record.identity.domain,
-                        crate::sync::remote_object::RetainedAuthorityObjectDomain::StoreDeviceHead {
+                        crate::sync::remote_object::RetainedAuthorityObjectDomain::DeviceHead {
                             reference
                         } if reference == &head
                     )
@@ -13831,14 +13925,13 @@ impl Database {
             }
             let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                 .map_err(|error| DbError::Message(format!("prepared Merge candidate: {error}")))?;
-            let publication = parse_prepared_merge_publication_on(&tx, &prepared)?
-                .ok_or_else(|| {
+            let publication =
+                parse_prepared_merge_publication_on(&tx, &prepared)?.ok_or_else(|| {
                     DbError::Message(
                         "Serial branch reached alternate Merge head adoption".to_string(),
                     )
                 })?;
-            if winner_prepared.reference().slot()
-                != publication.head_prepared.reference().slot()
+            if winner_prepared.reference().slot() != publication.head_prepared.reference().slot()
                 || winner_prepared.reference() == publication.head_prepared.reference()
             {
                 return Err(DbError::Message(
@@ -13871,7 +13964,7 @@ impl Database {
                 RemoteObjectRecord::RetainedAuthority(record)
                     if matches!(
                         &record.identity.domain,
-                        crate::sync::remote_object::RetainedAuthorityObjectDomain::StoreDeviceHead { .. }
+                        crate::sync::remote_object::RetainedAuthorityObjectDomain::DeviceHead { .. }
                     ) && matches!(
                         &record.state,
                         crate::sync::remote_object::RetainedAuthorityObjectState::Prepared {
@@ -16258,9 +16351,9 @@ fn load_published_store_ack_on(conn: &Connection) -> Result<Option<PublishedStor
         let reference: StoreAckRef = serde_json::from_str(&reference).map_err(|error| {
             DbError::Message(format!("published Store acknowledgement ref: {error}"))
         })?;
-        if reference.revision == 0 {
+        if reference.sequence == 0 {
             return Err(DbError::Message(
-                "published Store acknowledgement uses revision zero".to_string(),
+                "published Store acknowledgement uses sequence zero".to_string(),
             ));
         }
         Ok(PublishedStoreAck {
@@ -16275,9 +16368,64 @@ fn load_published_store_ack_on(conn: &Connection) -> Result<Option<PublishedStor
     .transpose()
 }
 
+fn record_activated_store_ack_on(
+    conn: &Connection,
+    commit: &StoreBatchCommit,
+    commit_ref: &StoreBatchCommitRef,
+) -> Result<(), DbError> {
+    let Some(reference) = commit.acknowledgement() else {
+        return Ok(());
+    };
+    if reference.registration != commit.author_registration {
+        return Err(DbError::Message(
+            "activated Store acknowledgement names another registration".to_string(),
+        ));
+    }
+    let device_id = reference.registration.device_id.to_string();
+    let current = conn
+        .query_row(
+            "SELECT ack_ref FROM activated_store_acks WHERE device_id = ?1",
+            [&device_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?
+        .map(|raw| {
+            serde_json::from_str::<StoreAckRef>(&raw).map_err(|error| {
+                DbError::Message(format!("activated Store acknowledgement ref: {error}"))
+            })
+        })
+        .transpose()?;
+    if current.as_ref().is_some_and(|current| {
+        current.registration != reference.registration || current.sequence >= reference.sequence
+    }) {
+        return Err(DbError::Message(
+            "Store acknowledgement activation does not advance the exact registration stream"
+                .to_string(),
+        ));
+    }
+    conn.execute(
+        "INSERT INTO activated_store_acks (device_id, ack_ref, activating_commit) \
+         VALUES (?1, ?2, ?3) \
+         ON CONFLICT(device_id) DO UPDATE SET \
+           ack_ref = excluded.ack_ref, activating_commit = excluded.activating_commit",
+        rusqlite::params![
+            device_id,
+            serde_json::to_string(reference).map_err(|error| DbError::Message(format!(
+                "serialize activated Store acknowledgement ref: {error}"
+            )))?,
+            serde_json::to_string(commit_ref).map_err(|error| DbError::Message(format!(
+                "serialize acknowledgement activating commit ref: {error}"
+            )))?,
+        ],
+    )
+    .map(|_| ())
+    .map_err(DbError::from)
+}
+
 fn load_outbound_store_ack_on(conn: &Connection) -> Result<Option<OutboundStoreAck>, DbError> {
     conn.query_row(
-        "SELECT ack_ref, ack_bytes, prepared_object \
+        "SELECT ack_ref, ack_bytes, prepared_object, activation \
          FROM outbound_store_acks WHERE singleton = 1",
         [],
         |row| {
@@ -16285,28 +16433,35 @@ fn load_outbound_store_ack_on(conn: &Connection) -> Result<Option<OutboundStoreA
                 row.get::<_, String>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         },
     )
     .optional()
     .map_err(DbError::from)?
-    .map(|(reference, bytes, prepared)| {
+    .map(|(reference, bytes, prepared, activation)| {
         let reference: StoreAckRef = serde_json::from_str(&reference).map_err(|error| {
             DbError::Message(format!("outbound Store acknowledgement ref: {error}"))
         })?;
         let prepared: PreparedExactObject = serde_json::from_str(&prepared).map_err(|error| {
             DbError::Message(format!("outbound prepared Store acknowledgement: {error}"))
         })?;
+        let activation: OutboundStoreAckActivation =
+            serde_json::from_str(&activation).map_err(|error| {
+                DbError::Message(format!(
+                    "outbound Store acknowledgement activation: {error}"
+                ))
+            })?;
         if prepared.reference() != &reference.object {
             return Err(DbError::Message(
                 "outbound Store acknowledgement ref differs from its prepared object".to_string(),
             ));
         }
         let (root, author_ref, author) = local_store_authority_on(conn)?;
-        let value = StoreAck::parse_at(&bytes, root.store_root_hash, &reference, &author).map_err(
-            |error| DbError::Message(format!("outbound Store acknowledgement: {error}")),
-        )?;
-        if value.author_registration != author_ref {
+        let value = StoreAck::parse_at(&bytes, &root, &reference, &author).map_err(|error| {
+            DbError::Message(format!("outbound Store acknowledgement: {error}"))
+        })?;
+        if value.registration != author_ref {
             return Err(DbError::Message(
                 "outbound Store acknowledgement author differs from local activation".to_string(),
             ));
@@ -16319,6 +16474,7 @@ fn load_outbound_store_ack_on(conn: &Connection) -> Result<Option<OutboundStoreA
                 object: prepared.reference().clone(),
                 prepared,
             },
+            activation,
         })
     })
     .transpose()

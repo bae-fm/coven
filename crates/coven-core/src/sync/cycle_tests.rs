@@ -2497,7 +2497,7 @@ async fn initial_snapshot_coalesces_shared_exact_blob_across_row_bindings() {
                 conn.query_row("SELECT COUNT(*) FROM row_blob_locators", [], |row| {
                     row.get(0)
                 })?,
-                conn.query_row("SELECT COUNT(*) FROM remote_objects", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM blob_locators", [], |row| row.get(0))?,
             ))
         })
         .await
@@ -4368,13 +4368,31 @@ async fn applied_rows_do_not_echo_into_next_outgoing_changeset() {
     )
     .await
     .expect("M's empty cycle succeeds");
+    let after = db_m
+        .latest_local_store_position()
+        .await
+        .expect("read local Store position after the empty cycle")
+        .expect("the empty cycle publishes its acknowledgement");
+    let (_, registration) = db_m
+        .local_blob_write_authority()
+        .await
+        .expect("load local Store registration");
+    let commit = crate::sync::store_objects::load_commit_ref(
+        &storage.storage,
+        storage.root.store_root_hash,
+        &after,
+        &registration,
+    )
+    .await
+    .expect("load empty-cycle acknowledgement commit")
+    .value;
     assert_eq!(
-        db_m.latest_local_store_position()
-            .await
-            .expect("read local Store position after the empty cycle"),
-        before,
-        "the row M applied from A must not create an outgoing M commit",
+        commit.order.predecessor(),
+        before.as_ref(),
+        "the acknowledgement directly extends the previous local position",
     );
+    assert!(commit.acknowledgement().is_some());
+    assert!(commit.store_package().is_none());
 }
 
 #[tokio::test]
@@ -6157,9 +6175,18 @@ async fn run_cycle_preserves_packages_until_every_device_covers_the_snapshot() {
     )
     .await
     .expect("stage behind device acknowledgement");
-    crate::sync::store_ack::drain_outbound_store_acks(&behind_db, &storage.storage)
+    let behind_membership = crate::sync::pull::load_cycle_membership(&storage.storage, &behind_db)
         .await
-        .expect("publish behind device acknowledgement");
+        .expect("load behind device membership");
+    crate::sync::store_ack::drain_outbound_store_acks(
+        &behind_db,
+        &storage.storage,
+        None,
+        &behind,
+        behind_membership.chain.as_ref(),
+    )
+    .await
+    .expect("publish behind device acknowledgement");
 
     let second_changeset = capture_bytes(
         &source,

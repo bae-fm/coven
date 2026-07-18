@@ -1002,6 +1002,7 @@ fn sign_exact_commit_with_package(
         graph.commit.device_state.clone(),
         membership_authority,
         crate::sync::store_commit::StoreCommitOperationsInput {
+            acknowledgement: None,
             control: graph.commit.control().cloned(),
             device_join_attempts: graph.commit.device_join_attempts().to_vec(),
             device_join_outcomes: graph.commit.device_join_outcomes().to_vec(),

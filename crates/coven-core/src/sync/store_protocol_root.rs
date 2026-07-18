@@ -6,9 +6,10 @@ use crate::keys::UserKeypair;
 use super::membership::{AuthorHead, MembershipHeadRef};
 use super::storage::SyncStorage;
 use super::store_commit::{
-    ack_slot_prefix, membership_head_slot_prefix, owner_recovery_semantic_prefix,
-    DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, StoreAck, StoreAckRef, StoreCreationId,
-    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreHistoryCut, StoreProtocolRoot,
+    ack_slot_prefix, membership_head_slot_prefix, owner_recovery_semantic_prefix, CommitFrontier,
+    DeviceStreamAnchor, GrantStreamAnchor, ObjectHash, ResolvedStoreDeviceState, StoreAck,
+    StoreAckExclusionState, StoreAckRef, StoreCreationId, StoreDeviceRegistrationOrigin,
+    StoreDeviceRegistrationRef, StoreDeviceStateRef, StoreHistoryCut, StoreProtocolRoot,
     StoreRootRef, StoreSerialPredecessor, StreamActivationId, SuccessorLink,
 };
 use super::store_objects::StoreObjectError;
@@ -740,12 +741,39 @@ async fn prepare_founder_graph(
             founder_registration: registration_ref.clone(),
         }),
     };
+    let resolved_devices = ResolvedStoreDeviceState::founder(
+        &root_ref,
+        registration_ref.clone(),
+        &root_value.descriptor.founder_pubkey,
+        root_value.descriptor.founder_grant.clone(),
+        &root_value.descriptor.founder_recovery,
+    )
+    .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+    let (device_state, exclusions) = match &frontier {
+        StoreHistoryCut::MergeConcurrent(commits) => (
+            StoreDeviceStateRef::merge_concurrent(
+                CommitFrontier::MergeConcurrent(commits.clone()),
+                &resolved_devices,
+            )
+            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?,
+            StoreAckExclusionState::MergeConcurrent {
+                proposal_freezes: Vec::new(),
+            },
+        ),
+        StoreHistoryCut::Serial(predecessor) => (
+            StoreDeviceStateRef::serial(predecessor.clone(), &resolved_devices)
+                .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?,
+            StoreAckExclusionState::Serial,
+        ),
+    };
     let initial_ack_value = StoreAck::signed(
         root_hash,
         registration_ref.clone(),
         1,
-        None,
         frontier,
+        device_state,
+        None,
+        exclusions,
         founder_timestamp.to_string(),
         SuccessorLink {
             activation: StreamActivationId::store_acknowledgements(&root_ref, &registration_ref),
@@ -765,7 +793,8 @@ async fn prepare_founder_graph(
         )
         .map_err(StoreObjectError::from)?;
     let initial_ack_ref = StoreAckRef {
-        revision: 1,
+        registration: registration_ref.clone(),
+        sequence: 1,
         ack_hash: initial_ack_value.ack_hash(),
         object: initial_ack_prepared.reference().clone(),
     };

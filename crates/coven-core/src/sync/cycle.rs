@@ -967,11 +967,17 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     }
 
     if rotation_pending.is_none() {
-        super::store_ack::drain_outbound_store_acks(db, storage)
-            .await
-            .map_err(|error| {
-                SyncCycleFailure::operation("publish queued Store acknowledgement", error)
-            })?;
+        super::store_ack::drain_outbound_store_acks(
+            db,
+            storage,
+            serial_coordination,
+            user_keypair,
+            merge_chain,
+        )
+        .await
+        .map_err(|error| {
+            SyncCycleFailure::operation("publish queued Store acknowledgement", error)
+        })?;
         let frontier = db
             .materialized_frontier()
             .await
@@ -981,9 +987,15 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
         super::store_ack::stage_store_ack(db, storage, frontier, sync_time.clone(), user_keypair)
             .await
             .map_err(|error| format!("stage Store acknowledgement: {error}"))?;
-        super::store_ack::drain_outbound_store_acks(db, storage)
-            .await
-            .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
+        super::store_ack::drain_outbound_store_acks(
+            db,
+            storage,
+            serial_coordination,
+            user_keypair,
+            merge_chain,
+        )
+        .await
+        .map_err(|error| SyncCycleFailure::operation("publish Store acknowledgement", error))?;
         let reclaim_membership = match (
             merge_membership.as_ref(),
             serial_membership_after_pull.as_ref(),

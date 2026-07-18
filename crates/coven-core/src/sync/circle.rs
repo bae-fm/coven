@@ -1049,6 +1049,7 @@ mod tests {
             },
             Some(membership_authority.clone()),
             super::super::store_commit::StoreCommitOperationsInput {
+                acknowledgement: None,
                 control: None,
                 device_join_attempts: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -1162,6 +1163,7 @@ mod tests {
             },
             control.value.membership_authority.clone(),
             super::super::store_commit::StoreCommitOperationsInput {
+                acknowledgement: None,
                 control: None,
                 device_join_attempts: Vec::new(),
                 device_join_outcomes: Vec::new(),

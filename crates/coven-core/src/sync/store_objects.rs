@@ -391,16 +391,87 @@ pub async fn load_store_ack_ref(
 ) -> Result<VerifiedObject<StoreAck>, StoreObjectError> {
     let context =
         ProtocolObjectContext::store(store_root.store_root_hash, ProtocolObjectDomain::StoreAck);
-    let semantic_prefix = ack_slot_prefix(&registration.device_id.to_string(), reference.revision);
+    let semantic_prefix = ack_slot_prefix(&registration.device_id.to_string(), reference.sequence);
     load_exact_object(
         storage,
         &context,
         &reference.object,
         &semantic_prefix,
         reference.ack_hash,
-        |bytes| StoreAck::parse_at(bytes, store_root.store_root_hash, reference, registration),
+        |bytes| StoreAck::parse_at(bytes, store_root, reference, registration),
     )
     .await
+}
+
+pub async fn load_store_ack_predecessor(
+    storage: &dyn SyncStorage,
+    store_root: &StoreRootRef,
+    successor_ref: &StoreAckRef,
+    successor: &StoreAck,
+    registration: &StoreDeviceRegistration,
+) -> Result<Option<(StoreAckRef, VerifiedObject<StoreAck>)>, StoreObjectError> {
+    if successor.registration != successor_ref.registration
+        || successor.sequence != successor_ref.sequence
+    {
+        return Err(StoreObjectError::InvalidObject {
+            semantic_prefix: ack_slot_prefix(
+                &registration.device_id.to_string(),
+                successor_ref.sequence,
+            ),
+            key: successor_ref.object.slot().logical_key().to_string(),
+            source: Box::new(StoreProtocolError::Malformed(
+                "Store acknowledgement differs from its exact reference".to_string(),
+            )),
+        });
+    }
+    let Some(object) = successor.successor.predecessor.as_ref() else {
+        return Ok(None);
+    };
+    let sequence =
+        successor
+            .sequence
+            .checked_sub(1)
+            .ok_or_else(|| StoreObjectError::InvalidObject {
+                semantic_prefix: ack_slot_prefix(&registration.device_id.to_string(), 0),
+                key: object.slot().logical_key().to_string(),
+                source: Box::new(StoreProtocolError::InvalidAckSequence(0)),
+            })?;
+    let context =
+        ProtocolObjectContext::store(store_root.store_root_hash, ProtocolObjectDomain::StoreAck);
+    let semantic_prefix = ack_slot_prefix(&registration.device_id.to_string(), sequence);
+    let bytes = storage
+        .read_protocol_object(&context, object, &semantic_prefix)
+        .await?;
+    let ack_hash = StoreAck::semantic_hash_from_bytes(&bytes).map_err(|source| {
+        StoreObjectError::InvalidObject {
+            semantic_prefix: semantic_prefix.clone(),
+            key: object.slot().logical_key().to_string(),
+            source: Box::new(source),
+        }
+    })?;
+    let reference = StoreAckRef {
+        registration: successor_ref.registration.clone(),
+        sequence,
+        ack_hash,
+        object: object.clone(),
+    };
+    let value =
+        StoreAck::parse_at(&bytes, store_root, &reference, registration).map_err(|source| {
+            StoreObjectError::InvalidObject {
+                semantic_prefix,
+                key: object.slot().logical_key().to_string(),
+                source: Box::new(source),
+            }
+        })?;
+    Ok(Some((
+        reference.clone(),
+        VerifiedObject {
+            value,
+            bytes,
+            semantic_hash: reference.ack_hash,
+            object: reference.object.clone(),
+        },
+    )))
 }
 
 pub async fn load_owner_recovery_node_ref(

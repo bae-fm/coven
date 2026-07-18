@@ -393,6 +393,50 @@ pub(crate) async fn load_device_join_authorization(
     }
 }
 
+async fn validate_commit_acknowledgement(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    activating_author: &StoreDeviceRegistration,
+) -> Result<(), RegistrationLoadError> {
+    let Some(reference) = commit.acknowledgement() else {
+        return Ok(());
+    };
+    let ack = load_store_ack_ref(storage, root, reference, activating_author)
+        .await
+        .map_err(RegistrationLoadError::Object)?
+        .value;
+    let predecessor_cut = commit
+        .order
+        .predecessor_cut()
+        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+    if ack.registration != commit.author_registration
+        || ack.store_cut != predecessor_cut
+        || ack.device_state != commit.device_state
+    {
+        return Err(RegistrationLoadError::Invalid(
+            "Store acknowledgement differs from its activating commit predecessor".to_string(),
+        ));
+    }
+    if let Some(snapshot) = &ack.snapshot {
+        let (_, metadata) = super::store_snapshot::load_store_snapshot_ref(
+            storage,
+            root,
+            &commit.author_registration,
+            activating_author,
+            snapshot,
+        )
+        .await
+        .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
+        if !ack.store_cut.frontier().covers(&metadata.coverage) {
+            return Err(RegistrationLoadError::Invalid(
+                "Store acknowledgement does not cover its exact snapshot".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn load_commit_registrations(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -401,6 +445,13 @@ async fn load_commit_registrations(
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
 ) -> Result<Vec<(StoreDeviceRegistration, StoreDeviceRegistrationActivation)>, RegistrationLoadError>
 {
+    Box::pin(validate_commit_acknowledgement(
+        storage,
+        root,
+        commit,
+        activating_author,
+    ))
+    .await?;
     Box::pin(validate_commit_join_attempts(
         storage,
         root,
@@ -994,9 +1045,9 @@ async fn registration_activation(
             .await
             .map_err(RegistrationLoadError::Object)?
             .value;
-            if initial_ack.revision != 1
-                || initial_ack.predecessor.is_some()
-                || initial_ack.author_registration != activated.registration
+            if initial_ack.sequence != 1
+                || initial_ack.successor.predecessor.is_some()
+                || initial_ack.registration != activated.registration
                 || initial_ack.store_cut != node_value.readiness.bootstrap_cut
             {
                 return Err(RegistrationLoadError::Invalid(
@@ -1680,10 +1731,10 @@ async fn discover_merge_owner_recoveries(
         );
         if !origin_matches
             || registration.author_pubkey != node.owner_pubkey
-            || initial_ack.revision != 1
-            || initial_ack.predecessor.is_some()
+            || initial_ack.sequence != 1
+            || initial_ack.successor.predecessor.is_some()
             || initial_ack.store_cut != node.readiness.bootstrap_cut
-            || initial_ack.author_registration != node.readiness.registration
+            || initial_ack.registration != node.readiness.registration
         {
             return Err(StorePullError::Database(
                 "Owner recovery readiness differs from its registration graph".into(),

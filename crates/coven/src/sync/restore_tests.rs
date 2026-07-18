@@ -1974,18 +1974,27 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
         .export_activated_device_continuation(&joiner_keypair)
         .await
         .expect("export exact activated continuation");
-    let source_device_snapshots = db_owner
+    let (source_device_snapshots, materialized_commits_without_device_state) = db_owner
         .call(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM store_device_state_snapshots",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(DbError::from)
+            Ok((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM store_device_state_snapshots",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM materialized_commits AS commits \
+                     LEFT JOIN store_device_state_snapshots AS states \
+                       ON states.commit_ref = commits.commit_ref \
+                     WHERE states.commit_ref IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+            ))
         })
         .await
-        .expect("count source device-state snapshots");
-    assert_eq!(source_device_snapshots, 2);
+        .expect("verify source device-state snapshots");
+    assert_eq!(materialized_commits_without_device_state, 0);
     let published_snapshot_bytes = db_owner
         .call(|conn| {
             conn.query_row(
@@ -2000,11 +2009,32 @@ async fn run_restore_bootstrap_backfills_blob_files_for_snapshot_rows() {
     let published_snapshot: crate::sync::store_commit::SnapshotMeta =
         serde_json::from_slice(&published_snapshot_bytes)
             .expect("parse published snapshot metadata");
-    assert!(published_snapshot
-        .coverage
-        .into_refs()
-        .values()
-        .any(|reference| Some(reference) == continuation.latest_position.as_ref()));
+    let snapshot_coverage = published_snapshot.coverage.into_refs();
+    let latest_position = continuation
+        .latest_position
+        .as_ref()
+        .expect("continuation has a latest Store position");
+    let source_registration = crate::sync::store_commit::StoreDeviceRegistration::parse_at(
+        &continuation.registration_bytes,
+        &store_root,
+        continuation.registration.device_id,
+    )
+    .expect("parse continuation Store registration");
+    let latest_commit = crate::sync::store_objects::load_commit_ref(
+        components.storage().as_ref(),
+        store_root.store_root_hash,
+        latest_position,
+        &source_registration,
+    )
+    .await
+    .expect("load continuation tip commit")
+    .value;
+    assert!(latest_commit
+        .order
+        .predecessor()
+        .is_some_and(|predecessor| snapshot_coverage
+            .values()
+            .any(|covered| covered == predecessor)));
     let device_signing_key: [u8; crate::keys::SIGN_SECRETKEYBYTES] =
         hex::decode(&continuation.device_signing_secret)
             .expect("decode continuation device signing key")

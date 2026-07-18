@@ -1880,7 +1880,7 @@ pub async fn abandon_device_join(
         return Err(DeviceJoinError::AttemptMismatch);
     }
     abandonment_ref.verify(&abandonment_object, &owner)?;
-    let plan = crate::sync::store_outbound::prepare_device_join_commit(
+    let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
         coordination,
@@ -1889,12 +1889,12 @@ pub async fn abandon_device_join(
         authorization.merge_chain(),
     )
     .await?;
-    let activation = crate::sync::store_outbound::activate_device_join_commit(
+    let activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
         coordination,
         plan,
-        crate::sync::store_outbound::DeviceJoinStoreBatch::Abandonment(abandonment_ref.clone()),
+        crate::sync::store_outbound::StoreOperationBatch::Abandonment(abandonment_ref.clone()),
     )
     .await?;
     let abandonment = DeviceJoinAbandonment {
@@ -2238,7 +2238,7 @@ pub async fn accept_device_registration_request(
         )),
     };
     advance_store_journal(db, &offered, requested.clone()).await?;
-    let plan = crate::sync::store_outbound::prepare_device_join_commit(
+    let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
         coordination,
@@ -2291,12 +2291,12 @@ pub async fn accept_device_registration_request(
         attempt_hash: attempt.attempt_hash(),
         object: prepared.reference().clone(),
     };
-    let activation = crate::sync::store_outbound::activate_device_join_commit(
+    let activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
         coordination,
         plan,
-        crate::sync::store_outbound::DeviceJoinStoreBatch::Attempt(attempt_ref.clone()),
+        crate::sync::store_outbound::StoreOperationBatch::Attempt(attempt_ref.clone()),
     )
     .await?;
     let attempt_id = offer.attempt_id;
@@ -2913,7 +2913,7 @@ pub async fn cancel_device_join(
     if verified_outcome.value != outcome {
         return Err(DeviceJoinError::AttemptMismatch);
     }
-    let plan = crate::sync::store_outbound::prepare_device_join_commit(
+    let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
         coordination,
@@ -2922,12 +2922,12 @@ pub async fn cancel_device_join(
         authorization.merge_chain(),
     )
     .await?;
-    let outcome_activation = crate::sync::store_outbound::activate_device_join_commit(
+    let outcome_activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
         coordination,
         plan,
-        crate::sync::store_outbound::DeviceJoinStoreBatch::Outcome {
+        crate::sync::store_outbound::StoreOperationBatch::Outcome {
             outcome: outcome_ref.clone(),
             registration: None,
         },
@@ -3061,7 +3061,7 @@ pub async fn prepare_device_join_cleanup(
     {
         return Err(DeviceJoinError::ProviderAdministratorRequired);
     }
-    let plan = crate::sync::store_outbound::prepare_device_join_commit(
+    let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
         coordination,
@@ -3780,7 +3780,7 @@ pub async fn activate_device_join_cleanup(
         .await
         .map_err(database_error)?
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    let plan = crate::sync::store_outbound::prepare_device_join_commit(
+    let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
         coordination,
@@ -3815,12 +3815,12 @@ pub async fn activate_device_join_cleanup(
     {
         return Err(DeviceJoinError::CleanupMismatch);
     }
-    let activation_ref = crate::sync::store_outbound::activate_device_join_commit(
+    let activation_ref = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
         coordination,
         plan,
-        crate::sync::store_outbound::DeviceJoinStoreBatch::CleanupReceipt(receipt.receipt.clone()),
+        crate::sync::store_outbound::StoreOperationBatch::CleanupReceipt(receipt.receipt.clone()),
     )
     .await?;
     let activation = DeviceJoinCleanupActivation {
@@ -4326,7 +4326,7 @@ pub async fn finalize_device_join(
         .await
         .map_err(database_error)?
         .ok_or(DeviceJoinError::ActiveDeviceRequired)?;
-    let plan = crate::sync::store_outbound::prepare_device_join_commit(
+    let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
         coordination,
@@ -4335,12 +4335,12 @@ pub async fn finalize_device_join(
         authorization.merge_chain(),
     )
     .await?;
-    let activation_ref = crate::sync::store_outbound::activate_device_join_commit(
+    let activation_ref = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
         coordination,
         plan,
-        crate::sync::store_outbound::DeviceJoinStoreBatch::Outcome {
+        crate::sync::store_outbound::StoreOperationBatch::Outcome {
             outcome: outcome_ref.clone(),
             registration: Some(activated_registration),
         },
@@ -4691,7 +4691,7 @@ pub async fn authorize_device_provider_access(
     }
     let grant_ref =
         StoreMemberProviderAccessGrantRef::from_grant(&grant, prepared.reference().clone());
-    let plan = crate::sync::store_outbound::prepare_device_join_commit(
+    let plan = crate::sync::store_outbound::prepare_store_operation_commit(
         db,
         storage,
         coordination,
@@ -4700,12 +4700,12 @@ pub async fn authorize_device_provider_access(
         authorization.merge_chain(),
     )
     .await?;
-    let activation = crate::sync::store_outbound::activate_device_join_commit(
+    let activation = crate::sync::store_outbound::activate_store_operation_commit(
         db,
         storage,
         coordination,
         plan,
-        crate::sync::store_outbound::DeviceJoinStoreBatch::ProviderAccessGrant(grant_ref.clone()),
+        crate::sync::store_outbound::StoreOperationBatch::ProviderAccessGrant(grant_ref.clone()),
     )
     .await?;
     let admission = if provider_admin.provider == request.peer_provider {

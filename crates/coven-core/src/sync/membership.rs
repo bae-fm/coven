@@ -218,7 +218,8 @@ impl SerialAuthorizationState {
         }
         let authorized = self.membership.can_write(&author.author_pubkey)
             || (self.membership.contains(&author.author_pubkey)
-                && is_exact_self_retirement_only(commit));
+                && (is_exact_self_retirement_only(commit)
+                    || is_exact_acknowledgement_only(commit)));
         if !authorized {
             return Err(SerialMembershipError::AuthorIsNotWriter(
                 author.author_pubkey.clone(),
@@ -289,6 +290,12 @@ fn is_exact_self_retirement_only(commit: &StoreBatchCommit) -> bool {
         && commit.circle_controls().is_empty()
         && commit.store_package().is_none()
         && commit.circle_packages().is_empty()
+}
+
+fn is_exact_acknowledgement_only(commit: &StoreBatchCommit) -> bool {
+    commit
+        .operations()
+        .is_some_and(|operations| operations.is_acknowledgement_only())
 }
 
 impl SerialMembershipState {

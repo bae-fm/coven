@@ -505,6 +505,16 @@ impl StoreHistoryCut {
             Self::MergeConcurrent(_) => None,
         }
     }
+
+    pub fn frontier(&self) -> CommitFrontier {
+        match self {
+            Self::MergeConcurrent(commits) => CommitFrontier::MergeConcurrent(commits.clone()),
+            Self::Serial(StoreSerialPredecessor::Genesis { .. }) => CommitFrontier::Serial(None),
+            Self::Serial(StoreSerialPredecessor::Commit(commit)) => {
+                CommitFrontier::Serial(Some(commit.clone()))
+            }
+        }
+    }
 }
 
 impl CommitFrontier {
@@ -564,6 +574,30 @@ impl CommitFrontier {
         match self {
             Self::MergeConcurrent(_) => WritePolicy::MergeConcurrent,
             Self::Serial(_) => WritePolicy::Serial,
+        }
+    }
+
+    pub fn covers(&self, covered: &Self) -> bool {
+        match (self, covered) {
+            (Self::MergeConcurrent(current), Self::MergeConcurrent(covered)) => {
+                covered.iter().all(|(stream, covered_ref)| {
+                    current.get(stream).is_some_and(|current_ref| {
+                        current_ref.coord.sequence() > covered_ref.coord.sequence()
+                            || current_ref.coord.sequence() == covered_ref.coord.sequence()
+                                && current_ref == covered_ref
+                    })
+                })
+            }
+            (Self::Serial(current), Self::Serial(covered)) => match (current, covered) {
+                (_, None) => true,
+                (Some(current), Some(covered)) => {
+                    current.coord.sequence() > covered.coord.sequence()
+                        || current.coord.sequence() == covered.coord.sequence()
+                            && current == covered
+                }
+                (None, Some(_)) => false,
+            },
+            _ => false,
         }
     }
 
@@ -938,6 +972,7 @@ pub enum CandidateExclusiveObjectRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreCommitOperations {
+    pub acknowledgement: Option<StoreAckRef>,
     pub control: Option<StoreControl>,
     pub device_join_attempts: Vec<DeviceJoinAttemptRef>,
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
@@ -954,6 +989,14 @@ pub struct StoreCommitOperations {
 
 impl StoreCommitOperations {
     fn is_empty(&self) -> bool {
+        self.acknowledgement.is_none() && self.has_no_other_operations()
+    }
+
+    pub(crate) fn is_acknowledgement_only(&self) -> bool {
+        self.acknowledgement.is_some() && self.has_no_other_operations()
+    }
+
+    fn has_no_other_operations(&self) -> bool {
         self.control.is_none()
             && self.device_join_attempts.is_empty()
             && self.device_join_outcomes.is_empty()
@@ -984,6 +1027,7 @@ pub enum StoreCommitBody {
 }
 
 pub struct StoreCommitOperationsInput<'a> {
+    pub acknowledgement: Option<StoreAckRef>,
     pub control: Option<StoreControl>,
     pub device_join_attempts: Vec<DeviceJoinAttemptRef>,
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
@@ -1058,6 +1102,11 @@ impl StoreBatchCommit {
     pub fn control(&self) -> Option<&StoreControl> {
         self.operations()
             .and_then(|operations| operations.control.as_ref())
+    }
+
+    pub fn acknowledgement(&self) -> Option<&StoreAckRef> {
+        self.operations()
+            .and_then(|operations| operations.acknowledgement.as_ref())
     }
 
     pub fn serial_recovery_activation(&self) -> Option<&SerialRecoveryActivation> {
@@ -1198,6 +1247,7 @@ impl StoreBatchCommit {
             device_state,
             membership_authority,
             StoreCommitOperationsInput {
+                acknowledgement: None,
                 control: None,
                 device_join_attempts: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -1240,6 +1290,7 @@ impl StoreBatchCommit {
             device_state,
             membership_authority,
             StoreCommitOperationsInput {
+                acknowledgement: None,
                 control,
                 device_join_attempts: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -1281,6 +1332,7 @@ impl StoreBatchCommit {
             device_state,
             membership_authority,
             StoreCommitOperationsInput {
+                acknowledgement: None,
                 control: None,
                 device_join_attempts: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -1450,6 +1502,7 @@ impl StoreBatchCommit {
             device_state,
             membership_authority,
             StoreCommitOperationsInput {
+                acknowledgement: None,
                 control: None,
                 device_join_attempts,
                 device_join_outcomes: Vec::new(),
@@ -1492,6 +1545,7 @@ impl StoreBatchCommit {
             device_state,
             membership_authority,
             StoreCommitOperationsInput {
+                acknowledgement: None,
                 control: None,
                 device_join_attempts: Vec::new(),
                 device_join_outcomes,
@@ -1533,6 +1587,7 @@ impl StoreBatchCommit {
             device_state,
             membership_authority,
             StoreCommitOperationsInput {
+                acknowledgement: None,
                 control: None,
                 device_join_attempts: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -1574,6 +1629,7 @@ impl StoreBatchCommit {
             device_state,
             membership_authority,
             StoreCommitOperationsInput {
+                acknowledgement: None,
                 control: None,
                 device_join_attempts: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -1618,6 +1674,7 @@ impl StoreBatchCommit {
             device_state,
             membership_authority,
             StoreCommitOperationsInput {
+                acknowledgement: None,
                 control: None,
                 device_join_attempts: Vec::new(),
                 device_join_outcomes: Vec::new(),
@@ -1660,6 +1717,7 @@ impl StoreBatchCommit {
             signer,
         )?;
         let StoreCommitOperationsInput {
+            acknowledgement,
             control,
             device_join_attempts,
             device_join_outcomes,
@@ -1678,6 +1736,7 @@ impl StoreBatchCommit {
             &author.author_pubkey,
             control.as_ref(),
         )?;
+        validate_commit_acknowledgement(&acknowledgement, &author_registration)?;
         let stream_id = commit_stream_id(&coord);
         let seq = order.seq();
         let candidate_family =
@@ -1735,6 +1794,7 @@ impl StoreBatchCommit {
             .collect::<Result<Vec<_>, StoreProtocolError>>()?;
         validate_circle_control_refs(order.policy(), &circle_controls)?;
         let operations = StoreCommitOperations {
+            acknowledgement,
             control,
             device_join_attempts,
             device_join_outcomes,
@@ -2016,6 +2076,7 @@ fn validate_commit_body(
                 return Err(StoreProtocolError::EmptyBatch);
             }
             validate_circle_control_refs(order.policy(), &operations.circle_controls)?;
+            validate_commit_acknowledgement(&operations.acknowledgement, author)?;
             validate_device_join_attempt_refs(&operations.device_join_attempts)?;
             validate_device_join_outcome_refs(&operations.device_join_outcomes)?;
             validate_device_join_abandonment_refs(&operations.device_join_abandonments)?;
@@ -2464,6 +2525,29 @@ fn validate_device_registration_refs(
                 revision: 1,
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_commit_acknowledgement(
+    acknowledgement: &Option<StoreAckRef>,
+    author: &StoreDeviceRegistrationRef,
+) -> Result<(), StoreProtocolError> {
+    let Some(acknowledgement) = acknowledgement else {
+        return Ok(());
+    };
+    let expected = format!(
+        "{}.json",
+        ack_slot_prefix(&author.device_id.to_string(), acknowledgement.sequence)
+    );
+    if acknowledgement.registration != *author
+        || acknowledgement.sequence < 2
+        || acknowledgement.object.slot().logical_key() != expected
+    {
+        return Err(StoreProtocolError::Malformed(
+            "Store commit acknowledgement is not the author's exact non-initial acknowledgement"
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -3166,11 +3250,12 @@ impl DeviceReadinessProof {
             return Err(StoreProtocolError::DeviceReadinessMismatch);
         }
         self.registration.verify_registration(registration)?;
-        if initial_ack.author_registration != self.registration
-            || initial_ack.revision != 1
-            || initial_ack.predecessor.is_some()
+        if initial_ack.registration != self.registration
+            || initial_ack.sequence != 1
+            || initial_ack.successor.predecessor.is_some()
             || initial_ack_ref != &self.initial_ack
-            || initial_ack_ref.revision != initial_ack.revision
+            || initial_ack_ref.registration != self.registration
+            || initial_ack_ref.sequence != initial_ack.sequence
             || initial_ack_ref.ack_hash != initial_ack.ack_hash()
             || initial_ack.store_cut != self.bootstrap_cut
         {
@@ -3960,7 +4045,7 @@ impl OwnerRecoveryNode {
                     && predecessor.sequence.checked_add(1) == Some(self.sequence)
             }
         };
-        if !predecessor_matches || self.readiness.initial_ack.revision != 1 {
+        if !predecessor_matches || self.readiness.initial_ack.sequence != 1 {
             return Err(StoreProtocolError::OwnerRecoveryMismatch);
         }
         Ok(())
@@ -4287,10 +4372,12 @@ fn validate_registration_anchors(
 pub struct StoreAck {
     pub version: u32,
     pub store_root_hash: ObjectHash,
-    pub author_registration: StoreDeviceRegistrationRef,
-    pub revision: u64,
-    pub predecessor: Option<StoreAckRef>,
+    pub registration: StoreDeviceRegistrationRef,
+    pub sequence: u64,
     pub store_cut: StoreHistoryCut,
+    pub device_state: StoreDeviceStateRef,
+    pub snapshot: Option<StoreSnapshotRef>,
+    pub exclusions: StoreAckExclusionState,
     pub last_sync: String,
     pub successor: SuccessorLink,
     pub signature: String,
@@ -4299,19 +4386,38 @@ pub struct StoreAck {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreAckRef {
-    pub revision: u64,
+    pub registration: StoreDeviceRegistrationRef,
+    pub sequence: u64,
     pub ack_hash: ObjectHash,
     pub object: ExactObjectRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreAckExclusionState {
+    MergeConcurrent {
+        proposal_freezes: Vec<StoreDeviceProposalAck>,
+    },
+    Serial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreDeviceProposalAck {
+    pub proposal: StoreDeviceExclusionProposalRef,
+    pub target_cut: StoreHistoryCut,
 }
 
 #[derive(Serialize)]
 struct AckSignedFields<'a> {
     version: u32,
     store_root_hash: ObjectHash,
-    author_registration: &'a StoreDeviceRegistrationRef,
-    revision: u64,
-    predecessor: Option<&'a StoreAckRef>,
+    registration: &'a StoreDeviceRegistrationRef,
+    sequence: u64,
     store_cut: &'a StoreHistoryCut,
+    device_state: &'a StoreDeviceStateRef,
+    snapshot: Option<&'a StoreSnapshotRef>,
+    exclusions: &'a StoreAckExclusionState,
     last_sync: &'a str,
     successor: &'a SuccessorLink,
 }
@@ -4319,24 +4425,33 @@ struct AckSignedFields<'a> {
 impl StoreAck {
     pub fn signed(
         store_root_hash: ObjectHash,
-        author_registration: StoreDeviceRegistrationRef,
-        revision: u64,
-        predecessor: Option<StoreAckRef>,
+        registration: StoreDeviceRegistrationRef,
+        sequence: u64,
         store_cut: StoreHistoryCut,
+        device_state: StoreDeviceStateRef,
+        snapshot: Option<StoreSnapshotRef>,
+        exclusions: StoreAckExclusionState,
         last_sync: String,
         successor: SuccessorLink,
         device_signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
-        validate_chained_revision(revision, predecessor.as_ref().map(|value| value.ack_hash))?;
-        validate_store_history_cut(&store_cut)?;
-        validate_ack_history_cut(store_root_hash, &author_registration, &store_cut)?;
+        validate_successor_sequence(sequence, &successor)?;
+        validate_ack_state(
+            store_root_hash,
+            &registration,
+            &store_cut,
+            &device_state,
+            &exclusions,
+        )?;
         let mut ack = Self {
             version: STORE_PROTOCOL_VERSION,
             store_root_hash,
-            author_registration,
-            revision,
-            predecessor,
+            registration,
+            sequence,
             store_cut,
+            device_state,
+            snapshot,
+            exclusions,
             last_sync,
             successor,
             signature: String::new(),
@@ -4352,10 +4467,12 @@ impl StoreAck {
             &AckSignedFields {
                 version: self.version,
                 store_root_hash: self.store_root_hash,
-                author_registration: &self.author_registration,
-                revision: self.revision,
-                predecessor: self.predecessor.as_ref(),
+                registration: &self.registration,
+                sequence: self.sequence,
                 store_cut: &self.store_cut,
+                device_state: &self.device_state,
+                snapshot: self.snapshot.as_ref(),
+                exclusions: &self.exclusions,
                 last_sync: &self.last_sync,
                 successor: &self.successor,
             },
@@ -4378,36 +4495,49 @@ impl StoreAck {
 
     pub fn parse_at(
         bytes: &[u8],
-        expected_store_root_hash: ObjectHash,
+        expected_store_root: &StoreRootRef,
         expected: &StoreAckRef,
         author: &StoreDeviceRegistration,
     ) -> Result<Self, StoreProtocolError> {
         let ack: Self = serde_json::from_slice(bytes)
             .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
         require_version(ack.version)?;
-        if ack.store_root_hash != expected_store_root_hash {
+        if ack.store_root_hash != expected_store_root.store_root_hash {
             return Err(StoreProtocolError::StoreRootMismatch {
-                expected: expected_store_root_hash,
+                expected: expected_store_root.store_root_hash,
                 actual: ack.store_root_hash,
             });
         }
-        ack.author_registration.verify_registration(author)?;
-        if ack.revision != expected.revision {
-            return Err(StoreProtocolError::RelocatedSlot {
-                expected: ack_slot_prefix(&author.device_id.to_string(), expected.revision),
-                actual: ack_slot_prefix(&author.device_id.to_string(), ack.revision),
+        ack.registration.verify_registration(author)?;
+        if ack.registration != expected.registration {
+            return Err(StoreProtocolError::DeviceRegistrationRefMismatch {
+                device_id: expected.registration.device_id.to_string(),
+                revision: 1,
+                expected: expected.registration.registration_hash,
+                actual: ack.registration.registration_hash,
             });
         }
-        validate_chained_revision(
-            ack.revision,
-            ack.predecessor.as_ref().map(|value| value.ack_hash),
-        )?;
-        validate_store_history_cut(&ack.store_cut)?;
-        validate_ack_history_cut(
+        if ack.sequence != expected.sequence {
+            return Err(StoreProtocolError::RelocatedSlot {
+                expected: ack_slot_prefix(&author.device_id.to_string(), expected.sequence),
+                actual: ack_slot_prefix(&author.device_id.to_string(), ack.sequence),
+            });
+        }
+        validate_successor_sequence(ack.sequence, &ack.successor)?;
+        validate_ack_state(
             ack.store_root_hash,
-            &ack.author_registration,
+            &ack.registration,
             &ack.store_cut,
+            &ack.device_state,
+            &ack.exclusions,
         )?;
+        if ack.successor.activation
+            != StreamActivationId::store_acknowledgements(expected_store_root, &ack.registration)
+        {
+            return Err(StoreProtocolError::Malformed(
+                "Store acknowledgement successor uses another stream activation".to_string(),
+            ));
+        }
         if !keys::verify_signature_hex(
             &author.device_signing_pubkey,
             &ack.signature,
@@ -4914,6 +5044,12 @@ pub enum StoreProtocolError {
     UnexpectedControlPredecessor,
     #[error("Store control revision after 1 must name its predecessor hash")]
     MissingControlPredecessor,
+    #[error("Store acknowledgement sequence must start at 1, got {0}")]
+    InvalidAckSequence(u64),
+    #[error("Store acknowledgement sequence 1 must not name a predecessor object")]
+    UnexpectedAckPredecessor,
+    #[error("Store acknowledgement after sequence 1 must name its predecessor object")]
+    MissingAckPredecessor,
     #[error("Store commit for {0:?} must not name its own device as a dependency")]
     OwnDependency(String),
     #[error(
@@ -5397,6 +5533,75 @@ fn validate_ack_history_cut(
         }
     }
     Ok(())
+}
+
+fn validate_successor_sequence(
+    sequence: u64,
+    successor: &SuccessorLink,
+) -> Result<(), StoreProtocolError> {
+    match (sequence, successor.predecessor.is_some()) {
+        (0, _) => Err(StoreProtocolError::InvalidAckSequence(0)),
+        (1, false) => Ok(()),
+        (1, true) => Err(StoreProtocolError::UnexpectedAckPredecessor),
+        (_, true) => Ok(()),
+        (_, false) => Err(StoreProtocolError::MissingAckPredecessor),
+    }
+}
+
+fn validate_ack_state(
+    store_root_hash: ObjectHash,
+    registration: &StoreDeviceRegistrationRef,
+    store_cut: &StoreHistoryCut,
+    device_state: &StoreDeviceStateRef,
+    exclusions: &StoreAckExclusionState,
+) -> Result<(), StoreProtocolError> {
+    validate_store_history_cut(store_cut)?;
+    validate_ack_history_cut(store_root_hash, registration, store_cut)?;
+    let state_matches = match (store_cut, device_state) {
+        (
+            StoreHistoryCut::MergeConcurrent(commits),
+            StoreDeviceStateRef::MergeConcurrent { frontier, .. },
+        ) => frontier == &CommitFrontier::MergeConcurrent(commits.clone()),
+        (
+            StoreHistoryCut::Serial(position),
+            StoreDeviceStateRef::Serial {
+                position: device_position,
+                ..
+            },
+        ) => position == device_position,
+        _ => false,
+    };
+    if !state_matches {
+        return Err(StoreProtocolError::DeviceStateMismatch);
+    }
+    match (store_cut, exclusions) {
+        (
+            StoreHistoryCut::MergeConcurrent(_),
+            StoreAckExclusionState::MergeConcurrent { proposal_freezes },
+        ) => {
+            if proposal_freezes
+                .windows(2)
+                .any(|pair| pair[0].proposal.proposal_id >= pair[1].proposal.proposal_id)
+                || proposal_freezes
+                    .iter()
+                    .any(|freeze| !matches!(freeze.target_cut, StoreHistoryCut::MergeConcurrent(_)))
+            {
+                return Err(StoreProtocolError::DeviceStateMismatch);
+            }
+            for freeze in proposal_freezes {
+                validate_store_history_cut(&freeze.target_cut)?;
+            }
+            Ok(())
+        }
+        (StoreHistoryCut::Serial(_), StoreAckExclusionState::Serial) => Ok(()),
+        _ => Err(StoreProtocolError::WritePolicyMismatch {
+            expected: device_state.write_policy(),
+            actual: match exclusions {
+                StoreAckExclusionState::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
+                StoreAckExclusionState::Serial => WritePolicy::Serial,
+            },
+        }),
+    }
 }
 
 fn validate_membership_coord(coord: &MembershipCoord) -> Result<(), StoreProtocolError> {
@@ -5927,15 +6132,24 @@ mod tests {
                 b"other commit",
             ),
         };
-        let other_cut =
-            StoreHistoryCut::MergeConcurrent(BTreeMap::from([(stream_id, other_commit)]));
+        let other_frontier = BTreeMap::from([(stream_id, other_commit)]);
+        let other_cut = StoreHistoryCut::MergeConcurrent(other_frontier.clone());
+        let other_device_state = StoreDeviceStateRef::MergeConcurrent {
+            frontier: CommitFrontier::MergeConcurrent(other_frontier),
+            recovery: Vec::new(),
+            state_hash: ObjectHash::digest(b"other device state"),
+        };
         let device_signer = registration.device_signer(&joiner).unwrap();
         let ack = StoreAck::signed(
             fixture.root_ref.store_root_hash,
             registration_ref.clone(),
             1,
-            None,
             other_cut.clone(),
+            other_device_state,
+            None,
+            StoreAckExclusionState::MergeConcurrent {
+                proposal_freezes: Vec::new(),
+            },
             "2026-07-16T00:00:00Z".to_string(),
             SuccessorLink {
                 activation: StreamActivationId::store_acknowledgements(
@@ -5949,7 +6163,8 @@ mod tests {
         )
         .unwrap();
         let ack_ref = StoreAckRef {
-            revision: 1,
+            registration: registration_ref.clone(),
+            sequence: 1,
             ack_hash: ack.ack_hash(),
             object: exact("store-v1/acks/joiner/1.json".to_string(), &ack.to_bytes()),
         };
@@ -5989,15 +6204,23 @@ mod tests {
                 b"registration",
             ),
         };
+        let store_cut = StoreHistoryCut::Serial(StoreSerialPredecessor::Genesis {
+            root: root_ref.clone(),
+            founder_registration: registration_ref.clone(),
+        });
+        let device_state = StoreDeviceStateRef::Serial {
+            position: store_cut.serial_predecessor().unwrap().clone(),
+            recovery: Vec::new(),
+            state_hash: ObjectHash::digest(b"ack semantic hash device state"),
+        };
         let ack = StoreAck::signed(
             store_root_hash,
             registration_ref.clone(),
             1,
+            store_cut,
+            device_state,
             None,
-            StoreHistoryCut::Serial(StoreSerialPredecessor::Genesis {
-                root: root_ref.clone(),
-                founder_registration: registration_ref.clone(),
-            }),
+            StoreAckExclusionState::Serial,
             "2026-07-16T00:00:00Z".to_string(),
             SuccessorLink {
                 activation: StreamActivationId::store_acknowledgements(
@@ -6015,6 +6238,64 @@ mod tests {
 
         assert_eq!(semantic_hash, ack.ack_hash());
         assert_ne!(semantic_hash, ObjectHash::digest(&bytes));
+    }
+
+    #[test]
+    fn store_ack_wire_shape_binds_activation_state_without_a_parallel_predecessor_ref() {
+        let signer = UserKeypair::generate();
+        let store_root_hash = ObjectHash::digest(b"ack wire shape Store root");
+        let root_ref = StoreRootRef {
+            store_root_id: ObjectHash::digest(b"ack wire shape Store id"),
+            store_root_hash,
+            object: exact(store_protocol_root_logical_key().to_string(), b"Store root"),
+        };
+        let origin = StoreDeviceRegistrationOrigin::Founder {
+            creation_id: StoreCreationId::from_nonce("ack wire shape founder"),
+        };
+        let registration_ref = StoreDeviceRegistrationRef {
+            device_id: StoreDeviceId::derive(&root_ref, &origin),
+            registration_hash: ObjectHash::digest(b"ack wire shape registration"),
+            object: exact(
+                "store-v1/device-registrations/founder.json".to_string(),
+                b"registration",
+            ),
+        };
+        let store_cut = StoreHistoryCut::Serial(StoreSerialPredecessor::Genesis {
+            root: root_ref.clone(),
+            founder_registration: registration_ref.clone(),
+        });
+        let device_state = StoreDeviceStateRef::Serial {
+            position: store_cut.serial_predecessor().unwrap().clone(),
+            recovery: Vec::new(),
+            state_hash: ObjectHash::digest(b"ack wire shape device state"),
+        };
+        let ack = StoreAck::signed(
+            store_root_hash,
+            registration_ref,
+            1,
+            store_cut,
+            device_state,
+            None,
+            StoreAckExclusionState::Serial,
+            "2026-07-18T00:00:00Z".to_string(),
+            SuccessorLink {
+                activation: StreamActivationId::from_hash(ObjectHash::digest(b"ack stream")),
+                predecessor: None,
+                next_slot: slot("store-v1/acks/founder/2.json".to_string()),
+            },
+            &signer,
+        )
+        .unwrap();
+        let value = serde_json::to_value(ack).unwrap();
+
+        assert!(value.get("registration").is_some());
+        assert!(value.get("sequence").is_some());
+        assert!(value.get("device_state").is_some());
+        assert!(value.get("snapshot").is_some());
+        assert!(value.get("exclusions").is_some());
+        assert!(value.get("author_registration").is_none());
+        assert!(value.get("revision").is_none());
+        assert!(value.get("predecessor").is_none());
     }
 
     #[test]

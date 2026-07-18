@@ -301,11 +301,11 @@ async fn load_ack_stream(
     };
     let context =
         ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreAck);
-    let mut revision = 1_u64;
+    let mut sequence = 1_u64;
     let mut predecessor = None;
     let mut acknowledgements = Vec::new();
     loop {
-        let prefix = ack_slot_prefix(&registration.device_id.to_string(), revision);
+        let prefix = ack_slot_prefix(&registration.device_id.to_string(), sequence);
         let (bytes, object) = match storage.read_protocol_slot(&context, &slot, &prefix).await {
             Ok(value) => value,
             Err(StorageError::NotFound(_)) => break,
@@ -314,14 +314,14 @@ async fn load_ack_stream(
         let semantic_hash = StoreAck::semantic_hash_from_bytes(&bytes)
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
         let reference = StoreAckRef {
-            revision,
+            registration: registration_ref.clone(),
+            sequence,
             ack_hash: semantic_hash,
             object,
         };
-        let ack = StoreAck::parse_at(&bytes, root.store_root_hash, &reference, registration)
+        let ack = StoreAck::parse_at(&bytes, root, &reference, registration)
             .map_err(|error| StoreReclaimError::Authorization(error.to_string()))?;
-        if ack.author_registration != *registration_ref
-            || ack.predecessor != predecessor
+        if ack.registration != *registration_ref
             || ack.successor.predecessor
                 != predecessor
                     .as_ref()
@@ -334,8 +334,8 @@ async fn load_ack_stream(
         slot = ack.successor.next_slot.clone();
         predecessor = Some(reference);
         acknowledgements.push(ack);
-        revision = revision.checked_add(1).ok_or_else(|| {
-            StoreReclaimError::Authorization("acknowledgement revision overflow".to_string())
+        sequence = sequence.checked_add(1).ok_or_else(|| {
+            StoreReclaimError::Authorization("acknowledgement sequence overflow".to_string())
         })?;
     }
     Ok(acknowledgements)
@@ -377,7 +377,7 @@ async fn require_registered_device_acks(
                     member: registration.author_pubkey.clone(),
                     device_id: device_id.to_string(),
                 })?;
-        if ack.author_registration.device_id != device_id {
+        if ack.registration.device_id != device_id {
             return Err(StoreReclaimError::AckAuthorMismatch {
                 device_id: device_id.to_string(),
             });

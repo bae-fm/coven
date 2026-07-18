@@ -255,7 +255,8 @@ macro_rules! coven_tables {
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     ack_ref TEXT NOT NULL CHECK (json_valid(ack_ref)),
     ack_bytes BLOB NOT NULL,
-    prepared_object TEXT NOT NULL CHECK (json_valid(prepared_object))
+    prepared_object TEXT NOT NULL CHECK (json_valid(prepared_object)),
+    activation TEXT NOT NULL CHECK (json_valid(activation))
 "
         );
         $visit!(
@@ -264,6 +265,14 @@ macro_rules! coven_tables {
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     ack_ref TEXT NOT NULL CHECK (json_valid(ack_ref)),
     successor_slot TEXT NOT NULL CHECK (json_valid(successor_slot))
+"
+        );
+        $visit!(
+            activated_store_acks,
+            "
+    device_id TEXT PRIMARY KEY,
+    ack_ref TEXT NOT NULL CHECK (json_valid(ack_ref)),
+    activating_commit TEXT NOT NULL CHECK (json_valid(activating_commit))
 "
         );
         $visit!(

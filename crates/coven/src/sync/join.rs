@@ -1183,18 +1183,21 @@ pub(crate) async fn open_db_and_pull(
         .await
         .map_err(|error| BootstrapError::Database(error.to_string()))?;
         let mut ack_chain = vec![(continuation.latest_ack.clone(), latest_ack.value)];
-        while let Some(predecessor) = ack_chain
-            .last()
-            .and_then(|(_, acknowledgement)| acknowledgement.predecessor.clone())
-        {
-            let loaded = crate::sync::store_objects::load_store_ack_ref(
-                storage,
-                &store_root,
-                &predecessor,
-                &registration,
-            )
-            .await
-            .map_err(|error| BootstrapError::Database(error.to_string()))?;
+        loop {
+            let (successor_ref, successor) = ack_chain.last().expect("ack chain is nonempty");
+            let Some((predecessor, loaded)) =
+                crate::sync::store_objects::load_store_ack_predecessor(
+                    storage,
+                    &store_root,
+                    successor_ref,
+                    successor,
+                    &registration,
+                )
+                .await
+                .map_err(|error| BootstrapError::Database(error.to_string()))?
+            else {
+                break;
+            };
             ack_chain.push((predecessor, loaded.value));
         }
         let latest_snapshot = match &continuation.latest_snapshot {

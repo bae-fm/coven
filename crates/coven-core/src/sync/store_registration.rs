@@ -13,13 +13,13 @@ use super::store_commit::{
     snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef, CandidateFamilyId, CommitFrontier,
     DeviceJoinAttempt, DeviceJoinAttemptRef, DeviceReadinessProof, DeviceRecoveryId,
     DeviceRecoveryReadiness, DeviceStreamAnchor, ObjectHash, OwnerRecoveryNode,
-    OwnerRecoveryNodeRef, OwnerRecoveryPosition, SerialRecoveryActivation, StoreAck, StoreAckRef,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor, StoreCommitCoord, StoreCommitOrder,
-    StoreDeviceHead, StoreDeviceRegistration, StoreDeviceRegistrationActivation,
-    StoreDeviceRegistrationActivationRef, StoreDeviceRegistrationOrigin,
-    StoreDeviceRegistrationRef, StoreDeviceSelfRetirement, StoreDeviceSelfRetirementRef,
-    StoreHistoryCut, StoreSerialHead, StoreSerialHeadState, StoreSerialPredecessor, SuccessorLink,
-    SERIAL_STREAM_ID,
+    OwnerRecoveryNodeRef, OwnerRecoveryPosition, SerialRecoveryActivation, StoreAck,
+    StoreAckExclusionState, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor,
+    StoreCommitCoord, StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration,
+    StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
+    StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceSelfRetirement,
+    StoreDeviceSelfRetirementRef, StoreDeviceStateRef, StoreHistoryCut, StoreSerialHead,
+    StoreSerialHeadState, StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
 };
 use super::store_objects::StoreObjectError;
 
@@ -60,8 +60,7 @@ enum RetirementPublication {
         head_prepared: PreparedExactObject,
     },
     Serial {
-        base_head_bytes: Option<Vec<u8>>,
-        base_head_version: Option<super::storage::VersionToken>,
+        base_head: super::storage::VersionedObject,
         head_bytes: Vec<u8>,
         authorization_after: super::membership::SerialAuthorizationState,
     },
@@ -192,13 +191,14 @@ pub(crate) async fn install_existing_founder_device(
     let unverified_ack: StoreAck = serde_json::from_slice(&ack_bytes)
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
     let ack_ref = StoreAckRef {
-        revision: unverified_ack.revision,
+        registration: registration_ref.clone(),
+        sequence: unverified_ack.sequence,
         ack_hash: unverified_ack.ack_hash(),
         object: ack_prepared.reference().clone(),
     };
-    let ack = StoreAck::parse_at(&ack_bytes, root.store_root_hash, &ack_ref, &founder.value)
+    let ack = StoreAck::parse_at(&ack_bytes, root, &ack_ref, &founder.value)
         .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
-    if ack.author_registration != registration_ref {
+    if ack.registration != registration_ref {
         return Err(StoreRegistrationError::Invalid(
             "Store founder acknowledgement names another registration".to_string(),
         ));
@@ -570,8 +570,7 @@ async fn prepare_self_retirement(
             )
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
             RetirementPublication::Serial {
-                base_head_bytes: snapshot.base_head_bytes,
-                base_head_version: snapshot.base_head_version,
+                base_head: snapshot.base_head,
                 head_bytes: head.to_bytes(),
                 authorization_after,
             }
@@ -726,8 +725,7 @@ async fn publish_self_retirement(
             None
         }
         RetirementPublication::Serial {
-            base_head_bytes,
-            base_head_version,
+            base_head,
             head_bytes,
             authorization_after,
         } => {
@@ -742,8 +740,7 @@ async fn publish_self_retirement(
                 db,
                 storage,
                 coordination,
-                base_head_bytes.as_deref(),
-                base_head_version.as_ref(),
+                base_head,
                 &commit,
                 &durable.commit_prepared,
                 &durable.commit_ref,
@@ -916,6 +913,7 @@ async fn prepare_or_load_initial_recovery_ack(
     registration_ref: &StoreDeviceRegistrationRef,
     first_slot: crate::storage::cloud::ObjectSlot,
     store_cut: StoreHistoryCut,
+    device_state: StoreDeviceStateRef,
     published_at: &str,
     device_signer: &UserKeypair,
 ) -> Result<(StoreAck, Vec<u8>, StoreAckRef, PreparedExactObject, bool), StoreRegistrationError> {
@@ -933,23 +931,25 @@ async fn prepare_or_load_initial_recovery_ack(
             let decoded: StoreAck = serde_json::from_slice(&bytes)
                 .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
             let reference = StoreAckRef {
-                revision: decoded.revision,
+                registration: registration_ref.clone(),
+                sequence: decoded.sequence,
                 ack_hash: decoded.ack_hash(),
                 object: object.clone(),
             };
-            let ack = StoreAck::parse_at(&bytes, root.store_root_hash, &reference, registration)
+            let ack = StoreAck::parse_at(&bytes, root, &reference, registration)
                 .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
             let expected_activation =
                 super::store_commit::StreamActivationId::store_acknowledgements(
                     root,
                     registration_ref,
                 );
-            if ack.revision != 1
-                || ack.predecessor.is_some()
-                || ack.author_registration != *registration_ref
+            if ack.sequence != 1
+                || ack.successor.predecessor.is_some()
+                || ack.registration != *registration_ref
+                || ack.store_cut != store_cut
+                || ack.device_state != device_state
                 || ack.last_sync != published_at
                 || ack.successor.activation != expected_activation
-                || ack.successor.predecessor.is_some()
                 || ack.successor.next_slot == first_slot
             {
                 return Err(StoreRegistrationError::Invalid(
@@ -972,8 +972,17 @@ async fn prepare_or_load_initial_recovery_ack(
                 root.store_root_hash,
                 registration_ref.clone(),
                 1,
-                None,
                 store_cut,
+                device_state,
+                None,
+                match &registration.store_commits {
+                    StoreCommitAnchor::MergeConcurrent { .. } => {
+                        StoreAckExclusionState::MergeConcurrent {
+                            proposal_freezes: Vec::new(),
+                        }
+                    }
+                    StoreCommitAnchor::Serial => StoreAckExclusionState::Serial,
+                },
                 published_at.to_string(),
                 SuccessorLink {
                     activation: super::store_commit::StreamActivationId::store_acknowledgements(
@@ -991,7 +1000,8 @@ async fn prepare_or_load_initial_recovery_ack(
                 .prepare_protocol_object(&context, first_slot, &prefix, bytes.clone())
                 .map_err(StoreObjectError::from)?;
             let reference = StoreAckRef {
-                revision: 1,
+                registration: registration_ref.clone(),
+                sequence: 1,
                 ack_hash: ack.ack_hash(),
                 object: prepared.reference().clone(),
             };
@@ -1204,7 +1214,7 @@ async fn install_activated_owner_recovery(
             initial_ack_ref.object.slot(),
             &ack_slot_prefix(
                 &registration_ref.device_id.to_string(),
-                initial_ack_ref.revision,
+                initial_ack_ref.sequence,
             ),
         )
         .await
@@ -1381,7 +1391,7 @@ pub async fn recover_owner_device_merge(
         );
         let initial_ack = StoreAck::parse_at(
             &durable.initial_ack.bytes,
-            root.store_root_hash,
+            &root,
             &durable.initial_ack_ref,
             &registration,
         )
@@ -1506,6 +1516,11 @@ pub async fn recover_owner_device_merge(
         let device_signer = registration
             .device_signer(identity_signer)
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        let bootstrap_cut = StoreHistoryCut::MergeConcurrent(dependencies);
+        let (device_state, _) = db
+            .store_device_state_for_history_cut(&bootstrap_cut)
+            .await
+            .map_err(database_error)?;
         let (
             initial_ack,
             initial_ack_bytes,
@@ -1518,7 +1533,8 @@ pub async fn recover_owner_device_merge(
             &registration,
             &registration_ref,
             first_ack,
-            StoreHistoryCut::MergeConcurrent(dependencies),
+            bootstrap_cut,
+            device_state,
             &authority.published_at,
             &device_signer,
         )
@@ -1972,6 +1988,7 @@ pub async fn recover_owner_device_serial(
             &registration_ref,
             first_ack,
             bootstrap_cut.clone(),
+            device_state.clone(),
             &authority.published_at,
             &device_signer,
         )
@@ -2114,8 +2131,7 @@ pub async fn recover_owner_device_serial(
         db,
         storage,
         coordination,
-        snapshot.base_head_bytes.as_deref(),
-        snapshot.base_head_version.as_ref(),
+        &snapshot.base_head,
         &commit,
         &commit_prepared,
         &commit_ref,
@@ -2249,12 +2265,25 @@ pub(crate) async fn bootstrap_pending_device(
         let device_signer = expected_registration
             .device_signer(identity_signer)
             .map_err(|error| StoreRegistrationError::Invalid(error.to_string()))?;
+        let (device_state, _) =
+            Box::pin(db.store_device_state_for_history_cut(&attempt.bootstrap_cut))
+                .await
+                .map_err(database_error)?;
         let initial_ack = StoreAck::signed(
             attempt.store_root.store_root_hash,
-            registration_ref,
+            registration_ref.clone(),
             1,
-            None,
             attempt.bootstrap_cut.clone(),
+            device_state,
+            None,
+            match &expected_registration.store_commits {
+                StoreCommitAnchor::MergeConcurrent { .. } => {
+                    StoreAckExclusionState::MergeConcurrent {
+                        proposal_freezes: Vec::new(),
+                    }
+                }
+                StoreCommitAnchor::Serial => StoreAckExclusionState::Serial,
+            },
             published_at.to_string(),
             SuccessorLink {
                 activation: super::store_commit::StreamActivationId::store_acknowledgements(
@@ -2279,7 +2308,8 @@ pub(crate) async fn bootstrap_pending_device(
             )
             .map_err(StoreObjectError::from)?;
         let initial_ack_ref = StoreAckRef {
-            revision: 1,
+            registration: registration_ref,
+            sequence: 1,
             ack_hash: initial_ack.ack_hash(),
             object: ack_prepared.reference().clone(),
         };

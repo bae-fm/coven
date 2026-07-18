@@ -684,19 +684,26 @@ async fn assert_generation_two_opens_but_generation_one_does_not(
         current_reader.clone(),
     )
     .expect("build current-reader exact storage");
-    let commit = crate::sync::store_objects::load_commit_ref(
-        &current_storage,
-        store_root.store_root_hash,
-        commit_ref,
-        registration,
-    )
-    .await
-    .expect("the current cipher opens the exact Store commit")
-    .value;
-    assert!(
-        commit.store_package().is_some(),
-        "the published Store commit names the queued package",
-    );
+    let mut package_ref = commit_ref.clone();
+    loop {
+        let commit = crate::sync::store_objects::load_commit_ref(
+            &current_storage,
+            store_root.store_root_hash,
+            &package_ref,
+            registration,
+        )
+        .await
+        .expect("the current cipher opens the exact Store commit")
+        .value;
+        if commit.store_package().is_some() {
+            break;
+        }
+        package_ref = commit
+            .order
+            .predecessor()
+            .cloned()
+            .expect("the post-adoption history contains the queued package commit");
+    }
 
     let removed_member_storage = CloudSyncStorage::new(
         Arc::new(home.clone()),
@@ -710,7 +717,7 @@ async fn assert_generation_two_opens_but_generation_one_does_not(
         crate::sync::store_objects::load_commit_ref(
             &removed_member_storage,
             store_root.store_root_hash,
-            commit_ref,
+            &package_ref,
             registration,
         )
         .await

@@ -44,7 +44,32 @@ impl RemoteObjectRecord {
         let object = reference.object.clone();
         let record = Self::RetainedAuthority(RetainedAuthorityRecord {
             identity: RetainedAuthorityObjectRef {
-                domain: RetainedAuthorityObjectDomain::StoreDeviceHead { reference },
+                domain: RetainedAuthorityObjectDomain::DeviceHead { reference },
+                semantic_hash: ObjectHash::digest(&canonical_signed_bytes),
+                object: object.clone(),
+            },
+            bytes: RemoteObjectBytes::inline(canonical_signed_bytes, stored_bytes, object)?,
+            state: RetainedAuthorityObjectState::Prepared {
+                ownership: PendingCandidateOwnership {
+                    pending: BTreeSet::from([owner]),
+                    nonactivated: Vec::new(),
+                },
+            },
+        });
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub(crate) fn candidate_activated_store_acknowledgement(
+        reference: super::store_commit::StoreAckRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+        owner: StoreBatchCommitRef,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let object = reference.object.clone();
+        let record = Self::RetainedAuthority(RetainedAuthorityRecord {
+            identity: RetainedAuthorityObjectRef {
+                domain: RetainedAuthorityObjectDomain::Acknowledgement { reference },
                 semantic_hash: ObjectHash::digest(&canonical_signed_bytes),
                 object: object.clone(),
             },
@@ -299,7 +324,7 @@ impl RemoteObjectRecord {
                     .identity
                     .validate_semantic(record.bytes.canonical_semantic_bytes())?;
                 match &record.identity.domain {
-                    RetainedAuthorityObjectDomain::StoreCommit { reference } => {
+                    RetainedAuthorityObjectDomain::Commit { reference } => {
                         let commit: super::store_commit::StoreBatchCommit =
                             serde_json::from_slice(record.bytes.canonical_semantic_bytes())
                                 .map_err(|error| {
@@ -312,7 +337,7 @@ impl RemoteObjectRecord {
                             return Err(RemoteObjectRecordError::StoredReferenceMismatch);
                         }
                     }
-                    RetainedAuthorityObjectDomain::StoreDeviceHead { reference } => {
+                    RetainedAuthorityObjectDomain::DeviceHead { reference } => {
                         let head: super::store_commit::StoreDeviceHead =
                             serde_json::from_slice(record.bytes.canonical_semantic_bytes())
                                 .map_err(|error| {
@@ -339,6 +364,20 @@ impl RemoteObjectRecord {
                         };
                         if !owns_head_commit {
                             return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+                        }
+                    }
+                    RetainedAuthorityObjectDomain::Acknowledgement { reference } => {
+                        let acknowledgement: super::store_commit::StoreAck =
+                            serde_json::from_slice(record.bytes.canonical_semantic_bytes())
+                                .map_err(|error| {
+                                    RemoteObjectRecordError::InvalidDomain(error.to_string())
+                                })?;
+                        if acknowledgement.registration != reference.registration
+                            || acknowledgement.sequence != reference.sequence
+                            || acknowledgement.ack_hash() != reference.ack_hash
+                            || reference.object != record.identity.object
+                        {
+                            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
                         }
                     }
                 }
@@ -415,7 +454,7 @@ impl RemoteObjectRecord {
                 }
                 Self::RetainedAuthority(RetainedAuthorityRecord {
                     identity: RetainedAuthorityObjectRef {
-                        domain: RetainedAuthorityObjectDomain::StoreCommit {
+                        domain: RetainedAuthorityObjectDomain::Commit {
                             reference: record.identity,
                         },
                         semantic_hash: ObjectHash::digest(record.bytes.canonical_semantic_bytes()),
@@ -604,8 +643,7 @@ impl RemoteObjectRecord {
             },
             Self::RetainedAuthority(record) => match &mut record.state {
                 RetainedAuthorityObjectState::Prepared { ownership } => {
-                    let RetainedAuthorityObjectDomain::StoreDeviceHead { .. } =
-                        &record.identity.domain
+                    let RetainedAuthorityObjectDomain::DeviceHead { .. } = &record.identity.domain
                     else {
                         return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
                     };
@@ -1116,11 +1154,14 @@ impl RetainedAuthorityObjectRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RetainedAuthorityObjectDomain {
-    StoreCommit {
+    Commit {
         reference: StoreBatchCommitRef,
     },
-    StoreDeviceHead {
+    DeviceHead {
         reference: super::store_commit::StoreDeviceHeadRef,
+    },
+    Acknowledgement {
+        reference: super::store_commit::StoreAckRef,
     },
 }
 

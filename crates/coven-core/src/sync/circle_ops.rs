@@ -13,7 +13,7 @@ use super::circle::{
 use super::membership::SerialAuthorizationState;
 use super::storage::{
     ExactObjectRef, PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage,
-    VersionToken,
+    VersionedObject,
 };
 use super::store_commit::{
     circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
@@ -47,8 +47,7 @@ pub(crate) enum CircleOperationPolicy {
     Serial {
         head: StoreSerialHead,
         base: Option<StoreBatchCommitRef>,
-        base_head_bytes: Option<Vec<u8>>,
-        base_head_version: Option<VersionToken>,
+        base_head: VersionedObject,
         authorization: SerialAuthorizationState,
     },
 }
@@ -151,6 +150,7 @@ fn signed_circle_commit(
         device_state,
         membership_authority,
         StoreCommitOperationsInput {
+            acknowledgement: None,
             control: None,
             device_join_attempts: Vec::new(),
             device_join_outcomes: Vec::new(),
@@ -864,8 +864,7 @@ async fn prepare_circle_operation(
                 CircleOperationPolicy::Serial {
                     head,
                     base,
-                    base_head_bytes: snapshot.base_head_bytes,
-                    base_head_version: snapshot.base_head_version,
+                    base_head: snapshot.base_head,
                     authorization: snapshot.authorization,
                 },
                 prepared_objects,
@@ -1180,8 +1179,7 @@ async fn publish_circle_operation(
         CircleOperationPolicy::Serial {
             head,
             base: _,
-            base_head_bytes,
-            base_head_version,
+            base_head,
             ..
         } => {
             let coordination = coordination.ok_or_else(|| {
@@ -1193,8 +1191,7 @@ async fn publish_circle_operation(
                 db,
                 storage,
                 coordination,
-                base_head_bytes.as_deref(),
-                base_head_version.as_ref(),
+                &base_head,
                 &commit,
                 journal
                     .prepared_objects
@@ -1713,8 +1710,8 @@ mod tests {
             .expect("Merge policy object");
         policy.insert("base".to_string(), serde_json::Value::Null);
         policy.insert(
-            "base_head_bytes".to_string(),
-            serde_json::json!([115, 101, 114, 105, 97, 108]),
+            "base_head".to_string(),
+            serde_json::json!({ "bytes": [115, 101, 114, 105, 97, 108], "version": "bad" }),
         );
         let payload = serde_json::to_vec(&payload).expect("serialize invalid journal");
         let circle_id = journal.circle_id();
