@@ -52,6 +52,8 @@ pub enum CovenError {
     MissingWritePolicy,
     #[error("Serial branch resolution failed: {0}")]
     SerialResolution(String),
+    #[error("candidate resolution failed: {0}")]
+    CandidateResolution(String),
     #[error("blob_tombstone_grace must be a positive duration")]
     InvalidBlobTombstoneGrace,
     #[error("browsable cloud storage cannot be used with scoped table {table:?}")]

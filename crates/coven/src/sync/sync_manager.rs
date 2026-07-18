@@ -258,6 +258,20 @@ impl SyncManager {
         .map_err(|error| SyncError::Protocol(error.to_string()))
     }
 
+    pub(crate) async fn cleanup_merge_candidate(
+        &self,
+        write_id: coven_core::WriteId,
+    ) -> Result<(), SyncError> {
+        let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
+        crate::sync::store_pull::cleanup_merge_candidate(
+            &self.db,
+            &**loop_handle.storage(),
+            write_id,
+        )
+        .await
+        .map_err(|error| SyncError::Protocol(error.to_string()))
+    }
+
     // =========================================================================
     // Sync lifecycle
     // =========================================================================

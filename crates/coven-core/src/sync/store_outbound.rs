@@ -4,7 +4,7 @@ use super::causal_grants::AuthorStreamId;
 use super::membership::{MembershipChain, SerialAuthorizationState};
 use super::storage::{
     BlobWriteAuthority, CoordinationError, CoordinationStorage, CreateHeadError, ReplaceHeadError,
-    SyncStorage, VersionToken,
+    StorageError, SyncStorage, VersionToken,
 };
 use super::storage::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectDomain};
 use super::store_commit::{
@@ -1289,10 +1289,72 @@ pub(crate) async fn drain_store_writes_with_coordination(
                 &head.author_registration.device_id.to_string(),
                 commit.seq(),
             );
-            storage
-                .create_protocol_object(&batch.head.prepared)
-                .await
-                .map_err(StoreObjectError::from)?;
+            if let Err(error) = storage.create_protocol_object(&batch.head.prepared).await {
+                if !matches!(error, StorageError::SlotCollision(_)) {
+                    return Err(StoreObjectError::from(error).into());
+                }
+                let (winner_bytes, winner_prepared) = storage
+                    .read_prepared_protocol_slot(
+                        &head_context,
+                        batch.head.object.slot(),
+                        &head_prefix,
+                    )
+                    .await
+                    .map_err(StoreObjectError::from)?;
+                let unverified: StoreDeviceHead =
+                    serde_json::from_slice(&winner_bytes).map_err(|parse_error| {
+                        StoreOutboundError::InvalidOutbound(format!(
+                            "parse competing Merge head: {parse_error}"
+                        ))
+                    })?;
+                if unverified.author_registration != head.author_registration
+                    || unverified.commit.coord != head.commit.coord
+                    || unverified.successor.activation != head.successor.activation
+                    || unverified.successor.predecessor != head.successor.predecessor
+                {
+                    return Err(StoreOutboundError::InvalidOutbound(
+                        "competing Merge head does not occupy the prepared successor point"
+                            .to_string(),
+                    ));
+                }
+                let registration = db
+                    .activated_store_device_registration(head.author_registration.clone())
+                    .await?;
+                if unverified.commit != head.commit {
+                    super::store_objects::load_commit_ref(
+                        storage,
+                        store_root_hash,
+                        &unverified.commit,
+                        &registration,
+                    )
+                    .await?;
+                }
+                let winner = StoreDeviceHead::parse_at(
+                    &winner_bytes,
+                    store_root_hash,
+                    &registration,
+                    &unverified.commit,
+                )
+                .map_err(|verify_error| {
+                    StoreOutboundError::InvalidOutbound(format!(
+                        "verify occupied Merge head: {verify_error}"
+                    ))
+                })?;
+                if unverified.commit == head.commit {
+                    db.adopt_alternate_merge_head(write_id.clone(), winner, winner_prepared)
+                        .await?;
+                    db.complete_prepared_store_write(head.commit.clone())
+                        .await?;
+                    return Ok::<bool, StoreOutboundError>(true);
+                }
+                let winner_ref = StoreDeviceHeadRef {
+                    head_hash: winner.head_hash(),
+                    object: winner_prepared.reference().clone(),
+                };
+                db.mark_merge_candidate_conflict(write_id.clone(), winner_ref)
+                    .await?;
+                return Ok::<bool, StoreOutboundError>(false);
+            }
             let opened_head = storage
                 .read_protocol_object(&head_context, &batch.head.object, &head_prefix)
                 .await
@@ -1309,15 +1371,19 @@ pub(crate) async fn drain_store_writes_with_coordination(
             .await?;
             db.complete_prepared_store_write(head.commit.clone())
                 .await?;
-            Ok::<(), StoreOutboundError>(())
+            Ok::<bool, StoreOutboundError>(true)
         }
         .await;
-        if let Err(error) = attempt {
-            if let Some(block) = blocked_status(&error) {
-                db.set_write_status(&write_id, crate::WriteStatus::Blocked(block))
-                    .await?;
+        match attempt {
+            Ok(false) => return Ok(published),
+            Ok(true) => {}
+            Err(error) => {
+                if let Some(block) = blocked_status(&error) {
+                    db.set_write_status(&write_id, crate::WriteStatus::Blocked(block))
+                        .await?;
+                }
+                return Err(error);
             }
-            return Err(error);
         }
         published = published
             .checked_add(1)
@@ -3786,6 +3852,8 @@ mod tests {
         home: InMemoryCloudHome,
         storage: CloudSyncStorage,
         db: Database,
+        keypair: UserKeypair,
+        root: StoreRootRef,
         device_id: String,
         write_id: crate::WriteId,
         commit_ref: StoreBatchCommitRef,
@@ -3851,11 +3919,224 @@ mod tests {
             home,
             storage,
             db,
+            keypair,
+            root,
             device_id,
             write_id: batch.commit.value.write_id.clone(),
             commit_ref,
             package_object,
             head_object: batch.head.object.clone(),
+        }
+    }
+
+    async fn publish_competing_merge_head(fixture: &PreparedWriteFixture) -> StoreDeviceHeadRef {
+        let batch = fixture
+            .db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load prepared Merge write")
+            .expect("prepared Merge write exists");
+        let candidate = &batch.commit.value;
+        let registration = fixture
+            .db
+            .activated_store_device_registration(candidate.author_registration.clone())
+            .await
+            .expect("load Merge author registration");
+        let signer = registration
+            .device_signer(&fixture.keypair)
+            .expect("derive Merge device signer");
+        let stream_id = match &candidate.order {
+            StoreCommitOrder::MergeConcurrent { .. } => match &batch.head.value.commit.coord {
+                StoreCommitCoord::MergeConcurrent { stream_id, .. } => *stream_id,
+                StoreCommitCoord::Serial { .. } => unreachable!("fixture is MergeConcurrent"),
+            },
+            StoreCommitOrder::Serial { .. } => unreachable!("fixture is MergeConcurrent"),
+        };
+        let package = super::super::audience_package::AudiencePackage::store(
+            fixture.root.store_root_hash,
+            candidate.candidate_family(),
+            candidate.write_id.clone(),
+            batch.head.value.commit.coord.clone(),
+            fixture.db.schema_version(),
+            b"competing valid package".to_vec(),
+            Vec::new(),
+        )
+        .expect("construct competing package");
+        let package_bytes = package.to_bytes();
+        let package_prefix = package_semantic_prefix(
+            candidate.candidate_family(),
+            &stream_id.to_string(),
+            candidate.seq(),
+            ObjectHash::digest(&package_bytes),
+        );
+        let package_context = ProtocolObjectContext::store(
+            fixture.root.store_root_hash,
+            ProtocolObjectDomain::StorePackage,
+        );
+        let package_slot = fixture
+            .storage
+            .allocate_protocol_slot(&package_context, &package_prefix, ".pkg")
+            .await
+            .expect("reserve competing package slot");
+        let package_prepared = fixture
+            .storage
+            .prepare_protocol_object(
+                &package_context,
+                package_slot,
+                &package_prefix,
+                package_bytes.clone(),
+            )
+            .expect("prepare competing package");
+        fixture
+            .storage
+            .create_protocol_object(&package_prepared)
+            .await
+            .expect("publish competing package");
+        let winner = StoreBatchCommit::signed(
+            fixture.root.store_root_hash,
+            candidate.write_id.clone(),
+            batch.head.value.commit.coord.clone(),
+            candidate.author_registration.clone(),
+            &registration,
+            candidate.order.clone(),
+            candidate.membership_state.clone(),
+            candidate.device_state.clone(),
+            candidate.membership_authority.clone(),
+            StorePackageInput {
+                candidate_family: candidate.candidate_family(),
+                schema_version: fixture.db.schema_version(),
+                bytes: &package_bytes,
+                object: package_prepared.reference().clone(),
+            },
+            &signer,
+        )
+        .expect("sign competing commit");
+        let commit_prefix = commit_semantic_prefix(
+            winner.candidate_family(),
+            &stream_id.to_string(),
+            winner.seq(),
+            winner.commit_hash(),
+        );
+        let commit_context = ProtocolObjectContext::store(
+            fixture.root.store_root_hash,
+            ProtocolObjectDomain::StoreCommit,
+        );
+        let commit_slot = fixture
+            .storage
+            .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
+            .await
+            .expect("reserve competing commit slot");
+        let commit_prepared = fixture
+            .storage
+            .prepare_protocol_object(
+                &commit_context,
+                commit_slot,
+                &commit_prefix,
+                winner.to_bytes(),
+            )
+            .expect("prepare competing commit");
+        fixture
+            .storage
+            .create_protocol_object(&commit_prepared)
+            .await
+            .expect("publish competing commit");
+        let winner_ref = StoreBatchCommitRef::from_commit(
+            &winner,
+            batch.head.value.commit.coord.clone(),
+            commit_prepared.reference().clone(),
+        )
+        .expect("reference competing commit");
+        assert_ne!(winner_ref, batch.head.value.commit);
+        let winner_head = StoreDeviceHead::signed(
+            fixture.root.store_root_hash,
+            candidate.author_registration.clone(),
+            winner_ref,
+            batch.head.value.successor.clone(),
+            &signer,
+        )
+        .expect("sign competing head");
+        let head_context = ProtocolObjectContext::store(
+            fixture.root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let head_prefix = head_slot_prefix(&fixture.device_id, candidate.seq());
+        let head_prepared = fixture
+            .storage
+            .prepare_protocol_object(
+                &head_context,
+                fixture.head_object.slot().clone(),
+                &head_prefix,
+                winner_head.to_bytes(),
+            )
+            .expect("prepare competing head");
+        fixture
+            .storage
+            .create_protocol_object(&head_prepared)
+            .await
+            .expect("publish competing head");
+        StoreDeviceHeadRef {
+            head_hash: winner_head.head_hash(),
+            object: head_prepared.reference().clone(),
+        }
+    }
+
+    async fn publish_alternate_head_for_prepared_commit(
+        fixture: &PreparedWriteFixture,
+    ) -> StoreDeviceHeadRef {
+        let batch = fixture
+            .db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load prepared Merge write")
+            .expect("prepared Merge write exists");
+        let registration = fixture
+            .db
+            .activated_store_device_registration(batch.head.value.author_registration.clone())
+            .await
+            .expect("load Merge author registration");
+        let signer = registration
+            .device_signer(&fixture.keypair)
+            .expect("derive Merge device signer");
+        let head_context = ProtocolObjectContext::store(
+            fixture.root.store_root_hash,
+            ProtocolObjectDomain::StoreHead,
+        );
+        let next_prefix = head_slot_prefix(&fixture.device_id, batch.commit.value.seq() + 1);
+        let alternate_next = crate::storage::cloud::ObjectSlot::opaque(
+            format!("{next_prefix}.json"),
+            "alternate-successor".to_string(),
+        )
+        .expect("reserve alternate successor slot");
+        let alternate = StoreDeviceHead::signed(
+            fixture.root.store_root_hash,
+            batch.head.value.author_registration.clone(),
+            batch.head.value.commit.clone(),
+            SuccessorLink {
+                activation: batch.head.value.successor.activation,
+                predecessor: batch.head.value.successor.predecessor.clone(),
+                next_slot: alternate_next,
+            },
+            &signer,
+        )
+        .expect("sign alternate activating head");
+        let head_prefix = head_slot_prefix(&fixture.device_id, batch.commit.value.seq());
+        let prepared = fixture
+            .storage
+            .prepare_protocol_object(
+                &head_context,
+                fixture.head_object.slot().clone(),
+                &head_prefix,
+                alternate.to_bytes(),
+            )
+            .expect("prepare alternate activating head");
+        fixture
+            .storage
+            .create_protocol_object(&prepared)
+            .await
+            .expect("publish alternate activating head");
+        StoreDeviceHeadRef {
+            head_hash: alternate.head_hash(),
+            object: prepared.reference().clone(),
         }
     }
 
@@ -4055,6 +4336,180 @@ mod tests {
                     )
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn competing_merge_head_blocks_the_candidate_with_durable_winner_evidence() {
+        let fixture = prepared_write_fixture().await;
+        let winner = publish_competing_merge_head(&fixture).await;
+
+        assert_eq!(
+            drain_store_writes(&fixture.db, &fixture.storage)
+                .await
+                .expect("classify the occupied Merge successor slot"),
+            0,
+        );
+        assert!(matches!(
+            fixture.db.write_status(&fixture.write_id).await.unwrap(),
+            crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState { ref reason })
+                if reason.contains(&winner.head_hash.to_string())
+        ));
+        let write_id = fixture.write_id.clone();
+        let retains_prepared = fixture
+            .db
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT prepared IS NOT NULL FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(crate::DbError::from)
+            })
+            .await
+            .expect("check durable losing candidate");
+        assert!(retains_prepared);
+        let package = stored_remote_object(&fixture.db, &fixture.package_object).await;
+        assert!(matches!(
+            package,
+            super::super::remote_object::RemoteObjectRecord::CandidateExclusive(record)
+                if matches!(
+                    &record.state,
+                    super::super::remote_object::CandidateObjectState::CleanupPending {
+                        former_candidates
+                    } if matches!(
+                        former_candidates.as_slice(),
+                        [super::super::remote_object::CandidateNonactivation {
+                            proof: super::super::remote_object::CandidateNonactivationProof::MergeWinner {
+                                winner_head
+                            },
+                            ..
+                        }] if winner_head == &winner
+                    )
+                )
+        ));
+        let commit = stored_remote_object(&fixture.db, &fixture.commit_ref.object).await;
+        assert!(matches!(
+            commit,
+            super::super::remote_object::RemoteObjectRecord::CandidateCommit(record)
+                if matches!(
+                    &record.state,
+                    super::super::remote_object::CandidateCommitState::CleanupPending {
+                        proof: super::super::remote_object::CandidateNonactivationProof::MergeWinner {
+                            winner_head
+                        }
+                    } if winner_head == &winner
+                )
+        ));
+        let head = stored_remote_object(&fixture.db, &fixture.head_object).await;
+        assert!(matches!(
+            head,
+            super::super::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                if matches!(
+                    &record.state,
+                    super::super::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
+                        former_candidates
+                    } if matches!(
+                        former_candidates.as_slice(),
+                        [super::super::remote_object::CandidateNonactivation {
+                            proof: super::super::remote_object::CandidateNonactivationProof::MergeWinner {
+                                winner_head
+                            },
+                            ..
+                        }] if winner_head == &winner
+                    )
+                )
+        ));
+        let discard_error = fixture
+            .db
+            .discard_blocked_write(&fixture.write_id)
+            .await
+            .expect_err("candidate cleanup must precede local Merge discard");
+        assert!(
+            discard_error.to_string().contains("cleanup"),
+            "unexpected discard error: {discard_error}"
+        );
+        assert!(fixture
+            .db
+            .merge_candidate_cleanup_pending(&fixture.write_id)
+            .await
+            .expect("read pending Merge cleanup"));
+        let retry_error = fixture
+            .db
+            .retry_blocked_write(&fixture.write_id)
+            .await
+            .expect_err("an occupied immutable Merge slot cannot be retried");
+        assert!(
+            retry_error.to_string().contains("winner"),
+            "unexpected retry error: {retry_error}"
+        );
+        fixture.home.fail_exact_delete_on_call(2);
+        assert!(super::super::store_pull::cleanup_merge_candidate(
+            &fixture.db,
+            &fixture.storage,
+            fixture.write_id.clone(),
+        )
+        .await
+        .is_err());
+        assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
+        assert!(exact_object_exists(
+            &fixture.home,
+            &fixture.commit_ref.object
+        ));
+        super::super::store_pull::cleanup_merge_candidate(
+            &fixture.db,
+            &fixture.storage,
+            fixture.write_id.clone(),
+        )
+        .await
+        .expect("resume exact losing Merge cleanup");
+        assert!(!fixture
+            .db
+            .merge_candidate_cleanup_pending(&fixture.write_id)
+            .await
+            .expect("read completed Merge cleanup"));
+        assert_eq!(
+            fixture
+                .db
+                .discard_blocked_write(&fixture.write_id)
+                .await
+                .expect("discard the cleaned losing Merge write"),
+            vec![fixture.write_id.clone()],
+        );
+        assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
+        assert!(!exact_object_exists(
+            &fixture.home,
+            &fixture.commit_ref.object
+        ));
+        assert!(exact_object_exists(&fixture.home, &winner.object));
+    }
+
+    #[tokio::test]
+    async fn alternate_merge_head_for_the_exact_commit_completes_as_accepted() {
+        let fixture = prepared_write_fixture().await;
+        let accepted_head = publish_alternate_head_for_prepared_commit(&fixture).await;
+
+        assert_eq!(
+            drain_store_writes(&fixture.db, &fixture.storage)
+                .await
+                .expect("accept the exact commit through the occupied Merge head"),
+            1,
+        );
+        assert!(matches!(
+            fixture.db.write_status(&fixture.write_id).await.unwrap(),
+            crate::WriteStatus::Published(position)
+                if position.commit() == &fixture.commit_ref
+        ));
+        let head = stored_remote_object(&fixture.db, &accepted_head.object).await;
+        assert!(matches!(
+            head,
+            super::super::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                if matches!(
+                    &record.identity.domain,
+                    super::super::remote_object::RetainedAuthorityObjectDomain::StoreDeviceHead {
+                        reference
+                    } if reference == &accepted_head
+                )
+        ));
     }
 
     #[tokio::test]

@@ -344,6 +344,20 @@ impl CovenHandle {
         &self,
         write_id: &coven_core::WriteId,
     ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
+        if self
+            .db
+            .merge_candidate_cleanup_pending(write_id)
+            .await
+            .map_err(crate::CovenError::from)?
+        {
+            self.sync_manager()
+                .ok_or_else(|| {
+                    crate::CovenError::CandidateResolution("sync is not connected".to_string())
+                })?
+                .cleanup_merge_candidate(write_id.clone())
+                .await
+                .map_err(|error| crate::CovenError::CandidateResolution(error.to_string()))?;
+        }
         self.db
             .discard_blocked_write(write_id)
             .await

@@ -332,6 +332,10 @@ impl RemoteObjectRecord {
                                 ownership.pending.contains(&head.commit)
                                     || ownership.activated.contains(&head.commit)
                             }
+                            RetainedAuthorityObjectState::UncreatedVerified {
+                                former_candidates,
+                            } => ensure_candidate_nonactivation(former_candidates, &head.commit)
+                                .is_ok(),
                         };
                         if !owns_head_commit {
                             return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
@@ -536,6 +540,9 @@ impl RemoteObjectRecord {
                     };
                 }
                 RetainedAuthorityObjectState::UploadedVerified { .. } => {}
+                RetainedAuthorityObjectState::UncreatedVerified { .. } => {
+                    return Err(RemoteObjectRecordError::InvalidUploadTransition);
+                }
             },
             Self::SharedLiveSet(record) => match &record.state {
                 OwnedObjectState::Prepared { ownership } => {
@@ -595,9 +602,45 @@ impl RemoteObjectRecord {
                     ensure_candidate_nonactivation(former_candidates, &candidate)?;
                 }
             },
-            Self::RetainedAuthority(_) => {
-                return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
-            }
+            Self::RetainedAuthority(record) => match &mut record.state {
+                RetainedAuthorityObjectState::Prepared { ownership } => {
+                    let RetainedAuthorityObjectDomain::StoreDeviceHead { .. } =
+                        &record.identity.domain
+                    else {
+                        return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+                    };
+                    let CandidateNonactivationProof::MergeWinner { winner_head } =
+                        &nonactivation.proof
+                    else {
+                        return Err(RemoteObjectRecordError::InvalidProof(
+                            "a prepared Store head requires a Merge winner proof".to_string(),
+                        ));
+                    };
+                    if winner_head.object.slot() != record.identity.object.slot()
+                        || winner_head.object == record.identity.object
+                    {
+                        return Err(RemoteObjectRecordError::InvalidProof(
+                            "Merge winner does not occupy the prepared head's exact slot"
+                                .to_string(),
+                        ));
+                    }
+                    if !ownership.pending.remove(&candidate) {
+                        return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+                    }
+                    ownership.nonactivated.push(nonactivation);
+                    if ownership.pending.is_empty() {
+                        record.state = RetainedAuthorityObjectState::UncreatedVerified {
+                            former_candidates: ownership.nonactivated.clone(),
+                        };
+                    }
+                }
+                RetainedAuthorityObjectState::UploadedVerified { .. } => {
+                    return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+                }
+                RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
+                    ensure_candidate_nonactivation(former_candidates, &candidate)?;
+                }
+            },
             Self::SharedLiveSet(record) => match &mut record.state {
                 OwnedObjectState::Prepared { ownership } => {
                     if !ownership.pending.remove(&candidate) {
@@ -708,6 +751,9 @@ impl RemoteObjectRecord {
                         && !ownership.activated.contains(candidate)
                         && contains(&ownership.nonactivated)?)
                 }
+                RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
+                    contains(former_candidates)
+                }
             },
             Self::SharedLiveSet(record) => match &record.state {
                 OwnedObjectState::Prepared { ownership } => Ok(!ownership
@@ -768,6 +814,9 @@ pub(crate) enum RetainedAuthorityObjectState {
     UploadedVerified {
         ownership: CandidateOwnership,
     },
+    UncreatedVerified {
+        former_candidates: Vec<CandidateNonactivation>,
+    },
 }
 
 impl RetainedAuthorityObjectState {
@@ -775,6 +824,9 @@ impl RetainedAuthorityObjectState {
         match self {
             Self::Prepared { ownership } => ownership.validate(),
             Self::UploadedVerified { ownership } => ownership.validate(),
+            Self::UncreatedVerified { former_candidates } => {
+                validate_nonactivations(former_candidates)
+            }
         }
     }
 }
@@ -1124,6 +1176,9 @@ impl CandidateNonactivation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CandidateNonactivationProof {
+    MergeWinner {
+        winner_head: super::store_commit::StoreDeviceHeadRef,
+    },
     SerialImmediateSuccessor {
         accepted_suffix: SerialAcceptedSuffix,
         losing_prefix: Vec<StoreBatchCommitDeletionTarget>,
@@ -1133,6 +1188,7 @@ pub(crate) enum CandidateNonactivationProof {
 impl CandidateNonactivationProof {
     fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         match self {
+            Self::MergeWinner { .. } => Ok(()),
             Self::SerialImmediateSuccessor {
                 accepted_suffix,
                 losing_prefix,
@@ -1150,6 +1206,14 @@ impl CandidateNonactivationProof {
     ) -> Result<(), RemoteObjectRecordError> {
         self.validate()?;
         match self {
+            Self::MergeWinner { .. } => {
+                if candidate.coord.policy() != crate::WritePolicy::MergeConcurrent {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "Merge winner proof names a non-Merge candidate".to_string(),
+                    ));
+                }
+                Ok(())
+            }
             Self::SerialImmediateSuccessor {
                 accepted_suffix: _,
                 losing_prefix,
