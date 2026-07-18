@@ -2499,10 +2499,12 @@ async fn read_serial_head(
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,
     root: &StoreRootRef,
-) -> Result<Option<StoreSerialHead>, StorePullError> {
+) -> Result<StoreSerialHead, StorePullError> {
     let object = match coordination.read_head(serial_head_key()).await {
         Ok(object) => object,
-        Err(CoordinationError::NotFound(_)) => return Ok(None),
+        Err(CoordinationError::NotFound(_)) => {
+            return Err(StorePullError::Serial("global head is absent".to_string()));
+        }
         Err(error) => return Err(StorePullError::Coordination(error)),
     };
     let unverified: StoreSerialHead = serde_json::from_slice(&object.bytes)
@@ -2522,7 +2524,7 @@ async fn read_serial_head(
         .value;
     let head = StoreSerialHead::parse(&object.bytes, root.store_root_hash, &executor)
         .map_err(|error| StorePullError::Serial(format!("invalid head: {error}")))?;
-    Ok(Some(head))
+    Ok(head)
 }
 
 pub(crate) async fn load_serial_authorization_at_head(
@@ -2548,13 +2550,7 @@ pub(crate) async fn load_serial_cycle_authorization(
     coordination: &dyn CoordinationStorage,
     root: &StoreRootRef,
 ) -> Result<SerialCycleAuthorization, StorePullError> {
-    let Some(head) = read_serial_head(storage, coordination, root).await? else {
-        return Ok(SerialCycleAuthorization {
-            authorization: load_serial_authorization_at_position(storage, root, None).await?,
-            head: None,
-            visible_activations: Vec::new(),
-        });
-    };
+    let head = read_serial_head(storage, coordination, root).await?;
     let authorized = load_authorized_serial_chain(storage, root, &head).await?;
     let authorization = match authorized.last() {
         Some(tip) => tip.authorization_after.clone(),
@@ -2637,17 +2633,8 @@ async fn pull_serial_store_commits(
     }
     let local = db.materialized_frontier().await?.remove(SERIAL_STREAM_ID);
     let head = read_serial_head(storage, coordination, root).await?;
-    let Some(head_value) = head.as_ref() else {
-        load_serial_authorization_at_position(storage, root, None).await?;
-        if local.is_some() {
-            return Err(StorePullError::Serial(format!(
-                "global head is absent but the durable Serial frontier is {local:?}"
-            )));
-        }
-        return empty_serial_pull_result(db, store_dir, head).await;
-    };
-    let authorized_chain = load_authorized_serial_chain(storage, root, head_value).await?;
-    let tip = match &head_value.state {
+    let authorized_chain = load_authorized_serial_chain(storage, root, &head).await?;
+    let tip = match &head.state {
         StoreSerialHeadState::Genesis { .. } => None,
         StoreSerialHeadState::Commit { commit, .. } => Some(commit.clone()),
     };
@@ -2657,7 +2644,7 @@ async fn pull_serial_store_commits(
                 "global head is genesis but the durable Serial frontier is {local:?}"
             )));
         }
-        return empty_serial_pull_result(db, store_dir, head).await;
+        return empty_serial_pull_result(db, store_dir, Some(head)).await;
     };
     if local
         .as_ref()
@@ -2766,7 +2753,7 @@ async fn pull_serial_store_commits(
                         HeldStorePositionReason::BlobDownloadFailed,
                     )],
                     visible_heads: Vec::new(),
-                    serial_head: head,
+                    serial_head: Some(head),
                     row_changes,
                     asset_downloads_failed: true,
                     local_blob_cleanup_pending,
@@ -2789,7 +2776,7 @@ async fn pull_serial_store_commits(
             .map_err(|_| StorePullError::Serial("author count exceeds u64".to_string()))?,
         held_positions: Vec::new(),
         visible_heads: Vec::new(),
-        serial_head: head,
+        serial_head: Some(head),
         row_changes,
         asset_downloads_failed: false,
         local_blob_cleanup_pending,
@@ -2835,9 +2822,7 @@ pub async fn prepare_serial_resolution(
             "Serial resolution root differs from durable exact root".to_string(),
         ));
     }
-    let head = read_serial_head(storage, coordination, &root)
-        .await?
-        .ok_or_else(|| StorePullError::Serial("global head is absent".to_string()))?;
+    let head = read_serial_head(storage, coordination, &root).await?;
     let authorized_chain = load_authorized_serial_chain(storage, &root, &head).await?;
     let first = match branch_base.as_ref() {
         None => 0,
@@ -3547,6 +3532,34 @@ fn commit_stream_id(coord: &StoreCommitCoord) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cycle_authorization_rejects_an_absent_serial_coordination_head() {
+        let db = crate::sync::test_helpers::open_serial_test_db();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "absent-serial-cycle-head",
+            crate::keys::UserKeypair::generate(),
+        )
+        .await
+        .expect("create Serial Store");
+        store.home.remove(serial_head_key());
+
+        let result = load_serial_cycle_authorization(
+            &store.storage,
+            store
+                .storage
+                .serial_coordination()
+                .expect("Serial coordination"),
+            &store.root,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(StorePullError::Serial(reason)) if reason == "global head is absent"
+        ));
+    }
 
     #[tokio::test]
     async fn merge_gap_reports_the_exact_signed_predecessor() {

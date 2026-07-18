@@ -3030,13 +3030,14 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
         };
         use crate::sync::store_commit::StoreControl;
 
-        struct HeadAppearsAfterInitialAuthorization<'a> {
+        struct HeadAdvancesAfterInitialAuthorization<'a> {
             inner: &'a dyn CoordinationStorage,
+            initial: VersionedObject,
             reads: AtomicUsize,
         }
 
         #[async_trait::async_trait]
-        impl CoordinationStorage for HeadAppearsAfterInitialAuthorization<'_> {
+        impl CoordinationStorage for HeadAdvancesAfterInitialAuthorization<'_> {
             async fn provider_binding(
                 &self,
             ) -> Result<crate::sync::storage::ResolvedProviderBinding, CoordinationError>
@@ -3046,7 +3047,7 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
 
             async fn read_head(&self, key: &str) -> Result<VersionedObject, CoordinationError> {
                 if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return Err(CoordinationError::NotFound(key.to_string()));
+                    return Ok(self.initial.clone());
                 }
                 self.inner.read_head(key).await
             }
@@ -3089,6 +3090,12 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
         let root = create_exact_test_store(&local, &storage, store_id, &founder)
             .await
             .expect("create exact Serial Store");
+        let initial_head = storage
+            .serial_coordination()
+            .expect("Serial coordination")
+            .read_head(crate::sync::store_commit::serial_head_key())
+            .await
+            .expect("read initial Serial head");
         let local_device_id = local
             .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
             .await
@@ -3183,8 +3190,9 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
         tokio::spawn(async move {
             assert_eq!(local.local_store_root_ref().await.unwrap(), Some(root));
             let coordination = storage.serial_coordination().unwrap();
-            let delayed = HeadAppearsAfterInitialAuthorization {
+            let delayed = HeadAdvancesAfterInitialAuthorization {
                 inner: coordination,
+                initial: initial_head,
                 reads: AtomicUsize::new(0),
             };
             let (_temp, store_dir) = temp_store_dir();
