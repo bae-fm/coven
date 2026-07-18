@@ -1469,6 +1469,29 @@ impl SerialAcceptedSuffix {
                 "accepted Serial head does not name the suffix tip".to_string(),
             ));
         }
+        if self
+            .commits
+            .iter()
+            .any(|commit| commit.coord.policy() != crate::WritePolicy::Serial)
+            || self
+                .predecessor
+                .as_ref()
+                .is_some_and(|predecessor| predecessor.coord.policy() != crate::WritePolicy::Serial)
+        {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "accepted Serial suffix contains a non-Serial coordinate".to_string(),
+            ));
+        }
+        let expected_first_sequence = match &self.predecessor {
+            Some(predecessor) => predecessor.coord.sequence().checked_add(1),
+            None => Some(1),
+        };
+        if expected_first_sequence != self.commits.first().map(|commit| commit.coord.sequence()) {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "accepted Serial suffix does not begin immediately after its predecessor"
+                    .to_string(),
+            ));
+        }
         for pair in self.commits.windows(2) {
             if pair[0].coord.sequence().checked_add(1) != Some(pair[1].coord.sequence()) {
                 return Err(RemoteObjectRecordError::InvalidProof(
@@ -1596,6 +1619,57 @@ mod tests {
     use crate::blob::locator::{BlobLocator, RemoteAudience};
     use crate::storage::cloud::ObjectSlot;
     use crate::{BlobScope, KeyFingerprint};
+
+    #[test]
+    fn serial_accepted_suffix_rejects_merge_commit_coordinates() {
+        let commit_bytes = b"accepted commit";
+        let commit = StoreBatchCommitRef {
+            coord: super::super::store_commit::StoreCommitCoord::MergeConcurrent {
+                stream_id: super::super::causal_grants::AuthorStreamId::from_digest(
+                    ObjectHash::digest(b"accepted stream"),
+                ),
+                sequence: 1,
+            },
+            commit_hash: ObjectHash::digest(commit_bytes),
+            object: ExactObjectRef::new(
+                ObjectSlot::logical("store-v1/commits/accepted.json".to_string())
+                    .expect("valid accepted commit slot"),
+                commit_bytes.len() as u64,
+                ObjectHash::digest(commit_bytes),
+            ),
+        };
+        let registration_bytes = b"accepted author registration";
+        let author_registration = super::super::store_commit::StoreDeviceRegistrationRef {
+            device_id: "11".repeat(32).parse().expect("valid test device id"),
+            registration_hash: ObjectHash::digest(registration_bytes),
+            object: ExactObjectRef::new(
+                ObjectSlot::logical("store-v1/registrations/accepted.json".to_string())
+                    .expect("valid accepted registration slot"),
+                registration_bytes.len() as u64,
+                ObjectHash::digest(registration_bytes),
+            ),
+        };
+        let head = super::super::store_commit::StoreSerialHead {
+            version: super::super::store_commit::STORE_PROTOCOL_VERSION,
+            store_root_hash: ObjectHash::digest(b"accepted Store root"),
+            state: super::super::store_commit::StoreSerialHeadState::Commit {
+                author_registration,
+                commit: commit.clone(),
+            },
+            signature: "test signature".to_string(),
+        };
+        let suffix = SerialAcceptedSuffix {
+            predecessor: None,
+            commits: vec![commit],
+            canonical_signed_head_bytes: head.to_bytes(),
+            observed_version_hash: ObjectHash::digest(b"observed version"),
+        };
+
+        assert!(matches!(
+            suffix.validate(),
+            Err(RemoteObjectRecordError::InvalidProof(_))
+        ));
+    }
 
     #[test]
     fn stored_blob_record_rejects_object_outside_locator_semantic_slot() {

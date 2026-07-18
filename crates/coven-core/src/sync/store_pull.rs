@@ -2547,6 +2547,94 @@ async fn load_authorized_serial_chain(
     Ok(authorized)
 }
 
+pub(crate) enum SerialSuccessorObservation {
+    Unchanged(super::storage::VersionedObject),
+    Advanced(super::remote_object::SerialAcceptedSuffix),
+}
+
+pub(crate) async fn observe_serial_successors_after(
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    root: &StoreRootRef,
+    predecessor: &super::store_commit::StoreSerialPredecessor,
+) -> Result<SerialSuccessorObservation, StorePullError> {
+    let verified_head = read_serial_head(storage, coordination, root).await?;
+    let authorized = load_authorized_serial_chain(storage, root, &verified_head.head).await?;
+    let first = match predecessor {
+        super::store_commit::StoreSerialPredecessor::Genesis {
+            root: expected_root,
+            founder_registration,
+        } => {
+            let actual = authorized.first().map_or_else(
+                || match &verified_head.head.state {
+                    StoreSerialHeadState::Genesis {
+                        root,
+                        founder_registration,
+                    } => super::store_commit::StoreSerialPredecessor::Genesis {
+                        root: root.clone(),
+                        founder_registration: founder_registration.clone(),
+                    },
+                    StoreSerialHeadState::Commit { .. } => {
+                        unreachable!("a commit head has an authorized tip")
+                    }
+                },
+                |first| match &first.commit.order {
+                    super::store_commit::StoreCommitOrder::Serial { predecessor, .. } => {
+                        predecessor.clone()
+                    }
+                    super::store_commit::StoreCommitOrder::MergeConcurrent { .. } => {
+                        unreachable!("authorized Serial chain contains only Serial commits")
+                    }
+                },
+            );
+            let expected = super::store_commit::StoreSerialPredecessor::Genesis {
+                root: expected_root.clone(),
+                founder_registration: founder_registration.clone(),
+            };
+            if actual != expected {
+                return Err(StorePullError::Serial(
+                    "global chain does not descend from the exact Serial genesis".to_string(),
+                ));
+            }
+            0
+        }
+        super::store_commit::StoreSerialPredecessor::Commit(base) => authorized
+            .iter()
+            .position(|accepted| &accepted.commit_ref == base)
+            .map(|index| index + 1)
+            .ok_or_else(|| {
+                StorePullError::Serial(
+                    "global chain does not descend from the exact Serial predecessor".to_string(),
+                )
+            })?,
+    };
+    let commits = authorized[first..]
+        .iter()
+        .map(|accepted| accepted.commit_ref.clone())
+        .collect::<Vec<_>>();
+    if commits.is_empty() {
+        return Ok(SerialSuccessorObservation::Unchanged(verified_head.object));
+    }
+    Ok(SerialSuccessorObservation::Advanced(
+        super::remote_object::SerialAcceptedSuffix {
+            predecessor: match predecessor {
+                super::store_commit::StoreSerialPredecessor::Genesis { .. } => None,
+                super::store_commit::StoreSerialPredecessor::Commit(base) => Some(base.clone()),
+            },
+            commits,
+            canonical_signed_head_bytes: verified_head.object.bytes,
+            observed_version_hash: super::store_commit::ObjectHash::digest(
+                verified_head
+                    .object
+                    .version
+                    .cloud()
+                    .as_provider()
+                    .as_bytes(),
+            ),
+        },
+    ))
+}
+
 struct VerifiedSerialHead {
     head: StoreSerialHead,
     object: super::storage::VersionedObject,

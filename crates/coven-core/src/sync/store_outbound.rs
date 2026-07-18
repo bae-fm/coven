@@ -3130,6 +3130,72 @@ impl StoreOperationCommitPlan {
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn serial_successor_plan_for_test(
+    db: &Database,
+    device_id: &str,
+    signer: &UserKeypair,
+    predecessor: &PreparedStoreOperationCommit,
+    base_head: VersionedObject,
+) -> Result<StoreOperationCommitPlan, StoreOutboundError> {
+    let StoreOperationPublication::Serial {
+        head,
+        authorization_after,
+        ..
+    } = &predecessor.publication
+    else {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "test Serial successor predecessor uses Merge publication".to_string(),
+        ));
+    };
+    if base_head.bytes != head.to_bytes() {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "test Serial successor receipt differs from its predecessor head".to_string(),
+        ));
+    }
+    let (root, registration_ref, registration, device_signer) =
+        load_local_store_authority(db, device_id, signer).await?;
+    let sequence = predecessor
+        .reference
+        .coord
+        .sequence()
+        .checked_add(1)
+        .ok_or_else(|| {
+            StoreOutboundError::InvalidOutbound(
+                "test Serial successor sequence overflow".to_string(),
+            )
+        })?;
+    let position = StoreSerialPredecessor::Commit(predecessor.reference.clone());
+    let membership_state = super::circle_control::StoreMembershipStateRef::serial(
+        position.clone(),
+        predecessor.commit.membership_state.recovery().to_vec(),
+        authorization_after,
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let device_state = super::store_commit::StoreDeviceStateRef::Serial {
+        position: position.clone(),
+        recovery: predecessor.commit.device_state.recovery().to_vec(),
+        state_hash: predecessor.commit.device_state.state_hash(),
+    };
+    Ok(StoreOperationCommitPlan {
+        root,
+        registration_ref,
+        registration,
+        device_signer,
+        coord: StoreCommitCoord::Serial { sequence },
+        order: StoreCommitOrder::Serial {
+            seq: sequence,
+            predecessor: position,
+        },
+        membership_state,
+        device_state,
+        serial: Some(StoreOperationSerialPlan {
+            base_head,
+            authorization: authorization_after.clone(),
+        }),
+    })
+}
+
 pub(crate) async fn prepare_store_operation_commit(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -3250,6 +3316,18 @@ impl PreparedStoreOperationCommit {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn serial_publication_for_test(
+        &self,
+    ) -> Option<(&VersionedObject, &StoreSerialHead)> {
+        match &self.publication {
+            StoreOperationPublication::MergeConcurrent { .. } => None,
+            StoreOperationPublication::Serial {
+                base_head, head, ..
+            } => Some((base_head, head)),
+        }
+    }
+
     pub(crate) fn acknowledgement_remote_objects(
         &self,
         acknowledgement: &crate::database::ExactProtocolObject<super::store_commit::StoreAck>,
@@ -3310,6 +3388,31 @@ impl PreparedStoreOperationCommit {
             }
             StoreOperationPublication::Serial { .. } => None,
         }
+    }
+
+    pub(crate) fn serial_base_head(&self) -> Option<&VersionedObject> {
+        match &self.publication {
+            StoreOperationPublication::MergeConcurrent { .. } => None,
+            StoreOperationPublication::Serial { base_head, .. } => Some(base_head),
+        }
+    }
+
+    pub(crate) fn adopt_serial_base_head(
+        &mut self,
+        observed: VersionedObject,
+    ) -> Result<(), StoreOutboundError> {
+        let StoreOperationPublication::Serial { base_head, .. } = &mut self.publication else {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Merge Store operation cannot adopt a Serial head receipt".to_string(),
+            ));
+        };
+        if *base_head == observed {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Serial Store operation already carries the observed head receipt".to_string(),
+            ));
+        }
+        *base_head = observed;
+        Ok(())
     }
 
     pub(crate) fn adopt_merge_head(
@@ -3599,7 +3702,7 @@ pub(crate) async fn publish_prepared_store_operation(
             authorization_after,
         } => {
             let coordination = coordination.ok_or(StoreOutboundError::MissingSerialCoordination)?;
-            activate_serial_commit_head(
+            let activation = activate_serial_commit_head(
                 db,
                 storage,
                 coordination,
@@ -3609,7 +3712,53 @@ pub(crate) async fn publish_prepared_store_operation(
                 &reference,
                 &head,
             )
-            .await?;
+            .await;
+            if let Err(error) = activation {
+                let Some(acknowledgement) = commit.acknowledgement().cloned() else {
+                    return Err(error);
+                };
+                if !matches!(&error, StoreOutboundError::SerialControlConflict { .. }) {
+                    return Err(error);
+                }
+                let StoreCommitOrder::Serial { predecessor, .. } = &commit.order else {
+                    return Err(StoreOutboundError::InvalidOutbound(
+                        "Serial acknowledgement activation carries Merge order".to_string(),
+                    ));
+                };
+                let root = required_store_root(db).await?;
+                match super::store_pull::observe_serial_successors_after(
+                    storage,
+                    coordination,
+                    &root,
+                    predecessor,
+                )
+                .await?
+                {
+                    super::store_pull::SerialSuccessorObservation::Unchanged(observed) => {
+                        db.adopt_outbound_store_ack_serial_base_head(acknowledgement, observed)
+                            .await?;
+                        return Ok(StoreOperationPublicationOutcome::Reprepared);
+                    }
+                    super::store_pull::SerialSuccessorObservation::Advanced(suffix) => {
+                        if suffix.commits.first() != Some(&reference) {
+                            db.begin_outbound_store_ack_nonactivation(
+                                acknowledgement.clone(),
+                                super::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor {
+                                    accepted_suffix: suffix,
+                                    losing_prefix: vec![StoreBatchCommitDeletionTarget {
+                                        coord: reference.coord.clone(),
+                                        object: reference.object.clone(),
+                                        canonical_signed_bytes: commit.to_bytes(),
+                                    }],
+                                },
+                            )
+                            .await?;
+                            finish_nonactivating_store_ack(db, storage, acknowledgement).await?;
+                            return Ok(StoreOperationPublicationOutcome::Nonactivated(reference));
+                        }
+                    }
+                }
+            }
             let operation_object_ids = commit.acknowledgement().map(|acknowledgement| {
                 vec![
                     super::remote_object::remote_object_id(&reference.object),
@@ -3730,9 +3879,11 @@ pub(crate) async fn publish_prepared_store_operation(
                     head_hash: winner.head_hash(),
                     object: winner_prepared.reference().clone(),
                 };
-                db.begin_outbound_store_ack_merge_nonactivation(
+                db.begin_outbound_store_ack_nonactivation(
                     acknowledgement.clone(),
-                    winner_ref,
+                    super::remote_object::CandidateNonactivationProof::MergeWinner {
+                        winner_head: winner_ref,
+                    },
                 )
                 .await?;
                 finish_nonactivating_store_ack(db, storage, acknowledgement).await?;
