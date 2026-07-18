@@ -195,7 +195,7 @@ pub trait CloudHeadStorage: Send + Sync {
         bytes: Vec<u8>,
     ) -> Result<CloudVersionedHead, CloudHeadReplaceError>;
 
-    async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError>;
+    async fn delete_head(&self, key: &str) -> Result<(), CloudHomeError>;
 }
 
 pub type CloudObjectStream =

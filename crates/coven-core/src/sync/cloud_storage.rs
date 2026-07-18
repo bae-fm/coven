@@ -1470,9 +1470,9 @@ impl CoordinationStorage for CloudCoordinationClient<'_> {
         })
     }
 
-    async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError> {
+    async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
         self.raw
-            .delete_probe_head(key)
+            .delete_head(key)
             .await
             .map_err(coordination_home_error)
     }
@@ -1513,10 +1513,8 @@ impl CoordinationStorage for CloudSyncStorage {
             .await
     }
 
-    async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError> {
-        self.primary_coordination_client()?
-            .delete_probe_head(key)
-            .await
+    async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
+        self.primary_coordination_client()?.delete_head(key).await
     }
 }
 

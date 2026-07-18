@@ -3069,8 +3069,8 @@ async fn serial_cycle_uses_membership_materialized_by_its_pull_for_owner_only_wo
                 self.inner.replace_head(key, expected, bytes).await
             }
 
-            async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError> {
-                self.inner.delete_probe_head(key).await
+            async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
+                self.inner.delete_head(key).await
             }
         }
 

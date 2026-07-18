@@ -1094,7 +1094,7 @@ pub trait CoordinationStorage: Send + Sync {
         bytes: &[u8],
     ) -> Result<VersionedObject, ReplaceHeadError>;
 
-    async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError>;
+    async fn delete_head(&self, key: &str) -> Result<(), CoordinationError>;
 }
 
 /// Error type for storage operations.

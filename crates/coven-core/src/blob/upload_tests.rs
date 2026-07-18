@@ -131,8 +131,8 @@ impl CloudHeadStorage for InstrumentedHome {
         self.inner.replace_head(key, expected, bytes).await
     }
 
-    async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError> {
-        self.inner.delete_probe_head(key).await
+    async fn delete_head(&self, key: &str) -> Result<(), CloudHomeError> {
+        self.inner.delete_head(key).await
     }
 }
 

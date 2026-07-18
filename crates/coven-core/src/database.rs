@@ -290,6 +290,8 @@ struct DatabaseState {
     /// Serializes construction and execution of the one local membership mutation
     /// whose exact signed bytes are held in `outbound_membership_mutation`.
     membership_mutation: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes publication and rollback of the one durable founder graph.
+    store_creation: Arc<tokio::sync::Mutex<()>>,
     /// Serializes staging and publication of the one exact snapshot generation
     /// held in `outbound_store_snapshot`.
     snapshot_publication: Arc<tokio::sync::Mutex<()>>,
@@ -862,6 +864,7 @@ impl DatabaseCore {
             transfer_limits: self.transfer_limits,
             membership_load: Arc::new(tokio::sync::Mutex::new(())),
             membership_mutation: Arc::new(tokio::sync::Mutex::new(())),
+            store_creation: Arc::new(tokio::sync::Mutex::new(())),
             snapshot_publication: Arc::new(tokio::sync::Mutex::new(())),
             local_blob_cleanup: Arc::new(tokio::sync::Mutex::new(())),
             ids: Arc::new(crate::id_provider::UuidProvider),
@@ -1159,7 +1162,10 @@ pub(crate) enum DurableFounderMembership {
         head: ExactProtocolObject<AuthorHead>,
         head_ref: MembershipHeadRef,
     },
-    Serial,
+    Serial {
+        genesis: crate::sync::store_commit::StoreSerialHead,
+        genesis_bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1173,7 +1179,9 @@ enum DurableFounderMembershipJournal {
         head_bytes: Vec<u8>,
         head_prepared: PreparedExactObject,
     },
-    Serial,
+    Serial {
+        genesis_bytes: Vec<u8>,
+    },
 }
 
 impl DurableFounderMembershipJournal {
@@ -1192,7 +1200,9 @@ impl DurableFounderMembershipJournal {
                 head_bytes: head.bytes.clone(),
                 head_prepared: head.prepared.clone(),
             },
-            DurableFounderMembership::Serial => Self::Serial,
+            DurableFounderMembership::Serial { genesis_bytes, .. } => Self::Serial {
+                genesis_bytes: genesis_bytes.clone(),
+            },
         }
     }
 
@@ -1231,7 +1241,15 @@ impl DurableFounderMembershipJournal {
                     head_ref,
                 })
             }
-            Self::Serial => Ok(DurableFounderMembership::Serial),
+            Self::Serial { genesis_bytes } => {
+                let genesis = serde_json::from_slice(&genesis_bytes).map_err(|error| {
+                    DbError::Message(format!("local founder Serial genesis: {error}"))
+                })?;
+                Ok(DurableFounderMembership::Serial {
+                    genesis,
+                    genesis_bytes,
+                })
+            }
         }
     }
 }
@@ -1260,7 +1278,9 @@ fn founder_graph_identity(graph: &DurableFounderGraph) -> ObjectHash {
             &head.bytes,
             &head.prepared,
         )),
-        DurableFounderMembership::Serial => serde_json::to_vec(&"serial"),
+        DurableFounderMembership::Serial { genesis_bytes, .. } => {
+            serde_json::to_vec(&("serial", genesis_bytes))
+        }
     }
     .expect("founder membership graph serialization cannot fail");
     ObjectHash::digest(
@@ -1599,8 +1619,29 @@ fn validate_founder_graph(graph: &DurableFounderGraph) -> Result<(), DbError> {
         }
         (
             crate::sync::store_commit::StoreMembershipGenesis::Serial,
-            DurableFounderMembership::Serial,
-        ) => {}
+            DurableFounderMembership::Serial {
+                genesis,
+                genesis_bytes,
+            },
+        ) => {
+            let parsed = crate::sync::store_commit::StoreSerialHead::parse(
+                genesis_bytes,
+                root_ref.store_root_hash,
+                &registration,
+            )
+            .map_err(|error| DbError::Message(format!("founder Serial genesis: {error}")))?;
+            if parsed != *genesis
+                || genesis.state
+                    != (crate::sync::store_commit::StoreSerialHeadState::Genesis {
+                        root: root_ref,
+                        founder_registration: registration_ref,
+                    })
+            {
+                return Err(DbError::Message(
+                    "founder Serial genesis differs from its exact root graph".to_string(),
+                ));
+            }
+        }
         _ => {
             return Err(DbError::Message(
                 "founder membership graph differs from the root policy".to_string(),
@@ -1688,7 +1729,7 @@ fn consume_store_creation_probes_on(
                     || head.value.successor.next_slot != *next_head_slot
             }
             (
-                DurableFounderMembership::Serial,
+                DurableFounderMembership::Serial { .. },
                 crate::sync::store_protocol_root::FounderMembershipPublicationReservation::Serial,
             ) => false,
             _ => true,
@@ -3884,6 +3925,10 @@ impl Database {
 
     pub(crate) async fn lock_membership_mutation(&self) -> tokio::sync::OwnedMutexGuard<()> {
         self.state.membership_mutation.clone().lock_owned().await
+    }
+
+    pub(crate) async fn lock_store_creation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.state.store_creation.clone().lock_owned().await
     }
 
     pub(crate) async fn lock_snapshot_publication(&self) -> tokio::sync::OwnedMutexGuard<()> {
@@ -9266,7 +9311,9 @@ impl Database {
                         },
                         FounderMembershipRefs::MergeConcurrent { entry, head },
                     ) => entry_ref != entry || head_ref != head,
-                    (DurableFounderMembership::Serial, FounderMembershipRefs::Serial) => false,
+                    (DurableFounderMembership::Serial { .. }, FounderMembershipRefs::Serial) => {
+                        false
+                    }
                     _ => true,
                 }
             {
@@ -9470,7 +9517,7 @@ impl Database {
                     .map_err(DbError::from)?;
                     crate::sync::membership_ops::upsert_head_cursor_on(&tx, head_ref)?;
                 }
-                DurableFounderMembership::Serial => {
+                DurableFounderMembership::Serial { .. } => {
                     let authorization = SerialAuthorizationState::from_founder(
                         &root,
                         &graph.root.value,
@@ -9483,6 +9530,62 @@ impl Database {
                         &graph.root.value.descriptor.founder_pubkey,
                         &authorization,
                     )?;
+                }
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn reset_store_founder_graph_publication(
+        &self,
+        expected: DurableFounderGraph,
+    ) -> Result<(), DbError> {
+        validate_founder_graph(&expected)?;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let durable = load_local_store_founder_graph_on(&tx)?.ok_or_else(|| {
+                DbError::Message("local Store founder graph is absent".to_string())
+            })?;
+            if founder_graph_identity(&durable) != founder_graph_identity(&expected) {
+                return Err(DbError::Message(
+                    "local Store founder graph changed before publication rollback".to_string(),
+                ));
+            }
+            match durable.registration_state {
+                LocalDeviceRegistrationState::Prepared => {}
+                LocalDeviceRegistrationState::Created => {
+                    let created = serde_json::to_string(&LocalDeviceRegistrationState::Created)
+                        .map_err(|error| {
+                            DbError::Message(format!("serialize created journal state: {error}"))
+                        })?;
+                    let prepared = serde_json::to_string(&LocalDeviceRegistrationState::Prepared)
+                        .map_err(|error| {
+                        DbError::Message(format!("serialize prepared journal state: {error}"))
+                    })?;
+                    let updated = tx
+                        .execute(
+                            "UPDATE local_store_device_registration SET state = ?1 \
+                             WHERE singleton = 1 AND state = ?2",
+                            (prepared, created),
+                        )
+                        .map_err(DbError::from)?;
+                    if updated != 1 {
+                        return Err(DbError::Message(
+                            "created founder journal did not reset after exact rollback"
+                                .to_string(),
+                        ));
+                    }
+                }
+                LocalDeviceRegistrationState::Activated { .. } => {
+                    return Err(DbError::Message(
+                        "activated founder graph cannot be rolled back".to_string(),
+                    ));
+                }
+                LocalDeviceRegistrationState::Retired { .. } => {
+                    return Err(DbError::Message(
+                        "retired founder graph cannot be rolled back".to_string(),
+                    ));
                 }
             }
             tx.commit().map_err(DbError::from)

@@ -258,7 +258,7 @@ impl CloudHeadStorage for CloudKitCloudHome {
             })?
     }
 
-    async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError> {
+    async fn delete_head(&self, key: &str) -> Result<(), CloudHomeError> {
         let ops = self.ops.clone();
         let scope = self.scope.clone();
         let key = key.to_string();

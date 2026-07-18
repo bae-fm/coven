@@ -428,7 +428,7 @@ impl CloudHeadStorage for InMemoryCloudHome {
         })
     }
 
-    async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError> {
+    async fn delete_head(&self, key: &str) -> Result<(), CloudHomeError> {
         if self.fail_head_cleanup.swap(false, Ordering::SeqCst) {
             return Err(CloudHomeError::Transport(
                 "InMemoryCloudHome: armed coordination cleanup failure".to_string(),

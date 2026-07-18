@@ -1384,8 +1384,8 @@ mod tests {
             self.inner.replace_head(key, expected, bytes).await
         }
 
-        async fn delete_probe_head(&self, key: &str) -> Result<(), CoordinationError> {
-            self.inner.delete_probe_head(key).await
+        async fn delete_head(&self, key: &str) -> Result<(), CoordinationError> {
+            self.inner.delete_head(key).await
         }
     }
 

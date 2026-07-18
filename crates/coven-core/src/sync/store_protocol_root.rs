@@ -171,6 +171,12 @@ pub enum StoreProtocolRootError {
     Missing(ObjectHash),
     #[error("Serial Store coordination check failed: {0}")]
     Coordination(String),
+    #[error("{operation}; Store founder rollback failed: {rollback}")]
+    Rollback {
+        #[source]
+        operation: Box<StoreProtocolRootError>,
+        rollback: String,
+    },
 }
 
 fn creation_authority(attempt: &StoreCreationAttempt) -> &StoreCreationAuthority {
@@ -877,7 +883,22 @@ async fn prepare_founder_graph(
                 head_ref,
             }
         }
-        (None, None) => crate::database::DurableFounderMembership::Serial,
+        (None, None) => {
+            let genesis = super::store_commit::StoreSerialHead::signed(
+                root_ref.store_root_hash,
+                super::store_commit::StoreSerialHeadState::Genesis {
+                    root: root_ref.clone(),
+                    founder_registration: registration_ref.clone(),
+                },
+                &device_signer,
+            )
+            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+            let genesis_bytes = genesis.to_bytes();
+            crate::database::DurableFounderMembership::Serial {
+                genesis,
+                genesis_bytes,
+            }
+        }
         _ => {
             return Err(StoreProtocolRootError::Database(
                 "founder membership reservation is only partially policy-shaped".to_string(),
@@ -909,14 +930,148 @@ async fn prepare_founder_graph(
     })
 }
 
+async fn rollback_founder_exact_objects(
+    storage: &dyn SyncStorage,
+    graph: &crate::database::DurableFounderGraph,
+) -> Result<(), String> {
+    let mut objects = match &graph.membership {
+        crate::database::DurableFounderMembership::MergeConcurrent { entry, head, .. } => {
+            vec![head.object.clone(), entry.object.clone()]
+        }
+        crate::database::DurableFounderMembership::Serial { .. } => Vec::new(),
+    };
+    objects.extend([
+        graph.initial_ack.object.clone(),
+        graph.registration.object.clone(),
+        graph.root.object.clone(),
+    ]);
+    let mut failures = Vec::new();
+    for object in objects {
+        match super::store_objects::delete_exact_object(storage, &object).await {
+            Ok(())
+            | Err(StoreObjectError::Storage(super::storage::StorageError::SlotCollision(_))) => {}
+            Err(error) => failures.push(format!("{}: {error}", object.slot().logical_key())),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+fn serial_genesis_rollback_marker(genesis_bytes: &[u8]) -> Vec<u8> {
+    format!(
+        "coven-store-creation-rollback-v1:{}",
+        ObjectHash::digest(genesis_bytes)
+    )
+    .into_bytes()
+}
+
+async fn rollback_serial_genesis(
+    coordination: &dyn super::storage::CoordinationStorage,
+    genesis_bytes: &[u8],
+) -> Result<(), String> {
+    let key = super::store_commit::serial_head_key();
+    let marker = serial_genesis_rollback_marker(genesis_bytes);
+    loop {
+        let observed = match coordination.read_head(key).await {
+            Ok(observed) => observed,
+            Err(super::storage::CoordinationError::NotFound(_)) => return Ok(()),
+            Err(error) => return Err(format!("read Serial genesis for rollback: {error}")),
+        };
+        if observed.bytes == genesis_bytes {
+            match coordination
+                .replace_head(key, &observed.version, &marker)
+                .await
+            {
+                Ok(replaced) if replaced.bytes == marker => continue,
+                Ok(_) => {
+                    return Err(
+                        "Serial genesis rollback compare-and-swap returned different bytes"
+                            .to_string(),
+                    )
+                }
+                Err(super::storage::ReplaceHeadError::VersionMismatch) => continue,
+                Err(operation) => {
+                    return match coordination.read_head(key).await {
+                        Err(super::storage::CoordinationError::NotFound(_)) => Ok(()),
+                        Ok(readback) if readback.bytes == marker => continue,
+                        Ok(readback) if readback.bytes != genesis_bytes => Ok(()),
+                        Ok(_) => Err(format!(
+                            "replace Serial genesis with rollback marker: {operation}"
+                        )),
+                        Err(readback) => Err(format!(
+                            "replace Serial genesis with rollback marker: {operation}; \
+                             readback failed: {readback}"
+                        )),
+                    };
+                }
+            }
+        }
+        if observed.bytes != marker {
+            return Ok(());
+        }
+        let deletion = coordination.delete_head(key).await.err();
+        match coordination.read_head(key).await {
+            Err(super::storage::CoordinationError::NotFound(_)) => return Ok(()),
+            Ok(readback) if readback.bytes == genesis_bytes => continue,
+            Ok(readback) if readback.bytes != marker => return Ok(()),
+            Ok(_) => {
+                return Err(match deletion {
+                    Some(error) => format!("delete Serial rollback marker: {error}"),
+                    None => "Serial rollback marker remains after deletion".to_string(),
+                })
+            }
+            Err(readback) => {
+                return Err(match deletion {
+                    Some(operation) => format!(
+                        "delete Serial rollback marker: {operation}; readback failed: {readback}"
+                    ),
+                    None => format!("read Serial rollback marker after deletion: {readback}"),
+                })
+            }
+        }
+    }
+}
+
+async fn rollback_founder_publication(
+    db: &Database,
+    storage: &super::cloud_storage::CloudSyncStorage,
+    graph: &crate::database::DurableFounderGraph,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    if let crate::database::DurableFounderMembership::Serial { genesis_bytes, .. } =
+        &graph.membership
+    {
+        match storage.serial_coordination() {
+            Ok(coordination) => {
+                if let Err(error) = rollback_serial_genesis(coordination, genesis_bytes).await {
+                    failures.push(error);
+                }
+            }
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    if let Err(error) = rollback_founder_exact_objects(storage, graph).await {
+        failures.push(error);
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("; "));
+    }
+    db.reset_store_founder_graph_publication(graph.clone())
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub async fn create_store(
     db: &Database,
     storage: &super::cloud_storage::CloudSyncStorage,
     founder_timestamp: &str,
     signer: &UserKeypair,
 ) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
-    let write_policy = db.write_policy();
-    let graph = match db
+    let _creation = db.lock_store_creation().await;
+    let mut graph = match db
         .local_store_founder_graph()
         .await
         .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
@@ -937,6 +1092,57 @@ pub async fn create_store(
                 })?
         }
     };
+    let rollback_allowed = match &graph.registration_state {
+        crate::database::LocalDeviceRegistrationState::Prepared
+        | crate::database::LocalDeviceRegistrationState::Created => true,
+        crate::database::LocalDeviceRegistrationState::Activated { .. } => false,
+        crate::database::LocalDeviceRegistrationState::Retired { .. } => {
+            return Err(StoreProtocolRootError::Database(
+                "retired founder graph cannot create a Store".to_string(),
+            ))
+        }
+    };
+    if rollback_allowed {
+        rollback_founder_publication(db, storage, &graph)
+            .await
+            .map_err(|rollback| {
+                StoreProtocolRootError::Database(format!(
+                    "Store founder rollback before publication: {rollback}"
+                ))
+            })?;
+        graph = db
+            .local_store_founder_graph()
+            .await
+            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?
+            .ok_or_else(|| {
+                StoreProtocolRootError::Database(
+                    "rolled-back Store founder graph is absent".to_string(),
+                )
+            })?;
+    }
+    match publish_store_founder_graph(db, storage, founder_timestamp, signer, graph.clone()).await {
+        Ok(root) => Ok(root),
+        Err(operation) if rollback_allowed => {
+            match rollback_founder_publication(db, storage, &graph).await {
+                Ok(()) => Err(operation),
+                Err(rollback) => Err(StoreProtocolRootError::Rollback {
+                    operation: Box::new(operation),
+                    rollback,
+                }),
+            }
+        }
+        Err(operation) => Err(operation),
+    }
+}
+
+async fn publish_store_founder_graph(
+    db: &Database,
+    storage: &super::cloud_storage::CloudSyncStorage,
+    founder_timestamp: &str,
+    signer: &UserKeypair,
+    graph: crate::database::DurableFounderGraph,
+) -> Result<StoreProtocolRoot, StoreProtocolRootError> {
+    let write_policy = db.write_policy();
     let root_ref = StoreRootRef {
         store_root_id: graph.root.value.descriptor.store_root_id(),
         store_root_hash: graph.root.value.object_hash(),
@@ -1009,13 +1215,18 @@ pub async fn create_store(
             "founder initial acknowledgement readback differs from durable bytes".to_string(),
         ));
     }
-    db.mark_local_store_device_registration_created(
-        graph.registration.clone(),
-        graph.initial_ack_ref.clone(),
-        graph.initial_ack.clone(),
-    )
-    .await
-    .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+    if !matches!(
+        &graph.registration_state,
+        crate::database::LocalDeviceRegistrationState::Activated { .. }
+    ) {
+        db.mark_local_store_device_registration_created(
+            graph.registration.clone(),
+            graph.initial_ack_ref.clone(),
+            graph.initial_ack.clone(),
+        )
+        .await
+        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
+    }
     let membership_refs = match &graph.membership {
         crate::database::DurableFounderMembership::MergeConcurrent {
             entry,
@@ -1061,7 +1272,7 @@ pub async fn create_store(
                 head: head_ref.clone(),
             }
         }
-        crate::database::DurableFounderMembership::Serial => {
+        crate::database::DurableFounderMembership::Serial { .. } => {
             crate::database::FounderMembershipRefs::Serial
         }
     };
@@ -1069,40 +1280,39 @@ pub async fn create_store(
         let coordination = storage
             .serial_coordination()
             .map_err(|error| StoreProtocolRootError::Coordination(error.to_string()))?;
-        let device_signer = registration
-            .device_signer(signer)
-            .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
-        let genesis = super::store_commit::StoreSerialHead::signed(
-            root_ref.store_root_hash,
-            super::store_commit::StoreSerialHeadState::Genesis {
-                root: root_ref.clone(),
-                founder_registration: registration_ref.clone(),
-            },
-            &device_signer,
-        )
-        .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
-        let genesis_bytes = genesis.to_bytes();
+        let crate::database::DurableFounderMembership::Serial { genesis_bytes, .. } =
+            &graph.membership
+        else {
+            return Err(StoreProtocolRootError::Database(
+                "Serial Store has a MergeConcurrent founder graph".to_string(),
+            ));
+        };
         match coordination
-            .create_head(super::store_commit::serial_head_key(), &genesis_bytes)
+            .create_head(super::store_commit::serial_head_key(), genesis_bytes)
             .await
         {
-            Ok(created) if created.bytes == genesis_bytes => {}
+            Ok(created) if created.bytes.as_slice() == genesis_bytes.as_slice() => {}
             Ok(_) => {
                 return Err(StoreProtocolRootError::Coordination(
                     "Serial genesis create returned different bytes".to_string(),
                 ))
             }
-            Err(_) => {
-                let observed = coordination
-                    .read_head(super::store_commit::serial_head_key())
-                    .await
-                    .map_err(|error| StoreProtocolRootError::Coordination(error.to_string()))?;
-                if observed.bytes != genesis_bytes {
-                    return Err(StoreProtocolRootError::Coordination(
-                        "Serial genesis slot contains different bytes".to_string(),
-                    ));
+            Err(operation) => match coordination
+                .read_head(super::store_commit::serial_head_key())
+                .await
+            {
+                Ok(observed) if observed.bytes.as_slice() == genesis_bytes.as_slice() => {}
+                Ok(_) => {
+                    return Err(StoreProtocolRootError::Coordination(format!(
+                        "create Serial genesis: {operation}; readback contains different bytes"
+                    )))
                 }
-            }
+                Err(readback) => {
+                    return Err(StoreProtocolRootError::Coordination(format!(
+                        "create Serial genesis: {operation}; readback failed: {readback}"
+                    )))
+                }
+            },
         }
     }
     db.complete_store_founder_graph(
@@ -1179,6 +1389,7 @@ pub async fn open_store(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -1190,12 +1401,96 @@ mod tests {
         CloudHomeError, CloudVersionedHead,
     };
     use crate::sync::cloud_storage::{BlobPathScheme, CloudCipher, CloudSyncStorage};
-    use crate::sync::test_helpers::{open_serial_test_db, open_test_db};
+    use crate::sync::test_helpers::{
+        open_serial_test_db, open_test_db, test_migrations, test_synced_tables,
+    };
 
     struct RecordingHeadClient {
         id: usize,
         calls: Arc<Mutex<Vec<usize>>>,
         inner: InMemoryCloudHome,
+    }
+
+    struct LostGenesisResponseClient {
+        inner: InMemoryCloudHome,
+        fail_create_response: Arc<AtomicBool>,
+        fail_readback: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl CloudHeadStorage for LostGenesisResponseClient {
+        async fn read_head(&self, key: &str) -> Result<CloudVersionedHead, CloudHomeError> {
+            if key == super::super::store_commit::serial_head_key()
+                && self.fail_readback.swap(false, Ordering::SeqCst)
+            {
+                return Err(CloudHomeError::Transport(
+                    "injected Serial genesis readback failure".to_string(),
+                ));
+            }
+            self.inner.read_head(key).await
+        }
+
+        async fn create_head(
+            &self,
+            key: &str,
+            bytes: Vec<u8>,
+        ) -> Result<CloudVersionedHead, CloudHeadCreateError> {
+            if key == super::super::store_commit::serial_head_key()
+                && self.fail_create_response.swap(false, Ordering::SeqCst)
+            {
+                self.inner.create_head(key, bytes).await?;
+                self.fail_readback.store(true, Ordering::SeqCst);
+                return Err(CloudHomeError::Transport(
+                    "injected lost Serial genesis response".to_string(),
+                )
+                .into());
+            }
+            self.inner.create_head(key, bytes).await
+        }
+
+        async fn replace_head(
+            &self,
+            key: &str,
+            expected: &CloudHeadVersion,
+            bytes: Vec<u8>,
+        ) -> Result<CloudVersionedHead, CloudHeadReplaceError> {
+            self.inner.replace_head(key, expected, bytes).await
+        }
+
+        async fn delete_head(&self, key: &str) -> Result<(), CloudHomeError> {
+            self.inner.delete_head(key).await
+        }
+    }
+
+    fn lost_genesis_fixture(
+        store_id: &str,
+    ) -> (
+        InMemoryCloudHome,
+        UserKeypair,
+        CloudSyncStorage,
+        Arc<AtomicBool>,
+    ) {
+        let home = InMemoryCloudHome::new();
+        let founder = UserKeypair::generate();
+        let fail_create_response = Arc::new(AtomicBool::new(false));
+        let fail_readback = Arc::new(AtomicBool::new(false));
+        let client = || {
+            Arc::new(LostGenesisResponseClient {
+                inner: home.clone(),
+                fail_create_response: fail_create_response.clone(),
+                fail_readback: fail_readback.clone(),
+            }) as Arc<dyn CloudHeadStorage>
+        };
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            store_id,
+            founder.clone(),
+        )
+        .expect("construct lost-genesis test storage")
+        .with_serial_coordination_clients(client(), client());
+        (home, founder, storage, fail_create_response)
     }
 
     #[tokio::test]
@@ -1224,6 +1519,304 @@ mod tests {
         super::super::cycle::ensure_owner_anchored_chain(&storage, &db, &root_ref, &root, &founder)
             .await
             .expect("created Store founder chain is immediately readable");
+    }
+
+    #[tokio::test]
+    async fn merge_store_creation_failure_removes_every_founder_object_before_returning() {
+        for failing_create in 1..=5 {
+            let home = InMemoryCloudHome::new();
+            let founder = UserKeypair::generate();
+            let storage = CloudSyncStorage::new(
+                Arc::new(home.clone()),
+                CloudCipher::Plaintext,
+                BlobPathScheme::Plain,
+                format!("founder-rollback-{failing_create}"),
+                founder.clone(),
+            )
+            .expect("construct founder rollback storage");
+            let db = open_test_db();
+            let timestamp = "0000000000001-0000-founder";
+            let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+                .await
+                .expect("prepare exact founder graph");
+            db.stage_store_founder_graph(graph.clone())
+                .await
+                .expect("stage exact founder graph");
+            let mut exact_objects = vec![
+                graph.root.object.clone(),
+                graph.registration.object.clone(),
+                graph.initial_ack.object.clone(),
+            ];
+            let crate::database::DurableFounderMembership::MergeConcurrent { entry, head, .. } =
+                &graph.membership
+            else {
+                panic!("MergeConcurrent Store prepared a Serial founder graph");
+            };
+            exact_objects.push(entry.object.clone());
+            exact_objects.push(head.object.clone());
+            home.fail_exact_create_before_call(failing_create);
+
+            create_store(&db, &storage, timestamp, &founder)
+                .await
+                .expect_err("injected founder publication failure must abort creation");
+
+            for object in &exact_objects {
+                assert!(
+                    home.get(object.slot().logical_key()).is_none(),
+                    "founder object {} remains after create call {failing_create} failed",
+                    object.slot().logical_key(),
+                );
+            }
+            create_store(&db, &storage, timestamp, &founder)
+                .await
+                .expect("retry creates the Store after complete rollback");
+        }
+    }
+
+    #[tokio::test]
+    async fn serial_store_creation_failure_removes_every_exact_founder_object_before_returning() {
+        for failing_create in 1..=3 {
+            let home = InMemoryCloudHome::new();
+            let founder = UserKeypair::generate();
+            let storage = CloudSyncStorage::new(
+                Arc::new(home.clone()),
+                CloudCipher::Plaintext,
+                BlobPathScheme::Plain,
+                format!("serial-founder-rollback-{failing_create}"),
+                founder.clone(),
+            )
+            .expect("construct Serial founder rollback storage")
+            .with_serial_coordination_clients(Arc::new(home.clone()), Arc::new(home.clone()));
+            let db = open_serial_test_db();
+            let timestamp = "0000000000001-0000-founder";
+            let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+                .await
+                .expect("prepare exact Serial founder graph");
+            db.stage_store_founder_graph(graph.clone())
+                .await
+                .expect("stage exact Serial founder graph");
+            let exact_objects = [
+                graph.root.object.clone(),
+                graph.registration.object.clone(),
+                graph.initial_ack.object.clone(),
+            ];
+            home.fail_exact_create_before_call(failing_create);
+
+            create_store(&db, &storage, timestamp, &founder)
+                .await
+                .expect_err("injected Serial founder publication failure must abort creation");
+
+            for object in &exact_objects {
+                assert!(
+                    home.get(object.slot().logical_key()).is_none(),
+                    "Serial founder object {} remains after create call {failing_create} failed",
+                    object.slot().logical_key(),
+                );
+            }
+            create_store(&db, &storage, timestamp, &founder)
+                .await
+                .expect("retry creates the Serial Store after complete exact rollback");
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_founder_rollback_is_resumed_before_publication_retry() {
+        let home = InMemoryCloudHome::new();
+        let founder = UserKeypair::generate();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "founder-rollback-retry",
+            founder.clone(),
+        )
+        .expect("construct founder rollback retry storage");
+        let temp = tempfile::tempdir().expect("create founder rollback database directory");
+        let path = temp.path().join("founder-rollback.sqlite");
+        let open = || {
+            Database::open(
+                &path,
+                test_synced_tables(),
+                crate::blob::BLOB_TOMBSTONE_GRACE,
+                crate::blob::TransferLimits::serial(),
+                WritePolicy::MergeConcurrent,
+                "founder-rollback-device".to_string(),
+                &test_migrations(),
+            )
+            .expect("open founder rollback database")
+            .0
+        };
+        let db = open();
+        let timestamp = "0000000000001-0000-founder";
+        let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+            .await
+            .expect("prepare exact founder graph");
+        db.stage_store_founder_graph(graph.clone())
+            .await
+            .expect("stage exact founder graph");
+        home.fail_exact_create_before_call(3);
+        home.fail_exact_delete_on_call(1);
+
+        let failure = create_store(&db, &storage, timestamp, &founder)
+            .await
+            .expect_err("failed exact deletion must fail the creation call");
+        assert!(matches!(failure, StoreProtocolRootError::Rollback { .. }));
+        drop(db);
+        let db = open();
+
+        create_store(&db, &storage, timestamp, &founder)
+            .await
+            .expect("retry resumes rollback before publishing the founder graph");
+    }
+
+    #[tokio::test]
+    async fn serial_creation_error_removes_visible_genesis_before_returning() {
+        let (home, founder, storage, fail_create_response) =
+            lost_genesis_fixture("serial-genesis-rollback");
+        let db = open_serial_test_db();
+        let timestamp = "0000000000001-0000-founder";
+        let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+            .await
+            .expect("prepare exact Serial founder graph");
+        db.stage_store_founder_graph(graph.clone())
+            .await
+            .expect("stage exact Serial founder graph");
+        fail_create_response.store(true, Ordering::SeqCst);
+
+        create_store(&db, &storage, timestamp, &founder)
+            .await
+            .expect_err("lost genesis response and readback failure must abort creation");
+
+        assert!(
+            home.get(super::super::store_commit::serial_head_key())
+                .is_none(),
+            "failed Serial creation left its genesis coordination head visible",
+        );
+    }
+
+    #[tokio::test]
+    async fn serial_rollback_marker_is_removed_before_creation_retry() {
+        let (home, founder, storage, fail_create_response) =
+            lost_genesis_fixture("serial-genesis-rollback-retry");
+        let db = open_serial_test_db();
+        let timestamp = "0000000000001-0000-founder";
+        let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+            .await
+            .expect("prepare exact Serial founder graph");
+        db.stage_store_founder_graph(graph.clone())
+            .await
+            .expect("stage exact Serial founder graph");
+        fail_create_response.store(true, Ordering::SeqCst);
+        home.fail_coordination_probe_cleanup();
+
+        let failure = create_store(&db, &storage, timestamp, &founder)
+            .await
+            .expect_err("failed marker deletion must fail Store creation");
+        assert!(matches!(failure, StoreProtocolRootError::Rollback { .. }));
+        for object in [
+            &graph.root.object,
+            &graph.registration.object,
+            &graph.initial_ack.object,
+        ] {
+            assert!(
+                home.get(object.slot().logical_key()).is_none(),
+                "Serial marker cleanup failure left exact object {} visible",
+                object.slot().logical_key(),
+            );
+        }
+
+        create_store(&db, &storage, timestamp, &founder)
+            .await
+            .expect("retry removes the durable rollback marker before publishing genesis");
+    }
+
+    #[tokio::test]
+    async fn concurrent_store_creation_calls_do_not_rollback_each_other() {
+        let home = InMemoryCloudHome::new();
+        let founder = UserKeypair::generate();
+        let storage = Arc::new(
+            CloudSyncStorage::new(
+                Arc::new(home.clone()),
+                CloudCipher::Plaintext,
+                BlobPathScheme::Plain,
+                "concurrent-founder-publication",
+                founder.clone(),
+            )
+            .expect("construct concurrent founder storage"),
+        );
+        let db = open_test_db();
+        let timestamp = "0000000000001-0000-founder";
+        let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+            .await
+            .expect("prepare exact founder graph");
+        db.stage_store_founder_graph(graph)
+            .await
+            .expect("stage exact founder graph");
+        let deletes_before = home.deletes_seen();
+        let (reached, release) = home.pause_after_exact_create_call(1);
+        let first_db = db.clone();
+        let first_storage = storage.clone();
+        let first_founder = founder.clone();
+        let first = tokio::spawn(async move {
+            create_store(&first_db, &first_storage, timestamp, &first_founder).await
+        });
+        reached.notified().await;
+        let second_db = db.clone();
+        let second_storage = storage.clone();
+        let second_founder = founder.clone();
+        let second = tokio::spawn(async move {
+            create_store(&second_db, &second_storage, timestamp, &second_founder).await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !second.is_finished(),
+            "second creation call bypassed founder publication serialization",
+        );
+        release.notify_one();
+
+        first
+            .await
+            .expect("first creation task joins")
+            .expect("first creation call succeeds");
+        second
+            .await
+            .expect("second creation task joins")
+            .expect("second creation call observes the activated founder graph");
+        assert_eq!(home.deletes_seen(), deletes_before);
+    }
+
+    #[tokio::test]
+    async fn founder_rollback_preserves_a_different_object_in_the_reserved_slot() {
+        let home = InMemoryCloudHome::new();
+        let founder = UserKeypair::generate();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "founder-rollback-slot-collision",
+            founder.clone(),
+        )
+        .expect("construct founder collision storage");
+        let db = open_test_db();
+        let timestamp = "0000000000001-0000-founder";
+        let graph = prepare_founder_graph(&db, &storage, timestamp, &founder)
+            .await
+            .expect("prepare exact founder graph");
+        db.stage_store_founder_graph(graph.clone())
+            .await
+            .expect("stage exact founder graph");
+        let competing = b"different Store root occupant".to_vec();
+        home.insert_exact_object(graph.root.object.slot().logical_key(), competing.clone());
+
+        create_store(&db, &storage, timestamp, &founder)
+            .await
+            .expect_err("different root occupant must prevent Store creation");
+
+        assert_eq!(
+            home.get(graph.root.object.slot().logical_key()),
+            Some(competing),
+            "founder rollback erased a different object in the reserved root slot",
+        );
     }
 
     #[tokio::test]
@@ -1300,9 +1893,9 @@ mod tests {
             self.inner.replace_head(key, expected, bytes).await
         }
 
-        async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError> {
+        async fn delete_head(&self, key: &str) -> Result<(), CloudHomeError> {
             self.calls.lock().unwrap().push(self.id);
-            self.inner.delete_probe_head(key).await
+            self.inner.delete_head(key).await
         }
     }
 

@@ -218,7 +218,7 @@ impl CloudHeadStorage for S3CloudHome {
         .map_err(CloudHeadReplaceError::Storage)?
     }
 
-    async fn delete_probe_head(&self, key: &str) -> Result<(), CloudHomeError> {
+    async fn delete_head(&self, key: &str) -> Result<(), CloudHomeError> {
         <Self as CloudHome>::delete(self, key).await
     }
 }

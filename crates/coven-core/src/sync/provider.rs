@@ -2996,12 +2996,9 @@ pub async fn probe_serial_coordination_receipt(
         match first.read_head(&logical_key).await {
             Err(CoordinationError::NotFound(_)) => {}
             Ok(object) if object == replaced => {
-                first
-                    .delete_probe_head(&logical_key)
-                    .await
-                    .map_err(|error| {
-                        ProviderProbeError::Storage(StorageError::Storage(error.to_string()))
-                    })?;
+                first.delete_head(&logical_key).await.map_err(|error| {
+                    ProviderProbeError::Storage(StorageError::Storage(error.to_string()))
+                })?;
                 match first.read_head(&logical_key).await {
                     Err(CoordinationError::NotFound(_)) => {}
                     Ok(_) => return invalid("serial coordination object remains after deletion"),
