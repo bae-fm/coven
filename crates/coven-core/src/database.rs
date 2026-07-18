@@ -1132,6 +1132,7 @@ pub(crate) struct OutboundStoreAck {
 pub(crate) enum OutboundStoreAckActivation {
     AwaitingCandidate,
     Prepared(crate::sync::store_outbound::PreparedStoreOperationCommit),
+    Nonactivating(crate::sync::store_outbound::PreparedStoreOperationCommit),
 }
 
 #[derive(Debug, Clone)]
@@ -2619,7 +2620,7 @@ fn parse_prepared_serial_candidate(raw: &str) -> Result<Option<PreparedSerialCan
 }
 
 fn begin_merge_candidate_nonactivation_on(
-    conn: &Connection,
+    conn: &rusqlite::Transaction<'_>,
     write_id: &WriteId,
     candidate: &PreparedMergeCandidate,
     winner_head: crate::sync::store_commit::StoreDeviceHeadRef,
@@ -2657,26 +2658,13 @@ fn begin_merge_candidate_nonactivation_on(
         let object_id: ObjectHash = encoded.parse().map_err(|error| {
             DbError::Message(format!("Merge conflict remote object id: {error}"))
         })?;
-        let mut remote = load_remote_object_on(conn, object_id)?;
-        remote
-            .begin_candidate_nonactivation(nonactivation.clone())
-            .map_err(|error| {
-                DbError::Message(format!(
-                    "record Merge candidate nonactivation for {object_id}: {error}"
-                ))
-            })?;
-        update_remote_object_on(conn, object_id, &remote)?;
+        let _cleanup_target =
+            begin_remote_candidate_nonactivation_on(conn, object_id, nonactivation.clone())?;
     }
     let commit_object_id = remote_object_id(&candidate.reference.object);
-    let mut remote = load_remote_object_on(conn, commit_object_id)?;
-    remote
-        .begin_candidate_nonactivation(nonactivation)
-        .map_err(|error| {
-            DbError::Message(format!(
-                "record Merge candidate commit nonactivation for {commit_object_id}: {error}"
-            ))
-        })?;
-    update_remote_object_on(conn, commit_object_id, &remote)
+    let _cleanup_target =
+        begin_remote_candidate_nonactivation_on(conn, commit_object_id, nonactivation)?;
+    Ok(())
 }
 
 fn merge_candidate_cleanup_targets_on(
@@ -8042,7 +8030,8 @@ impl Database {
                 {
                     return Ok(());
                 }
-                OutboundStoreAckActivation::Prepared(_) => {
+                OutboundStoreAckActivation::Prepared(_)
+                | OutboundStoreAckActivation::Nonactivating(_) => {
                     return Err(DbError::Message(
                         "Store acknowledgement already has a different activation candidate"
                             .to_string(),
@@ -8088,6 +8077,203 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn begin_outbound_store_ack_merge_nonactivation(
+        &self,
+        expected: StoreAckRef,
+        winner_head: crate::sync::store_commit::StoreDeviceHeadRef,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
+                DbError::Message("outbound Store acknowledgement is absent".to_string())
+            })?;
+            if outbound.reference != expected {
+                return Err(DbError::Message(
+                    "Merge nonactivation names another Store acknowledgement".to_string(),
+                ));
+            }
+            let (candidate, already_nonactivating) = match outbound.activation {
+                OutboundStoreAckActivation::Prepared(candidate) => (candidate, false),
+                OutboundStoreAckActivation::Nonactivating(candidate) => (candidate, true),
+                OutboundStoreAckActivation::AwaitingCandidate => {
+                    return Err(DbError::Message(
+                        "Store acknowledgement has no prepared activation candidate".to_string(),
+                    ));
+                }
+            };
+            let head = candidate.merge_head_ref().ok_or_else(|| {
+                DbError::Message(
+                    "Merge acknowledgement activation carries Serial publication state".to_string(),
+                )
+            })?;
+            let target = crate::sync::store_commit::StoreBatchCommitDeletionTarget {
+                coord: candidate.reference.coord.clone(),
+                object: candidate.reference.object.clone(),
+                canonical_signed_bytes: candidate.commit.to_bytes(),
+            };
+            let nonactivation = crate::sync::remote_object::CandidateNonactivation {
+                candidate: target,
+                proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner {
+                    winner_head,
+                },
+            };
+            if already_nonactivating {
+                let commit_id = remote_object_id(&candidate.reference.object);
+                let commit_remote = load_remote_object_on(&tx, commit_id)?;
+                let proof_matches = commit_remote
+                    .candidate_nonactivation_proof(&candidate.reference)
+                    .map_err(|error| DbError::Message(error.to_string()))?
+                    == Some(&nonactivation.proof);
+                let inert = load_protocol_inert_object_on(&tx, remote_object_id(&expected.object))?;
+                if !proof_matches
+                    || inert
+                        .candidate_nonactivation_proof(&candidate.reference)
+                        .map_err(|error| DbError::Message(error.to_string()))?
+                        != Some(&nonactivation.proof)
+                {
+                    return Err(DbError::Message(
+                        "nonactivating Store acknowledgement carries different durable proof"
+                            .to_string(),
+                    ));
+                }
+                return Ok(());
+            }
+            let acknowledgement_id = remote_object_id(&expected.object);
+            if begin_remote_candidate_nonactivation_on(
+                &tx,
+                acknowledgement_id,
+                nonactivation.clone(),
+            )?
+            .is_some()
+            {
+                return Err(DbError::Message(
+                    "Store acknowledgement became an exact cleanup target".to_string(),
+                ));
+            }
+            let head_id = remote_object_id(&head.object);
+            if begin_remote_candidate_nonactivation_on(&tx, head_id, nonactivation.clone())?
+                .is_some()
+            {
+                return Err(DbError::Message(
+                    "Store activation head became an exact cleanup target".to_string(),
+                ));
+            }
+            let commit_id = remote_object_id(&candidate.reference.object);
+            if begin_remote_candidate_nonactivation_on(&tx, commit_id, nonactivation)?.is_none() {
+                return Err(DbError::Message(
+                    "losing Store acknowledgement commit has no exact cleanup target".to_string(),
+                ));
+            }
+            let activation =
+                serde_json::to_string(&OutboundStoreAckActivation::Nonactivating(candidate))
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "serialize nonactivating Store acknowledgement: {error}"
+                        ))
+                    })?;
+            let updated = tx
+                .execute(
+                    "UPDATE outbound_store_acks SET activation = ?2
+                     WHERE singleton = 1 AND ack_ref = ?1",
+                    rusqlite::params![
+                        serde_json::to_string(&expected).map_err(|error| DbError::Message(
+                            format!("serialize Store acknowledgement ref: {error}")
+                        ))?,
+                        activation,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "outbound Store acknowledgement disappeared during nonactivation".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn adopt_outbound_store_ack_merge_head(
+        &self,
+        expected: StoreAckRef,
+        winner: StoreDeviceHead,
+        winner_prepared: PreparedExactObject,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
+                DbError::Message("outbound Store acknowledgement is absent".to_string())
+            })?;
+            if outbound.reference != expected {
+                return Err(DbError::Message(
+                    "alternate Merge head names another Store acknowledgement".to_string(),
+                ));
+            }
+            let OutboundStoreAckActivation::Prepared(mut candidate) = outbound.activation else {
+                return Err(DbError::Message(
+                    "Store acknowledgement has no prepared Merge candidate".to_string(),
+                ));
+            };
+            let current = candidate.merge_head_ref().ok_or_else(|| {
+                DbError::Message(
+                    "Serial Store acknowledgement cannot adopt a Merge head".to_string(),
+                )
+            })?;
+            let root = required_store_root_authority_on(&tx)?;
+            let registration =
+                load_activated_registration_on(&tx, &root, &candidate.commit.author_registration)?;
+            let verified = StoreDeviceHead::parse_at(
+                &winner.to_bytes(),
+                root.store_root_hash,
+                &registration,
+                &candidate.reference,
+            )
+            .map_err(|error| DbError::Message(format!("verify alternate Merge head: {error}")))?;
+            if verified != winner {
+                return Err(DbError::Message(
+                    "alternate Merge head changed during exact verification".to_string(),
+                ));
+            }
+            replace_prepared_merge_head_remote_on(
+                &tx,
+                &current.object,
+                &winner,
+                &winner_prepared,
+                &candidate.reference,
+            )?;
+            candidate
+                .adopt_merge_head(winner, winner_prepared)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let activation = serde_json::to_string(&OutboundStoreAckActivation::Prepared(
+                candidate,
+            ))
+            .map_err(|error| {
+                DbError::Message(format!(
+                    "serialize alternate Store acknowledgement activation: {error}"
+                ))
+            })?;
+            let updated = tx
+                .execute(
+                    "UPDATE outbound_store_acks SET activation = ?2
+                     WHERE singleton = 1 AND ack_ref = ?1",
+                    rusqlite::params![
+                        serde_json::to_string(&expected).map_err(|error| DbError::Message(
+                            format!("serialize Store acknowledgement ref: {error}")
+                        ))?,
+                        activation,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "outbound Store acknowledgement disappeared during head adoption".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
     pub(crate) async fn complete_outbound_store_ack(
         &self,
         accepted: StoreAckRef,
@@ -8118,27 +8304,151 @@ impl Database {
                     "outbound Store acknowledgement disappeared".to_string(),
                 ));
             }
-            let successor_slot = serde_json::to_string(&outbound.ack.value.successor.next_slot)
-                .map_err(|error| {
-                    DbError::Message(format!(
-                        "serialize Store acknowledgement successor slot: {error}"
-                    ))
+            record_published_store_ack_on(&tx, &outbound)?;
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
+    pub(crate) async fn nonactivating_outbound_store_ack_cleanup_targets(
+        &self,
+        expected: StoreAckRef,
+    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
+        self.call(move |conn| {
+            let outbound = load_outbound_store_ack_on(conn)?.ok_or_else(|| {
+                DbError::Message("outbound Store acknowledgement is absent".to_string())
+            })?;
+            if outbound.reference != expected {
+                return Err(DbError::Message(
+                    "Store acknowledgement cleanup names another exact object".to_string(),
+                ));
+            }
+            let OutboundStoreAckActivation::Nonactivating(candidate) = outbound.activation else {
+                return Err(DbError::Message(
+                    "Store acknowledgement activation is not nonactivating".to_string(),
+                ));
+            };
+            let commit =
+                load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
+            let mut targets = Vec::new();
+            if let Some(object) = commit.cleanup_target() {
+                targets.push(CandidateCleanupObject {
+                    object: object.clone(),
+                });
+            } else if !commit
+                .candidate_cleanup_complete(&candidate.reference)
+                .map_err(|error| DbError::Message(error.to_string()))?
+            {
+                return Err(DbError::Message(
+                    "losing Store acknowledgement commit is not awaiting cleanup".to_string(),
+                ));
+            }
+            Ok(targets)
+        })
+        .await
+    }
+
+    pub(crate) async fn complete_nonactivating_outbound_store_ack(
+        &self,
+        expected: StoreAckRef,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
+                DbError::Message("outbound Store acknowledgement is absent".to_string())
+            })?;
+            if outbound.reference != expected {
+                return Err(DbError::Message(
+                    "Store acknowledgement completion names another exact object".to_string(),
+                ));
+            }
+            let OutboundStoreAckActivation::Nonactivating(candidate) = &outbound.activation else {
+                return Err(DbError::Message(
+                    "Store acknowledgement activation is not nonactivating".to_string(),
+                ));
+            };
+            let commit_id = remote_object_id(&candidate.reference.object);
+            let commit = load_remote_object_on(&tx, commit_id)?;
+            if !commit
+                .candidate_cleanup_complete(&candidate.reference)
+                .map_err(|error| DbError::Message(error.to_string()))?
+            {
+                return Err(DbError::Message(
+                    "losing Store acknowledgement commit cleanup is incomplete".to_string(),
+                ));
+            }
+            let proof = commit
+                .candidate_nonactivation_proof(&candidate.reference)
+                .map_err(|error| DbError::Message(error.to_string()))?
+                .ok_or_else(|| {
+                    DbError::Message(
+                        "losing Store acknowledgement commit lacks its proof".to_string(),
+                    )
                 })?;
-            tx.execute(
-                "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
-                 VALUES (1, ?1, ?2) \
-                 ON CONFLICT(singleton) DO UPDATE SET \
-                   ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot",
-                (
-                    serde_json::to_string(&accepted).map_err(|error| {
+            let head = candidate.merge_head_ref().ok_or_else(|| {
+                DbError::Message(
+                    "Merge acknowledgement completion carries Serial publication state".to_string(),
+                )
+            })?;
+            let head_id = remote_object_id(&head.object);
+            let head_remote = load_remote_object_on(&tx, head_id)?;
+            if !head_remote
+                .candidate_cleanup_complete(&candidate.reference)
+                .map_err(|error| DbError::Message(error.to_string()))?
+            {
+                return Err(DbError::Message(
+                    "losing Store acknowledgement head proof is incomplete".to_string(),
+                ));
+            }
+            if head_remote
+                .candidate_nonactivation_proof(&candidate.reference)
+                .map_err(|error| DbError::Message(error.to_string()))?
+                != Some(proof)
+            {
+                return Err(DbError::Message(
+                    "losing Store acknowledgement head carries a different proof".to_string(),
+                ));
+            }
+            let inert =
+                load_protocol_inert_object_on(&tx, remote_object_id(&outbound.reference.object))?;
+            if inert
+                .candidate_nonactivation_proof(&candidate.reference)
+                .map_err(|error| DbError::Message(error.to_string()))?
+                != Some(proof)
+            {
+                return Err(DbError::Message(
+                    "protocol-inert acknowledgement lacks its candidate proof".to_string(),
+                ));
+            }
+            for object_id in [commit_id, head_id] {
+                let removed = tx
+                    .execute(
+                        "DELETE FROM remote_objects WHERE object_id = ?1",
+                        [object_id.to_string()],
+                    )
+                    .map_err(DbError::from)?;
+                if removed != 1 {
+                    return Err(DbError::Message(format!(
+                        "nonactivating remote object {object_id} disappeared during completion"
+                    )));
+                }
+            }
+            let removed = tx
+                .execute(
+                    "DELETE FROM outbound_store_acks WHERE singleton = 1 AND ack_ref = ?1",
+                    [serde_json::to_string(&expected).map_err(|error| {
                         DbError::Message(format!(
-                            "serialize published Store acknowledgement ref: {error}"
+                            "serialize nonactivating Store acknowledgement ref: {error}"
                         ))
-                    })?,
-                    successor_slot,
-                ),
-            )
-            .map_err(DbError::from)?;
+                    })?],
+                )
+                .map_err(DbError::from)?;
+            if removed != 1 {
+                return Err(DbError::Message(
+                    "nonactivating Store acknowledgement disappeared".to_string(),
+                ));
+            }
+            record_published_store_ack_on(&tx, &outbound)?;
             tx.commit().map_err(DbError::from)
         })
         .await
@@ -13417,6 +13727,29 @@ impl Database {
             .await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn protocol_inert_object(
+        &self,
+        object: ExactObjectRef,
+    ) -> Result<Option<crate::sync::remote_object::ProtocolInertObject>, DbError> {
+        self.call(move |conn| {
+            let object_id = remote_object_id(&object);
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1
+                     )",
+                    [object_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            exists
+                .then(|| load_protocol_inert_object_on(conn, object_id))
+                .transpose()
+        })
+        .await
+    }
+
     pub(crate) async fn mark_candidate_commit_uploaded(
         &self,
         commit: StoreBatchCommitRef,
@@ -13931,13 +14264,6 @@ impl Database {
                         "Serial branch reached alternate Merge head adoption".to_string(),
                     )
                 })?;
-            if winner_prepared.reference().slot() != publication.head_prepared.reference().slot()
-                || winner_prepared.reference() == publication.head_prepared.reference()
-            {
-                return Err(DbError::Message(
-                    "alternate Merge head does not replace the prepared exact slot".to_string(),
-                ));
-            }
             let root = required_store_root_authority_on(&tx)?;
             let registration = load_activated_registration_on(
                 &tx,
@@ -13957,51 +14283,13 @@ impl Database {
                     "alternate Merge head does not activate the prepared commit".to_string(),
                 ));
             }
-            let old_object_id = remote_object_id(publication.head_prepared.reference());
-            let old_remote = load_remote_object_on(&tx, old_object_id)?;
-            if !matches!(
-                &old_remote,
-                RemoteObjectRecord::RetainedAuthority(record)
-                    if matches!(
-                        &record.identity.domain,
-                        crate::sync::remote_object::RetainedAuthorityObjectDomain::DeviceHead { .. }
-                    ) && matches!(
-                        &record.state,
-                        crate::sync::remote_object::RetainedAuthorityObjectState::Prepared {
-                            ownership
-                        } if ownership.pending == BTreeSet::from([candidate.clone()])
-                    )
-            ) {
-                return Err(DbError::Message(
-                    "prepared Merge head lost its candidate ownership".to_string(),
-                ));
-            }
-            let removed = tx
-                .execute(
-                    "DELETE FROM remote_objects WHERE object_id = ?1",
-                    [old_object_id.to_string()],
-                )
-                .map_err(DbError::from)?;
-            if removed != 1 {
-                return Err(DbError::Message(
-                    "prepared Merge head disappeared during replacement".to_string(),
-                ));
-            }
-            let winner_ref = crate::sync::store_commit::StoreDeviceHeadRef {
-                head_hash: winner.head_hash(),
-                object: winner_prepared.reference().clone(),
-            };
-            let mut winner_remote = RemoteObjectRecord::candidate_activated_store_head(
-                winner_ref,
-                winner.to_bytes(),
-                winner_prepared.stored_bytes().to_vec(),
-                candidate,
-            )
-            .map_err(|error| DbError::Message(format!("alternate Merge head: {error}")))?;
-            winner_remote.mark_uploaded_verified().map_err(|error| {
-                DbError::Message(format!("mark alternate Merge head uploaded: {error}"))
-            })?;
-            persist_exact_remote_object_on(&tx, &winner_remote, "alternate Merge head")?;
+            replace_prepared_merge_head_remote_on(
+                &tx,
+                publication.head_prepared.reference(),
+                &winner,
+                &winner_prepared,
+                &candidate,
+            )?;
             let replacement_head = DurablePreparedProtocolObject {
                 semantic_bytes: winner.to_bytes(),
                 prepared: winner_prepared,
@@ -14248,18 +14536,13 @@ impl Database {
                     let object_id: ObjectHash = encoded.parse().map_err(|error| {
                         DbError::Message(format!("Serial cleanup remote object id: {error}"))
                     })?;
-                    let mut remote = load_remote_object_on(&tx, object_id)?;
-                    remote
-                        .begin_candidate_nonactivation(nonactivation.clone())
-                        .map_err(|error| {
-                            DbError::Message(format!(
-                                "record candidate nonactivation for {object_id}: {error}"
-                            ))
-                        })?;
-                    if let Some(object) = remote.cleanup_target() {
-                        manifest_cleanup.insert(object.clone());
+                    if let Some(object) = begin_remote_candidate_nonactivation_on(
+                        &tx,
+                        object_id,
+                        nonactivation.clone(),
+                    )? {
+                        manifest_cleanup.insert(object);
                     }
-                    update_remote_object_on(&tx, object_id, &remote)?;
                 }
                 for object in candidate_manifest_exact_objects(commit) {
                     if manifest_cleanup.remove(object) {
@@ -14274,20 +14557,13 @@ impl Database {
                     )));
                 }
                 let commit_object_id = remote_object_id(&reference.object);
-                let mut remote = load_remote_object_on(&tx, commit_object_id)?;
-                remote
-                    .begin_candidate_nonactivation(nonactivation)
-                    .map_err(|error| {
-                        DbError::Message(format!(
-                            "record candidate commit nonactivation for {commit_object_id}: {error}"
-                        ))
-                    })?;
-                if let Some(object) = remote.cleanup_target() {
-                    commit_cleanup.push(CandidateCleanupObject {
-                        object: object.clone(),
-                    });
+                if let Some(object) = begin_remote_candidate_nonactivation_on(
+                    &tx,
+                    commit_object_id,
+                    nonactivation,
+                )? {
+                    commit_cleanup.push(CandidateCleanupObject { object });
                 }
-                update_remote_object_on(&tx, commit_object_id, &remote)?;
             }
             tx.commit().map_err(DbError::from)?;
             exclusive_cleanup.extend(commit_cleanup);
@@ -14382,25 +14658,20 @@ impl Database {
                         .to_string(),
                 ));
             }
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
             let object_id = remote_object_id(&authority_ref.object);
-            let mut remote = load_remote_object_on(conn, object_id)?;
-            remote
-                .begin_candidate_nonactivation(
-                    crate::sync::remote_object::CandidateNonactivation {
-                        candidate: authority_target.clone(),
-                        proof: crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor {
-                            accepted_suffix: suffix,
-                            losing_prefix: vec![authority_target],
-                        },
+            let target = begin_remote_candidate_nonactivation_on(
+                &tx,
+                object_id,
+                crate::sync::remote_object::CandidateNonactivation {
+                    candidate: authority_target.clone(),
+                    proof: crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor {
+                        accepted_suffix: suffix,
+                        losing_prefix: vec![authority_target],
                     },
-                )
-                .map_err(|error| {
-                    DbError::Message(format!(
-                        "record Serial abandonment nonactivation for {object_id}: {error}"
-                    ))
-                })?;
-            let target = remote.cleanup_target().cloned();
-            update_remote_object_on(conn, object_id, &remote)?;
+                },
+            )?;
+            tx.commit().map_err(DbError::from)?;
             Ok(target.map(|object| CandidateCleanupObject { object }))
         })
         .await
@@ -16368,6 +16639,34 @@ fn load_published_store_ack_on(conn: &Connection) -> Result<Option<PublishedStor
     .transpose()
 }
 
+fn record_published_store_ack_on(
+    conn: &Connection,
+    outbound: &OutboundStoreAck,
+) -> Result<(), DbError> {
+    let successor_slot =
+        serde_json::to_string(&outbound.ack.value.successor.next_slot).map_err(|error| {
+            DbError::Message(format!(
+                "serialize Store acknowledgement successor slot: {error}"
+            ))
+        })?;
+    conn.execute(
+        "INSERT INTO published_store_acks (singleton, ack_ref, successor_slot) \
+         VALUES (1, ?1, ?2) \
+         ON CONFLICT(singleton) DO UPDATE SET \
+           ack_ref = excluded.ack_ref, successor_slot = excluded.successor_slot",
+        (
+            serde_json::to_string(&outbound.reference).map_err(|error| {
+                DbError::Message(format!(
+                    "serialize published Store acknowledgement ref: {error}"
+                ))
+            })?,
+            successor_slot,
+        ),
+    )
+    .map(|_| ())
+    .map_err(DbError::from)
+}
+
 fn record_activated_store_ack_on(
     conn: &Connection,
     commit: &StoreBatchCommit,
@@ -17057,6 +17356,35 @@ fn load_remote_object_on(
     Ok(remote)
 }
 
+fn load_protocol_inert_object_on(
+    conn: &Connection,
+    object_id: ObjectHash,
+) -> Result<crate::sync::remote_object::ProtocolInertObject, DbError> {
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM protocol_inert_objects WHERE object_id = ?1",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    let inert: crate::sync::remote_object::ProtocolInertObject = serde_json::from_str(&state)
+        .map_err(|error| {
+            DbError::Message(format!(
+                "protocol-inert object {object_id} has invalid closed state: {error}"
+            ))
+        })?;
+    inert
+        .validate()
+        .map_err(|error| DbError::Message(format!("protocol-inert object {object_id}: {error}")))?;
+    if inert.object_id() != object_id {
+        return Err(DbError::Message(format!(
+            "protocol-inert object key is {object_id}, exact reference hashes to {}",
+            inert.object_id()
+        )));
+    }
+    Ok(inert)
+}
+
 fn persist_exact_remote_object_on(
     conn: &Connection,
     remote: &RemoteObjectRecord,
@@ -17066,6 +17394,20 @@ fn persist_exact_remote_object_on(
         .validate()
         .map_err(|error| DbError::Message(format!("prepared {domain}: {error}")))?;
     let object_id = remote.object_id();
+    let inert_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM protocol_inert_objects WHERE object_id = ?1
+             )",
+            [object_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(DbError::from)?;
+    if inert_exists {
+        return Err(DbError::Message(format!(
+            "prepared {domain} {object_id} is already protocol-inert"
+        )));
+    }
     let existing = conn
         .query_row(
             "SELECT state FROM remote_objects WHERE object_id = ?1",
@@ -17126,12 +17468,133 @@ fn update_remote_object_on(
     Ok(())
 }
 
+fn begin_remote_candidate_nonactivation_on(
+    conn: &rusqlite::Transaction<'_>,
+    object_id: ObjectHash,
+    nonactivation: crate::sync::remote_object::CandidateNonactivation,
+) -> Result<Option<ExactObjectRef>, DbError> {
+    let mut remote = load_remote_object_on(conn, object_id)?;
+    let inert = remote
+        .begin_candidate_nonactivation(nonactivation)
+        .map_err(|error| {
+            DbError::Message(format!(
+                "record candidate nonactivation for {object_id}: {error}"
+            ))
+        })?;
+    let Some(inert) = inert else {
+        let cleanup = remote.cleanup_target().cloned();
+        update_remote_object_on(conn, object_id, &remote)?;
+        return Ok(cleanup);
+    };
+    if inert.object_id() != object_id {
+        return Err(DbError::Message(format!(
+            "protocol-inert object {object_id} changed its exact identity"
+        )));
+    }
+    inert
+        .validate()
+        .map_err(|error| DbError::Message(format!("protocol-inert object {object_id}: {error}")))?;
+    let encoded = serde_json::to_string(&inert)
+        .map_err(|error| DbError::Message(format!("serialize protocol-inert object: {error}")))?;
+    let removed = conn
+        .execute(
+            "DELETE FROM remote_objects WHERE object_id = ?1",
+            [object_id.to_string()],
+        )
+        .map_err(DbError::from)?;
+    if removed != 1 {
+        return Err(DbError::Message(format!(
+            "remote object {object_id} disappeared during protocol-inert transition"
+        )));
+    }
+    let inserted = conn
+        .execute(
+            "INSERT INTO protocol_inert_objects (object_id, state) VALUES (?1, ?2)",
+            (object_id.to_string(), encoded),
+        )
+        .map_err(DbError::from)?;
+    if inserted != 1 {
+        return Err(DbError::Message(format!(
+            "protocol-inert object {object_id} was not inserted"
+        )));
+    }
+    Ok(None)
+}
+
+fn replace_prepared_merge_head_remote_on(
+    conn: &Connection,
+    current: &ExactObjectRef,
+    winner: &StoreDeviceHead,
+    winner_prepared: &PreparedExactObject,
+    candidate: &StoreBatchCommitRef,
+) -> Result<(), DbError> {
+    if winner_prepared.reference().slot() != current.slot()
+        || winner_prepared.reference() == current
+        || winner.commit != *candidate
+    {
+        return Err(DbError::Message(
+            "alternate Merge head does not replace the prepared activation slot".to_string(),
+        ));
+    }
+    let old_object_id = remote_object_id(current);
+    let old_remote = load_remote_object_on(conn, old_object_id)?;
+    if !matches!(
+        &old_remote,
+        RemoteObjectRecord::RetainedAuthority(record)
+            if matches!(
+                &record.identity.domain,
+                crate::sync::remote_object::RetainedAuthorityObjectDomain::DeviceHead { .. }
+            ) && matches!(
+                &record.state,
+                crate::sync::remote_object::RetainedAuthorityObjectState::Prepared { ownership }
+                    if ownership.pending == BTreeSet::from([candidate.clone()])
+            )
+    ) {
+        return Err(DbError::Message(
+            "prepared Merge head lost its candidate ownership".to_string(),
+        ));
+    }
+    let removed = conn
+        .execute(
+            "DELETE FROM remote_objects WHERE object_id = ?1",
+            [old_object_id.to_string()],
+        )
+        .map_err(DbError::from)?;
+    if removed != 1 {
+        return Err(DbError::Message(
+            "prepared Merge head disappeared during replacement".to_string(),
+        ));
+    }
+    let winner_ref = crate::sync::store_commit::StoreDeviceHeadRef {
+        head_hash: winner.head_hash(),
+        object: winner_prepared.reference().clone(),
+    };
+    let mut winner_remote = RemoteObjectRecord::candidate_activated_store_head(
+        winner_ref,
+        winner.to_bytes(),
+        winner_prepared.stored_bytes().to_vec(),
+        candidate.clone(),
+    )
+    .map_err(|error| DbError::Message(format!("alternate Merge head: {error}")))?;
+    winner_remote.mark_uploaded_verified().map_err(|error| {
+        DbError::Message(format!("mark alternate Merge head uploaded: {error}"))
+    })?;
+    persist_exact_remote_object_on(conn, &winner_remote, "alternate Merge head")
+}
+
 fn mark_remote_object_uploaded_on(
     conn: &Connection,
     expected: RemoteObjectRecord,
 ) -> Result<RemoteObjectRecord, DbError> {
     let object_id = expected.object_id();
     let current = load_remote_object_on(conn, object_id)?;
+    let mut uploaded = expected.clone();
+    uploaded.mark_uploaded_verified().map_err(|error| {
+        DbError::Message(format!("mark remote object {object_id} uploaded: {error}"))
+    })?;
+    if current == uploaded {
+        return Ok(current);
+    }
     if current != expected {
         return Err(DbError::Message(format!(
             "remote object {object_id} changed before upload completion"
@@ -17139,10 +17602,6 @@ fn mark_remote_object_uploaded_on(
     }
     let expected_json = serde_json::to_string(&expected)
         .map_err(|error| DbError::Message(format!("serialize expected remote object: {error}")))?;
-    let mut uploaded = current;
-    uploaded.mark_uploaded_verified().map_err(|error| {
-        DbError::Message(format!("mark remote object {object_id} uploaded: {error}"))
-    })?;
     let uploaded_json = serde_json::to_string(&uploaded)
         .map_err(|error| DbError::Message(format!("serialize uploaded remote object: {error}")))?;
     let updated = conn

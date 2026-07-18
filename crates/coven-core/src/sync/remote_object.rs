@@ -320,65 +320,29 @@ impl RemoteObjectRecord {
                 record.state.validate()?;
             }
             Self::RetainedAuthority(record) => {
-                record
-                    .identity
-                    .validate_semantic(record.bytes.canonical_semantic_bytes())?;
-                match &record.identity.domain {
-                    RetainedAuthorityObjectDomain::Commit { reference } => {
-                        let commit: super::store_commit::StoreBatchCommit =
-                            serde_json::from_slice(record.bytes.canonical_semantic_bytes())
-                                .map_err(|error| {
-                                    RemoteObjectRecordError::InvalidDomain(error.to_string())
-                                })?;
-                        reference.verify_commit(&commit).map_err(|error| {
-                            RemoteObjectRecordError::InvalidDomain(error.to_string())
-                        })?;
-                        if reference.object != record.identity.object {
-                            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+                validate_retained_authority_identity(
+                    &record.identity,
+                    record.bytes.canonical_semantic_bytes(),
+                )?;
+                if let RetainedAuthorityObjectDomain::DeviceHead { .. } = &record.identity.domain {
+                    let head: super::store_commit::StoreDeviceHead = serde_json::from_slice(
+                        record.bytes.canonical_semantic_bytes(),
+                    )
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                    let owns_head_commit = match &record.state {
+                        RetainedAuthorityObjectState::Prepared { ownership } => {
+                            ownership.pending.len() == 1 && ownership.pending.contains(&head.commit)
                         }
-                    }
-                    RetainedAuthorityObjectDomain::DeviceHead { reference } => {
-                        let head: super::store_commit::StoreDeviceHead =
-                            serde_json::from_slice(record.bytes.canonical_semantic_bytes())
-                                .map_err(|error| {
-                                    RemoteObjectRecordError::InvalidDomain(error.to_string())
-                                })?;
-                        if head.head_hash() != reference.head_hash
-                            || reference.object != record.identity.object
-                        {
-                            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+                        RetainedAuthorityObjectState::UploadedVerified { ownership } => {
+                            ownership.pending.contains(&head.commit)
+                                || ownership.activated.contains(&head.commit)
                         }
-                        let owns_head_commit = match &record.state {
-                            RetainedAuthorityObjectState::Prepared { ownership } => {
-                                ownership.pending.len() == 1
-                                    && ownership.pending.contains(&head.commit)
-                            }
-                            RetainedAuthorityObjectState::UploadedVerified { ownership } => {
-                                ownership.pending.contains(&head.commit)
-                                    || ownership.activated.contains(&head.commit)
-                            }
-                            RetainedAuthorityObjectState::UncreatedVerified {
-                                former_candidates,
-                            } => ensure_candidate_nonactivation(former_candidates, &head.commit)
-                                .is_ok(),
-                        };
-                        if !owns_head_commit {
-                            return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+                        RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
+                            ensure_candidate_nonactivation(former_candidates, &head.commit).is_ok()
                         }
-                    }
-                    RetainedAuthorityObjectDomain::Acknowledgement { reference } => {
-                        let acknowledgement: super::store_commit::StoreAck =
-                            serde_json::from_slice(record.bytes.canonical_semantic_bytes())
-                                .map_err(|error| {
-                                    RemoteObjectRecordError::InvalidDomain(error.to_string())
-                                })?;
-                        if acknowledgement.registration != reference.registration
-                            || acknowledgement.sequence != reference.sequence
-                            || acknowledgement.ack_hash() != reference.ack_hash
-                            || reference.object != record.identity.object
-                        {
-                            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
-                        }
+                    };
+                    if !owns_head_commit {
+                        return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
                     }
                 }
                 record.state.validate()?;
@@ -605,7 +569,7 @@ impl RemoteObjectRecord {
     pub(crate) fn begin_candidate_nonactivation(
         &mut self,
         nonactivation: CandidateNonactivation,
-    ) -> Result<(), RemoteObjectRecordError> {
+    ) -> Result<Option<ProtocolInertObject>, RemoteObjectRecordError> {
         nonactivation.validate()?;
         let candidate = nonactivation.reference()?;
         match self {
@@ -673,7 +637,26 @@ impl RemoteObjectRecord {
                     }
                 }
                 RetainedAuthorityObjectState::UploadedVerified { .. } => {
-                    return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+                    let RetainedAuthorityObjectState::UploadedVerified { ownership } =
+                        &record.state
+                    else {
+                        unreachable!("matched uploaded retained authority")
+                    };
+                    let mut ownership = ownership.clone();
+                    if !ownership.pending.remove(&candidate) {
+                        ensure_candidate_nonactivation(&ownership.nonactivated, &candidate)?;
+                        return Ok(None);
+                    }
+                    ownership.nonactivated.push(nonactivation);
+                    if ownership.pending.is_empty() && ownership.activated.is_empty() {
+                        return ProtocolInertObject::new(
+                            record.identity.clone(),
+                            record.bytes.canonical_semantic_bytes().to_vec(),
+                            ownership.nonactivated,
+                        )
+                        .map(Some);
+                    }
+                    record.state = RetainedAuthorityObjectState::UploadedVerified { ownership };
                 }
                 RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
                     ensure_candidate_nonactivation(former_candidates, &candidate)?;
@@ -707,7 +690,8 @@ impl RemoteObjectRecord {
                 }
             },
         }
-        self.validate()
+        self.validate()?;
+        Ok(None)
     }
 
     pub(crate) fn cleanup_target(&self) -> Option<&ExactObjectRef> {
@@ -807,6 +791,59 @@ impl RemoteObjectRecord {
                 }
                 OwnedObjectState::RetirementPending { former_candidates } => {
                     contains(former_candidates)
+                }
+            },
+        }
+    }
+
+    pub(crate) fn candidate_nonactivation_proof(
+        &self,
+        candidate: &StoreBatchCommitRef,
+    ) -> Result<Option<&CandidateNonactivationProof>, RemoteObjectRecordError> {
+        self.validate()?;
+        match self {
+            Self::CandidateCommit(record) => {
+                if &record.identity != candidate {
+                    return Ok(None);
+                }
+                match &record.state {
+                    CandidateCommitState::CleanupPending { proof }
+                    | CandidateCommitState::AbsentVerified { proof } => Ok(Some(proof)),
+                    CandidateCommitState::Prepared | CandidateCommitState::UploadedVerified => {
+                        Ok(None)
+                    }
+                }
+            }
+            Self::CandidateExclusive(record) => match &record.state {
+                CandidateObjectState::Prepared { ownership }
+                | CandidateObjectState::UploadedVerified { ownership } => {
+                    find_nonactivation_proof(&ownership.nonactivated, candidate)
+                }
+                CandidateObjectState::CleanupPending { former_candidates }
+                | CandidateObjectState::AbsentVerified { former_candidates } => {
+                    find_nonactivation_proof(former_candidates, candidate)
+                }
+            },
+            Self::RetainedAuthority(record) => match &record.state {
+                RetainedAuthorityObjectState::Prepared { ownership } => {
+                    find_nonactivation_proof(&ownership.nonactivated, candidate)
+                }
+                RetainedAuthorityObjectState::UploadedVerified { ownership } => {
+                    find_nonactivation_proof(&ownership.nonactivated, candidate)
+                }
+                RetainedAuthorityObjectState::UncreatedVerified { former_candidates } => {
+                    find_nonactivation_proof(former_candidates, candidate)
+                }
+            },
+            Self::SharedLiveSet(record) => match &record.state {
+                OwnedObjectState::Prepared { ownership } => {
+                    find_nonactivation_proof(&ownership.nonactivated, candidate)
+                }
+                OwnedObjectState::UploadedVerified { ownership } => {
+                    find_nonactivation_proof(&ownership.nonactivated, candidate)
+                }
+                OwnedObjectState::RetirementPending { former_candidates } => {
+                    find_nonactivation_proof(former_candidates, candidate)
                 }
             },
         }
@@ -1145,6 +1182,47 @@ pub(crate) struct RetainedAuthorityObjectRef {
     pub(crate) object: ExactObjectRef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProtocolInertObject {
+    pub(crate) identity: RetainedAuthorityObjectRef,
+    pub(crate) canonical_semantic_bytes: Vec<u8>,
+    pub(crate) former_candidates: Vec<CandidateNonactivation>,
+}
+
+impl ProtocolInertObject {
+    fn new(
+        identity: RetainedAuthorityObjectRef,
+        canonical_semantic_bytes: Vec<u8>,
+        former_candidates: Vec<CandidateNonactivation>,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let value = Self {
+            identity,
+            canonical_semantic_bytes,
+            former_candidates,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub(crate) fn object_id(&self) -> ObjectHash {
+        remote_object_id(&self.identity.object)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), RemoteObjectRecordError> {
+        validate_retained_authority_identity(&self.identity, &self.canonical_semantic_bytes)?;
+        validate_nonactivations(&self.former_candidates)
+    }
+
+    pub(crate) fn candidate_nonactivation_proof(
+        &self,
+        candidate: &StoreBatchCommitRef,
+    ) -> Result<Option<&CandidateNonactivationProof>, RemoteObjectRecordError> {
+        self.validate()?;
+        find_nonactivation_proof(&self.former_candidates, candidate)
+    }
+}
+
 impl RetainedAuthorityObjectRef {
     fn validate_semantic(&self, bytes: &[u8]) -> Result<(), RemoteObjectRecordError> {
         validate_semantic_hash(self.semantic_hash, bytes)
@@ -1163,6 +1241,47 @@ pub(crate) enum RetainedAuthorityObjectDomain {
     Acknowledgement {
         reference: super::store_commit::StoreAckRef,
     },
+}
+
+fn validate_retained_authority_identity(
+    identity: &RetainedAuthorityObjectRef,
+    canonical_semantic_bytes: &[u8],
+) -> Result<(), RemoteObjectRecordError> {
+    identity.validate_semantic(canonical_semantic_bytes)?;
+    match &identity.domain {
+        RetainedAuthorityObjectDomain::Commit { reference } => {
+            let commit: super::store_commit::StoreBatchCommit =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            reference
+                .verify_commit(&commit)
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if reference.object != identity.object {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::DeviceHead { reference } => {
+            let head: super::store_commit::StoreDeviceHead =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if head.head_hash() != reference.head_hash || reference.object != identity.object {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+        RetainedAuthorityObjectDomain::Acknowledgement { reference } => {
+            let acknowledgement: super::store_commit::StoreAck =
+                serde_json::from_slice(canonical_semantic_bytes)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+            if acknowledgement.registration != reference.registration
+                || acknowledgement.sequence != reference.sequence
+                || acknowledgement.ack_hash() != reference.ack_hash
+                || reference.object != identity.object
+            {
+                return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) use super::store_commit::StoreBatchCommitDeletionTarget;
@@ -1387,6 +1506,18 @@ fn ensure_candidate_nonactivation(
         }
     }
     Err(RemoteObjectRecordError::CandidateNonactivationMissing)
+}
+
+fn find_nonactivation_proof<'a>(
+    former_candidates: &'a [CandidateNonactivation],
+    expected: &StoreBatchCommitRef,
+) -> Result<Option<&'a CandidateNonactivationProof>, RemoteObjectRecordError> {
+    for candidate in former_candidates {
+        if candidate.reference()? == *expected {
+            return Ok(Some(&candidate.proof));
+        }
+    }
+    Ok(None)
 }
 
 fn validate_owner_partition<'a>(

@@ -1763,6 +1763,55 @@ async fn finish_merge_abandonment(
 
 /// Publish the exact prepared object graph in sequence order. Every remote object
 /// is verified at its reserved slot before the exact head activates the commit.
+async fn read_occupied_merge_head(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    store_root_hash: ObjectHash,
+    expected: &StoreDeviceHead,
+    slot: &crate::storage::cloud::ObjectSlot,
+    semantic_prefix: &str,
+) -> Result<(StoreDeviceHead, PreparedExactObject), StoreOutboundError> {
+    let context = ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead);
+    let (winner_bytes, winner_prepared) = storage
+        .read_prepared_protocol_slot(&context, slot, semantic_prefix)
+        .await
+        .map_err(StoreObjectError::from)?;
+    let unverified: StoreDeviceHead = serde_json::from_slice(&winner_bytes).map_err(|error| {
+        StoreOutboundError::InvalidOutbound(format!("parse competing Merge head: {error}"))
+    })?;
+    if unverified.author_registration != expected.author_registration
+        || unverified.commit.coord != expected.commit.coord
+        || unverified.successor.activation != expected.successor.activation
+        || unverified.successor.predecessor != expected.successor.predecessor
+    {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "competing Merge head does not occupy the prepared successor point".to_string(),
+        ));
+    }
+    let registration = db
+        .activated_store_device_registration(expected.author_registration.clone())
+        .await?;
+    if unverified.commit != expected.commit {
+        super::store_objects::load_commit_ref(
+            storage,
+            store_root_hash,
+            &unverified.commit,
+            &registration,
+        )
+        .await?;
+    }
+    let winner = StoreDeviceHead::parse_at(
+        &winner_bytes,
+        store_root_hash,
+        &registration,
+        &unverified.commit,
+    )
+    .map_err(|error| {
+        StoreOutboundError::InvalidOutbound(format!("verify occupied Merge head: {error}"))
+    })?;
+    Ok((winner, winner_prepared))
+}
+
 pub async fn drain_store_writes(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -1839,54 +1888,16 @@ pub(crate) async fn drain_store_writes_with_coordination(
                 if !matches!(error, StorageError::SlotCollision(_)) {
                     return Err(StoreObjectError::from(error).into());
                 }
-                let (winner_bytes, winner_prepared) = storage
-                    .read_prepared_protocol_slot(
-                        &head_context,
-                        batch.head.object.slot(),
-                        &head_prefix,
-                    )
-                    .await
-                    .map_err(StoreObjectError::from)?;
-                let unverified: StoreDeviceHead =
-                    serde_json::from_slice(&winner_bytes).map_err(|parse_error| {
-                        StoreOutboundError::InvalidOutbound(format!(
-                            "parse competing Merge head: {parse_error}"
-                        ))
-                    })?;
-                if unverified.author_registration != head.author_registration
-                    || unverified.commit.coord != head.commit.coord
-                    || unverified.successor.activation != head.successor.activation
-                    || unverified.successor.predecessor != head.successor.predecessor
-                {
-                    return Err(StoreOutboundError::InvalidOutbound(
-                        "competing Merge head does not occupy the prepared successor point"
-                            .to_string(),
-                    ));
-                }
-                let registration = db
-                    .activated_store_device_registration(head.author_registration.clone())
-                    .await?;
-                if unverified.commit != head.commit {
-                    super::store_objects::load_commit_ref(
-                        storage,
-                        store_root_hash,
-                        &unverified.commit,
-                        &registration,
-                    )
-                    .await?;
-                }
-                let winner = StoreDeviceHead::parse_at(
-                    &winner_bytes,
+                let (winner, winner_prepared) = read_occupied_merge_head(
+                    db,
+                    storage,
                     store_root_hash,
-                    &registration,
-                    &unverified.commit,
+                    head,
+                    batch.head.object.slot(),
+                    &head_prefix,
                 )
-                .map_err(|verify_error| {
-                    StoreOutboundError::InvalidOutbound(format!(
-                        "verify occupied Merge head: {verify_error}"
-                    ))
-                })?;
-                if unverified.commit == head.commit {
+                .await?;
+                if winner.commit == head.commit {
                     db.adopt_alternate_merge_head(write_id.clone(), winner, winner_prepared)
                         .await?;
                     db.complete_prepared_store_write(head.commit.clone())
@@ -3229,6 +3240,16 @@ pub(crate) struct PreparedStoreOperationCommit {
 }
 
 impl PreparedStoreOperationCommit {
+    #[cfg(test)]
+    pub(crate) fn merge_publication_for_test(
+        &self,
+    ) -> Option<(&StoreDeviceHead, &PreparedExactObject)> {
+        match &self.publication {
+            StoreOperationPublication::MergeConcurrent { head, prepared } => Some((head, prepared)),
+            StoreOperationPublication::Serial { .. } => None,
+        }
+    }
+
     pub(crate) fn acknowledgement_remote_objects(
         &self,
         acknowledgement: &crate::database::ExactProtocolObject<super::store_commit::StoreAck>,
@@ -3278,6 +3299,55 @@ impl PreparedStoreOperationCommit {
         }
         Ok(objects)
     }
+
+    pub(crate) fn merge_head_ref(&self) -> Option<StoreDeviceHeadRef> {
+        match &self.publication {
+            StoreOperationPublication::MergeConcurrent { head, prepared } => {
+                Some(StoreDeviceHeadRef {
+                    head_hash: head.head_hash(),
+                    object: prepared.reference().clone(),
+                })
+            }
+            StoreOperationPublication::Serial { .. } => None,
+        }
+    }
+
+    pub(crate) fn adopt_merge_head(
+        &mut self,
+        winner: StoreDeviceHead,
+        prepared: PreparedExactObject,
+    ) -> Result<(), StoreOutboundError> {
+        let StoreOperationPublication::MergeConcurrent {
+            head: current,
+            prepared: current_prepared,
+        } = &mut self.publication
+        else {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "Serial Store operation cannot adopt a Merge head".to_string(),
+            ));
+        };
+        if winner.commit != self.reference
+            || prepared.reference().slot() != current_prepared.reference().slot()
+            || prepared.reference() == current_prepared.reference()
+            || winner.author_registration != current.author_registration
+            || winner.successor.activation != current.successor.activation
+            || winner.successor.predecessor != current.successor.predecessor
+        {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "alternate Merge head differs from the prepared activation point".to_string(),
+            ));
+        }
+        *current = winner;
+        *current_prepared = prepared;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StoreOperationPublicationOutcome {
+    Activated(StoreBatchCommitRef),
+    Nonactivated(StoreBatchCommitRef),
+    Reprepared,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3514,7 +3584,7 @@ pub(crate) async fn publish_prepared_store_operation(
     storage: &dyn SyncStorage,
     coordination: Option<&dyn CoordinationStorage>,
     prepared: PreparedStoreOperationCommit,
-) -> Result<StoreBatchCommitRef, StoreOutboundError> {
+) -> Result<StoreOperationPublicationOutcome, StoreOutboundError> {
     let PreparedStoreOperationCommit {
         commit,
         prepared,
@@ -3622,10 +3692,52 @@ pub(crate) async fn publish_prepared_store_operation(
                 &commit.author_registration.device_id.to_string(),
                 commit.seq(),
             );
-            storage
-                .create_protocol_object(&prepared_head)
-                .await
-                .map_err(StoreObjectError::from)?;
+            if let Err(error) = storage.create_protocol_object(&prepared_head).await {
+                if !matches!(error, StorageError::SlotCollision(_)) {
+                    return Err(StoreObjectError::from(error).into());
+                }
+                let (winner, winner_prepared) = read_occupied_merge_head(
+                    db,
+                    storage,
+                    commit.store_root_hash,
+                    &head,
+                    prepared_head.reference().slot(),
+                    &head_prefix,
+                )
+                .await?;
+                if winner.commit == reference {
+                    let acknowledgement = commit.acknowledgement().cloned().ok_or_else(|| {
+                        StoreOutboundError::InvalidOutbound(
+                            "non-acknowledgement Store operation cannot adopt an alternate Merge head"
+                                .to_string(),
+                        )
+                    })?;
+                    db.adopt_outbound_store_ack_merge_head(
+                        acknowledgement,
+                        winner,
+                        winner_prepared,
+                    )
+                    .await?;
+                    return Ok(StoreOperationPublicationOutcome::Reprepared);
+                }
+                let Some(acknowledgement) = commit.acknowledgement().cloned() else {
+                    return Err(StoreOutboundError::InvalidOutbound(format!(
+                        "Store operation lost its Merge successor slot to {}",
+                        winner.commit.commit_hash
+                    )));
+                };
+                let winner_ref = StoreDeviceHeadRef {
+                    head_hash: winner.head_hash(),
+                    object: winner_prepared.reference().clone(),
+                };
+                db.begin_outbound_store_ack_merge_nonactivation(
+                    acknowledgement.clone(),
+                    winner_ref,
+                )
+                .await?;
+                finish_nonactivating_store_ack(db, storage, acknowledgement).await?;
+                return Ok(StoreOperationPublicationOutcome::Nonactivated(reference));
+            }
             let opened_head = storage
                 .read_protocol_object(&head_context, prepared_head.reference(), &head_prefix)
                 .await
@@ -3674,7 +3786,24 @@ pub(crate) async fn publish_prepared_store_operation(
             .await?;
         }
     }
-    Ok(reference)
+    Ok(StoreOperationPublicationOutcome::Activated(reference))
+}
+
+pub(crate) async fn finish_nonactivating_store_ack(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    acknowledgement: super::store_commit::StoreAckRef,
+) -> Result<(), StoreOutboundError> {
+    let targets = db
+        .nonactivating_outbound_store_ack_cleanup_targets(acknowledgement.clone())
+        .await?;
+    for target in targets {
+        super::store_objects::delete_exact_object(storage, &target.object).await?;
+        db.mark_candidate_cleanup_absent(target.object).await?;
+    }
+    db.complete_nonactivating_outbound_store_ack(acknowledgement)
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn activate_store_operation_commit(
@@ -3685,7 +3814,18 @@ pub(crate) async fn activate_store_operation_commit(
     batch: StoreOperationBatch,
 ) -> Result<StoreBatchCommitRef, StoreOutboundError> {
     let prepared = prepare_store_operation_candidate(db, storage, plan, batch).await?;
-    publish_prepared_store_operation(db, storage, coordination, prepared).await
+    match publish_prepared_store_operation(db, storage, coordination, prepared).await? {
+        StoreOperationPublicationOutcome::Activated(reference) => Ok(reference),
+        StoreOperationPublicationOutcome::Nonactivated(reference) => {
+            Err(StoreOutboundError::InvalidOutbound(format!(
+                "Store operation candidate {} did not activate",
+                reference.commit_hash
+            )))
+        }
+        StoreOperationPublicationOutcome::Reprepared => Err(StoreOutboundError::InvalidOutbound(
+            "Store operation was reprepared during immediate activation".to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]

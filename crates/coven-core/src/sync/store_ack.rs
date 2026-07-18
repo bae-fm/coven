@@ -223,6 +223,18 @@ pub async fn drain_outbound_store_acks(
                 continue;
             }
             crate::database::OutboundStoreAckActivation::Prepared(candidate) => candidate,
+            crate::database::OutboundStoreAckActivation::Nonactivating(_) => {
+                super::store_outbound::finish_nonactivating_store_ack(
+                    db,
+                    storage,
+                    outbound.reference,
+                )
+                .await?;
+                published = published.checked_add(1).ok_or_else(|| {
+                    StoreAckError::Database("ack publish count exceeded u64".into())
+                })?;
+                continue;
+            }
         };
         storage
             .create_protocol_object(&outbound.ack.prepared)
@@ -252,14 +264,20 @@ pub async fn drain_outbound_store_acks(
             })?;
         db.mark_remote_object_uploaded(acknowledgement_remote)
             .await?;
-        super::store_outbound::publish_prepared_store_operation(
+        let outcome = super::store_outbound::publish_prepared_store_operation(
             db,
             storage,
             coordination,
             candidate,
         )
         .await?;
-        db.complete_outbound_store_ack(outbound.reference).await?;
+        match outcome {
+            super::store_outbound::StoreOperationPublicationOutcome::Activated(_) => {
+                db.complete_outbound_store_ack(outbound.reference).await?;
+            }
+            super::store_outbound::StoreOperationPublicationOutcome::Nonactivated(_) => {}
+            super::store_outbound::StoreOperationPublicationOutcome::Reprepared => continue,
+        }
         published = published
             .checked_add(1)
             .ok_or_else(|| StoreAckError::Database("ack publish count exceeded u64".into()))?;
@@ -391,6 +409,90 @@ mod tests {
             .await
             .expect("persist acknowledgement candidate");
         candidate
+    }
+
+    struct LosingMergeAckFixture {
+        home: InMemoryCloudHome,
+        signer: UserKeypair,
+        storage: CloudSyncStorage,
+        db: Database,
+        outbound: crate::database::OutboundStoreAck,
+        losing: super::super::store_outbound::PreparedStoreOperationCommit,
+    }
+
+    async fn losing_merge_ack_fixture(path: &Path) -> LosingMergeAckFixture {
+        let home = InMemoryCloudHome::new();
+        let signer = UserKeypair::generate();
+        let storage = storage(&home, &signer);
+        let db = open(path, "ack-merge-loser-device");
+        initialize(&db, &storage, &signer).await;
+        stage(&db, &storage, &signer).await;
+        let outbound = db
+            .oldest_outbound_store_ack()
+            .await
+            .unwrap()
+            .expect("staged acknowledgement exists");
+        let losing = persist_candidate(&db, &storage, &signer, &outbound).await;
+        let membership = super::super::pull::load_cycle_membership(&storage, &db)
+            .await
+            .expect("load acknowledgement test membership");
+        let device_id = db
+            .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await
+            .unwrap()
+            .expect("local Store device id");
+        let competing_plan = super::super::store_outbound::prepare_store_operation_commit(
+            &db,
+            &storage,
+            None,
+            &device_id,
+            &signer,
+            membership.chain.as_ref(),
+        )
+        .await
+        .expect("prepare competing Store operation");
+        let grant_id = super::super::provider::ProviderAccessGrantId::from_random_bytes([91; 32]);
+        let grant_prefix =
+            super::super::store_commit::provider_access_grant_semantic_prefix(&grant_id);
+        let grant_bytes = b"competing provider grant";
+        let grant = super::super::provider::StoreMemberProviderAccessGrantRef {
+            grant_id,
+            grant_hash: super::super::store_commit::ObjectHash::digest(grant_bytes),
+            object: crate::sync::storage::ExactObjectRef::new(
+                crate::storage::cloud::ObjectSlot::logical(format!("{grant_prefix}.json"))
+                    .expect("valid provider grant slot"),
+                grant_bytes.len() as u64,
+                super::super::store_commit::ObjectHash::digest(grant_bytes),
+            ),
+        };
+        let competing = super::super::store_outbound::prepare_store_operation_candidate(
+            &db,
+            &storage,
+            competing_plan,
+            super::super::store_outbound::StoreOperationBatch::ProviderAccessGrant(grant),
+        )
+        .await
+        .expect("prepare competing candidate");
+        assert_ne!(competing.reference, losing.reference);
+        let (_, competing_head) = competing
+            .merge_publication_for_test()
+            .expect("Merge operation has a device head");
+        storage
+            .create_protocol_object(&competing.prepared)
+            .await
+            .expect("publish competing commit");
+        storage
+            .create_protocol_object(competing_head)
+            .await
+            .expect("publish competing head");
+        LosingMergeAckFixture {
+            home,
+            signer,
+            storage,
+            db,
+            outbound,
+            losing,
+        }
     }
 
     #[tokio::test]
@@ -613,6 +715,319 @@ mod tests {
         assert_eq!(
             reopened.latest_local_store_position().await.unwrap(),
             Some(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn uploaded_acknowledgement_accepts_its_sole_candidate_nonactivation() {
+        let home = InMemoryCloudHome::new();
+        let signer = UserKeypair::generate();
+        let storage = storage(&home, &signer);
+        let db = open(Path::new(":memory:"), "ack-nonactivation-device");
+        initialize(&db, &storage, &signer).await;
+        stage(&db, &storage, &signer).await;
+        let outbound = db
+            .oldest_outbound_store_ack()
+            .await
+            .unwrap()
+            .expect("staged acknowledgement exists");
+        let candidate = persist_candidate(&db, &storage, &signer, &outbound).await;
+        let mut acknowledgement = candidate
+            .acknowledgement_remote_objects(&outbound.ack)
+            .expect("candidate owns acknowledgement")
+            .into_iter()
+            .find(|remote| remote.object() == &outbound.reference.object)
+            .expect("acknowledgement ownership record");
+        acknowledgement
+            .mark_uploaded_verified()
+            .expect("acknowledgement upload is durable");
+        let winner_bytes = b"different valid winner head";
+        let winner_object = crate::sync::storage::ExactObjectRef::new(
+            crate::storage::cloud::ObjectSlot::logical(
+                "store-v1/heads/ack-nonactivation-winner.json".to_string(),
+            )
+            .expect("valid winner slot"),
+            winner_bytes.len() as u64,
+            super::super::store_commit::ObjectHash::digest(winner_bytes),
+        );
+        let nonactivation = super::super::remote_object::CandidateNonactivation {
+            candidate: super::super::store_commit::StoreBatchCommitDeletionTarget {
+                coord: candidate.reference.coord.clone(),
+                object: candidate.reference.object.clone(),
+                canonical_signed_bytes: candidate.commit.to_bytes(),
+            },
+            proof: super::super::remote_object::CandidateNonactivationProof::MergeWinner {
+                winner_head: super::super::store_commit::StoreDeviceHeadRef {
+                    head_hash: super::super::store_commit::ObjectHash::digest(winner_bytes),
+                    object: winner_object,
+                },
+            },
+        };
+
+        assert!(acknowledgement
+            .begin_candidate_nonactivation(nonactivation)
+            .expect("uploaded acknowledgement accepts candidate loss")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn losing_merge_activation_inerts_the_uploaded_acknowledgement() {
+        let LosingMergeAckFixture {
+            home,
+            signer,
+            storage,
+            db,
+            outbound,
+            losing,
+        } = losing_merge_ack_fixture(Path::new(":memory:")).await;
+
+        assert_eq!(
+            drain(&db, &storage, &signer)
+                .await
+                .expect("settle losing acknowledgement activation"),
+            1
+        );
+        assert!(db.oldest_outbound_store_ack().await.unwrap().is_none());
+        assert_eq!(
+            db.latest_local_store_ack()
+                .await
+                .unwrap()
+                .expect("inert acknowledgement still advances its physical stream")
+                .reference,
+            outbound.reference
+        );
+        let inert = db
+            .protocol_inert_object(outbound.reference.object.clone())
+            .await
+            .unwrap()
+            .expect("losing acknowledgement is retained outside reducer state");
+        assert!(matches!(
+            inert.identity.domain,
+            super::super::remote_object::RetainedAuthorityObjectDomain::Acknowledgement {
+                ref reference
+            } if reference == &outbound.reference
+        ));
+        assert!(inert
+            .candidate_nonactivation_proof(&losing.reference)
+            .expect("inert acknowledgement proof is valid")
+            .is_some());
+        assert!(home
+            .get(losing.reference.object.slot().logical_key())
+            .is_none());
+        assert_ne!(
+            db.activated_store_ack(&outbound.reference.registration)
+                .await
+                .unwrap(),
+            Some(outbound.reference.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_acknowledgement_nonactivation_resumes_after_delete_failure_and_restart() {
+        let directory = tempfile::tempdir().expect("acknowledgement database directory");
+        let path = directory.path().join("store.sqlite3");
+        let LosingMergeAckFixture {
+            home,
+            signer,
+            storage,
+            db,
+            outbound,
+            losing,
+        } = losing_merge_ack_fixture(&path).await;
+        home.fail_exact_delete_on_call(1);
+
+        assert!(drain(&db, &storage, &signer).await.is_err());
+        assert!(matches!(
+            db.oldest_outbound_store_ack()
+                .await
+                .unwrap()
+                .expect("nonactivating acknowledgement remains durable")
+                .activation,
+            crate::database::OutboundStoreAckActivation::Nonactivating(ref candidate)
+                if candidate.reference == losing.reference
+        ));
+        assert!(db
+            .protocol_inert_object(outbound.reference.object.clone())
+            .await
+            .unwrap()
+            .is_some());
+        drop(db);
+
+        let reopened = open(&path, "ack-merge-loser-device");
+        assert_eq!(drain(&reopened, &storage, &signer).await.unwrap(), 1);
+        assert!(reopened
+            .oldest_outbound_store_ack()
+            .await
+            .unwrap()
+            .is_none());
+        assert!(home
+            .get(losing.reference.object.slot().logical_key())
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn merge_acknowledgement_completion_rejects_mismatched_durable_loss_proofs() {
+        let LosingMergeAckFixture {
+            home,
+            signer,
+            storage,
+            db,
+            outbound,
+            losing,
+        } = losing_merge_ack_fixture(Path::new(":memory:")).await;
+        home.fail_exact_delete_on_call(1);
+        assert!(drain(&db, &storage, &signer).await.is_err());
+
+        let head = losing
+            .merge_head_ref()
+            .expect("Merge acknowledgement candidate has a head");
+        db.call(move |conn| {
+            let object_id = super::super::remote_object::remote_object_id(&head.object);
+            let encoded: String = conn
+                .query_row(
+                    "SELECT state FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(crate::DbError::from)?;
+            let mut remote: super::super::remote_object::RemoteObjectRecord =
+                serde_json::from_str(&encoded).map_err(|error| {
+                    crate::DbError::Message(format!("parse test head ownership: {error}"))
+                })?;
+            let super::super::remote_object::RemoteObjectRecord::RetainedAuthority(record) =
+                &mut remote
+            else {
+                return Err(crate::DbError::Message(
+                    "test head is not retained authority".to_string(),
+                ));
+            };
+            let super::super::remote_object::RetainedAuthorityObjectState::UncreatedVerified {
+                former_candidates,
+            } = &mut record.state
+            else {
+                return Err(crate::DbError::Message(
+                    "test head is not proven uncreated".to_string(),
+                ));
+            };
+            let Some(nonactivation) = former_candidates.first_mut() else {
+                return Err(crate::DbError::Message(
+                    "test head has no loss proof".to_string(),
+                ));
+            };
+            let super::super::remote_object::CandidateNonactivationProof::MergeWinner {
+                winner_head,
+            } = &mut nonactivation.proof
+            else {
+                return Err(crate::DbError::Message(
+                    "test head has a non-Merge loss proof".to_string(),
+                ));
+            };
+            let tampered_bytes = b"different winner at the same head slot";
+            winner_head.object = crate::sync::storage::ExactObjectRef::new(
+                winner_head.object.slot().clone(),
+                tampered_bytes.len() as u64,
+                super::super::store_commit::ObjectHash::digest(tampered_bytes),
+            );
+            remote.validate().map_err(|error| {
+                crate::DbError::Message(format!("validate test head ownership: {error}"))
+            })?;
+            conn.execute(
+                "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
+                (
+                    object_id.to_string(),
+                    serde_json::to_string(&remote).map_err(|error| {
+                        crate::DbError::Message(format!("serialize test head ownership: {error}"))
+                    })?,
+                ),
+            )
+            .map_err(crate::DbError::from)?;
+            Ok(())
+        })
+        .await
+        .expect("install mismatched durable head proof");
+
+        assert!(drain(&db, &storage, &signer).await.is_err());
+        assert_eq!(
+            db.oldest_outbound_store_ack()
+                .await
+                .unwrap()
+                .expect("mismatched proof keeps acknowledgement pending")
+                .reference,
+            outbound.reference
+        );
+    }
+
+    #[tokio::test]
+    async fn alternate_merge_head_for_the_same_ack_candidate_is_adopted() {
+        let home = InMemoryCloudHome::new();
+        let signer = UserKeypair::generate();
+        let storage = storage(&home, &signer);
+        let db = open(Path::new(":memory:"), "ack-alternate-head-device");
+        initialize(&db, &storage, &signer).await;
+        stage(&db, &storage, &signer).await;
+        let outbound = db
+            .oldest_outbound_store_ack()
+            .await
+            .unwrap()
+            .expect("staged acknowledgement exists");
+        let candidate = persist_candidate(&db, &storage, &signer, &outbound).await;
+        let (expected_head, expected_prepared) = candidate
+            .merge_publication_for_test()
+            .expect("Merge acknowledgement has a device head");
+        let (root, registration_ref, _, device_signer) =
+            super::super::store_outbound::load_local_store_authority(
+                &db,
+                &outbound.reference.registration.device_id.to_string(),
+                &signer,
+            )
+            .await
+            .expect("load local device signing authority");
+        let alternate_next = crate::storage::cloud::ObjectSlot::opaque(
+            expected_head.successor.next_slot.logical_key().to_string(),
+            "alternate-next-slot".to_string(),
+        )
+        .expect("valid alternate successor slot");
+        let alternate_head = super::super::store_commit::StoreDeviceHead::signed(
+            root.store_root_hash,
+            registration_ref,
+            candidate.reference.clone(),
+            super::super::store_commit::SuccessorLink {
+                activation: expected_head.successor.activation,
+                predecessor: expected_head.successor.predecessor.clone(),
+                next_slot: alternate_next,
+            },
+            &device_signer,
+        )
+        .expect("sign alternate head");
+        let head_context =
+            ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreHead);
+        let head_prefix = super::super::store_commit::head_slot_prefix(
+            &outbound.reference.registration.device_id.to_string(),
+            candidate.commit.seq(),
+        );
+        let alternate_prepared = storage
+            .prepare_protocol_object(
+                &head_context,
+                expected_prepared.reference().slot().clone(),
+                &head_prefix,
+                alternate_head.to_bytes(),
+            )
+            .expect("prepare alternate head at the same slot");
+        assert_ne!(
+            alternate_prepared.reference(),
+            expected_prepared.reference()
+        );
+        storage
+            .create_protocol_object(&alternate_prepared)
+            .await
+            .expect("publish alternate head");
+
+        assert_eq!(drain(&db, &storage, &signer).await.unwrap(), 1);
+        assert_eq!(
+            db.activated_store_ack(&outbound.reference.registration)
+                .await
+                .unwrap(),
+            Some(outbound.reference)
         );
     }
 }

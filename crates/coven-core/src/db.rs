@@ -168,6 +168,13 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            protocol_inert_objects,
+            "
+    object_id TEXT PRIMARY KEY CHECK (length(object_id) = 64),
+    state TEXT NOT NULL CHECK (json_valid(state))
+"
+        );
+        $visit!(
             store_write_packages,
             "
     write_id TEXT NOT NULL,
@@ -458,6 +465,41 @@ macro_rules! coven_routing_tables {
     };
 }
 
+const OBJECT_OWNERSHIP_TRIGGERS: &str = "
+CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_inert_on_insert
+BEFORE INSERT ON remote_objects
+WHEN EXISTS (
+    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'remote object identity is protocol-inert');
+END;
+CREATE TRIGGER IF NOT EXISTS remote_object_identity_must_not_be_inert_on_update
+BEFORE UPDATE OF object_id ON remote_objects
+WHEN EXISTS (
+    SELECT 1 FROM protocol_inert_objects WHERE object_id = NEW.object_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'remote object identity is protocol-inert');
+END;
+CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_remote_on_insert
+BEFORE INSERT ON protocol_inert_objects
+WHEN EXISTS (
+    SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'protocol-inert object identity has active ownership');
+END;
+CREATE TRIGGER IF NOT EXISTS inert_object_identity_must_not_be_remote_on_update
+BEFORE UPDATE OF object_id ON protocol_inert_objects
+WHEN EXISTS (
+    SELECT 1 FROM remote_objects WHERE object_id = NEW.object_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'protocol-inert object identity has active ownership');
+END;
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CovenSchemaManifest {
@@ -578,7 +620,7 @@ pub(crate) fn live_coven_schema_manifest(
         .prepare(
             "SELECT type, name, tbl_name, sql
              FROM main.sqlite_schema
-             WHERE type IN ('table', 'index')
+             WHERE type IN ('table', 'index', 'trigger')
              ORDER BY type, name",
         )?
         .query_map([], |row| {
@@ -640,6 +682,7 @@ pub(crate) fn apply_coven_schema(conn: &rusqlite::Connection) -> rusqlite::Resul
     }
 
     coven_tables!(apply_table);
+    conn.execute_batch(OBJECT_OWNERSHIP_TRIGGERS)?;
     Ok(())
 }
 
@@ -736,6 +779,57 @@ mod tests {
                 .unwrap_or_else(|e| panic!("PRAGMA table_list({name}): {e}"));
             assert_eq!(strict, 1, "{name} must be STRICT");
         }
+    }
+
+    #[test]
+    fn active_and_protocol_inert_object_identities_are_disjoint() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        apply_coven_schema(&conn).expect("apply coven schema");
+        let active_first = "a".repeat(64);
+        conn.execute(
+            "INSERT INTO remote_objects (object_id, state) VALUES (?1, '{}')",
+            [&active_first],
+        )
+        .expect("insert active object");
+        assert!(
+            conn.execute(
+                "INSERT INTO protocol_inert_objects (object_id, state) VALUES (?1, '{}')",
+                [&active_first],
+            )
+            .is_err(),
+            "an active object identity must not also become protocol-inert"
+        );
+
+        let inert_first = "b".repeat(64);
+        conn.execute(
+            "INSERT INTO protocol_inert_objects (object_id, state) VALUES (?1, '{}')",
+            [&inert_first],
+        )
+        .expect("insert protocol-inert object");
+        assert!(
+            conn.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, '{}')",
+                [&inert_first],
+            )
+            .is_err(),
+            "a protocol-inert object identity must not return to active ownership"
+        );
+        assert!(
+            conn.execute(
+                "UPDATE remote_objects SET object_id = ?1 WHERE object_id = ?2",
+                [&inert_first, &active_first],
+            )
+            .is_err(),
+            "an active identity update must not collide with protocol-inert ownership"
+        );
+        assert!(
+            conn.execute(
+                "UPDATE protocol_inert_objects SET object_id = ?1 WHERE object_id = ?2",
+                [&active_first, &inert_first],
+            )
+            .is_err(),
+            "a protocol-inert identity update must not collide with active ownership"
+        );
     }
 
     #[test]
