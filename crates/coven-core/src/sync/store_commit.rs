@@ -284,6 +284,52 @@ pub struct StoreBatchCommitRef {
     pub object: ExactObjectRef,
 }
 
+/// Exact stored candidate commit retained as cleanup authority after abandonment.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreBatchCommitDeletionTarget {
+    pub coord: StoreCommitCoord,
+    pub object: ExactObjectRef,
+    pub canonical_signed_bytes: Vec<u8>,
+}
+
+impl StoreBatchCommitDeletionTarget {
+    pub(crate) fn verify_candidate(
+        &self,
+        expected_store_root_hash: ObjectHash,
+        author: &StoreDeviceRegistration,
+    ) -> Result<StoreBatchCommit, StoreProtocolError> {
+        self.object
+            .verify(&self.canonical_signed_bytes)
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        let commit: StoreBatchCommit = serde_json::from_slice(&self.canonical_signed_bytes)
+            .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+        if commit.to_bytes() != self.canonical_signed_bytes {
+            return Err(StoreProtocolError::Malformed(
+                "candidate commit bytes are not canonical".to_string(),
+            ));
+        }
+        if matches!(
+            &commit.body,
+            StoreCommitBody::SerialRecoveryActivation { .. }
+                | StoreCommitBody::AbandonCandidates { .. }
+        ) {
+            return Err(StoreProtocolError::Malformed(
+                "retained authority cannot be a candidate cleanup target".to_string(),
+            ));
+        }
+        commit.verify_at(expected_store_root_hash, &self.coord, author)?;
+        StoreBatchCommitRef::from_commit(&commit, self.coord.clone(), self.object.clone())?;
+        Ok(commit)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateCleanupManifest {
+    pub candidate: StoreBatchCommitDeletionTarget,
+}
+
 impl StoreBatchCommitRef {
     pub fn from_commit(
         commit: &StoreBatchCommit,
@@ -932,6 +978,9 @@ pub enum StoreCommitBody {
     SerialRecoveryActivation {
         activation: SerialRecoveryActivation,
     },
+    AbandonCandidates {
+        manifests: Vec<CandidateCleanupManifest>,
+    },
 }
 
 pub struct StoreCommitOperationsInput<'a> {
@@ -1001,7 +1050,8 @@ impl StoreBatchCommit {
         match &self.body {
             StoreCommitBody::Operations(operations) => Some(operations),
             StoreCommitBody::SelfRetirement { .. }
-            | StoreCommitBody::SerialRecoveryActivation { .. } => None,
+            | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
 
@@ -1013,16 +1063,27 @@ impl StoreBatchCommit {
     pub fn serial_recovery_activation(&self) -> Option<&SerialRecoveryActivation> {
         match &self.body {
             StoreCommitBody::SerialRecoveryActivation { activation } => Some(activation),
-            StoreCommitBody::Operations(_) | StoreCommitBody::SelfRetirement { .. } => None,
+            StoreCommitBody::Operations(_)
+            | StoreCommitBody::SelfRetirement { .. }
+            | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
 
     pub fn self_retirement(&self) -> Option<&StoreDeviceSelfRetirementRef> {
         match &self.body {
             StoreCommitBody::SelfRetirement { retirement } => Some(retirement),
-            StoreCommitBody::Operations(_) | StoreCommitBody::SerialRecoveryActivation { .. } => {
-                None
-            }
+            StoreCommitBody::Operations(_)
+            | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::AbandonCandidates { .. } => None,
+        }
+    }
+
+    pub fn abandoned_candidates(&self) -> &[CandidateCleanupManifest] {
+        match &self.body {
+            StoreCommitBody::AbandonCandidates { manifests } => manifests,
+            StoreCommitBody::Operations(_)
+            | StoreCommitBody::SelfRetirement { .. }
+            | StoreCommitBody::SerialRecoveryActivation { .. } => &[],
         }
     }
 
@@ -1071,6 +1132,7 @@ impl StoreBatchCommit {
                 std::slice::from_ref(&activation.registration)
             }
             StoreCommitBody::SelfRetirement { .. } => &[],
+            StoreCommitBody::AbandonCandidates { .. } => &[],
         }
     }
 
@@ -1080,6 +1142,7 @@ impl StoreBatchCommit {
             StoreCommitBody::Operations(_) | StoreCommitBody::SerialRecoveryActivation { .. } => {
                 &[]
             }
+            StoreCommitBody::AbandonCandidates { .. } => &[],
         }
     }
 
@@ -1312,6 +1375,52 @@ impl StoreBatchCommit {
             device_state,
             membership_authority,
             StoreCommitBody::SelfRetirement { retirement },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_with_candidate_abandonment(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        mut manifests: Vec<CandidateCleanupManifest>,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            None,
+            signer,
+        )?;
+        manifests.sort();
+        validate_candidate_abandonment(
+            &manifests,
+            store_root_hash,
+            &author_registration,
+            &coord,
+            &order,
+            author,
+        )?;
+        Self::finish_signed_body(
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            None,
+            StoreCommitBody::AbandonCandidates { manifests },
             signer,
         )
     }
@@ -1801,6 +1910,16 @@ impl StoreBatchCommit {
             }
         }
         validate_commit_body(&self.body, family, &self.author_registration, &self.order)?;
+        if let StoreCommitBody::AbandonCandidates { manifests } = &self.body {
+            validate_candidate_abandonment(
+                manifests,
+                self.store_root_hash,
+                &self.author_registration,
+                expected_coord,
+                &self.order,
+                author,
+            )?;
+        }
         if self.candidate_objects != candidate_manifest(family, &self.body)? {
             return Err(StoreProtocolError::Malformed(
                 "candidate object manifest differs from the exact commit body graph".to_string(),
@@ -1918,6 +2037,71 @@ fn validate_commit_body(
         StoreCommitBody::SerialRecoveryActivation { activation } => {
             validate_serial_recovery_activation(order, activation, author)?;
         }
+        StoreCommitBody::AbandonCandidates { manifests } => {
+            if manifests.is_empty() {
+                return Err(StoreProtocolError::Malformed(
+                    "candidate abandonment has no candidates".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_candidate_abandonment(
+    manifests: &[CandidateCleanupManifest],
+    store_root_hash: ObjectHash,
+    author_registration: &StoreDeviceRegistrationRef,
+    coord: &StoreCommitCoord,
+    order: &StoreCommitOrder,
+    author: &StoreDeviceRegistration,
+) -> Result<(), StoreProtocolError> {
+    if manifests.is_empty() {
+        return Err(StoreProtocolError::Malformed(
+            "candidate abandonment has no candidates".to_string(),
+        ));
+    }
+    if manifests.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(StoreProtocolError::Malformed(
+            "candidate abandonment manifests are not strictly sorted and unique".to_string(),
+        ));
+    }
+    for manifest in manifests {
+        if &manifest.candidate.coord != coord {
+            return Err(StoreProtocolError::Malformed(
+                "abandoned candidate occupies a different competition point".to_string(),
+            ));
+        }
+        let candidate = manifest
+            .candidate
+            .verify_candidate(store_root_hash, author)?;
+        if &candidate.author_registration != author_registration {
+            return Err(StoreProtocolError::Malformed(
+                "abandoned candidate has a different author registration".to_string(),
+            ));
+        }
+        let shares_predecessor = match (&candidate.order, order) {
+            (
+                StoreCommitOrder::MergeConcurrent {
+                    predecessor: candidate_predecessor,
+                    ..
+                },
+                StoreCommitOrder::MergeConcurrent { predecessor, .. },
+            ) => candidate_predecessor == predecessor,
+            (
+                StoreCommitOrder::Serial {
+                    predecessor: candidate_predecessor,
+                    ..
+                },
+                StoreCommitOrder::Serial { predecessor, .. },
+            ) => candidate_predecessor == predecessor,
+            _ => false,
+        };
+        if !shares_predecessor {
+            return Err(StoreProtocolError::Malformed(
+                "abandoned candidate has a different predecessor".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -1967,7 +2151,8 @@ fn candidate_manifest(
                 retirement.clone(),
             ));
         }
-        StoreCommitBody::SerialRecoveryActivation { .. } => {}
+        StoreCommitBody::SerialRecoveryActivation { .. }
+        | StoreCommitBody::AbandonCandidates { .. } => {}
     }
     objects.sort_by_cached_key(|object| {
         serde_json::to_vec(object).expect("candidate object serialization cannot fail")
@@ -5903,6 +6088,234 @@ mod tests {
     fn resign_commit(commit: &mut StoreBatchCommit, fixture: &Fixture) {
         let signer = fixture.registration.device_signer(&fixture.signer).unwrap();
         commit.signature = keys::sign_hex(&signer, &commit.canonical_signed_bytes()).1;
+    }
+
+    fn candidate_cleanup_manifest(fixture: &Fixture, label: &str) -> CandidateCleanupManifest {
+        let package = label.as_bytes();
+        let write_id = WriteId::from_generated(format!("{label}-write"));
+        let order = fixture.commit.order.clone();
+        let family = CandidateFamilyId::derive(
+            fixture.root_ref.store_root_hash,
+            &fixture.registration_ref,
+            &write_id,
+            &order,
+        );
+        let package_object = exact(
+            format!(
+                "{}.pkg",
+                package_semantic_prefix(
+                    family,
+                    SERIAL_STREAM_ID,
+                    order.seq(),
+                    ObjectHash::digest(package),
+                )
+            ),
+            package,
+        );
+        let signer = fixture.registration.device_signer(&fixture.signer).unwrap();
+        let commit = StoreBatchCommit::signed(
+            fixture.root_ref.store_root_hash,
+            write_id,
+            fixture.commit_ref.coord.clone(),
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            order,
+            fixture.commit.membership_state.clone(),
+            fixture.commit.device_state.clone(),
+            None,
+            StorePackageInput {
+                candidate_family: family,
+                schema_version: 3,
+                bytes: package,
+                object: package_object,
+            },
+            &signer,
+        )
+        .expect("sign candidate commit");
+        let bytes = commit.to_bytes();
+        CandidateCleanupManifest {
+            candidate: StoreBatchCommitDeletionTarget {
+                coord: fixture.commit_ref.coord.clone(),
+                object: exact(
+                    format!(
+                        "{}.json",
+                        commit_semantic_prefix(
+                            commit.candidate_family(),
+                            SERIAL_STREAM_ID,
+                            commit.seq(),
+                            commit.commit_hash(),
+                        )
+                    ),
+                    &bytes,
+                ),
+                canonical_signed_bytes: bytes,
+            },
+        }
+    }
+
+    fn sign_candidate_abandonment(
+        fixture: &Fixture,
+        manifests: Vec<CandidateCleanupManifest>,
+    ) -> Result<StoreBatchCommit, StoreProtocolError> {
+        let signer = fixture.registration.device_signer(&fixture.signer).unwrap();
+        StoreBatchCommit::signed_with_candidate_abandonment(
+            fixture.root_ref.store_root_hash,
+            WriteId::from_generated("abandon-candidates".to_string()),
+            fixture.commit_ref.coord.clone(),
+            fixture.registration_ref.clone(),
+            &fixture.registration,
+            fixture.commit.order.clone(),
+            fixture.commit.membership_state.clone(),
+            fixture.commit.device_state.clone(),
+            manifests,
+            &signer,
+        )
+    }
+
+    #[test]
+    fn candidate_abandonment_is_signed_canonical_cleanup_authority() {
+        let fixture = fixture();
+        let first = candidate_cleanup_manifest(&fixture, "first candidate");
+        let second = candidate_cleanup_manifest(&fixture, "second candidate");
+        let commit = sign_candidate_abandonment(&fixture, vec![second.clone(), first.clone()])
+            .expect("sign candidate abandonment");
+
+        assert!(commit.candidate_objects.objects.is_empty());
+        assert_eq!(
+            commit.abandoned_candidates(),
+            [first, second]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+        commit
+            .verify_at(
+                fixture.root_ref.store_root_hash,
+                &fixture.commit_ref.coord,
+                &fixture.registration,
+            )
+            .expect("verify candidate abandonment");
+    }
+
+    #[test]
+    fn candidate_abandonment_rejects_duplicate_and_inexact_targets() {
+        let fixture = fixture();
+        let manifest = candidate_cleanup_manifest(&fixture, "candidate");
+        assert!(matches!(
+            sign_candidate_abandonment(&fixture, vec![manifest.clone(), manifest.clone()]),
+            Err(StoreProtocolError::Malformed(reason))
+                if reason.contains("strictly sorted and unique")
+        ));
+
+        let mut inexact = manifest;
+        inexact.candidate.object = exact(
+            inexact.candidate.object.slot().logical_key().to_string(),
+            b"different stored bytes",
+        );
+        assert!(matches!(
+            sign_candidate_abandonment(&fixture, vec![inexact]),
+            Err(StoreProtocolError::Malformed(reason))
+                if reason.contains("does not match stored size/hash")
+        ));
+    }
+
+    #[test]
+    fn candidate_abandonment_rejects_noncanonical_or_unsigned_candidate_bytes() {
+        let fixture = fixture();
+        let manifest = candidate_cleanup_manifest(&fixture, "candidate");
+        let candidate: StoreBatchCommit =
+            serde_json::from_slice(&manifest.candidate.canonical_signed_bytes).unwrap();
+
+        let mut noncanonical = manifest.clone();
+        noncanonical.candidate.canonical_signed_bytes =
+            serde_json::to_vec_pretty(&candidate).expect("serialize noncanonical candidate");
+        noncanonical.candidate.object = exact(
+            noncanonical
+                .candidate
+                .object
+                .slot()
+                .logical_key()
+                .to_string(),
+            &noncanonical.candidate.canonical_signed_bytes,
+        );
+        assert!(matches!(
+            sign_candidate_abandonment(&fixture, vec![noncanonical]),
+            Err(StoreProtocolError::Malformed(reason))
+                if reason.contains("not canonical")
+        ));
+
+        let mut unsigned_candidate = candidate;
+        unsigned_candidate.signature.push('0');
+        let mut unsigned = manifest;
+        unsigned.candidate.canonical_signed_bytes = unsigned_candidate.to_bytes();
+        unsigned.candidate.object = exact(
+            unsigned.candidate.object.slot().logical_key().to_string(),
+            &unsigned.candidate.canonical_signed_bytes,
+        );
+        assert!(matches!(
+            sign_candidate_abandonment(&fixture, vec![unsigned]),
+            Err(StoreProtocolError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn candidate_abandonment_rejects_retained_authority_target() {
+        let fixture = fixture();
+        let inner = sign_candidate_abandonment(
+            &fixture,
+            vec![candidate_cleanup_manifest(&fixture, "candidate")],
+        )
+        .expect("sign inner candidate abandonment");
+        let bytes = inner.to_bytes();
+        let retained = CandidateCleanupManifest {
+            candidate: StoreBatchCommitDeletionTarget {
+                coord: fixture.commit_ref.coord.clone(),
+                object: exact(
+                    format!(
+                        "{}.json",
+                        commit_semantic_prefix(
+                            inner.candidate_family(),
+                            SERIAL_STREAM_ID,
+                            inner.seq(),
+                            inner.commit_hash(),
+                        )
+                    ),
+                    &bytes,
+                ),
+                canonical_signed_bytes: bytes,
+            },
+        };
+
+        assert!(matches!(
+            sign_candidate_abandonment(&fixture, vec![retained]),
+            Err(StoreProtocolError::Malformed(reason))
+                if reason.contains("retained authority")
+        ));
+    }
+
+    #[test]
+    fn parsed_candidate_abandonment_rejects_noncanonical_manifest_order() {
+        let fixture = fixture();
+        let first = candidate_cleanup_manifest(&fixture, "first candidate");
+        let second = candidate_cleanup_manifest(&fixture, "second candidate");
+        let mut commit = sign_candidate_abandonment(&fixture, vec![first, second])
+            .expect("sign candidate abandonment");
+        let StoreCommitBody::AbandonCandidates { manifests } = &mut commit.body else {
+            panic!("commit carries candidate abandonment")
+        };
+        manifests.reverse();
+        resign_commit(&mut commit, &fixture);
+
+        assert!(matches!(
+            commit.verify_at(
+                fixture.root_ref.store_root_hash,
+                &fixture.commit_ref.coord,
+                &fixture.registration,
+            ),
+            Err(StoreProtocolError::Malformed(reason))
+                if reason.contains("strictly sorted and unique")
+        ));
     }
 
     #[test]

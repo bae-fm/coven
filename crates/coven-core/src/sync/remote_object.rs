@@ -1124,13 +1124,7 @@ pub(crate) enum RetainedAuthorityObjectDomain {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct StoreBatchCommitDeletionTarget {
-    pub(crate) coord: super::store_commit::StoreCommitCoord,
-    pub(crate) object: ExactObjectRef,
-    pub(crate) canonical_signed_bytes: Vec<u8>,
-}
+pub(crate) use super::store_commit::StoreBatchCommitDeletionTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
