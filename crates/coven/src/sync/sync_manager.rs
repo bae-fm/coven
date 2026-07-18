@@ -242,6 +242,22 @@ impl SyncManager {
         .map_err(|error| SyncError::Protocol(error.to_string()))
     }
 
+    pub(crate) async fn cleanup_serial_candidates(
+        &self,
+        branch_id: coven_core::PendingBranchId,
+        plan: &crate::sync::store_pull::SerialResolutionPlan,
+    ) -> Result<(), SyncError> {
+        let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
+        crate::sync::store_pull::cleanup_serial_candidates(
+            &self.db,
+            &**loop_handle.storage(),
+            branch_id,
+            plan,
+        )
+        .await
+        .map_err(|error| SyncError::Protocol(error.to_string()))
+    }
+
     // =========================================================================
     // Sync lifecycle
     // =========================================================================

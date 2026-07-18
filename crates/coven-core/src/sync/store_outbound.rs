@@ -1095,6 +1095,7 @@ fn close_prepared_packages(
                 state: super::remote_object::CandidateObjectState::Prepared {
                     ownership: super::remote_object::PendingCandidateOwnership {
                         pending: std::collections::BTreeSet::from([owner.clone()]),
+                        nonactivated: Vec::new(),
                     },
                 },
             },
@@ -1164,12 +1165,14 @@ fn close_prepared_blobs(
                         ownership: super::remote_object::SharedObjectOwnership {
                             pending: std::collections::BTreeSet::from([owner.clone()]),
                             activated: std::collections::BTreeSet::new(),
+                            nonactivated: Vec::new(),
                         },
                     }
                 } else {
                     super::remote_object::OwnedObjectState::Prepared {
                         ownership: super::remote_object::PendingCandidateOwnership {
                             pending: std::collections::BTreeSet::from([owner.clone()]),
+                            nonactivated: Vec::new(),
                         },
                     }
                 },
@@ -1278,6 +1281,8 @@ pub(crate) async fn drain_store_writes_with_coordination(
                     "prepared commit exact readback differs from its signed bytes".to_string(),
                 ));
             }
+            db.mark_candidate_commit_uploaded(head.commit.clone())
+                .await?;
             let head_context =
                 ProtocolObjectContext::store(store_root_hash, ProtocolObjectDomain::StoreHead);
             let head_prefix = head_slot_prefix(
@@ -2127,6 +2132,15 @@ async fn drain_serial_store_branch(
                 "prepared Serial commit exact readback differs from its signed bytes".to_string(),
             ));
         }
+        let commit_ref = StoreBatchCommitRef::from_commit(
+            &write.commit.value,
+            StoreCommitCoord::Serial {
+                sequence: write.commit.value.seq(),
+            },
+            write.commit.object.clone(),
+        )
+        .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+        db.mark_candidate_commit_uploaded(commit_ref).await?;
     }
     let current = observe_serial_head(db, coordination).await?;
     if let PreparedSerialBaseObservation::Conflicts(current) =
@@ -2280,6 +2294,10 @@ async fn publish_prepared_remote_objects(
     for prepared in db.prepared_remote_objects(write_id).await? {
         let remote = prepared.record;
         let prepared_state = match &remote {
+            super::remote_object::RemoteObjectRecord::CandidateCommit(record) => matches!(
+                record.state,
+                super::remote_object::CandidateCommitState::Prepared
+            ),
             super::remote_object::RemoteObjectRecord::CandidateExclusive(record) => matches!(
                 record.state,
                 super::remote_object::CandidateObjectState::Prepared { .. }
@@ -2288,6 +2306,7 @@ async fn publish_prepared_remote_objects(
                 record.state,
                 super::remote_object::OwnedObjectState::Prepared { .. }
             ),
+            super::remote_object::RemoteObjectRecord::RetainedAuthority(_) => false,
         };
         match remote.bytes().stored() {
             super::remote_object::RemoteStoredRepresentation::Inline { bytes, object } => {
@@ -3340,7 +3359,7 @@ mod tests {
 
     #[tokio::test]
     async fn different_tip_after_ambiguous_serial_response_conflicts_the_whole_branch() {
-        let (home, storage, db, keypair, _root, pending) =
+        let (home, storage, db, keypair, root, pending) =
             serial_fixture("serial-lost-to-other").await;
         let (_temp, store_dir) = temp_store_dir();
         assert!(prepare_pending_store_write_with_coordination(
@@ -3355,6 +3374,15 @@ mod tests {
         )
         .await
         .unwrap());
+        let losing_commit_keys = db
+            .prepared_serial_store_branch()
+            .await
+            .unwrap()
+            .expect("prepared losing branch")
+            .writes
+            .into_iter()
+            .map(|write| write.commit.object.slot().logical_key().to_string())
+            .collect::<Vec<_>>();
         let other = competing_head(&db, &storage, &keypair, "other-winner").await;
         let head_mutations_before = home.head_mutation_count();
         home.replace_after_next_head_mutation(other.to_bytes());
@@ -3370,7 +3398,7 @@ mod tests {
             0,
         );
         assert_eq!(home.head_mutation_count(), head_mutations_before + 2);
-        for write in pending {
+        for write in &pending {
             let status = db.write_status(&write.write_id).await.unwrap();
             assert!(matches!(
                 status,
@@ -3382,6 +3410,87 @@ mod tests {
                             ..
                         } if Some(current) == serial_commit_ref(&other)
                     )
+            ));
+        }
+        let retained_prepared: i64 = db
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM store_writes WHERE prepared IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(crate::DbError::from)
+            })
+            .await
+            .unwrap();
+        assert_eq!(retained_prepared, 2);
+
+        let branch_id = crate::PendingBranchId::from_first_write(pending[0].write_id.clone());
+        let resolution = super::super::store_pull::prepare_serial_resolution(
+            &db,
+            &storage,
+            storage.serial_coordination().unwrap(),
+            root.store_root_hash,
+            &store_dir,
+            None,
+            &keypair,
+        )
+        .await
+        .expect("prepare accepted successor resolution");
+        home.fail_exact_delete_on_call(2);
+        let interrupted = super::super::store_pull::cleanup_serial_candidates(
+            &db,
+            &storage,
+            branch_id.clone(),
+            &resolution,
+        )
+        .await;
+        assert!(interrupted.is_err());
+        db.discard_pending_serial_branch(branch_id.clone(), resolution)
+            .await
+            .expect_err("incomplete candidate cleanup must block resolution");
+
+        let coordination = storage.serial_coordination().unwrap();
+        let current = coordination
+            .read_head(serial_head_key())
+            .await
+            .expect("read accepted Serial head");
+        coordination
+            .replace_head(serial_head_key(), &current.version, &current.bytes)
+            .await
+            .expect("refresh accepted Serial head version");
+
+        let resolution = super::super::store_pull::prepare_serial_resolution(
+            &db,
+            &storage,
+            storage.serial_coordination().unwrap(),
+            root.store_root_hash,
+            &store_dir,
+            None,
+            &keypair,
+        )
+        .await
+        .expect("prepare retry resolution");
+        super::super::store_pull::cleanup_serial_candidates(
+            &db,
+            &storage,
+            branch_id.clone(),
+            &resolution,
+        )
+        .await
+        .expect("resume losing candidate cleanup");
+        db.discard_pending_serial_branch(branch_id, resolution)
+            .await
+            .expect("discard cleaned branch");
+        let deletes = home.deletes_seen();
+        assert_eq!(
+            &deletes[deletes.len() - losing_commit_keys.len()..],
+            losing_commit_keys
+        );
+        for write in pending {
+            assert!(matches!(
+                db.write_status(&write.write_id).await.unwrap(),
+                crate::WriteStatus::Resolved(crate::WriteResolution::Discarded)
             ));
         }
     }
@@ -3808,6 +3917,19 @@ mod tests {
                                     )
                                 ])
                     )
+        ));
+        let commit = stored_remote_object(&fixture.db, &fixture.commit_ref.object).await;
+        assert!(matches!(
+            commit,
+            super::super::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                if matches!(
+                    &record.identity.domain,
+                    super::super::remote_object::RetainedAuthorityObjectDomain::StoreCommit {
+                        reference
+                    } if reference == &fixture.commit_ref
+                ) && record.ownership.pending.is_empty()
+                    && record.ownership.activated
+                        == std::collections::BTreeSet::from([fixture.commit_ref.clone()])
         ));
     }
 

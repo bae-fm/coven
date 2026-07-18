@@ -616,6 +616,11 @@ impl CovenHandle {
         branch_id: coven_core::PendingBranchId,
     ) -> CovenResult<()> {
         let plan = self.prepare_pending_branch_resolution(&branch_id).await?;
+        self.sync_manager()
+            .ok_or_else(|| CovenError::SerialResolution("sync is not connected".to_string()))?
+            .cleanup_serial_candidates(branch_id.clone(), &plan)
+            .await
+            .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
         self.db()
             .discard_pending_serial_branch(branch_id, plan)
             .await?;
@@ -633,6 +638,11 @@ impl CovenHandle {
         R: Send + 'static,
     {
         let plan = self.prepare_pending_branch_resolution(&branch_id).await?;
+        self.sync_manager()
+            .ok_or_else(|| CovenError::SerialResolution("sync is not connected".to_string()))?
+            .cleanup_serial_candidates(branch_id.clone(), &plan)
+            .await
+            .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
         let write_id = self.db().new_write_id();
         let stamper = self.stamper();
         let receipt = self

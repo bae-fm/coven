@@ -1156,6 +1156,7 @@ pub struct SerialResolutionCommit {
 #[doc(hidden)]
 pub struct SerialResolutionPlan {
     pub(crate) head: StoreSerialHead,
+    pub(crate) head_object: super::storage::VersionedObject,
     pub(crate) commits: Vec<SerialResolutionCommit>,
 }
 
@@ -2495,11 +2496,16 @@ async fn load_authorized_serial_chain(
     Ok(authorized)
 }
 
+struct VerifiedSerialHead {
+    head: StoreSerialHead,
+    object: super::storage::VersionedObject,
+}
+
 async fn read_serial_head(
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,
     root: &StoreRootRef,
-) -> Result<StoreSerialHead, StorePullError> {
+) -> Result<VerifiedSerialHead, StorePullError> {
     let object = match coordination.read_head(serial_head_key()).await {
         Ok(object) => object,
         Err(CoordinationError::NotFound(_)) => {
@@ -2524,7 +2530,7 @@ async fn read_serial_head(
         .value;
     let head = StoreSerialHead::parse(&object.bytes, root.store_root_hash, &executor)
         .map_err(|error| StorePullError::Serial(format!("invalid head: {error}")))?;
-    Ok(head)
+    Ok(VerifiedSerialHead { head, object })
 }
 
 pub(crate) async fn load_serial_authorization_at_head(
@@ -2550,7 +2556,7 @@ pub(crate) async fn load_serial_cycle_authorization(
     coordination: &dyn CoordinationStorage,
     root: &StoreRootRef,
 ) -> Result<SerialCycleAuthorization, StorePullError> {
-    let head = read_serial_head(storage, coordination, root).await?;
+    let head = read_serial_head(storage, coordination, root).await?.head;
     let authorized = load_authorized_serial_chain(storage, root, &head).await?;
     let authorization = match authorized.last() {
         Some(tip) => tip.authorization_after.clone(),
@@ -2632,7 +2638,7 @@ async fn pull_serial_store_commits(
         ));
     }
     let local = db.materialized_frontier().await?.remove(SERIAL_STREAM_ID);
-    let head = read_serial_head(storage, coordination, root).await?;
+    let head = read_serial_head(storage, coordination, root).await?.head;
     let authorized_chain = load_authorized_serial_chain(storage, root, &head).await?;
     let tip = match &head.state {
         StoreSerialHeadState::Genesis { .. } => None,
@@ -2822,7 +2828,8 @@ pub async fn prepare_serial_resolution(
             "Serial resolution root differs from durable exact root".to_string(),
         ));
     }
-    let head = read_serial_head(storage, coordination, &root).await?;
+    let verified_head = read_serial_head(storage, coordination, &root).await?;
+    let head = verified_head.head;
     let authorized_chain = load_authorized_serial_chain(storage, &root, &head).await?;
     let first = match branch_base.as_ref() {
         None => 0,
@@ -2891,7 +2898,26 @@ pub async fn prepare_serial_resolution(
             authorization_after: authorized.authorization_after,
         });
     }
-    Ok(SerialResolutionPlan { head, commits })
+    Ok(SerialResolutionPlan {
+        head,
+        head_object: verified_head.object,
+        commits,
+    })
+}
+
+#[doc(hidden)]
+pub async fn cleanup_serial_candidates(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    branch_id: crate::PendingBranchId,
+    plan: &SerialResolutionPlan,
+) -> Result<(), StorePullError> {
+    let targets = db.prepare_serial_candidate_cleanup(branch_id, plan).await?;
+    for target in targets {
+        super::store_objects::delete_exact_object(storage, &target.object).await?;
+        db.mark_candidate_cleanup_absent(target.object).await?;
+    }
+    Ok(())
 }
 
 async fn apply_serial_candidate(

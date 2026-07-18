@@ -8,7 +8,7 @@
 //! Hosts open coven with [`crate::Coven::builder`] and run app SQL through
 //! [`crate::CovenHandle::sql`] or [`crate::CovenHandle::write`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1867,6 +1867,9 @@ impl PreparedAudiencePackage {
             .validate()
             .map_err(|error| DbError::Message(format!("prepared remote package: {error}")))?;
         let is_package = match &remote {
+            RemoteObjectRecord::CandidateCommit(_) | RemoteObjectRecord::RetainedAuthority(_) => {
+                false
+            }
             RemoteObjectRecord::CandidateExclusive(record) => matches!(
                 record.identity.domain,
                 CandidateExclusiveObjectDomain::StorePackage
@@ -2339,6 +2342,11 @@ pub(crate) struct SerialStoreWritePreparationEntry {
     pub completion: StoreBatchCompletion,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CandidateCleanupObject {
+    pub(crate) object: ExactObjectRef,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum PreparedStoreWriteState {
@@ -2357,6 +2365,41 @@ enum PreparedStoreWriteState {
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
     },
+}
+
+struct PreparedSerialCandidate {
+    commit: StoreBatchCommit,
+    reference: StoreBatchCommitRef,
+    canonical_signed_bytes: Vec<u8>,
+}
+
+fn parse_prepared_serial_candidate(raw: &str) -> Result<Option<PreparedSerialCandidate>, DbError> {
+    let prepared: PreparedStoreWriteState = serde_json::from_str(raw)
+        .map_err(|error| DbError::Message(format!("prepared Serial candidate: {error}")))?;
+    let PreparedStoreWriteState::Serial { commit, .. } = prepared else {
+        return match prepared {
+            PreparedStoreWriteState::SerialPreparing => Ok(None),
+            PreparedStoreWriteState::MergeConcurrent { .. } => Err(DbError::Message(
+                "MergeConcurrent publication reached Serial candidate state".to_string(),
+            )),
+            PreparedStoreWriteState::Serial { .. } => unreachable!(),
+        };
+    };
+    let value: StoreBatchCommit = serde_json::from_slice(&commit.semantic_bytes)
+        .map_err(|error| DbError::Message(format!("signed Serial candidate: {error}")))?;
+    let reference = StoreBatchCommitRef::from_commit(
+        &value,
+        StoreCommitCoord::Serial {
+            sequence: value.seq(),
+        },
+        commit.prepared.reference().clone(),
+    )
+    .map_err(|error| DbError::Message(error.to_string()))?;
+    Ok(Some(PreparedSerialCandidate {
+        commit: value,
+        reference,
+        canonical_signed_bytes: commit.semantic_bytes,
+    }))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -4531,6 +4574,7 @@ impl Database {
                 root.store_root_hash,
                 &commit_ref,
                 &stage.commit.value,
+                stage.commit.prepared.stored_bytes(),
                 &partitions,
                 &stage.remote_objects,
                 &stage.audiences,
@@ -4763,6 +4807,7 @@ impl Database {
                     root.store_root_hash,
                     &commit_ref,
                     &write.commit.value,
+                    write.commit.prepared.stored_bytes(),
                     &partitions,
                     &write.remote_objects,
                     &write.audiences,
@@ -5681,7 +5726,7 @@ impl Database {
             for write_id in &write_ids {
                 let updated = tx
                     .execute(
-                        "UPDATE store_writes SET status = ?2, prepared = NULL WHERE write_id = ?1",
+                        "UPDATE store_writes SET status = ?2 WHERE write_id = ?1",
                         rusqlite::params![write_id.as_str(), &status_json],
                     )
                     .map_err(DbError::from)?;
@@ -5971,6 +6016,54 @@ impl Database {
         .await
     }
 
+    fn validate_serial_candidate_cleanup_on(
+        conn: &Connection,
+        write_id: &WriteId,
+        raw_prepared: Option<&str>,
+    ) -> Result<(), DbError> {
+        let Some(raw_prepared) = raw_prepared else {
+            return Ok(());
+        };
+        let Some(candidate) = parse_prepared_serial_candidate(raw_prepared)? else {
+            return Ok(());
+        };
+        let mut object_ids = vec![remote_object_id(&candidate.reference.object)];
+        let mut statement = conn
+            .prepare(
+                "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
+                 UNION
+                 SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1",
+            )
+            .map_err(DbError::from)?;
+        let indexed = statement
+            .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        for encoded in indexed {
+            object_ids.push(encoded.parse().map_err(|error| {
+                DbError::Message(format!("Serial cleanup remote object id: {error}"))
+            })?);
+        }
+        for object_id in object_ids {
+            let remote = load_remote_object_on(conn, object_id)?;
+            if !remote
+                .candidate_cleanup_complete(&candidate.reference)
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "validate candidate cleanup for {object_id}: {error}"
+                    ))
+                })?
+            {
+                return Err(DbError::Message(format!(
+                    "candidate cleanup for remote object {object_id} is incomplete"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn apply_serial_resolution_on(
         tx: &rusqlite::Transaction<'_>,
         synced_tables: &[SyncedTable],
@@ -6044,11 +6137,11 @@ impl Database {
                     )))
                 }
             }
-            if prepared.is_some() {
-                return Err(DbError::Message(
-                    "conflicted Serial branch contains prepared publication state".to_string(),
-                ));
-            }
+            Self::validate_serial_candidate_cleanup_on(
+                tx,
+                &WriteId::from_generated(write_id.clone()),
+                prepared.as_deref(),
+            )?;
             if branch_base.as_ref().is_some_and(|stored| stored != &base) {
                 return Err(DbError::Message(
                     "Serial conflict branch has inconsistent bases".to_string(),
@@ -6079,9 +6172,12 @@ impl Database {
         }
         let mut predecessor = branch_base;
         for resolution in plan.commits {
-            let expected_seq = predecessor
-                .as_ref()
-                .map_or(1, |reference| reference.coord.sequence().saturating_add(1));
+            let expected_seq = match predecessor.as_ref() {
+                Some(reference) => reference.coord.sequence().checked_add(1).ok_or_else(|| {
+                    DbError::Message("Serial resolution sequence overflow".to_string())
+                })?,
+                None => 1,
+            };
             if resolution.commit.seq() != expected_seq
                 || resolution.commit_ref.coord
                     != (StoreCommitCoord::Serial {
@@ -6156,11 +6252,78 @@ impl Database {
     ) -> Result<(), DbError> {
         let status = WriteStatus::Resolved(resolution.clone());
         for write_id in write_ids {
+            let raw_prepared: Option<String> = tx
+                .query_row(
+                    "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let mut removable = Vec::new();
+            if let Some(raw_prepared) = raw_prepared.as_deref() {
+                if let Some(candidate) = parse_prepared_serial_candidate(raw_prepared)? {
+                    removable.push(remote_object_id(&candidate.reference.object));
+                }
+            }
+            let mut statement = tx
+                .prepare(
+                    "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
+                     UNION
+                     SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1",
+                )
+                .map_err(DbError::from)?;
+            let indexed = statement
+                .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            drop(statement);
+            for encoded in indexed {
+                removable.push(encoded.parse().map_err(|error| {
+                    DbError::Message(format!("resolved remote object id: {error}"))
+                })?);
+            }
             tx.execute(
                 "DELETE FROM store_write_blob_leases WHERE write_id = ?1",
                 [write_id.as_str()],
             )
             .map_err(DbError::from)?;
+            tx.execute(
+                "DELETE FROM store_write_packages WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            tx.execute(
+                "DELETE FROM store_write_blobs WHERE write_id = ?1",
+                [write_id.as_str()],
+            )
+            .map_err(DbError::from)?;
+            for object_id in removable {
+                let remote = load_remote_object_on(tx, object_id)?;
+                let absent = matches!(
+                    remote,
+                    RemoteObjectRecord::CandidateCommit(
+                        crate::sync::remote_object::CandidateCommitRecord {
+                            state:
+                                crate::sync::remote_object::CandidateCommitState::AbsentVerified { .. },
+                            ..
+                        }
+                    ) | RemoteObjectRecord::CandidateExclusive(
+                        crate::sync::remote_object::CandidateObjectRecord {
+                            state:
+                                crate::sync::remote_object::CandidateObjectState::AbsentVerified { .. },
+                            ..
+                        }
+                    )
+                );
+                if absent {
+                    tx.execute(
+                        "DELETE FROM remote_objects WHERE object_id = ?1",
+                        [object_id.to_string()],
+                    )
+                    .map_err(DbError::from)?;
+                }
+            }
             tx.execute(
                 "UPDATE store_writes SET prepared = NULL WHERE write_id = ?1",
                 [write_id.as_str()],
@@ -11276,6 +11439,7 @@ impl Database {
         store_root_hash: ObjectHash,
         commit_ref: &StoreBatchCommitRef,
         commit: &StoreBatchCommit,
+        commit_stored_bytes: &[u8],
         partitions: &PreparedStoreWritePartitions,
         remote_objects: &[RemoteObjectRecord],
         audiences: &PreparedAudienceObjects,
@@ -11322,6 +11486,43 @@ impl Database {
                 "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)
                  ON CONFLICT(object_id) DO UPDATE SET state = excluded.state",
                 (object_id.to_string(), state),
+            )
+            .map_err(DbError::from)?;
+        }
+        let commit_remote = RemoteObjectRecord::candidate_commit(
+            commit_ref.clone(),
+            commit.to_bytes(),
+            commit_stored_bytes.to_vec(),
+        )
+        .map_err(|error| DbError::Message(format!("prepared candidate commit: {error}")))?;
+        let commit_object_id = commit_remote.object_id();
+        let existing_commit = conn
+            .query_row(
+                "SELECT state FROM remote_objects WHERE object_id = ?1",
+                [commit_object_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(DbError::from)?;
+        if let Some(existing) = existing_commit {
+            let existing: RemoteObjectRecord =
+                serde_json::from_str(&existing).map_err(|error| {
+                    DbError::Message(format!(
+                        "candidate commit {commit_object_id} has invalid closed state: {error}"
+                    ))
+                })?;
+            if existing != commit_remote {
+                return Err(DbError::Message(format!(
+                    "candidate commit {commit_object_id} already has different closed state"
+                )));
+            }
+        } else {
+            let state = serde_json::to_string(&commit_remote).map_err(|error| {
+                DbError::Message(format!("serialize candidate commit: {error}"))
+            })?;
+            conn.execute(
+                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+                (commit_object_id.to_string(), state),
             )
             .map_err(DbError::from)?;
         }
@@ -11485,6 +11686,7 @@ impl Database {
                 .map_err(|error| DbError::Message(error.to_string()))?;
         }
         let mut object_ids = std::collections::BTreeSet::new();
+        object_ids.insert(remote_object_id(&commit_ref.object));
         object_ids.extend(
             audiences
                 .packages
@@ -11683,37 +11885,283 @@ impl Database {
         &self,
         expected: RemoteObjectRecord,
     ) -> Result<RemoteObjectRecord, DbError> {
+        self.call(move |conn| mark_remote_object_uploaded_on(conn, expected))
+            .await
+    }
+
+    pub(crate) async fn mark_candidate_commit_uploaded(
+        &self,
+        commit: StoreBatchCommitRef,
+    ) -> Result<(), DbError> {
         self.call(move |conn| {
-            let object_id = expected.object_id();
+            let object_id = remote_object_id(&commit.object);
             let current = load_remote_object_on(conn, object_id)?;
-            if current != expected {
+            if !matches!(
+                &current,
+                RemoteObjectRecord::CandidateCommit(record) if record.identity == commit
+            ) {
                 return Err(DbError::Message(format!(
-                    "remote object {object_id} changed before upload completion"
+                    "remote object {object_id} is not the exact candidate commit"
                 )));
             }
-            let mut uploaded = current;
-            uploaded.mark_uploaded_verified().map_err(|error| {
-                DbError::Message(format!("mark remote object {object_id} uploaded: {error}"))
-            })?;
-            let expected_json = serde_json::to_string(&expected).map_err(|error| {
-                DbError::Message(format!("serialize expected remote object: {error}"))
-            })?;
-            let uploaded_json = serde_json::to_string(&uploaded).map_err(|error| {
-                DbError::Message(format!("serialize uploaded remote object: {error}"))
-            })?;
-            let updated = conn
-                .execute(
-                    "UPDATE remote_objects SET state = ?3
-                     WHERE object_id = ?1 AND state = ?2",
-                    (object_id.to_string(), expected_json, uploaded_json),
+            mark_remote_object_uploaded_on(conn, current)?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn prepare_serial_candidate_cleanup(
+        &self,
+        branch_id: PendingBranchId,
+        plan: &crate::sync::store_pull::SerialResolutionPlan,
+    ) -> Result<Vec<CandidateCleanupObject>, DbError> {
+        let accepted_refs = plan
+            .commits
+            .iter()
+            .map(|commit| commit.commit_ref.clone())
+            .collect::<Vec<_>>();
+        let accepted_commits = plan
+            .commits
+            .iter()
+            .map(|commit| commit.commit.clone())
+            .collect::<Vec<_>>();
+        let head = plan.head.clone();
+        let head_bytes = plan.head_object.bytes.clone();
+        let observed_version_hash =
+            ObjectHash::digest(plan.head_object.version.cloud().as_provider().as_bytes());
+        self.call(move |conn| {
+            if head.to_bytes() != head_bytes {
+                return Err(DbError::Message(
+                    "Serial cleanup head bytes differ from the verified head".to_string(),
+                ));
+            }
+            let mut statement = conn
+                .prepare(
+                    "SELECT write_id, base, status, prepared FROM store_writes
+                     WHERE status != '\"local_only\"'
+                       AND json_extract(status, '$.published') IS NULL
+                       AND json_extract(status, '$.resolved') IS NULL
+                       AND json_type(base, '$.serial') IS NOT NULL
+                     ORDER BY ordinal",
                 )
                 .map_err(DbError::from)?;
-            if updated != 1 {
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            drop(statement);
+            let mut branch_base = None;
+            let mut prepared = Vec::new();
+            for (write_id, raw_base, raw_status, raw_prepared) in rows {
+                let base: StoreWriteBase = serde_json::from_str(&raw_base).map_err(|error| {
+                    DbError::Message(format!("Serial cleanup branch base: {error}"))
+                })?;
+                let StoreWriteBase::Serial {
+                    branch_id: stored_branch_id,
+                    base,
+                } = base
+                else {
+                    return Err(DbError::Message(
+                        "MergeConcurrent base reached Serial candidate cleanup".to_string(),
+                    ));
+                };
+                if stored_branch_id != branch_id {
+                    return Err(DbError::Message(
+                        "Serial database contains more than one unresolved branch".to_string(),
+                    ));
+                }
+                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                    DbError::Message(format!("Serial cleanup branch status: {error}"))
+                })?;
+                if !matches!(
+                    status,
+                    WriteStatus::Conflict(ref conflict) if conflict.branch_id == branch_id
+                ) {
+                    return Err(DbError::Message(format!(
+                        "Serial cleanup write {write_id} is not conflicted"
+                    )));
+                }
+                if branch_base.as_ref().is_some_and(|stored| stored != &base) {
+                    return Err(DbError::Message(
+                        "Serial cleanup branch has inconsistent bases".to_string(),
+                    ));
+                }
+                branch_base.get_or_insert(base);
+                let Some(raw_prepared) = raw_prepared else {
+                    continue;
+                };
+                if let Some(candidate) = parse_prepared_serial_candidate(&raw_prepared)? {
+                    prepared.push((
+                        WriteId::from_generated(write_id),
+                        candidate.commit,
+                        candidate.reference,
+                        candidate.canonical_signed_bytes,
+                    ));
+                }
+            }
+            if prepared.is_empty() {
+                return Ok(Vec::new());
+            }
+            let branch_base = branch_base.expect("prepared branch has a base");
+            if accepted_refs.is_empty() || accepted_refs.len() != accepted_commits.len() {
+                return Err(DbError::Message(
+                    "Serial candidate cleanup requires a nonempty accepted suffix".to_string(),
+                ));
+            }
+            let mut accepted_predecessor = branch_base.clone();
+            for (reference, commit) in accepted_refs.iter().zip(&accepted_commits) {
+                reference
+                    .verify_commit(commit)
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                if commit.order.predecessor() != accepted_predecessor.as_ref() {
+                    return Err(DbError::Message(
+                        "accepted Serial cleanup suffix has a broken exact predecessor"
+                            .to_string(),
+                    ));
+                }
+                accepted_predecessor = Some(reference.clone());
+            }
+            if !matches!(
+                head.state,
+                StoreSerialHeadState::Commit { ref commit, .. }
+                    if Some(commit) == accepted_refs.last()
+            ) {
+                return Err(DbError::Message(
+                    "Serial cleanup head does not name the accepted suffix tip".to_string(),
+                ));
+            }
+            let mut losing_predecessor = branch_base.clone();
+            let mut losing_targets = Vec::with_capacity(prepared.len());
+            for (_, commit, reference, bytes) in &prepared {
+                if commit.order.predecessor() != losing_predecessor.as_ref() {
+                    return Err(DbError::Message(
+                        "losing Serial candidates have a broken exact predecessor chain"
+                            .to_string(),
+                    ));
+                }
+                losing_targets.push(
+                    crate::sync::remote_object::StoreBatchCommitDeletionTarget {
+                        coord: reference.coord.clone(),
+                        object: reference.object.clone(),
+                        canonical_signed_bytes: bytes.clone(),
+                    },
+                );
+                losing_predecessor = Some(reference.clone());
+            }
+            if accepted_refs.first() == prepared.first().map(|(_, _, reference, _)| reference) {
+                return Err(DbError::Message(
+                    "accepted Serial suffix begins with the losing candidate".to_string(),
+                ));
+            }
+            let suffix = crate::sync::remote_object::SerialAcceptedSuffix {
+                predecessor: branch_base,
+                commits: accepted_refs,
+                canonical_signed_head_bytes: head_bytes,
+                observed_version_hash,
+            };
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let mut exclusive_cleanup = Vec::new();
+            let mut commit_cleanup = Vec::new();
+            for (index, (write_id, commit, reference, _)) in prepared.iter().enumerate() {
+                let proof = crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor {
+                    accepted_suffix: suffix.clone(),
+                    losing_prefix: losing_targets[..=index].to_vec(),
+                };
+                let nonactivation = crate::sync::remote_object::CandidateNonactivation {
+                    candidate: losing_targets[index].clone(),
+                    proof,
+                };
+                let mut object_statement = tx
+                    .prepare(
+                        "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
+                         UNION
+                         SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1
+                         ORDER BY remote_object_id",
+                    )
+                    .map_err(DbError::from)?;
+                let object_ids = object_statement
+                    .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
+                    .map_err(DbError::from)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)?;
+                drop(object_statement);
+                let mut manifest_cleanup = BTreeSet::new();
+                for encoded in object_ids {
+                    let object_id: ObjectHash = encoded.parse().map_err(|error| {
+                        DbError::Message(format!("Serial cleanup remote object id: {error}"))
+                    })?;
+                    let mut remote = load_remote_object_on(&tx, object_id)?;
+                    remote
+                        .begin_candidate_nonactivation(nonactivation.clone())
+                        .map_err(|error| {
+                            DbError::Message(format!(
+                                "record candidate nonactivation for {object_id}: {error}"
+                            ))
+                        })?;
+                    if let Some(object) = remote.cleanup_target() {
+                        manifest_cleanup.insert(object.clone());
+                    }
+                    update_remote_object_on(&tx, object_id, &remote)?;
+                }
+                for object in candidate_manifest_exact_objects(commit) {
+                    if manifest_cleanup.remove(object) {
+                        exclusive_cleanup.push(CandidateCleanupObject {
+                            object: object.clone(),
+                        });
+                    }
+                }
+                if !manifest_cleanup.is_empty() {
+                    return Err(DbError::Message(format!(
+                        "candidate cleanup for write {write_id} contains an object outside its signed manifest"
+                    )));
+                }
+                let commit_object_id = remote_object_id(&reference.object);
+                let mut remote = load_remote_object_on(&tx, commit_object_id)?;
+                remote
+                    .begin_candidate_nonactivation(nonactivation)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "record candidate commit nonactivation for {commit_object_id}: {error}"
+                        ))
+                    })?;
+                if let Some(object) = remote.cleanup_target() {
+                    commit_cleanup.push(CandidateCleanupObject {
+                        object: object.clone(),
+                    });
+                }
+                update_remote_object_on(&tx, commit_object_id, &remote)?;
+            }
+            tx.commit().map_err(DbError::from)?;
+            exclusive_cleanup.extend(commit_cleanup);
+            Ok(exclusive_cleanup)
+        })
+        .await
+    }
+
+    pub(crate) async fn mark_candidate_cleanup_absent(
+        &self,
+        object: ExactObjectRef,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let object_id = remote_object_id(&object);
+            let mut remote = load_remote_object_on(conn, object_id)?;
+            if remote.cleanup_target() != Some(&object) {
                 return Err(DbError::Message(format!(
-                    "remote object {object_id} lost upload ownership"
+                    "remote object {object_id} is not awaiting exact cleanup"
                 )));
             }
-            Ok(uploaded)
+            remote.mark_absent_verified().map_err(|error| {
+                DbError::Message(format!("mark candidate {object_id} absent: {error}"))
+            })?;
+            update_remote_object_on(conn, object_id, &remote)
         })
         .await
     }
@@ -14061,6 +14509,30 @@ enum RemoteStoredRepresentationRef<'a> {
     Blob,
 }
 
+fn candidate_manifest_exact_objects(commit: &StoreBatchCommit) -> Vec<&ExactObjectRef> {
+    let mut objects = Vec::new();
+    for candidate in &commit.candidate_objects.objects {
+        match candidate {
+            crate::sync::store_commit::CandidateExclusiveObjectRef::StorePackage(reference) => {
+                objects.push(&reference.object);
+            }
+            crate::sync::store_commit::CandidateExclusiveObjectRef::CirclePackage(reference) => {
+                objects.push(&reference.package.object);
+            }
+            crate::sync::store_commit::CandidateExclusiveObjectRef::CircleAccess {
+                access, ..
+            } => {
+                objects.push(&access.leaf.object);
+                objects.push(&access.envelope.object);
+            }
+            crate::sync::store_commit::CandidateExclusiveObjectRef::SelfRetirement(reference) => {
+                objects.push(&reference.object);
+            }
+        }
+    }
+    objects
+}
+
 fn validate_remote_object_on(
     conn: &Connection,
     object_id: ObjectHash,
@@ -14113,6 +14585,69 @@ fn load_remote_object_on(
     Ok(remote)
 }
 
+fn update_remote_object_on(
+    conn: &Connection,
+    object_id: ObjectHash,
+    remote: &RemoteObjectRecord,
+) -> Result<(), DbError> {
+    remote
+        .validate()
+        .map_err(|error| DbError::Message(format!("remote object {object_id}: {error}")))?;
+    if remote.object_id() != object_id {
+        return Err(DbError::Message(format!(
+            "remote object {object_id} changed its exact identity"
+        )));
+    }
+    let state = serde_json::to_string(remote)
+        .map_err(|error| DbError::Message(format!("serialize remote object: {error}")))?;
+    let updated = conn
+        .execute(
+            "UPDATE remote_objects SET state = ?2 WHERE object_id = ?1",
+            (object_id.to_string(), state),
+        )
+        .map_err(DbError::from)?;
+    if updated != 1 {
+        return Err(DbError::Message(format!(
+            "remote object {object_id} disappeared during state transition"
+        )));
+    }
+    Ok(())
+}
+
+fn mark_remote_object_uploaded_on(
+    conn: &Connection,
+    expected: RemoteObjectRecord,
+) -> Result<RemoteObjectRecord, DbError> {
+    let object_id = expected.object_id();
+    let current = load_remote_object_on(conn, object_id)?;
+    if current != expected {
+        return Err(DbError::Message(format!(
+            "remote object {object_id} changed before upload completion"
+        )));
+    }
+    let expected_json = serde_json::to_string(&expected)
+        .map_err(|error| DbError::Message(format!("serialize expected remote object: {error}")))?;
+    let mut uploaded = current;
+    uploaded.mark_uploaded_verified().map_err(|error| {
+        DbError::Message(format!("mark remote object {object_id} uploaded: {error}"))
+    })?;
+    let uploaded_json = serde_json::to_string(&uploaded)
+        .map_err(|error| DbError::Message(format!("serialize uploaded remote object: {error}")))?;
+    let updated = conn
+        .execute(
+            "UPDATE remote_objects SET state = ?3
+             WHERE object_id = ?1 AND state = ?2",
+            (object_id.to_string(), expected_json, uploaded_json),
+        )
+        .map_err(DbError::from)?;
+    if updated != 1 {
+        return Err(DbError::Message(format!(
+            "remote object {object_id} lost upload ownership"
+        )));
+    }
+    Ok(uploaded)
+}
+
 fn merge_prepared_remote_object(
     existing: RemoteObjectRecord,
     proposed: &RemoteObjectRecord,
@@ -14146,6 +14681,7 @@ fn merge_prepared_remote_object(
     let proposed_has_owner = match &proposed.state {
         OwnedObjectState::Prepared { ownership } => ownership.pending.contains(owner),
         OwnedObjectState::UploadedVerified { ownership } => ownership.pending.contains(owner),
+        OwnedObjectState::RetirementPending { .. } => false,
     };
     if !proposed_has_owner {
         return Err(DbError::Message(format!(
@@ -14153,12 +14689,39 @@ fn merge_prepared_remote_object(
             remote_object_id(&proposed.identity.object)
         )));
     }
+    let proposed_uploaded = matches!(&proposed.state, OwnedObjectState::UploadedVerified { .. });
     match &mut existing.state {
         OwnedObjectState::Prepared { ownership } => {
             ownership.pending.insert(owner.clone());
+            if proposed_uploaded {
+                existing.state = OwnedObjectState::UploadedVerified {
+                    ownership: crate::sync::remote_object::SharedObjectOwnership {
+                        pending: ownership.pending.clone(),
+                        activated: std::collections::BTreeSet::new(),
+                        nonactivated: ownership.nonactivated.clone(),
+                    },
+                };
+            }
         }
         OwnedObjectState::UploadedVerified { ownership } => {
             ownership.pending.insert(owner.clone());
+        }
+        OwnedObjectState::RetirementPending { former_candidates } => {
+            let ownership = crate::sync::remote_object::PendingCandidateOwnership {
+                pending: std::collections::BTreeSet::from([owner.clone()]),
+                nonactivated: former_candidates.clone(),
+            };
+            existing.state = if proposed_uploaded {
+                OwnedObjectState::UploadedVerified {
+                    ownership: crate::sync::remote_object::SharedObjectOwnership {
+                        pending: ownership.pending,
+                        activated: std::collections::BTreeSet::new(),
+                        nonactivated: ownership.nonactivated,
+                    },
+                }
+            } else {
+                OwnedObjectState::Prepared { ownership }
+            };
         }
     }
     let merged = RemoteObjectRecord::SharedLiveSet(existing);
@@ -15925,6 +16488,7 @@ mod tests {
                 state: crate::sync::remote_object::CandidateObjectState::Prepared {
                     ownership: crate::sync::remote_object::PendingCandidateOwnership {
                         pending: std::collections::BTreeSet::from([owner.clone()]),
+                        nonactivated: Vec::new(),
                     },
                 },
             },
@@ -15958,6 +16522,7 @@ mod tests {
                 state: crate::sync::remote_object::OwnedObjectState::Prepared {
                     ownership: crate::sync::remote_object::PendingCandidateOwnership {
                         pending: std::collections::BTreeSet::from([owner.clone()]),
+                        nonactivated: Vec::new(),
                     },
                 },
             },
@@ -15984,6 +16549,7 @@ mod tests {
                 state: crate::sync::remote_object::OwnedObjectState::Prepared {
                     ownership: crate::sync::remote_object::PendingCandidateOwnership {
                         pending: std::collections::BTreeSet::from([owner]),
+                        nonactivated: Vec::new(),
                     },
                 },
             },

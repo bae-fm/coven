@@ -1,4 +1,4 @@
-//! Closed local publication and ownership state for remote package and blob objects.
+//! Closed local publication and ownership state for remote protocol objects.
 
 use std::collections::BTreeSet;
 
@@ -13,11 +13,28 @@ const REMOTE_OBJECT_ID_DOMAIN: &[u8] = b"coven.remote-object-id.v1\0";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RemoteObjectRecord {
+    CandidateCommit(CandidateCommitRecord),
     CandidateExclusive(CandidateObjectRecord),
+    RetainedAuthority(RetainedAuthorityRecord),
     SharedLiveSet(SharedObjectRecord),
 }
 
 impl RemoteObjectRecord {
+    pub(crate) fn candidate_commit(
+        identity: StoreBatchCommitRef,
+        canonical_signed_bytes: Vec<u8>,
+        stored_bytes: Vec<u8>,
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let object = identity.object.clone();
+        let record = Self::CandidateCommit(CandidateCommitRecord {
+            identity,
+            bytes: RemoteObjectBytes::inline(canonical_signed_bytes, stored_bytes, object)?,
+            state: CandidateCommitState::Prepared,
+        });
+        record.validate()?;
+        Ok(record)
+    }
+
     pub(crate) fn snapshot_activated_blob(
         stored: &crate::blob::locator::StoredBlobRef,
         owner: SnapshotObjectOwner,
@@ -34,6 +51,7 @@ impl RemoteObjectRecord {
                 ownership: SharedObjectOwnership {
                     pending: BTreeSet::new(),
                     activated: BTreeSet::from([SharedObjectOwner::Snapshot(owner)]),
+                    nonactivated: Vec::new(),
                 },
             },
         });
@@ -57,6 +75,7 @@ impl RemoteObjectRecord {
                 ownership: SharedObjectOwnership {
                     pending: BTreeSet::new(),
                     activated: BTreeSet::from([SharedObjectOwner::StoreCommit(owner)]),
+                    nonactivated: Vec::new(),
                 },
             },
         });
@@ -89,6 +108,7 @@ impl RemoteObjectRecord {
                     ownership: SharedObjectOwnership {
                         pending,
                         activated: BTreeSet::from([SharedObjectOwner::StoreCommit(owner.clone())]),
+                        nonactivated: ownership.nonactivated.clone(),
                     },
                 };
             }
@@ -97,6 +117,15 @@ impl RemoteObjectRecord {
                 ownership
                     .activated
                     .insert(SharedObjectOwner::StoreCommit(owner.clone()));
+            }
+            OwnedObjectState::RetirementPending { former_candidates } => {
+                record.state = OwnedObjectState::UploadedVerified {
+                    ownership: SharedObjectOwnership {
+                        pending: BTreeSet::new(),
+                        activated: BTreeSet::from([SharedObjectOwner::StoreCommit(owner.clone())]),
+                        nonactivated: former_candidates.clone(),
+                    },
+                };
             }
         }
         self.validate()
@@ -118,25 +147,42 @@ impl RemoteObjectRecord {
         {
             return Err(RemoteObjectRecordError::StoredReferenceMismatch);
         }
-        let OwnedObjectState::UploadedVerified { ownership } = &mut record.state else {
-            return Err(RemoteObjectRecordError::InvalidActivation);
-        };
-        ownership
-            .activated
-            .insert(SharedObjectOwner::Snapshot(owner));
+        match &mut record.state {
+            OwnedObjectState::UploadedVerified { ownership } => {
+                ownership
+                    .activated
+                    .insert(SharedObjectOwner::Snapshot(owner));
+            }
+            OwnedObjectState::RetirementPending { former_candidates } => {
+                record.state = OwnedObjectState::UploadedVerified {
+                    ownership: SharedObjectOwnership {
+                        pending: BTreeSet::new(),
+                        activated: BTreeSet::from([SharedObjectOwner::Snapshot(owner)]),
+                        nonactivated: former_candidates.clone(),
+                    },
+                };
+            }
+            OwnedObjectState::Prepared { .. } => {
+                return Err(RemoteObjectRecordError::InvalidActivation);
+            }
+        }
         self.validate()
     }
 
     pub(crate) fn object(&self) -> &ExactObjectRef {
         match self {
+            Self::CandidateCommit(record) => &record.identity.object,
             Self::CandidateExclusive(record) => &record.identity.object,
+            Self::RetainedAuthority(record) => &record.identity.object,
             Self::SharedLiveSet(record) => &record.identity.object,
         }
     }
 
     pub(crate) fn bytes(&self) -> &RemoteObjectBytes {
         match self {
+            Self::CandidateCommit(record) => &record.bytes,
             Self::CandidateExclusive(record) => &record.bytes,
+            Self::RetainedAuthority(record) => &record.bytes,
             Self::SharedLiveSet(record) => &record.bytes,
         }
     }
@@ -165,7 +211,8 @@ impl RemoteObjectRecord {
             {
                 match &record.state {
                     OwnedObjectState::UploadedVerified { ownership } => Some(&ownership.activated),
-                    OwnedObjectState::Prepared { .. } => None,
+                    OwnedObjectState::Prepared { .. }
+                    | OwnedObjectState::RetirementPending { .. } => None,
                 }
             }
             _ => None,
@@ -181,6 +228,23 @@ impl RemoteObjectRecord {
     pub(crate) fn validate(&self) -> Result<(), RemoteObjectRecordError> {
         self.bytes().validate()?;
         match self {
+            Self::CandidateCommit(record) => {
+                let commit: super::store_commit::StoreBatchCommit = serde_json::from_slice(
+                    record.bytes.canonical_semantic_bytes(),
+                )
+                .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                record
+                    .identity
+                    .verify_commit(&commit)
+                    .map_err(|error| RemoteObjectRecordError::InvalidDomain(error.to_string()))?;
+                match &record.state {
+                    CandidateCommitState::Prepared | CandidateCommitState::UploadedVerified => {}
+                    CandidateCommitState::CleanupPending { proof }
+                    | CandidateCommitState::AbsentVerified { proof } => {
+                        proof.validate_for(&record.identity, &commit)?;
+                    }
+                }
+            }
             Self::CandidateExclusive(record) => {
                 record
                     .identity
@@ -204,6 +268,27 @@ impl RemoteObjectRecord {
                     _ => return Err(RemoteObjectRecordError::DomainMismatch),
                 }
                 record.state.validate()?;
+            }
+            Self::RetainedAuthority(record) => {
+                record
+                    .identity
+                    .validate_semantic(record.bytes.canonical_semantic_bytes())?;
+                match &record.identity.domain {
+                    RetainedAuthorityObjectDomain::StoreCommit { reference } => {
+                        let commit: super::store_commit::StoreBatchCommit =
+                            serde_json::from_slice(record.bytes.canonical_semantic_bytes())
+                                .map_err(|error| {
+                                    RemoteObjectRecordError::InvalidDomain(error.to_string())
+                                })?;
+                        reference.verify_commit(&commit).map_err(|error| {
+                            RemoteObjectRecordError::InvalidDomain(error.to_string())
+                        })?;
+                        if reference.object != record.identity.object {
+                            return Err(RemoteObjectRecordError::StoredReferenceMismatch);
+                        }
+                    }
+                }
+                record.ownership.validate()?;
             }
             Self::SharedLiveSet(record) => {
                 record
@@ -268,6 +353,28 @@ impl RemoteObjectRecord {
         commit: &StoreBatchCommitRef,
     ) -> Result<Self, RemoteObjectRecordError> {
         let activated = match self {
+            Self::CandidateCommit(record) => {
+                if &record.identity != commit
+                    || !matches!(record.state, CandidateCommitState::UploadedVerified)
+                {
+                    return Err(RemoteObjectRecordError::InvalidActivation);
+                }
+                Self::RetainedAuthority(RetainedAuthorityRecord {
+                    identity: RetainedAuthorityObjectRef {
+                        domain: RetainedAuthorityObjectDomain::StoreCommit {
+                            reference: record.identity,
+                        },
+                        semantic_hash: ObjectHash::digest(record.bytes.canonical_semantic_bytes()),
+                        object: record.bytes.stored().object().clone(),
+                    },
+                    bytes: record.bytes,
+                    ownership: CandidateOwnership {
+                        pending: BTreeSet::new(),
+                        activated: BTreeSet::from([commit.clone()]),
+                        nonactivated: Vec::new(),
+                    },
+                })
+            }
             Self::CandidateExclusive(record) => {
                 let CandidateObjectState::UploadedVerified { ownership } = &record.state else {
                     return Err(RemoteObjectRecordError::InvalidActivation);
@@ -296,9 +403,18 @@ impl RemoteObjectRecord {
                             activated: BTreeSet::from([SharedObjectOwner::StoreCommit(
                                 commit.clone(),
                             )]),
+                            nonactivated: Vec::new(),
                         },
                     },
                 })
+            }
+            Self::RetainedAuthority(mut record) => {
+                if record.ownership.pending.remove(commit) {
+                    record.ownership.activated.insert(commit.clone());
+                } else if !record.ownership.activated.contains(commit) {
+                    return Err(RemoteObjectRecordError::InvalidActivation);
+                }
+                Self::RetainedAuthority(record)
             }
             Self::SharedLiveSet(mut record) => {
                 match &mut record.state {
@@ -317,6 +433,9 @@ impl RemoteObjectRecord {
                     OwnedObjectState::Prepared { .. } => {
                         return Err(RemoteObjectRecordError::InvalidActivation);
                     }
+                    OwnedObjectState::RetirementPending { .. } => {
+                        return Err(RemoteObjectRecordError::InvalidActivation);
+                    }
                 }
                 Self::SharedLiveSet(record)
             }
@@ -327,6 +446,16 @@ impl RemoteObjectRecord {
 
     pub(crate) fn mark_uploaded_verified(&mut self) -> Result<(), RemoteObjectRecordError> {
         match self {
+            Self::CandidateCommit(record) => match record.state {
+                CandidateCommitState::Prepared => {
+                    record.state = CandidateCommitState::UploadedVerified;
+                }
+                CandidateCommitState::UploadedVerified => {}
+                CandidateCommitState::CleanupPending { .. }
+                | CandidateCommitState::AbsentVerified { .. } => {
+                    return Err(RemoteObjectRecordError::InvalidUploadTransition);
+                }
+            },
             Self::CandidateExclusive(record) => match &record.state {
                 CandidateObjectState::Prepared { ownership } => {
                     record.state = CandidateObjectState::UploadedVerified {
@@ -334,20 +463,195 @@ impl RemoteObjectRecord {
                     };
                 }
                 CandidateObjectState::UploadedVerified { .. } => {}
+                CandidateObjectState::CleanupPending { .. }
+                | CandidateObjectState::AbsentVerified { .. } => {
+                    return Err(RemoteObjectRecordError::InvalidUploadTransition);
+                }
             },
+            Self::RetainedAuthority(_) => {
+                return Err(RemoteObjectRecordError::InvalidUploadTransition);
+            }
             Self::SharedLiveSet(record) => match &record.state {
                 OwnedObjectState::Prepared { ownership } => {
                     record.state = OwnedObjectState::UploadedVerified {
                         ownership: SharedObjectOwnership {
                             pending: ownership.pending.clone(),
                             activated: BTreeSet::new(),
+                            nonactivated: ownership.nonactivated.clone(),
                         },
                     };
                 }
                 OwnedObjectState::UploadedVerified { .. } => {}
+                OwnedObjectState::RetirementPending { .. } => {
+                    return Err(RemoteObjectRecordError::InvalidUploadTransition);
+                }
             },
         }
         self.validate()
+    }
+
+    pub(crate) fn begin_candidate_nonactivation(
+        &mut self,
+        nonactivation: CandidateNonactivation,
+    ) -> Result<(), RemoteObjectRecordError> {
+        nonactivation.validate()?;
+        let candidate = nonactivation.reference()?;
+        match self {
+            Self::CandidateCommit(record) => {
+                if record.identity != candidate {
+                    return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+                }
+                match &record.state {
+                    CandidateCommitState::Prepared | CandidateCommitState::UploadedVerified => {
+                        record.state = CandidateCommitState::CleanupPending {
+                            proof: nonactivation.proof,
+                        };
+                    }
+                    CandidateCommitState::CleanupPending { .. }
+                    | CandidateCommitState::AbsentVerified { .. } => {}
+                }
+            }
+            Self::CandidateExclusive(record) => match &mut record.state {
+                CandidateObjectState::Prepared { ownership }
+                | CandidateObjectState::UploadedVerified { ownership } => {
+                    if !ownership.pending.remove(&candidate) {
+                        return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+                    }
+                    ownership.nonactivated.push(nonactivation);
+                    if ownership.pending.is_empty() {
+                        record.state = CandidateObjectState::CleanupPending {
+                            former_candidates: ownership.nonactivated.clone(),
+                        };
+                    }
+                }
+                CandidateObjectState::CleanupPending { former_candidates }
+                | CandidateObjectState::AbsentVerified { former_candidates } => {
+                    ensure_candidate_nonactivation(former_candidates, &candidate)?;
+                }
+            },
+            Self::RetainedAuthority(_) => {
+                return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+            }
+            Self::SharedLiveSet(record) => match &mut record.state {
+                OwnedObjectState::Prepared { ownership } => {
+                    if !ownership.pending.remove(&candidate) {
+                        return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+                    }
+                    ownership.nonactivated.push(nonactivation);
+                    if ownership.pending.is_empty() {
+                        record.state = OwnedObjectState::RetirementPending {
+                            former_candidates: ownership.nonactivated.clone(),
+                        };
+                    }
+                }
+                OwnedObjectState::UploadedVerified { ownership } => {
+                    if !ownership.pending.remove(&candidate) {
+                        return Err(RemoteObjectRecordError::CandidateOwnerMismatch);
+                    }
+                    ownership.nonactivated.push(nonactivation);
+                    if ownership.pending.is_empty() && ownership.activated.is_empty() {
+                        record.state = OwnedObjectState::RetirementPending {
+                            former_candidates: ownership.nonactivated.clone(),
+                        };
+                    }
+                }
+                OwnedObjectState::RetirementPending { former_candidates } => {
+                    ensure_candidate_nonactivation(former_candidates, &candidate)?;
+                }
+            },
+        }
+        self.validate()
+    }
+
+    pub(crate) fn cleanup_target(&self) -> Option<&ExactObjectRef> {
+        match self {
+            Self::CandidateCommit(CandidateCommitRecord {
+                state: CandidateCommitState::CleanupPending { .. },
+                ..
+            })
+            | Self::CandidateExclusive(CandidateObjectRecord {
+                state: CandidateObjectState::CleanupPending { .. },
+                ..
+            }) => Some(self.object()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn mark_absent_verified(&mut self) -> Result<(), RemoteObjectRecordError> {
+        match self {
+            Self::CandidateCommit(record) => match &record.state {
+                CandidateCommitState::CleanupPending { proof } => {
+                    record.state = CandidateCommitState::AbsentVerified {
+                        proof: proof.clone(),
+                    };
+                }
+                CandidateCommitState::AbsentVerified { .. } => {}
+                _ => return Err(RemoteObjectRecordError::InvalidCleanupTransition),
+            },
+            Self::CandidateExclusive(record) => match &record.state {
+                CandidateObjectState::CleanupPending { former_candidates } => {
+                    record.state = CandidateObjectState::AbsentVerified {
+                        former_candidates: former_candidates.clone(),
+                    };
+                }
+                CandidateObjectState::AbsentVerified { .. } => {}
+                _ => return Err(RemoteObjectRecordError::InvalidCleanupTransition),
+            },
+            Self::RetainedAuthority(_) | Self::SharedLiveSet(_) => {
+                return Err(RemoteObjectRecordError::InvalidCleanupTransition);
+            }
+        }
+        self.validate()
+    }
+
+    pub(crate) fn candidate_cleanup_complete(
+        &self,
+        candidate: &StoreBatchCommitRef,
+    ) -> Result<bool, RemoteObjectRecordError> {
+        self.validate()?;
+        let contains =
+            |former: &[CandidateNonactivation]| -> Result<bool, RemoteObjectRecordError> {
+                former
+                    .iter()
+                    .map(CandidateNonactivation::reference)
+                    .try_fold(false, |found, reference| {
+                        reference.map(|reference| found || &reference == candidate)
+                    })
+            };
+        match self {
+            Self::CandidateCommit(record) => Ok(&record.identity == candidate
+                && matches!(record.state, CandidateCommitState::AbsentVerified { .. })),
+            Self::CandidateExclusive(record) => match &record.state {
+                CandidateObjectState::Prepared { ownership }
+                | CandidateObjectState::UploadedVerified { ownership } => Ok(!ownership
+                    .pending
+                    .contains(candidate)
+                    && contains(&ownership.nonactivated)?),
+                CandidateObjectState::CleanupPending { .. } => Ok(false),
+                CandidateObjectState::AbsentVerified { former_candidates } => {
+                    contains(former_candidates)
+                }
+            },
+            Self::RetainedAuthority(record) => Ok(!record.ownership.pending.contains(candidate)
+                && !record.ownership.activated.contains(candidate)
+                && contains(&record.ownership.nonactivated)?),
+            Self::SharedLiveSet(record) => match &record.state {
+                OwnedObjectState::Prepared { ownership } => Ok(!ownership
+                    .pending
+                    .contains(candidate)
+                    && contains(&ownership.nonactivated)?),
+                OwnedObjectState::UploadedVerified { ownership } => {
+                    Ok(!ownership.pending.contains(candidate)
+                        && !ownership
+                            .activated
+                            .contains(&SharedObjectOwner::StoreCommit(candidate.clone()))
+                        && contains(&ownership.nonactivated)?)
+                }
+                OwnedObjectState::RetirementPending { former_candidates } => {
+                    contains(former_candidates)
+                }
+            },
+        }
     }
 }
 
@@ -363,6 +667,22 @@ pub(crate) struct CandidateObjectRecord {
     pub(crate) identity: CandidateExclusiveTarget,
     pub(crate) bytes: RemoteObjectBytes,
     pub(crate) state: CandidateObjectState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CandidateCommitRecord {
+    pub(crate) identity: StoreBatchCommitRef,
+    pub(crate) bytes: RemoteObjectBytes,
+    pub(crate) state: CandidateCommitState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainedAuthorityRecord {
+    pub(crate) identity: RetainedAuthorityObjectRef,
+    pub(crate) bytes: RemoteObjectBytes,
+    pub(crate) ownership: CandidateOwnership,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -463,6 +783,12 @@ pub(crate) enum CandidateObjectState {
     UploadedVerified {
         ownership: PendingCandidateOwnership,
     },
+    CleanupPending {
+        former_candidates: Vec<CandidateNonactivation>,
+    },
+    AbsentVerified {
+        former_candidates: Vec<CandidateNonactivation>,
+    },
 }
 
 impl CandidateObjectState {
@@ -471,8 +797,21 @@ impl CandidateObjectState {
             Self::Prepared { ownership } | Self::UploadedVerified { ownership } => {
                 ownership.validate()
             }
+            Self::CleanupPending { former_candidates }
+            | Self::AbsentVerified { former_candidates } => {
+                validate_nonactivations(former_candidates)
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum CandidateCommitState {
+    Prepared,
+    UploadedVerified,
+    CleanupPending { proof: CandidateNonactivationProof },
+    AbsentVerified { proof: CandidateNonactivationProof },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,6 +823,9 @@ pub(crate) enum OwnedObjectState {
     UploadedVerified {
         ownership: SharedObjectOwnership,
     },
+    RetirementPending {
+        former_candidates: Vec<CandidateNonactivation>,
+    },
 }
 
 impl OwnedObjectState {
@@ -491,6 +833,9 @@ impl OwnedObjectState {
         match self {
             Self::Prepared { ownership } => ownership.validate(),
             Self::UploadedVerified { ownership } => ownership.validate(),
+            Self::RetirementPending { former_candidates } => {
+                validate_nonactivations(former_candidates)
+            }
         }
     }
 }
@@ -499,6 +844,7 @@ impl OwnedObjectState {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PendingCandidateOwnership {
     pub(crate) pending: BTreeSet<StoreBatchCommitRef>,
+    pub(crate) nonactivated: Vec<CandidateNonactivation>,
 }
 
 impl PendingCandidateOwnership {
@@ -506,7 +852,7 @@ impl PendingCandidateOwnership {
         if self.pending.is_empty() {
             return Err(RemoteObjectRecordError::EmptyPendingOwnership);
         }
-        Ok(())
+        validate_owner_partition(&self.pending, std::iter::empty(), &self.nonactivated)
     }
 }
 
@@ -515,6 +861,7 @@ impl PendingCandidateOwnership {
 pub(crate) struct SharedObjectOwnership {
     pub(crate) pending: BTreeSet<StoreBatchCommitRef>,
     pub(crate) activated: BTreeSet<SharedObjectOwner>,
+    pub(crate) nonactivated: Vec<CandidateNonactivation>,
 }
 
 impl SharedObjectOwnership {
@@ -526,15 +873,25 @@ impl SharedObjectOwnership {
                 SharedObjectOwner::StoreCommit(commit) => Some(commit),
                 SharedObjectOwner::Snapshot(_) => None,
             });
-            if activated_commits
-                .into_iter()
-                .any(|commit| self.pending.contains(commit))
-            {
-                Err(RemoteObjectRecordError::OverlappingOwnership)
-            } else {
-                Ok(())
-            }
+            validate_owner_partition(&self.pending, activated_commits, &self.nonactivated)
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CandidateOwnership {
+    pub(crate) pending: BTreeSet<StoreBatchCommitRef>,
+    pub(crate) activated: BTreeSet<StoreBatchCommitRef>,
+    pub(crate) nonactivated: Vec<CandidateNonactivation>,
+}
+
+impl CandidateOwnership {
+    fn validate(&self) -> Result<(), RemoteObjectRecordError> {
+        if self.pending.is_empty() && self.activated.is_empty() {
+            return Err(RemoteObjectRecordError::EmptyOwnership);
+        }
+        validate_owner_partition(&self.pending, self.activated.iter(), &self.nonactivated)
     }
 }
 
@@ -596,6 +953,266 @@ pub(crate) enum SharedLiveSetObjectDomain {
     CirclePackage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainedAuthorityObjectRef {
+    pub(crate) domain: RetainedAuthorityObjectDomain,
+    pub(crate) semantic_hash: ObjectHash,
+    pub(crate) object: ExactObjectRef,
+}
+
+impl RetainedAuthorityObjectRef {
+    fn validate_semantic(&self, bytes: &[u8]) -> Result<(), RemoteObjectRecordError> {
+        validate_semantic_hash(self.semantic_hash, bytes)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RetainedAuthorityObjectDomain {
+    StoreCommit { reference: StoreBatchCommitRef },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoreBatchCommitDeletionTarget {
+    pub(crate) coord: super::store_commit::StoreCommitCoord,
+    pub(crate) object: ExactObjectRef,
+    pub(crate) canonical_signed_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CandidateNonactivation {
+    pub(crate) candidate: StoreBatchCommitDeletionTarget,
+    pub(crate) proof: CandidateNonactivationProof,
+}
+
+impl CandidateNonactivation {
+    fn validate(&self) -> Result<(), RemoteObjectRecordError> {
+        let commit: super::store_commit::StoreBatchCommit =
+            serde_json::from_slice(&self.candidate.canonical_signed_bytes)
+                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        if commit.policy() != self.candidate.coord.policy()
+            || commit.seq() != self.candidate.coord.sequence()
+        {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "candidate coordinate differs from its signed bytes".to_string(),
+            ));
+        }
+        let reference = StoreBatchCommitRef::from_commit(
+            &commit,
+            self.candidate.coord.clone(),
+            self.candidate.object.clone(),
+        )
+        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        self.proof.validate_for(&reference, &commit)
+    }
+
+    pub(crate) fn reference(&self) -> Result<StoreBatchCommitRef, RemoteObjectRecordError> {
+        let commit: super::store_commit::StoreBatchCommit =
+            serde_json::from_slice(&self.candidate.canonical_signed_bytes)
+                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        StoreBatchCommitRef::from_commit(
+            &commit,
+            self.candidate.coord.clone(),
+            self.candidate.object.clone(),
+        )
+        .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum CandidateNonactivationProof {
+    SerialImmediateSuccessor {
+        accepted_suffix: SerialAcceptedSuffix,
+        losing_prefix: Vec<StoreBatchCommitDeletionTarget>,
+    },
+}
+
+impl CandidateNonactivationProof {
+    fn validate(&self) -> Result<(), RemoteObjectRecordError> {
+        match self {
+            Self::SerialImmediateSuccessor {
+                accepted_suffix,
+                losing_prefix,
+            } => {
+                accepted_suffix.validate()?;
+                validate_losing_prefix(accepted_suffix, losing_prefix)
+            }
+        }
+    }
+
+    fn validate_for(
+        &self,
+        candidate: &StoreBatchCommitRef,
+        commit: &super::store_commit::StoreBatchCommit,
+    ) -> Result<(), RemoteObjectRecordError> {
+        self.validate()?;
+        match self {
+            Self::SerialImmediateSuccessor {
+                accepted_suffix: _,
+                losing_prefix,
+            } => {
+                if candidate.coord.policy() != crate::WritePolicy::Serial {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "Serial successor proof names a non-Serial candidate".to_string(),
+                    ));
+                }
+                let last = losing_prefix.last().expect("validated nonempty");
+                if last.coord != candidate.coord
+                    || last.object != candidate.object
+                    || last.canonical_signed_bytes != commit.to_bytes()
+                {
+                    return Err(RemoteObjectRecordError::InvalidProof(
+                        "losing Serial prefix does not end at the discarded candidate".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn validate_losing_prefix(
+    accepted: &SerialAcceptedSuffix,
+    losing: &[StoreBatchCommitDeletionTarget],
+) -> Result<(), RemoteObjectRecordError> {
+    let accepted_first = accepted.commits.first().expect("validated nonempty");
+    if losing.is_empty() {
+        return Err(RemoteObjectRecordError::InvalidProof(
+            "losing Serial prefix is empty".to_string(),
+        ));
+    }
+    let mut predecessor = accepted.predecessor.clone();
+    let mut previous = None;
+    let mut first = None;
+    for target in losing {
+        let commit: super::store_commit::StoreBatchCommit =
+            serde_json::from_slice(&target.canonical_signed_bytes)
+                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let reference =
+            StoreBatchCommitRef::from_commit(&commit, target.coord.clone(), target.object.clone())
+                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        if commit.order.predecessor() != predecessor.as_ref() {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "losing Serial prefix has a broken exact predecessor chain".to_string(),
+            ));
+        }
+        let expected_sequence = previous
+            .as_ref()
+            .map(|previous: &StoreBatchCommitRef| previous.coord.sequence().checked_add(1))
+            .unwrap_or(Some(accepted_first.coord.sequence()));
+        if expected_sequence != Some(reference.coord.sequence()) {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "losing Serial prefix coordinates are not consecutive".to_string(),
+            ));
+        }
+        first.get_or_insert_with(|| reference.clone());
+        predecessor = Some(reference.clone());
+        previous = Some(reference);
+    }
+    let first_ref = first.expect("checked nonempty");
+    if &first_ref == accepted_first || first_ref.coord.sequence() != accepted_first.coord.sequence()
+    {
+        return Err(RemoteObjectRecordError::InvalidProof(
+            "accepted and losing Serial branches do not have different immediate successors"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SerialAcceptedSuffix {
+    pub(crate) predecessor: Option<StoreBatchCommitRef>,
+    pub(crate) commits: Vec<StoreBatchCommitRef>,
+    pub(crate) canonical_signed_head_bytes: Vec<u8>,
+    pub(crate) observed_version_hash: ObjectHash,
+}
+
+impl SerialAcceptedSuffix {
+    fn validate(&self) -> Result<(), RemoteObjectRecordError> {
+        if self.commits.is_empty() {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "accepted Serial suffix is empty".to_string(),
+            ));
+        }
+        let head: super::store_commit::StoreSerialHead =
+            serde_json::from_slice(&self.canonical_signed_head_bytes)
+                .map_err(|error| RemoteObjectRecordError::InvalidProof(error.to_string()))?;
+        let Some(last) = self.commits.last() else {
+            unreachable!("checked nonempty")
+        };
+        if !matches!(head.state, super::store_commit::StoreSerialHeadState::Commit { commit, .. } if commit == *last)
+        {
+            return Err(RemoteObjectRecordError::InvalidProof(
+                "accepted Serial head does not name the suffix tip".to_string(),
+            ));
+        }
+        for pair in self.commits.windows(2) {
+            if pair[0].coord.sequence().checked_add(1) != Some(pair[1].coord.sequence()) {
+                return Err(RemoteObjectRecordError::InvalidProof(
+                    "accepted Serial suffix coordinates are not consecutive".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_nonactivations(
+    nonactivated: &[CandidateNonactivation],
+) -> Result<(), RemoteObjectRecordError> {
+    if nonactivated.is_empty() {
+        return Err(RemoteObjectRecordError::EmptyNonactivation);
+    }
+    let mut references = BTreeSet::new();
+    for candidate in nonactivated {
+        candidate.validate()?;
+        if !references.insert(candidate.reference()?) {
+            return Err(RemoteObjectRecordError::OverlappingOwnership);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_candidate_nonactivation(
+    former_candidates: &[CandidateNonactivation],
+    expected: &StoreBatchCommitRef,
+) -> Result<(), RemoteObjectRecordError> {
+    for candidate in former_candidates {
+        if candidate.reference()? == *expected {
+            return Ok(());
+        }
+    }
+    Err(RemoteObjectRecordError::CandidateNonactivationMissing)
+}
+
+fn validate_owner_partition<'a>(
+    pending: &BTreeSet<StoreBatchCommitRef>,
+    activated: impl Iterator<Item = &'a StoreBatchCommitRef>,
+    nonactivated: &[CandidateNonactivation],
+) -> Result<(), RemoteObjectRecordError> {
+    let activated = activated.cloned().collect::<BTreeSet<_>>();
+    let mut former = BTreeSet::new();
+    for candidate in nonactivated {
+        candidate.validate()?;
+        former.insert(candidate.reference()?);
+    }
+    if pending
+        .iter()
+        .any(|owner| activated.contains(owner) || former.contains(owner))
+        || activated.iter().any(|owner| former.contains(owner))
+        || former.len() != nonactivated.len()
+    {
+        return Err(RemoteObjectRecordError::OverlappingOwnership);
+    }
+    Ok(())
+}
+
 fn validate_semantic_hash(
     expected: ObjectHash,
     bytes: &[u8],
@@ -630,6 +1247,18 @@ pub(crate) enum RemoteObjectRecordError {
     DomainMismatch,
     #[error("remote object is not uploaded for the exact activating commit")]
     InvalidActivation,
+    #[error("remote object cannot return to uploaded state after cleanup began")]
+    InvalidUploadTransition,
+    #[error("candidate nonactivation set is empty")]
+    EmptyNonactivation,
+    #[error("candidate nonactivation proof is invalid: {0}")]
+    InvalidProof(String),
+    #[error("candidate does not own this remote object")]
+    CandidateOwnerMismatch,
+    #[error("remote object does not retain this candidate's nonactivation proof")]
+    CandidateNonactivationMissing,
+    #[error("remote object is not awaiting exact candidate cleanup")]
+    InvalidCleanupTransition,
 }
 
 #[cfg(test)]
@@ -702,6 +1331,7 @@ mod tests {
                 ownership: SharedObjectOwnership {
                     pending: BTreeSet::new(),
                     activated: BTreeSet::from([SharedObjectOwner::StoreCommit(owner)]),
+                    nonactivated: Vec::new(),
                 },
             },
         });
