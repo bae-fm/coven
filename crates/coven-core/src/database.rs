@@ -7919,60 +7919,11 @@ impl Database {
     ) -> Result<StoreAckRef, DbError> {
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let (root, registration_ref, registration) = local_store_authority_on(&tx)?;
-            if ack.registration != registration_ref {
-                return Err(DbError::Message(
-                    "staged Store acknowledgement author differs from local activation".to_string(),
-                ));
-            }
-            let reference = StoreAckRef {
-                registration: registration_ref.clone(),
-                sequence: ack.sequence,
-                ack_hash: ack.ack_hash(),
-                object: prepared.reference().clone(),
-            };
-            let verified = StoreAck::parse_at(&ack.to_bytes(), &root, &reference, &registration)
-                .map_err(|error| {
-                    DbError::Message(format!("verify staged Store acknowledgement: {error}"))
-                })?;
+            let bytes = ack.to_bytes();
+            let (reference, verified) = verify_next_local_store_ack_on(&tx, &bytes, &prepared)?;
             if verified != ack {
                 return Err(DbError::Message(
                     "staged Store acknowledgement changed during exact verification".to_string(),
-                ));
-            }
-            let previous = load_published_store_ack_on(&tx)?;
-            let (expected_sequence, expected_predecessor, expected_slot) = match &previous {
-                Some(previous) => (
-                    previous.reference.sequence.checked_add(1).ok_or_else(|| {
-                        DbError::Message("Store acknowledgement sequence overflow".to_string())
-                    })?,
-                    Some(previous.reference.object.clone()),
-                    previous.successor_slot.clone(),
-                ),
-                None => (1, None, store_ack_first_slot(&registration)?.clone()),
-            };
-            if ack.sequence != expected_sequence
-                || ack.successor.predecessor != expected_predecessor
-                || prepared.reference().slot() != &expected_slot
-            {
-                return Err(DbError::Message(
-                    "Store acknowledgement does not extend the exact local stream".to_string(),
-                ));
-            }
-            let next_sequence = ack.sequence.checked_add(1).ok_or_else(|| {
-                DbError::Message("Store acknowledgement sequence overflow".to_string())
-            })?;
-            if ack.successor.activation
-                != StreamActivationId::store_acknowledgements(&root, &registration_ref)
-                || ack.successor.next_slot.logical_key()
-                    != format!(
-                        "{}.json",
-                        ack_slot_prefix(&registration.device_id.to_string(), next_sequence)
-                    )
-            {
-                return Err(DbError::Message(
-                    "Store acknowledgement successor is outside its activated exact stream"
-                        .to_string(),
                 ));
             }
             let ack_ref = serde_json::to_string(&reference).map_err(|error| {
@@ -7993,11 +7944,117 @@ impl Database {
                 "INSERT INTO outbound_store_acks \
                  (singleton, ack_ref, ack_bytes, prepared_object, activation) \
                  VALUES (1, ?1, ?2, ?3, ?4)",
-                rusqlite::params![ack_ref, ack.to_bytes(), prepared, activation],
+                rusqlite::params![ack_ref, bytes, prepared, activation],
             )
             .map_err(DbError::from)?;
             tx.commit().map_err(DbError::from)?;
             Ok(reference)
+        })
+        .await
+    }
+
+    pub(crate) async fn adopt_outbound_store_ack_slot_winner(
+        &self,
+        expected: StoreAckRef,
+        winner_bytes: Vec<u8>,
+        winner_prepared: PreparedExactObject,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let outbound = load_outbound_store_ack_on(&tx)?.ok_or_else(|| {
+                DbError::Message("outbound Store acknowledgement is absent".to_string())
+            })?;
+            if outbound.reference != expected {
+                return Err(DbError::Message(
+                    "acknowledgement slot winner names another queued object".to_string(),
+                ));
+            }
+            let OutboundStoreAckActivation::Prepared(candidate) = &outbound.activation else {
+                return Err(DbError::Message(
+                    "acknowledgement slot collision has no prepared activation candidate"
+                        .to_string(),
+                ));
+            };
+            if candidate.commit.acknowledgement() != Some(&expected) {
+                return Err(DbError::Message(
+                    "prepared activation candidate names another acknowledgement".to_string(),
+                ));
+            }
+            if winner_prepared.reference().slot() != expected.object.slot()
+                || winner_prepared.reference() == &expected.object
+            {
+                return Err(DbError::Message(
+                    "acknowledgement slot winner is not a distinct object at the occupied slot"
+                        .to_string(),
+                ));
+            }
+            let (winner_reference, _) =
+                verify_next_local_store_ack_on(&tx, &winner_bytes, &winner_prepared)?;
+            let expected_records = candidate
+                .acknowledgement_remote_objects(&outbound.ack)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            for expected_record in &expected_records {
+                let object_id = expected_record.object_id();
+                let stored = load_remote_object_on(&tx, object_id)?;
+                if stored != *expected_record {
+                    return Err(DbError::Message(
+                        "losing acknowledgement candidate is no longer wholly unuploaded"
+                            .to_string(),
+                    ));
+                }
+            }
+            for expected_record in expected_records {
+                let removed = tx
+                    .execute(
+                        "DELETE FROM remote_objects WHERE object_id = ?1",
+                        [expected_record.object_id().to_string()],
+                    )
+                    .map_err(DbError::from)?;
+                if removed != 1 {
+                    return Err(DbError::Message(
+                        "losing acknowledgement candidate object disappeared".to_string(),
+                    ));
+                }
+            }
+            let activation = serde_json::to_string(&OutboundStoreAckActivation::AwaitingCandidate)
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "serialize adopted Store acknowledgement activation: {error}"
+                    ))
+                })?;
+            let winner_ref = serde_json::to_string(&winner_reference).map_err(|error| {
+                DbError::Message(format!(
+                    "serialize adopted Store acknowledgement ref: {error}"
+                ))
+            })?;
+            let winner_prepared = serde_json::to_string(&winner_prepared).map_err(|error| {
+                DbError::Message(format!(
+                    "serialize adopted prepared Store acknowledgement: {error}"
+                ))
+            })?;
+            let updated = tx
+                .execute(
+                    "UPDATE outbound_store_acks
+                     SET ack_ref = ?2, ack_bytes = ?3, prepared_object = ?4, activation = ?5
+                     WHERE singleton = 1 AND ack_ref = ?1",
+                    rusqlite::params![
+                        serde_json::to_string(&expected).map_err(|error| DbError::Message(
+                            format!("serialize losing Store acknowledgement ref: {error}")
+                        ))?,
+                        winner_ref,
+                        winner_bytes,
+                        winner_prepared,
+                        activation,
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "outbound Store acknowledgement changed during winner adoption".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)?;
+            Ok(())
         })
         .await
     }
@@ -16739,6 +16796,65 @@ fn validate_host_device_id_on(conn: &Connection, expected: &str) -> Result<(), D
         )));
     }
     Ok(())
+}
+
+fn verify_next_local_store_ack_on(
+    conn: &Connection,
+    bytes: &[u8],
+    prepared: &PreparedExactObject,
+) -> Result<(StoreAckRef, StoreAck), DbError> {
+    let (root, registration_ref, registration) = local_store_authority_on(conn)?;
+    let unverified: StoreAck = serde_json::from_slice(bytes)
+        .map_err(|error| DbError::Message(format!("parse Store acknowledgement: {error}")))?;
+    if unverified.registration != registration_ref {
+        return Err(DbError::Message(
+            "Store acknowledgement author differs from local activation".to_string(),
+        ));
+    }
+    let reference = StoreAckRef {
+        registration: registration_ref.clone(),
+        sequence: unverified.sequence,
+        ack_hash: unverified.ack_hash(),
+        object: prepared.reference().clone(),
+    };
+    let ack = StoreAck::parse_at(bytes, &root, &reference, &registration)
+        .map_err(|error| DbError::Message(format!("verify Store acknowledgement: {error}")))?;
+    let previous = load_published_store_ack_on(conn)?;
+    let (expected_sequence, expected_predecessor, expected_slot) = match &previous {
+        Some(previous) => (
+            previous.reference.sequence.checked_add(1).ok_or_else(|| {
+                DbError::Message("Store acknowledgement sequence overflow".to_string())
+            })?,
+            Some(previous.reference.object.clone()),
+            previous.successor_slot.clone(),
+        ),
+        None => (1, None, store_ack_first_slot(&registration)?.clone()),
+    };
+    if ack.sequence != expected_sequence
+        || ack.successor.predecessor != expected_predecessor
+        || prepared.reference().slot() != &expected_slot
+    {
+        return Err(DbError::Message(
+            "Store acknowledgement does not extend the exact local stream".to_string(),
+        ));
+    }
+    let next_sequence = ack
+        .sequence
+        .checked_add(1)
+        .ok_or_else(|| DbError::Message("Store acknowledgement sequence overflow".to_string()))?;
+    if ack.successor.activation
+        != StreamActivationId::store_acknowledgements(&root, &registration_ref)
+        || ack.successor.next_slot.logical_key()
+            != format!(
+                "{}.json",
+                ack_slot_prefix(&registration.device_id.to_string(), next_sequence)
+            )
+    {
+        return Err(DbError::Message(
+            "Store acknowledgement successor is outside its activated exact stream".to_string(),
+        ));
+    }
+    Ok((reference, ack))
 }
 
 fn store_ack_first_slot(

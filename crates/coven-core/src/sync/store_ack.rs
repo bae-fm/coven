@@ -236,10 +236,27 @@ pub async fn drain_outbound_store_acks(
                 continue;
             }
         };
-        storage
-            .create_protocol_object(&outbound.ack.prepared)
-            .await
-            .map_err(StoreObjectError::from)?;
+        if let Err(error) = storage.create_protocol_object(&outbound.ack.prepared).await {
+            if !matches!(error, super::storage::StorageError::SlotCollision(_)) {
+                return Err(StoreObjectError::from(error).into());
+            }
+            let semantic_prefix = ack_slot_prefix(&device_id, outbound.reference.sequence);
+            let (winner_bytes, winner_prepared) = storage
+                .read_prepared_protocol_slot(
+                    &context,
+                    outbound.reference.object.slot(),
+                    &semantic_prefix,
+                )
+                .await
+                .map_err(StoreObjectError::from)?;
+            db.adopt_outbound_store_ack_slot_winner(
+                outbound.reference,
+                winner_bytes,
+                winner_prepared,
+            )
+            .await?;
+            continue;
+        }
         let opened = storage
             .read_protocol_object(
                 &context,
@@ -348,6 +365,15 @@ mod tests {
     }
 
     async fn stage(db: &Database, storage: &CloudSyncStorage, signer: &UserKeypair) -> StoreAck {
+        stage_at(db, storage, signer, "2026-07-16T00:00:00Z").await
+    }
+
+    async fn stage_at(
+        db: &Database,
+        storage: &CloudSyncStorage,
+        signer: &UserKeypair,
+        last_sync: &str,
+    ) -> StoreAck {
         let frontier = CommitFrontier::from_refs(
             db.write_policy(),
             db.materialized_frontier()
@@ -355,15 +381,9 @@ mod tests {
                 .expect("read acknowledgement frontier"),
         )
         .expect("shape acknowledgement frontier");
-        stage_store_ack(
-            db,
-            storage,
-            frontier,
-            "2026-07-16T00:00:00Z".to_string(),
-            signer,
-        )
-        .await
-        .expect("stage exact acknowledgement")
+        stage_store_ack(db, storage, frontier, last_sync.to_string(), signer)
+            .await
+            .expect("stage exact acknowledgement")
     }
 
     async fn drain(
@@ -673,7 +693,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn occupied_acknowledgement_slot_is_never_replaced_or_completed() {
+    async fn invalid_acknowledgement_slot_bytes_are_never_replaced_or_completed() {
         let home = InMemoryCloudHome::new();
         let signer = UserKeypair::generate();
         let storage = storage(&home, &signer);
@@ -711,6 +731,140 @@ mod tests {
                 .reference,
             founder_ack.reference
         );
+    }
+
+    async fn assert_valid_acknowledgement_slot_winner_is_adopted_and_activated(
+        write_policy: crate::WritePolicy,
+    ) {
+        let directory = tempfile::tempdir().expect("acknowledgement database directory");
+        let seed_path = directory.path().join("seed.sqlite3");
+        let winner_path = directory.path().join("winner.sqlite3");
+        let loser_path = directory.path().join("loser.sqlite3");
+        let home = InMemoryCloudHome::new();
+        let signer = UserKeypair::generate();
+        let storage = match write_policy {
+            crate::WritePolicy::MergeConcurrent => storage(&home, &signer),
+            crate::WritePolicy::Serial => {
+                storage(&home, &signer).with_test_serial_coordination(Arc::new(home.clone()))
+            }
+        };
+        let seed = open_with_policy(&seed_path, "ack-slot-race-device", write_policy);
+        initialize(&seed, &storage, &signer).await;
+        for destination in [&winner_path, &loser_path] {
+            let destination = destination
+                .to_str()
+                .expect("temporary database path is UTF-8")
+                .to_string();
+            seed.call(move |connection| {
+                connection
+                    .execute("VACUUM INTO ?1", [destination])
+                    .map(|_| ())
+                    .map_err(crate::DbError::from)
+            })
+            .await
+            .expect("copy acknowledgement database");
+        }
+        drop(seed);
+
+        let winner_db = open_with_policy(&winner_path, "ack-slot-race-device", write_policy);
+        stage_at(&winner_db, &storage, &signer, "2026-07-16T00:00:01Z").await;
+        let winner = winner_db
+            .oldest_outbound_store_ack()
+            .await
+            .expect("read winner acknowledgement")
+            .expect("winner acknowledgement exists");
+        storage
+            .create_protocol_object(&winner.ack.prepared)
+            .await
+            .expect("publish winner acknowledgement");
+
+        let loser_db = open_with_policy(&loser_path, "ack-slot-race-device", write_policy);
+        stage_at(&loser_db, &storage, &signer, "2026-07-16T00:00:02Z").await;
+        let loser = loser_db
+            .oldest_outbound_store_ack()
+            .await
+            .expect("read losing acknowledgement")
+            .expect("losing acknowledgement exists");
+        assert_eq!(
+            winner.reference.object.slot(),
+            loser.reference.object.slot()
+        );
+        assert_ne!(winner.reference, loser.reference);
+        let losing_candidate = match write_policy {
+            crate::WritePolicy::MergeConcurrent => {
+                persist_candidate(&loser_db, &storage, &signer, &loser).await
+            }
+            crate::WritePolicy::Serial => {
+                persist_serial_candidate(&loser_db, &storage, &signer, &loser).await
+            }
+        };
+        let losing_object_ids = losing_candidate
+            .acknowledgement_remote_objects(&loser.ack)
+            .expect("load losing acknowledgement candidate graph")
+            .into_iter()
+            .map(|remote| remote.object_id())
+            .collect::<Vec<_>>();
+
+        let result = match write_policy {
+            crate::WritePolicy::MergeConcurrent => drain(&loser_db, &storage, &signer).await,
+            crate::WritePolicy::Serial => {
+                drain_outbound_store_acks(&loser_db, &storage, Some(&storage), &signer, None).await
+            }
+        };
+        assert_eq!(
+            result.expect("adopt and activate acknowledgement slot winner"),
+            1
+        );
+        assert_eq!(
+            loser_db
+                .latest_local_store_ack()
+                .await
+                .expect("read adopted acknowledgement")
+                .expect("adopted acknowledgement is published")
+                .reference,
+            winner.reference
+        );
+        assert!(loser_db
+            .oldest_outbound_store_ack()
+            .await
+            .expect("read drained acknowledgement outbox")
+            .is_none());
+        assert!(loser_db
+            .protocol_inert_object(loser.reference.object)
+            .await
+            .expect("read losing acknowledgement inert state")
+            .is_none());
+        for object_id in losing_object_ids {
+            let exists = loser_db
+                .call(move |connection| {
+                    connection
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                            [object_id.to_string()],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .map_err(crate::DbError::from)
+                })
+                .await
+                .expect("read losing acknowledgement candidate ownership");
+            assert!(!exists);
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_merge_acknowledgement_slot_winner_is_adopted_and_activated() {
+        assert_valid_acknowledgement_slot_winner_is_adopted_and_activated(
+            crate::WritePolicy::MergeConcurrent,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn valid_serial_acknowledgement_slot_winner_is_adopted_and_activated() {
+        assert_valid_acknowledgement_slot_winner_is_adopted_and_activated(
+            crate::WritePolicy::Serial,
+        )
+        .await;
     }
 
     #[tokio::test]
