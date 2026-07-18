@@ -1302,6 +1302,11 @@ pub(crate) async fn drain_store_writes_with_coordination(
                     "prepared head exact readback differs from its signed bytes".to_string(),
                 ));
             }
+            db.mark_store_head_uploaded(StoreDeviceHeadRef {
+                head_hash: head.head_hash(),
+                object: batch.head.object.clone(),
+            })
+            .await?;
             db.complete_prepared_store_write(head.commit.clone())
                 .await?;
             Ok::<(), StoreOutboundError>(())
@@ -3888,9 +3893,31 @@ mod tests {
         .expect("load stored remote object")
     }
 
+    async fn remote_object_exists(
+        db: &Database,
+        object: &crate::sync::storage::ExactObjectRef,
+    ) -> bool {
+        let object_id = super::super::remote_object::remote_object_id(object);
+        db.call(move |conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM remote_objects WHERE object_id = ?1)",
+                [object_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(crate::DbError::from)
+        })
+        .await
+        .expect("check stored remote object")
+    }
+
     #[tokio::test]
     async fn accepted_package_transfers_to_shared_live_set_ownership() {
         let fixture = prepared_write_fixture().await;
+
+        assert!(
+            remote_object_exists(&fixture.db, &fixture.head_object).await,
+            "the prepared Merge head must have durable candidate ownership before publication",
+        );
 
         assert_eq!(
             drain_store_writes(&fixture.db, &fixture.storage)
@@ -3927,9 +3954,32 @@ mod tests {
                     super::super::remote_object::RetainedAuthorityObjectDomain::StoreCommit {
                         reference
                     } if reference == &fixture.commit_ref
-                ) && record.ownership.pending.is_empty()
-                    && record.ownership.activated
-                        == std::collections::BTreeSet::from([fixture.commit_ref.clone()])
+                ) && matches!(
+                    &record.state,
+                    super::super::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+                        ownership
+                    } if ownership.pending.is_empty()
+                        && ownership.activated
+                            == std::collections::BTreeSet::from([fixture.commit_ref.clone()])
+                )
+        ));
+        let head = stored_remote_object(&fixture.db, &fixture.head_object).await;
+        assert!(matches!(
+            head,
+            super::super::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                if matches!(
+                    &record.identity.domain,
+                    super::super::remote_object::RetainedAuthorityObjectDomain::StoreDeviceHead {
+                        reference
+                    } if reference.object == fixture.head_object
+                ) && matches!(
+                    &record.state,
+                    super::super::remote_object::RetainedAuthorityObjectState::UploadedVerified {
+                        ownership
+                    } if ownership.pending.is_empty()
+                        && ownership.activated
+                            == std::collections::BTreeSet::from([fixture.commit_ref.clone()])
+                )
         ));
     }
 

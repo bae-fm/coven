@@ -4579,6 +4579,18 @@ impl Database {
                 &stage.remote_objects,
                 &stage.audiences,
             )?;
+            let head_ref = crate::sync::store_commit::StoreDeviceHeadRef {
+                head_hash: stage.head.value.head_hash(),
+                object: stage.head.prepared.reference().clone(),
+            };
+            let head_remote = RemoteObjectRecord::candidate_activated_store_head(
+                head_ref,
+                stage.head.value.to_bytes(),
+                stage.head.prepared.stored_bytes().to_vec(),
+                commit_ref.clone(),
+            )
+            .map_err(|error| DbError::Message(format!("prepared Store head: {error}")))?;
+            persist_exact_remote_object_on(&tx, &head_remote, "Store head")?;
 
             let prepared = PreparedStoreWriteState::MergeConcurrent {
                 commit: DurablePreparedProtocolObject {
@@ -5606,6 +5618,7 @@ impl Database {
                 .map_err(|error| DbError::Message(format!("prepared Store write: {error}")))?;
             let PreparedStoreWriteState::MergeConcurrent {
                 commit,
+                head,
                 local_cleanup,
                 ..
             } = prepared
@@ -5647,6 +5660,7 @@ impl Database {
                 ));
             }
             let write_id = commit_value.write_id.clone();
+            let head_object_id = remote_object_id(head.prepared.reference());
             Self::activate_prepared_write_on(
                 &tx,
                 &gates,
@@ -5655,6 +5669,7 @@ impl Database {
                 &commit_value,
                 &accepted,
                 local_cleanup,
+                &[head_object_id],
             )?;
             let cleared = tx
                 .execute(
@@ -5911,6 +5926,7 @@ impl Database {
                     &commit_value,
                     &commit_ref,
                     local_cleanup,
+                    &[],
                 )?;
                 let cleared = tx
                     .execute(
@@ -11495,37 +11511,7 @@ impl Database {
             commit_stored_bytes.to_vec(),
         )
         .map_err(|error| DbError::Message(format!("prepared candidate commit: {error}")))?;
-        let commit_object_id = commit_remote.object_id();
-        let existing_commit = conn
-            .query_row(
-                "SELECT state FROM remote_objects WHERE object_id = ?1",
-                [commit_object_id.to_string()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(DbError::from)?;
-        if let Some(existing) = existing_commit {
-            let existing: RemoteObjectRecord =
-                serde_json::from_str(&existing).map_err(|error| {
-                    DbError::Message(format!(
-                        "candidate commit {commit_object_id} has invalid closed state: {error}"
-                    ))
-                })?;
-            if existing != commit_remote {
-                return Err(DbError::Message(format!(
-                    "candidate commit {commit_object_id} already has different closed state"
-                )));
-            }
-        } else {
-            let state = serde_json::to_string(&commit_remote).map_err(|error| {
-                DbError::Message(format!("serialize candidate commit: {error}"))
-            })?;
-            conn.execute(
-                "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
-                (commit_object_id.to_string(), state),
-            )
-            .map_err(DbError::from)?;
-        }
+        persist_exact_remote_object_on(conn, &commit_remote, "candidate commit")?;
         let expected_partition_count = usize::from(partitions.store.is_some())
             .checked_add(partitions.circles.len())
             .ok_or_else(|| DbError::Message("audience partition count overflow".to_string()))?;
@@ -11674,6 +11660,7 @@ impl Database {
         commit: &StoreBatchCommit,
         commit_ref: &StoreBatchCommitRef,
         local_cleanup: StoreBatchLocalCleanup,
+        additional_object_ids: &[ObjectHash],
     ) -> Result<(), DbError> {
         commit_ref
             .verify_commit(commit)
@@ -11699,6 +11686,7 @@ impl Database {
                 .iter()
                 .map(PreparedAudienceBlob::remote_object_id),
         );
+        object_ids.extend(additional_object_ids.iter().copied());
         for object_id in object_ids {
             let remote = load_remote_object_on(conn, object_id)?
                 .into_activated(commit_ref)
@@ -11902,6 +11890,33 @@ impl Database {
             ) {
                 return Err(DbError::Message(format!(
                     "remote object {object_id} is not the exact candidate commit"
+                )));
+            }
+            mark_remote_object_uploaded_on(conn, current)?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn mark_store_head_uploaded(
+        &self,
+        head: crate::sync::store_commit::StoreDeviceHeadRef,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let object_id = remote_object_id(&head.object);
+            let current = load_remote_object_on(conn, object_id)?;
+            if !matches!(
+                &current,
+                RemoteObjectRecord::RetainedAuthority(record)
+                    if matches!(
+                        &record.identity.domain,
+                        crate::sync::remote_object::RetainedAuthorityObjectDomain::StoreDeviceHead {
+                            reference
+                        } if reference == &head
+                    )
+            ) {
+                return Err(DbError::Message(format!(
+                    "remote object {object_id} is not the exact prepared Store head"
                 )));
             }
             mark_remote_object_uploaded_on(conn, current)?;
@@ -14583,6 +14598,46 @@ fn load_remote_object_on(
         )));
     }
     Ok(remote)
+}
+
+fn persist_exact_remote_object_on(
+    conn: &Connection,
+    remote: &RemoteObjectRecord,
+    domain: &str,
+) -> Result<(), DbError> {
+    remote
+        .validate()
+        .map_err(|error| DbError::Message(format!("prepared {domain}: {error}")))?;
+    let object_id = remote.object_id();
+    let existing = conn
+        .query_row(
+            "SELECT state FROM remote_objects WHERE object_id = ?1",
+            [object_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DbError::from)?;
+    if let Some(existing) = existing {
+        let existing: RemoteObjectRecord = serde_json::from_str(&existing).map_err(|error| {
+            DbError::Message(format!(
+                "prepared {domain} {object_id} has invalid closed state: {error}"
+            ))
+        })?;
+        if existing != *remote {
+            return Err(DbError::Message(format!(
+                "prepared {domain} {object_id} already has different closed state"
+            )));
+        }
+        return Ok(());
+    }
+    let state = serde_json::to_string(remote)
+        .map_err(|error| DbError::Message(format!("serialize prepared {domain}: {error}")))?;
+    conn.execute(
+        "INSERT INTO remote_objects (object_id, state) VALUES (?1, ?2)",
+        (object_id.to_string(), state),
+    )
+    .map_err(DbError::from)?;
+    Ok(())
 }
 
 fn update_remote_object_on(
