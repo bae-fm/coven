@@ -11498,10 +11498,11 @@ impl Database {
                 .map(PreparedAudienceBlob::remote_object_id),
         );
         for object_id in object_ids {
-            let mut remote = load_remote_object_on(conn, object_id)?;
-            remote.activate(commit_ref).map_err(|error| {
-                DbError::Message(format!("activate remote object {object_id}: {error}"))
-            })?;
+            let remote = load_remote_object_on(conn, object_id)?
+                .into_activated(commit_ref)
+                .map_err(|error| {
+                    DbError::Message(format!("activate remote object {object_id}: {error}"))
+                })?;
             let state = serde_json::to_string(&remote).map_err(|error| {
                 DbError::Message(format!("serialize activated remote object: {error}"))
             })?;

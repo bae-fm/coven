@@ -263,43 +263,66 @@ impl RemoteObjectRecord {
         Ok(())
     }
 
-    pub(crate) fn activate(
-        &mut self,
+    pub(crate) fn into_activated(
+        self,
         commit: &StoreBatchCommitRef,
-    ) -> Result<(), RemoteObjectRecordError> {
-        match self {
-            Self::CandidateExclusive(record) => match &record.state {
-                CandidateObjectState::UploadedVerified { ownership }
-                    if ownership.pending.len() == 1 && ownership.pending.contains(commit) =>
-                {
-                    record.state = CandidateObjectState::Activated {
-                        owner: commit.clone(),
-                    };
+    ) -> Result<Self, RemoteObjectRecordError> {
+        let activated = match self {
+            Self::CandidateExclusive(record) => {
+                let CandidateObjectState::UploadedVerified { ownership } = &record.state else {
+                    return Err(RemoteObjectRecordError::InvalidActivation);
+                };
+                if ownership.pending.len() != 1 || !ownership.pending.contains(commit) {
+                    return Err(RemoteObjectRecordError::InvalidActivation);
                 }
-                CandidateObjectState::Activated { owner } if owner == commit => {}
-                _ => return Err(RemoteObjectRecordError::InvalidActivation),
-            },
-            Self::SharedLiveSet(record) => match &mut record.state {
-                OwnedObjectState::UploadedVerified { ownership } => {
-                    if !ownership.pending.remove(commit) {
-                        if ownership
+                let domain = match record.identity.domain {
+                    CandidateExclusiveObjectDomain::StorePackage => {
+                        SharedLiveSetObjectDomain::StorePackage
+                    }
+                    CandidateExclusiveObjectDomain::CirclePackage { .. } => {
+                        SharedLiveSetObjectDomain::CirclePackage
+                    }
+                };
+                Self::SharedLiveSet(SharedObjectRecord {
+                    identity: SharedLiveSetObjectRef {
+                        domain,
+                        semantic_hash: record.identity.semantic_hash,
+                        object: record.identity.object,
+                    },
+                    bytes: record.bytes,
+                    state: OwnedObjectState::UploadedVerified {
+                        ownership: SharedObjectOwnership {
+                            pending: BTreeSet::new(),
+                            activated: BTreeSet::from([SharedObjectOwner::StoreCommit(
+                                commit.clone(),
+                            )]),
+                        },
+                    },
+                })
+            }
+            Self::SharedLiveSet(mut record) => {
+                match &mut record.state {
+                    OwnedObjectState::UploadedVerified { ownership } => {
+                        if ownership.pending.remove(commit) {
+                            ownership
+                                .activated
+                                .insert(SharedObjectOwner::StoreCommit(commit.clone()));
+                        } else if !ownership
                             .activated
                             .contains(&SharedObjectOwner::StoreCommit(commit.clone()))
                         {
-                            return Ok(());
+                            return Err(RemoteObjectRecordError::InvalidActivation);
                         }
+                    }
+                    OwnedObjectState::Prepared { .. } => {
                         return Err(RemoteObjectRecordError::InvalidActivation);
                     }
-                    ownership
-                        .activated
-                        .insert(SharedObjectOwner::StoreCommit(commit.clone()));
                 }
-                OwnedObjectState::Prepared { .. } => {
-                    return Err(RemoteObjectRecordError::InvalidActivation);
-                }
-            },
-        }
-        self.validate()
+                Self::SharedLiveSet(record)
+            }
+        };
+        activated.validate()?;
+        Ok(activated)
     }
 
     pub(crate) fn mark_uploaded_verified(&mut self) -> Result<(), RemoteObjectRecordError> {
@@ -310,8 +333,7 @@ impl RemoteObjectRecord {
                         ownership: ownership.clone(),
                     };
                 }
-                CandidateObjectState::UploadedVerified { .. }
-                | CandidateObjectState::Activated { .. } => {}
+                CandidateObjectState::UploadedVerified { .. } => {}
             },
             Self::SharedLiveSet(record) => match &record.state {
                 OwnedObjectState::Prepared { ownership } => {
@@ -441,9 +463,6 @@ pub(crate) enum CandidateObjectState {
     UploadedVerified {
         ownership: PendingCandidateOwnership,
     },
-    Activated {
-        owner: StoreBatchCommitRef,
-    },
 }
 
 impl CandidateObjectState {
@@ -452,7 +471,6 @@ impl CandidateObjectState {
             Self::Prepared { ownership } | Self::UploadedVerified { ownership } => {
                 ownership.validate()
             }
-            Self::Activated { .. } => Ok(()),
         }
     }
 }

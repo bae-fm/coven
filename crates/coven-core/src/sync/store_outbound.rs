@@ -3759,6 +3759,58 @@ mod tests {
         }
     }
 
+    async fn stored_remote_object(
+        db: &Database,
+        object: &crate::sync::storage::ExactObjectRef,
+    ) -> super::super::remote_object::RemoteObjectRecord {
+        let object_id = super::super::remote_object::remote_object_id(object);
+        db.call(move |conn| {
+            let encoded: String = conn
+                .query_row(
+                    "SELECT state FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(crate::DbError::from)?;
+            serde_json::from_str(&encoded)
+                .map_err(|error| crate::DbError::Message(error.to_string()))
+        })
+        .await
+        .expect("load stored remote object")
+    }
+
+    #[tokio::test]
+    async fn accepted_package_transfers_to_shared_live_set_ownership() {
+        let fixture = prepared_write_fixture().await;
+
+        assert_eq!(
+            drain_store_writes(&fixture.db, &fixture.storage)
+                .await
+                .expect("publish prepared Store package"),
+            1,
+        );
+
+        let remote = stored_remote_object(&fixture.db, &fixture.package_object).await;
+        assert!(matches!(
+            remote,
+            super::super::remote_object::RemoteObjectRecord::SharedLiveSet(record)
+                if record.identity.domain
+                    == super::super::remote_object::SharedLiveSetObjectDomain::StorePackage
+                    && matches!(
+                        &record.state,
+                        super::super::remote_object::OwnedObjectState::UploadedVerified {
+                            ownership
+                        } if ownership.pending.is_empty()
+                            && ownership.activated
+                                == std::collections::BTreeSet::from([
+                                    super::super::remote_object::SharedObjectOwner::StoreCommit(
+                                        fixture.commit_ref.clone()
+                                    )
+                                ])
+                    )
+        ));
+    }
+
     #[tokio::test]
     async fn failures_before_package_commit_and_head_keep_the_exact_prepared_write_retryable() {
         for failed_call in 1..=3 {
