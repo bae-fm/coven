@@ -344,19 +344,42 @@ impl CovenHandle {
         &self,
         write_id: &coven_core::WriteId,
     ) -> Result<Vec<coven_core::WriteId>, crate::CovenError> {
-        if self
+        let merge_cleanup_pending = self
             .db
             .merge_candidate_cleanup_pending(write_id)
             .await
-            .map_err(crate::CovenError::from)?
-        {
-            self.sync_manager()
+            .map_err(crate::CovenError::from)?;
+        let merge_abandonment_required = if merge_cleanup_pending {
+            false
+        } else {
+            self.db
+                .merge_candidate_abandonment_required(write_id)
+                .await
+                .map_err(crate::CovenError::from)?
+        };
+        if merge_cleanup_pending || merge_abandonment_required {
+            let abandonment = self
+                .sync_manager()
                 .ok_or_else(|| {
                     crate::CovenError::CandidateResolution("sync is not connected".to_string())
                 })?
-                .cleanup_merge_candidate(write_id.clone())
+                .abandon_merge_candidate(write_id.clone())
                 .await
                 .map_err(|error| crate::CovenError::CandidateResolution(error.to_string()))?;
+            match abandonment {
+                coven_core::sync::store_outbound::MergeCandidateAbandonment::NotRequired => {
+                    return Err(crate::CovenError::CandidateResolution(
+                        "blocked Merge candidate has no abandonment authority".to_string(),
+                    ));
+                }
+                coven_core::sync::store_outbound::MergeCandidateAbandonment::Abandoned => {}
+                coven_core::sync::store_outbound::MergeCandidateAbandonment::CandidateActivated => {
+                    return Err(crate::CovenError::CandidateResolution(
+                        "Merge candidate activated before abandonment and cannot be discarded"
+                            .to_string(),
+                    ));
+                }
+            }
         }
         self.db
             .discard_blocked_write(write_id)

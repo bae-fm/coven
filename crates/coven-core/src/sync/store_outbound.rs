@@ -10,9 +10,10 @@ use super::storage::{PreparedExactObject, ProtocolObjectContext, ProtocolObjectD
 use super::store_commit::{
     circle_package_semantic_prefix, commit_semantic_prefix, head_slot_prefix,
     package_semantic_prefix, serial_head_key, ActivatedStoreDeviceRegistrationRef,
-    CandidateFamilyId, CirclePackageInput, DeviceJoinAttemptRef, DeviceJoinOutcomeRef, ObjectHash,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput,
-    StoreCommitOrder, StoreControl, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
+    CandidateCleanupManifest, CandidateFamilyId, CirclePackageInput, DeviceJoinAttemptRef,
+    DeviceJoinOutcomeRef, ObjectHash, StoreBatchCommit, StoreBatchCommitDeletionTarget,
+    StoreBatchCommitRef, StoreCommitCoord, StoreCommitOperationsInput, StoreCommitOrder,
+    StoreControl, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
     StoreDeviceRegistrationRef, StoreHistoryCut, StorePackageInput, StoreRootRef, StoreSerialHead,
     StoreSerialHeadState, StoreSerialPredecessor, SuccessorLink, SERIAL_STREAM_ID,
 };
@@ -21,8 +22,8 @@ use super::store_objects::StoreObjectError;
 const STORE_ROOT_AUTHORITY: &str = "store_root_authority";
 const SERIAL_COORDINATION_HEAD: &str = "serial_coordination_head";
 use crate::database::{
-    Database, PreparedAudienceBlob, PreparedAudienceObjects, PreparedAudiencePackage,
-    PreparedProtocolObject, PreparedSerialStoreBranch, PreparedStoreWrite,
+    Database, MergeCandidateAbandonmentPreparation, PreparedAudienceBlob, PreparedAudienceObjects,
+    PreparedAudiencePackage, PreparedProtocolObject, PreparedSerialStoreBranch, PreparedStoreWrite,
     SerialStoreWritePreparation, SerialStoreWritePreparationEntry, StoreWriteBase,
     StoreWriteBlobFact, StoreWriteBlobFacts, StoreWritePreparation,
 };
@@ -78,12 +79,21 @@ pub enum StoreOutboundError {
         expected: Box<StoreSerialPredecessor>,
         current: Box<StoreSerialPredecessor>,
     },
+    #[error("candidate cleanup: {0}")]
+    CandidateCleanup(#[from] super::store_pull::StorePullError),
 }
 
 impl From<crate::database::DbError> for StoreOutboundError {
     fn from(error: crate::database::DbError) -> Self {
         Self::Database(error.into_message())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeCandidateAbandonment {
+    NotRequired,
+    Abandoned,
+    CandidateActivated,
 }
 
 pub(crate) async fn exact_next_announcement_slot(
@@ -184,7 +194,7 @@ pub(crate) async fn exact_next_announcement_slot(
 impl StoreOutboundError {
     pub(crate) fn definitely_uncommitted(&self) -> bool {
         match self {
-            Self::Database(_) | Self::Coordination(_) => false,
+            Self::Database(_) | Self::Coordination(_) | Self::CandidateCleanup(_) => false,
             Self::BlobStorage { source, .. } => source.definitely_uncommitted(),
             Self::Object(_) => true,
             Self::MissingState { .. }
@@ -1220,6 +1230,181 @@ fn merge_identical_prepared_blob(
     Ok(())
 }
 
+pub async fn prepare_merge_candidate_abandonment(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    write_id: crate::WriteId,
+) -> Result<bool, StoreOutboundError> {
+    let Some(candidate) = db.blocked_merge_candidate(write_id.clone()).await? else {
+        return Ok(false);
+    };
+    let (root, registration_ref, registration, device_signer) =
+        load_local_store_authority(db, device_id, identity_signer).await?;
+    if candidate.commit.value.author_registration != registration_ref {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "blocked Merge candidate belongs to another local registration".to_string(),
+        ));
+    }
+    let coord = candidate.head.value.commit.coord.clone();
+    let commit = StoreBatchCommit::signed_with_candidate_abandonment(
+        root.store_root_hash,
+        write_id.clone(),
+        coord.clone(),
+        registration_ref.clone(),
+        &registration,
+        candidate.commit.value.order.clone(),
+        candidate.commit.value.membership_state.clone(),
+        candidate.commit.value.device_state.clone(),
+        vec![CandidateCleanupManifest {
+            candidate: StoreBatchCommitDeletionTarget {
+                coord: coord.clone(),
+                object: candidate.commit.object.clone(),
+                canonical_signed_bytes: candidate.commit.bytes.clone(),
+            },
+        }],
+        &device_signer,
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let StoreCommitCoord::MergeConcurrent {
+        stream_id,
+        sequence,
+    } = coord.clone()
+    else {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "Serial candidate reached Merge abandonment".to_string(),
+        ));
+    };
+    let commit_context =
+        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreCommit);
+    let commit_prefix = commit_semantic_prefix(
+        commit.candidate_family(),
+        &stream_id.to_string(),
+        sequence,
+        commit.commit_hash(),
+    );
+    let commit_slot = storage
+        .allocate_protocol_slot(&commit_context, &commit_prefix, ".json")
+        .await
+        .map_err(StoreObjectError::from)?;
+    let commit_prepared = storage
+        .prepare_protocol_object(
+            &commit_context,
+            commit_slot,
+            &commit_prefix,
+            commit.to_bytes(),
+        )
+        .map_err(StoreObjectError::from)?;
+    let commit_ref =
+        StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let head = StoreDeviceHead::signed(
+        root.store_root_hash,
+        registration_ref,
+        commit_ref,
+        candidate.head.value.successor,
+        &device_signer,
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let head_context =
+        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreHead);
+    let head_prefix = head_slot_prefix(device_id, sequence);
+    let head_prepared = storage
+        .prepare_protocol_object(
+            &head_context,
+            candidate.head.object.slot().clone(),
+            &head_prefix,
+            head.to_bytes(),
+        )
+        .map_err(StoreObjectError::from)?;
+    db.prepare_merge_candidate_abandonment(MergeCandidateAbandonmentPreparation {
+        write_id,
+        commit: PreparedProtocolObject {
+            value: commit,
+            prepared: commit_prepared,
+        },
+        head: PreparedProtocolObject {
+            value: head,
+            prepared: head_prepared,
+        },
+    })
+    .await?;
+    Ok(true)
+}
+
+pub async fn abandon_merge_candidate(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    write_id: crate::WriteId,
+) -> Result<MergeCandidateAbandonment, StoreOutboundError> {
+    match db.merge_abandonment_state(&write_id).await? {
+        crate::database::MergeAbandonmentState::None => {
+            if db.merge_candidate_cleanup_pending(&write_id).await? {
+                super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+                return Ok(MergeCandidateAbandonment::Abandoned);
+            }
+            if !prepare_merge_candidate_abandonment(
+                db,
+                storage,
+                device_id,
+                identity_signer,
+                write_id.clone(),
+            )
+            .await?
+            {
+                return Ok(MergeCandidateAbandonment::NotRequired);
+            }
+        }
+        crate::database::MergeAbandonmentState::Prepared => {}
+        crate::database::MergeAbandonmentState::Accepted
+        | crate::database::MergeAbandonmentState::CandidateWon
+        | crate::database::MergeAbandonmentState::OtherWon => {
+            if db.merge_candidate_cleanup_pending(&write_id).await? {
+                super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+            }
+            return finish_merge_abandonment(db, storage, write_id).await;
+        }
+    }
+    drain_store_writes(db, storage).await?;
+    if !db.merge_candidate_cleanup_pending(&write_id).await? {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "accepted Merge abandonment has no exact cleanup transition".to_string(),
+        ));
+    }
+    super::store_pull::cleanup_merge_candidate(db, storage, write_id.clone()).await?;
+    finish_merge_abandonment(db, storage, write_id).await
+}
+
+async fn finish_merge_abandonment(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    write_id: crate::WriteId,
+) -> Result<MergeCandidateAbandonment, StoreOutboundError> {
+    match db.merge_abandonment_state(&write_id).await? {
+        crate::database::MergeAbandonmentState::None
+        | crate::database::MergeAbandonmentState::Accepted => {
+            Ok(MergeCandidateAbandonment::Abandoned)
+        }
+        crate::database::MergeAbandonmentState::OtherWon => {
+            db.finish_lost_merge_abandonment(write_id).await?;
+            Ok(MergeCandidateAbandonment::Abandoned)
+        }
+        crate::database::MergeAbandonmentState::CandidateWon => {
+            db.resume_winning_merge_candidate(write_id).await?;
+            drain_store_writes(db, storage).await?;
+            Ok(MergeCandidateAbandonment::CandidateActivated)
+        }
+        crate::database::MergeAbandonmentState::Prepared => {
+            Err(StoreOutboundError::InvalidOutbound(
+                "Merge abandonment has no accepted head outcome".to_string(),
+            ))
+        }
+    }
+}
+
 /// Publish the exact prepared object graph in sequence order. Every remote object
 /// is verified at its reserved slot before the exact head activates the commit.
 pub async fn drain_store_writes(
@@ -1249,8 +1434,13 @@ pub(crate) async fn drain_store_writes_with_coordination(
             .await?;
         let attempt = async {
             let store_root_hash = required_store_root(db).await?.store_root_hash;
-            publish_prepared_remote_objects(db, storage, &write_id, store_root_hash).await?;
             let commit = &batch.commit.value;
+            if !matches!(
+                commit.body,
+                super::store_commit::StoreCommitBody::AbandonCandidates { .. }
+            ) {
+                publish_prepared_remote_objects(db, storage, &write_id, store_root_hash).await?;
+            }
             let head = &batch.head.value;
             let stream_id = match &head.commit.coord {
                 StoreCommitCoord::MergeConcurrent { stream_id, .. } => stream_id.to_string(),
@@ -1351,8 +1541,12 @@ pub(crate) async fn drain_store_writes_with_coordination(
                     head_hash: winner.head_hash(),
                     object: winner_prepared.reference().clone(),
                 };
-                db.mark_merge_candidate_conflict(write_id.clone(), winner_ref)
-                    .await?;
+                db.mark_merge_candidate_conflict(
+                    write_id.clone(),
+                    winner.commit.clone(),
+                    winner_ref,
+                )
+                .await?;
                 return Ok::<bool, StoreOutboundError>(false);
             }
             let opened_head = storage
@@ -2278,7 +2472,8 @@ fn blocked_status(error: &StoreOutboundError) -> Option<crate::WriteBlock> {
     match error {
         StoreOutboundError::Database(_)
         | StoreOutboundError::BlobStorage { .. }
-        | StoreOutboundError::Coordination(_) => None,
+        | StoreOutboundError::Coordination(_)
+        | StoreOutboundError::CandidateCleanup(_) => None,
         StoreOutboundError::MissingSerialCoordination => {
             Some(crate::WriteBlock::InvalidProtocolState {
                 reason: error.to_string(),
@@ -4481,6 +4676,408 @@ mod tests {
             &fixture.commit_ref.object
         ));
         assert!(exact_object_exists(&fixture.home, &winner.object));
+    }
+
+    #[tokio::test]
+    async fn blocked_merge_candidate_is_abandoned_before_local_discard() {
+        let fixture = prepared_write_fixture().await;
+        fixture
+            .db
+            .set_write_status(
+                &fixture.write_id,
+                crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                    reason: "host chose discard".to_string(),
+                }),
+            )
+            .await
+            .expect("block prepared Merge candidate");
+
+        assert_eq!(
+            abandon_merge_candidate(
+                &fixture.db,
+                &fixture.storage,
+                &fixture.device_id,
+                &fixture.keypair,
+                fixture.write_id.clone(),
+            )
+            .await
+            .expect("publish candidate abandonment"),
+            MergeCandidateAbandonment::Abandoned,
+        );
+        assert!(!fixture
+            .db
+            .merge_candidate_cleanup_pending(&fixture.write_id)
+            .await
+            .expect("candidate cleanup completed"));
+        let authority = fixture
+            .db
+            .latest_local_store_position()
+            .await
+            .expect("read local Merge position")
+            .expect("abandonment advances the local stream");
+        assert_ne!(authority, fixture.commit_ref);
+        let authority_remote = stored_remote_object(&fixture.db, &authority.object).await;
+        assert!(matches!(
+            authority_remote,
+            super::super::remote_object::RemoteObjectRecord::RetainedAuthority(record)
+                if matches!(
+                    &record.identity.domain,
+                    super::super::remote_object::RetainedAuthorityObjectDomain::StoreCommit {
+                        reference
+                    } if reference == &authority
+                )
+        ));
+        assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
+        assert!(!exact_object_exists(
+            &fixture.home,
+            &fixture.commit_ref.object
+        ));
+        assert_eq!(
+            fixture
+                .db
+                .discard_blocked_write(&fixture.write_id)
+                .await
+                .expect("reverse the abandoned write"),
+            vec![fixture.write_id.clone()]
+        );
+        assert!(matches!(
+            fixture.db.write_status(&fixture.write_id).await.unwrap(),
+            crate::WriteStatus::Resolved(crate::WriteResolution::Discarded)
+        ));
+        assert!(remote_object_exists(&fixture.db, &authority.object).await);
+    }
+
+    #[tokio::test]
+    async fn prepared_merge_abandonment_resumes_after_restart() {
+        let fixture = prepared_write_fixture().await;
+        fixture
+            .db
+            .set_write_status(
+                &fixture.write_id,
+                crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                    reason: "host chose discard".to_string(),
+                }),
+            )
+            .await
+            .expect("block prepared Merge candidate");
+        assert!(prepare_merge_candidate_abandonment(
+            &fixture.db,
+            &fixture.storage,
+            &fixture.device_id,
+            &fixture.keypair,
+            fixture.write_id.clone(),
+        )
+        .await
+        .expect("persist Merge abandonment"));
+
+        assert_eq!(
+            abandon_merge_candidate(
+                &fixture.db,
+                &fixture.storage,
+                &fixture.device_id,
+                &fixture.keypair,
+                fixture.write_id.clone(),
+            )
+            .await
+            .expect("resume Merge abandonment"),
+            MergeCandidateAbandonment::Abandoned,
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_abandonment_retries_commit_and_head_publication_failures() {
+        for failed_call in 1..=2 {
+            let fixture = prepared_write_fixture().await;
+            fixture
+                .db
+                .set_write_status(
+                    &fixture.write_id,
+                    crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                        reason: "host chose discard".to_string(),
+                    }),
+                )
+                .await
+                .expect("block prepared Merge candidate");
+            assert!(prepare_merge_candidate_abandonment(
+                &fixture.db,
+                &fixture.storage,
+                &fixture.device_id,
+                &fixture.keypair,
+                fixture.write_id.clone(),
+            )
+            .await
+            .expect("persist Merge abandonment"));
+            fixture.home.fail_exact_create_before_call(failed_call);
+
+            assert!(
+                abandon_merge_candidate(
+                    &fixture.db,
+                    &fixture.storage,
+                    &fixture.device_id,
+                    &fixture.keypair,
+                    fixture.write_id.clone(),
+                )
+                .await
+                .is_err(),
+                "exact create call {failed_call} fails",
+            );
+            assert_eq!(
+                abandon_merge_candidate(
+                    &fixture.db,
+                    &fixture.storage,
+                    &fixture.device_id,
+                    &fixture.keypair,
+                    fixture.write_id.clone(),
+                )
+                .await
+                .expect("retry Merge abandonment publication"),
+                MergeCandidateAbandonment::Abandoned,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_merge_abandonment_retries_losing_object_deletion() {
+        let fixture = prepared_write_fixture().await;
+        let batch = fixture
+            .db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load prepared Merge write")
+            .expect("prepared Merge write exists");
+        publish_prepared_remote_objects(
+            &fixture.db,
+            &fixture.storage,
+            &fixture.write_id,
+            fixture.root.store_root_hash,
+        )
+        .await
+        .expect("publish original candidate objects");
+        fixture
+            .storage
+            .create_protocol_object(&batch.commit.prepared)
+            .await
+            .expect("publish original candidate commit");
+        fixture
+            .db
+            .mark_candidate_commit_uploaded(fixture.commit_ref.clone())
+            .await
+            .expect("record uploaded original candidate commit");
+        fixture
+            .db
+            .set_write_status(
+                &fixture.write_id,
+                crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                    reason: "host chose discard".to_string(),
+                }),
+            )
+            .await
+            .expect("block prepared Merge candidate");
+        fixture.home.fail_exact_delete_on_call(1);
+
+        assert!(
+            abandon_merge_candidate(
+                &fixture.db,
+                &fixture.storage,
+                &fixture.device_id,
+                &fixture.keypair,
+                fixture.write_id.clone(),
+            )
+            .await
+            .is_err(),
+            "losing object deletion fails",
+        );
+        assert!(fixture
+            .db
+            .merge_candidate_cleanup_pending(&fixture.write_id)
+            .await
+            .expect("cleanup remains pending"));
+        assert_eq!(
+            abandon_merge_candidate(
+                &fixture.db,
+                &fixture.storage,
+                &fixture.device_id,
+                &fixture.keypair,
+                fixture.write_id.clone(),
+            )
+            .await
+            .expect("retry losing object deletion"),
+            MergeCandidateAbandonment::Abandoned,
+        );
+    }
+
+    #[tokio::test]
+    async fn original_candidate_activation_wins_abandonment_race() {
+        let fixture = prepared_write_fixture().await;
+        let batch = fixture
+            .db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load prepared Merge write")
+            .expect("prepared Merge write exists");
+        publish_prepared_remote_objects(
+            &fixture.db,
+            &fixture.storage,
+            &fixture.write_id,
+            fixture.root.store_root_hash,
+        )
+        .await
+        .expect("publish original candidate objects");
+        fixture
+            .storage
+            .create_protocol_object(&batch.commit.prepared)
+            .await
+            .expect("publish original candidate commit");
+        fixture
+            .storage
+            .create_protocol_object(&batch.head.prepared)
+            .await
+            .expect("activate original candidate");
+        fixture
+            .db
+            .set_write_status(
+                &fixture.write_id,
+                crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                    reason: "host chose discard".to_string(),
+                }),
+            )
+            .await
+            .expect("block locally unobserved Merge activation");
+
+        assert_eq!(
+            abandon_merge_candidate(
+                &fixture.db,
+                &fixture.storage,
+                &fixture.device_id,
+                &fixture.keypair,
+                fixture.write_id.clone(),
+            )
+            .await
+            .expect("settle activation that won abandonment race"),
+            MergeCandidateAbandonment::CandidateActivated,
+        );
+        assert!(matches!(
+            fixture.db.write_status(&fixture.write_id).await.unwrap(),
+            crate::WriteStatus::Published(position)
+                if position.commit() == &fixture.commit_ref
+        ));
+        assert!(exact_object_exists(&fixture.home, &fixture.package_object));
+        assert!(exact_object_exists(
+            &fixture.home,
+            &fixture.commit_ref.object
+        ));
+        assert!(exact_object_exists(&fixture.home, &fixture.head_object));
+    }
+
+    #[tokio::test]
+    async fn third_candidate_wins_after_abandonment_preparation() {
+        let fixture = prepared_write_fixture().await;
+        fixture
+            .db
+            .set_write_status(
+                &fixture.write_id,
+                crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                    reason: "host chose discard".to_string(),
+                }),
+            )
+            .await
+            .expect("block prepared Merge candidate");
+        assert!(prepare_merge_candidate_abandonment(
+            &fixture.db,
+            &fixture.storage,
+            &fixture.device_id,
+            &fixture.keypair,
+            fixture.write_id.clone(),
+        )
+        .await
+        .expect("persist Merge abandonment"));
+        let authority = fixture
+            .db
+            .oldest_prepared_store_write()
+            .await
+            .expect("load prepared abandonment")
+            .expect("prepared abandonment exists");
+        let authority_commit = authority.commit.object.clone();
+        let authority_head = authority.head.object.clone();
+        let winner = publish_competing_merge_head(&fixture).await;
+
+        assert_eq!(
+            abandon_merge_candidate(
+                &fixture.db,
+                &fixture.storage,
+                &fixture.device_id,
+                &fixture.keypair,
+                fixture.write_id.clone(),
+            )
+            .await
+            .expect("settle third-candidate winner"),
+            MergeCandidateAbandonment::Abandoned,
+        );
+        assert!(!fixture
+            .db
+            .merge_candidate_cleanup_pending(&fixture.write_id)
+            .await
+            .expect("all losing candidates are cleaned"));
+        assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
+        assert!(!exact_object_exists(
+            &fixture.home,
+            &fixture.commit_ref.object
+        ));
+        assert!(exact_object_exists(&fixture.home, &winner.object));
+        assert!(!remote_object_exists(&fixture.db, &authority_commit).await);
+        assert!(!remote_object_exists(&fixture.db, &authority_head).await);
+        assert_eq!(
+            fixture
+                .db
+                .discard_blocked_write(&fixture.write_id)
+                .await
+                .expect("reverse the abandoned local write"),
+            vec![fixture.write_id.clone()],
+        );
+    }
+
+    #[tokio::test]
+    async fn alternate_head_for_abandonment_authority_is_accepted() {
+        let fixture = prepared_write_fixture().await;
+        fixture
+            .db
+            .set_write_status(
+                &fixture.write_id,
+                crate::WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                    reason: "host chose discard".to_string(),
+                }),
+            )
+            .await
+            .expect("block prepared Merge candidate");
+        assert!(prepare_merge_candidate_abandonment(
+            &fixture.db,
+            &fixture.storage,
+            &fixture.device_id,
+            &fixture.keypair,
+            fixture.write_id.clone(),
+        )
+        .await
+        .expect("persist Merge abandonment"));
+        let accepted_head = publish_alternate_head_for_prepared_commit(&fixture).await;
+
+        assert_eq!(
+            abandon_merge_candidate(
+                &fixture.db,
+                &fixture.storage,
+                &fixture.device_id,
+                &fixture.keypair,
+                fixture.write_id.clone(),
+            )
+            .await
+            .expect("accept alternate abandonment head"),
+            MergeCandidateAbandonment::Abandoned,
+        );
+        assert!(!exact_object_exists(&fixture.home, &fixture.package_object));
+        assert!(!exact_object_exists(
+            &fixture.home,
+            &fixture.commit_ref.object
+        ));
+        assert!(exact_object_exists(&fixture.home, &accepted_head.object));
     }
 
     #[tokio::test]

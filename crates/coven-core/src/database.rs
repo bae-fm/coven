@@ -1026,6 +1026,21 @@ pub(crate) struct PreparedStoreWriteCommit {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct BlockedMergeCandidate {
+    pub commit: ExactProtocolObject<StoreBatchCommit>,
+    pub head: ExactProtocolObject<StoreDeviceHead>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MergeAbandonmentState {
+    None,
+    Prepared,
+    Accepted,
+    CandidateWon,
+    OtherWon,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct PreparedSerialStoreWriteCommit {
     pub audiences: PreparedAudienceObjects,
     pub commit: ExactProtocolObject<StoreBatchCommit>,
@@ -2324,6 +2339,12 @@ pub(crate) struct StoreWritePreparation {
     pub completion: StoreBatchCompletion,
 }
 
+pub(crate) struct MergeCandidateAbandonmentPreparation {
+    pub write_id: WriteId,
+    pub commit: PreparedProtocolObject<StoreBatchCommit>,
+    pub head: PreparedProtocolObject<StoreDeviceHead>,
+}
+
 pub(crate) struct SerialStoreWritePreparation {
     pub branch_id: PendingBranchId,
     pub base: Option<StoreBatchCommitRef>,
@@ -2356,6 +2377,15 @@ enum PreparedStoreWriteState {
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
     },
+    MergeAbandonment {
+        candidate_commit: DurablePreparedProtocolObject,
+        candidate_head: DurablePreparedProtocolObject,
+        authority_commit: DurablePreparedProtocolObject,
+        authority_head: DurablePreparedProtocolObject,
+        outcome: MergeAbandonmentOutcome,
+        local_cleanup: StoreBatchLocalCleanup,
+        completion: StoreBatchCompletion,
+    },
     SerialPreparing,
     Serial {
         base_head_bytes: Option<Vec<u8>>,
@@ -2364,6 +2394,19 @@ enum PreparedStoreWriteState {
         tip_head_bytes: Option<Vec<u8>>,
         local_cleanup: StoreBatchLocalCleanup,
         completion: StoreBatchCompletion,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum MergeAbandonmentOutcome {
+    Prepared,
+    Accepted {
+        authority: StoreBatchCommitRef,
+    },
+    Lost {
+        winner_commit: StoreBatchCommitRef,
+        winner_head: crate::sync::store_commit::StoreDeviceHeadRef,
     },
 }
 
@@ -2376,16 +2419,34 @@ struct PreparedSerialCandidate {
 struct PreparedMergeCandidate {
     commit: StoreBatchCommit,
     reference: StoreBatchCommitRef,
-    head_object: ExactObjectRef,
+    canonical_signed_bytes: Vec<u8>,
+    head: StoreDeviceHead,
+    head_prepared: PreparedExactObject,
 }
 
 fn parse_prepared_merge_candidate_on(
     conn: &Connection,
     prepared: &PreparedStoreWriteState,
 ) -> Result<Option<PreparedMergeCandidate>, DbError> {
-    let PreparedStoreWriteState::MergeConcurrent { commit, head, .. } = prepared else {
-        return Ok(None);
+    let (commit, head) = match prepared {
+        PreparedStoreWriteState::MergeConcurrent { commit, head, .. } => (commit, head),
+        PreparedStoreWriteState::MergeAbandonment {
+            candidate_commit,
+            candidate_head,
+            ..
+        } => (candidate_commit, candidate_head),
+        PreparedStoreWriteState::SerialPreparing | PreparedStoreWriteState::Serial { .. } => {
+            return Ok(None);
+        }
     };
+    parse_prepared_merge_candidate_parts_on(conn, commit, head).map(Some)
+}
+
+fn parse_prepared_merge_candidate_parts_on(
+    conn: &Connection,
+    commit: &DurablePreparedProtocolObject,
+    head: &DurablePreparedProtocolObject,
+) -> Result<PreparedMergeCandidate, DbError> {
     let root = required_store_root_authority_on(conn)?;
     let unverified: StoreBatchCommit = serde_json::from_slice(&commit.semantic_bytes)
         .map_err(|error| DbError::Message(format!("signed Merge candidate: {error}")))?;
@@ -2405,18 +2466,40 @@ fn parse_prepared_merge_candidate_on(
     let reference =
         StoreBatchCommitRef::from_commit(&value, coord, commit.prepared.reference().clone())
             .map_err(|error| DbError::Message(error.to_string()))?;
-    StoreDeviceHead::parse_at(
+    let head_value = StoreDeviceHead::parse_at(
         &head.semantic_bytes,
         root.store_root_hash,
         &registration,
         &reference,
     )
     .map_err(|error| DbError::Message(format!("verify Merge candidate head: {error}")))?;
-    Ok(Some(PreparedMergeCandidate {
+    Ok(PreparedMergeCandidate {
         commit: value,
         reference,
-        head_object: head.prepared.reference().clone(),
-    }))
+        canonical_signed_bytes: commit.semantic_bytes.clone(),
+        head: head_value,
+        head_prepared: head.prepared.clone(),
+    })
+}
+
+fn parse_prepared_merge_publication_on(
+    conn: &Connection,
+    prepared: &PreparedStoreWriteState,
+) -> Result<Option<PreparedMergeCandidate>, DbError> {
+    match prepared {
+        PreparedStoreWriteState::MergeConcurrent { commit, head, .. } => {
+            parse_prepared_merge_candidate_parts_on(conn, commit, head).map(Some)
+        }
+        PreparedStoreWriteState::MergeAbandonment {
+            authority_commit,
+            authority_head,
+            ..
+        } => parse_prepared_merge_candidate_parts_on(conn, authority_commit, authority_head)
+            .map(Some),
+        PreparedStoreWriteState::SerialPreparing | PreparedStoreWriteState::Serial { .. } => {
+            Ok(None)
+        }
+    }
 }
 
 fn parse_prepared_serial_candidate(raw: &str) -> Result<Option<PreparedSerialCandidate>, DbError> {
@@ -2427,6 +2510,9 @@ fn parse_prepared_serial_candidate(raw: &str) -> Result<Option<PreparedSerialCan
             PreparedStoreWriteState::SerialPreparing => Ok(None),
             PreparedStoreWriteState::MergeConcurrent { .. } => Err(DbError::Message(
                 "MergeConcurrent publication reached Serial candidate state".to_string(),
+            )),
+            PreparedStoreWriteState::MergeAbandonment { .. } => Err(DbError::Message(
+                "Merge abandonment reached Serial candidate state".to_string(),
             )),
             PreparedStoreWriteState::Serial { .. } => unreachable!(),
         };
@@ -2446,6 +2532,200 @@ fn parse_prepared_serial_candidate(raw: &str) -> Result<Option<PreparedSerialCan
         reference,
         canonical_signed_bytes: commit.semantic_bytes,
     }))
+}
+
+fn begin_merge_candidate_nonactivation_on(
+    conn: &Connection,
+    write_id: &WriteId,
+    candidate: &PreparedMergeCandidate,
+    winner_head: crate::sync::store_commit::StoreDeviceHeadRef,
+    include_indexed_objects: bool,
+) -> Result<(), DbError> {
+    let nonactivation = crate::sync::remote_object::CandidateNonactivation {
+        candidate: crate::sync::store_commit::StoreBatchCommitDeletionTarget {
+            coord: candidate.reference.coord.clone(),
+            object: candidate.reference.object.clone(),
+            canonical_signed_bytes: candidate.canonical_signed_bytes.clone(),
+        },
+        proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { winner_head },
+    };
+    let mut object_ids = if include_indexed_objects {
+        let mut statement = conn
+            .prepare(
+                "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
+                 UNION
+                 SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1
+                 ORDER BY remote_object_id",
+            )
+            .map_err(DbError::from)?;
+        let object_ids = statement
+            .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        object_ids
+    } else {
+        Vec::new()
+    };
+    object_ids.push(remote_object_id(candidate.head_prepared.reference()).to_string());
+    for encoded in object_ids {
+        let object_id: ObjectHash = encoded.parse().map_err(|error| {
+            DbError::Message(format!("Merge conflict remote object id: {error}"))
+        })?;
+        let mut remote = load_remote_object_on(conn, object_id)?;
+        remote
+            .begin_candidate_nonactivation(nonactivation.clone())
+            .map_err(|error| {
+                DbError::Message(format!(
+                    "record Merge candidate nonactivation for {object_id}: {error}"
+                ))
+            })?;
+        update_remote_object_on(conn, object_id, &remote)?;
+    }
+    let commit_object_id = remote_object_id(&candidate.reference.object);
+    let mut remote = load_remote_object_on(conn, commit_object_id)?;
+    remote
+        .begin_candidate_nonactivation(nonactivation)
+        .map_err(|error| {
+            DbError::Message(format!(
+                "record Merge candidate commit nonactivation for {commit_object_id}: {error}"
+            ))
+        })?;
+    update_remote_object_on(conn, commit_object_id, &remote)
+}
+
+fn merge_candidate_cleanup_targets_on(
+    conn: &Connection,
+    write_id: &WriteId,
+    candidate: &PreparedMergeCandidate,
+    include_indexed_objects: bool,
+) -> Result<Vec<CandidateCleanupObject>, DbError> {
+    let commit_remote = load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
+    if !matches!(
+        &commit_remote,
+        RemoteObjectRecord::CandidateCommit(record)
+            if matches!(
+                &record.state,
+                crate::sync::remote_object::CandidateCommitState::CleanupPending {
+                    proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                } | crate::sync::remote_object::CandidateCommitState::AbsentVerified {
+                    proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                }
+            )
+    ) {
+        return Err(DbError::Message(
+            "Merge candidate has no durable winner proof".to_string(),
+        ));
+    }
+    let mut cleanup = BTreeMap::new();
+    if include_indexed_objects {
+        let mut statement = conn
+            .prepare(
+                "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
+                 UNION
+                 SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1",
+            )
+            .map_err(DbError::from)?;
+        let encoded = statement
+            .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
+            .map_err(DbError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)?;
+        drop(statement);
+        for encoded in encoded {
+            let object_id: ObjectHash = encoded.parse().map_err(|error| {
+                DbError::Message(format!("Merge cleanup remote object id: {error}"))
+            })?;
+            let remote = load_remote_object_on(conn, object_id)?;
+            if let Some(object) = remote.cleanup_target() {
+                cleanup.insert(
+                    object.clone(),
+                    CandidateCleanupObject {
+                        object: object.clone(),
+                    },
+                );
+            } else if !remote
+                .candidate_cleanup_complete(&candidate.reference)
+                .map_err(|error| DbError::Message(format!("Merge cleanup {object_id}: {error}")))?
+            {
+                return Err(DbError::Message(format!(
+                    "Merge candidate object {object_id} has no cleanup transition"
+                )));
+            }
+        }
+    }
+    let head_remote =
+        load_remote_object_on(conn, remote_object_id(candidate.head_prepared.reference()))?;
+    if !head_remote
+        .candidate_cleanup_complete(&candidate.reference)
+        .map_err(|error| DbError::Message(format!("Merge cleanup head: {error}")))?
+    {
+        return Err(DbError::Message(
+            "Merge candidate head absence is not verified".to_string(),
+        ));
+    }
+    let mut targets = Vec::new();
+    for object in candidate_manifest_exact_objects(&candidate.commit) {
+        if let Some(target) = cleanup.remove(object) {
+            targets.push(target);
+        }
+    }
+    if !cleanup.is_empty() {
+        return Err(DbError::Message(
+            "Merge cleanup contains an object outside the signed candidate manifest".to_string(),
+        ));
+    }
+    if let Some(object) = commit_remote.cleanup_target() {
+        targets.push(CandidateCleanupObject {
+            object: object.clone(),
+        });
+    } else if !commit_remote
+        .candidate_cleanup_complete(&candidate.reference)
+        .map_err(|error| DbError::Message(format!("Merge cleanup commit: {error}")))?
+    {
+        return Err(DbError::Message(
+            "Merge candidate commit cleanup is incomplete".to_string(),
+        ));
+    }
+    Ok(targets)
+}
+
+fn remove_cleaned_merge_authority_on(
+    tx: &rusqlite::Transaction<'_>,
+    authority: &PreparedMergeCandidate,
+) -> Result<(), DbError> {
+    for object in [
+        authority.reference.object.clone(),
+        authority.head_prepared.reference().clone(),
+    ] {
+        let object_id = remote_object_id(&object);
+        let remote = load_remote_object_on(tx, object_id)?;
+        if !remote
+            .candidate_cleanup_complete(&authority.reference)
+            .map_err(|error| {
+                DbError::Message(format!(
+                    "validate abandoned authority cleanup for {object_id}: {error}"
+                ))
+            })?
+        {
+            return Err(DbError::Message(
+                "losing Merge abandonment cleanup is incomplete".to_string(),
+            ));
+        }
+        let removed = tx
+            .execute(
+                "DELETE FROM remote_objects WHERE object_id = ?1",
+                [object_id.to_string()],
+            )
+            .map_err(DbError::from)?;
+        if removed != 1 {
+            return Err(DbError::Message(format!(
+                "abandoned authority object {object_id} disappeared during removal"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -4699,6 +4979,171 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn prepare_merge_candidate_abandonment(
+        &self,
+        stage: MergeCandidateAbandonmentPreparation,
+    ) -> Result<(), DbError> {
+        if self.write_policy() != WritePolicy::MergeConcurrent {
+            return Err(DbError::Message(
+                "Merge candidate abandonment requires MergeConcurrent policy".to_string(),
+            ));
+        }
+        let statuses = self.state.write_statuses.clone();
+        let notified_write_id = stage.write_id.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (raw_status, raw_prepared): (String, String) = tx
+                .query_row(
+                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
+                    [stage.write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError::Message(format!("Merge abandonment status: {error}")))?;
+            if !matches!(status, WriteStatus::Blocked(_)) {
+                return Err(DbError::Message(format!(
+                    "write {} is not blocked",
+                    stage.write_id
+                )));
+            }
+            let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
+                .map_err(|error| DbError::Message(format!("prepared Merge candidate: {error}")))?;
+            let PreparedStoreWriteState::MergeConcurrent {
+                commit: candidate_commit,
+                head: candidate_head,
+                local_cleanup,
+                completion,
+            } = prepared
+            else {
+                return Err(DbError::Message(
+                    "Merge abandonment requires one prepared candidate".to_string(),
+                ));
+            };
+            let candidate =
+                parse_prepared_merge_candidate_parts_on(&tx, &candidate_commit, &candidate_head)?;
+            if candidate.commit.write_id != stage.write_id {
+                return Err(DbError::Message(
+                    "prepared Merge candidate differs from its write identity".to_string(),
+                ));
+            }
+            let root = required_store_root_authority_on(&tx)?;
+            let registration =
+                load_activated_registration_on(&tx, &root, &candidate.commit.author_registration)?;
+            stage
+                .commit
+                .value
+                .verify_at(
+                    root.store_root_hash,
+                    &candidate.reference.coord,
+                    &registration,
+                )
+                .map_err(|error| {
+                    DbError::Message(format!("verify Merge abandonment commit: {error}"))
+                })?;
+            if stage.commit.value.write_id != stage.write_id
+                || stage.commit.value.abandoned_candidates()
+                    != [crate::sync::store_commit::CandidateCleanupManifest {
+                        candidate: crate::sync::store_commit::StoreBatchCommitDeletionTarget {
+                            coord: candidate.reference.coord.clone(),
+                            object: candidate.reference.object.clone(),
+                            canonical_signed_bytes: candidate.canonical_signed_bytes.clone(),
+                        },
+                    }]
+            {
+                return Err(DbError::Message(
+                    "Merge abandonment does not name its exact prepared candidate".to_string(),
+                ));
+            }
+            let authority_ref = StoreBatchCommitRef::from_commit(
+                &stage.commit.value,
+                candidate.reference.coord.clone(),
+                stage.commit.prepared.reference().clone(),
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            if stage.head.value.commit != authority_ref
+                || stage.head.prepared.reference().slot()
+                    != candidate.head_prepared.reference().slot()
+                || stage.head.value.successor != candidate.head.successor
+                || stage.head.value.author_registration != candidate.commit.author_registration
+            {
+                return Err(DbError::Message(
+                    "Merge abandonment head differs from the candidate competition point"
+                        .to_string(),
+                ));
+            }
+            StoreDeviceHead::parse_at(
+                &stage.head.value.to_bytes(),
+                root.store_root_hash,
+                &registration,
+                &authority_ref,
+            )
+            .map_err(|error| DbError::Message(format!("verify Merge abandonment head: {error}")))?;
+            let authority_commit = RemoteObjectRecord::candidate_commit(
+                authority_ref.clone(),
+                stage.commit.value.to_bytes(),
+                stage.commit.prepared.stored_bytes().to_vec(),
+            )
+            .map_err(|error| DbError::Message(format!("Merge abandonment commit: {error}")))?;
+            persist_exact_remote_object_on(&tx, &authority_commit, "Merge abandonment commit")?;
+            let authority_head_ref = crate::sync::store_commit::StoreDeviceHeadRef {
+                head_hash: stage.head.value.head_hash(),
+                object: stage.head.prepared.reference().clone(),
+            };
+            let authority_head = RemoteObjectRecord::candidate_activated_store_head(
+                authority_head_ref,
+                stage.head.value.to_bytes(),
+                stage.head.prepared.stored_bytes().to_vec(),
+                authority_ref,
+            )
+            .map_err(|error| DbError::Message(format!("Merge abandonment head: {error}")))?;
+            persist_exact_remote_object_on(&tx, &authority_head, "Merge abandonment head")?;
+            let replacement = PreparedStoreWriteState::MergeAbandonment {
+                candidate_commit,
+                candidate_head,
+                authority_commit: DurablePreparedProtocolObject {
+                    semantic_bytes: stage.commit.value.to_bytes(),
+                    prepared: stage.commit.prepared,
+                },
+                authority_head: DurablePreparedProtocolObject {
+                    semantic_bytes: stage.head.value.to_bytes(),
+                    prepared: stage.head.prepared,
+                },
+                outcome: MergeAbandonmentOutcome::Prepared,
+                local_cleanup,
+                completion,
+            };
+            let replacement = serde_json::to_string(&replacement).map_err(|error| {
+                DbError::Message(format!("serialize Merge abandonment: {error}"))
+            })?;
+            let publishing = serde_json::to_string(&WriteStatus::Publishing).map_err(|error| {
+                DbError::Message(format!("serialize Merge abandonment status: {error}"))
+            })?;
+            let updated = tx
+                .execute(
+                    "UPDATE store_writes SET prepared = ?2, status = ?3
+                     WHERE write_id = ?1 AND prepared = ?4
+                       AND json_extract(status, '$.blocked') IS NOT NULL",
+                    rusqlite::params![
+                        stage.write_id.as_str(),
+                        replacement,
+                        publishing,
+                        raw_prepared
+                    ],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "blocked Merge candidate changed during abandonment preparation".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)?;
+            Self::notify_write_status_in(&statuses, &notified_write_id, WriteStatus::Publishing);
+            Ok(())
+        })
+        .await
+    }
+
     pub(crate) async fn prepare_serial_store_branch_commit(
         &self,
         stage: SerialStoreWritePreparation,
@@ -5088,11 +5533,22 @@ impl Database {
                         .map_err(|error| {
                             DbError::Message(format!("prepared Store write: {error}"))
                         })?;
-                    let PreparedStoreWriteState::MergeConcurrent { commit, head, .. } = prepared
-                    else {
-                        return Err(DbError::Message(
-                            "serial branch reached MergeConcurrent publication".to_string(),
-                        ));
+                    let (commit, head, graph_commit) = match &prepared {
+                        PreparedStoreWriteState::MergeConcurrent { commit, head, .. } => {
+                            (commit, head, None)
+                        }
+                        PreparedStoreWriteState::MergeAbandonment {
+                            candidate_commit,
+                            authority_commit,
+                            authority_head,
+                            ..
+                        } => (authority_commit, authority_head, Some(candidate_commit)),
+                        PreparedStoreWriteState::SerialPreparing
+                        | PreparedStoreWriteState::Serial { .. } => {
+                            return Err(DbError::Message(
+                                "serial branch reached MergeConcurrent publication".to_string(),
+                            ));
+                        }
                     };
                     let write_id = WriteId::from_generated(write_id);
                     let unverified_commit: StoreBatchCommit =
@@ -5196,9 +5652,26 @@ impl Database {
                         WritePolicy::MergeConcurrent,
                     )?;
                     let audiences = load_prepared_audience_objects_on(conn, &write_id)?;
+                    let graph_commit = match graph_commit {
+                        Some(graph_commit) => {
+                            let candidate = parse_prepared_merge_candidate_parts_on(
+                                conn,
+                                graph_commit,
+                                match &prepared {
+                                    PreparedStoreWriteState::MergeAbandonment {
+                                        candidate_head,
+                                        ..
+                                    } => candidate_head,
+                                    _ => unreachable!("matched Merge abandonment"),
+                                },
+                            )?;
+                            candidate.commit
+                        }
+                        None => commit_value.clone(),
+                    };
                     let expected_package_count =
-                        usize::from(commit_value.store_package().is_some())
-                            .checked_add(commit_value.circle_packages().len())
+                        usize::from(graph_commit.store_package().is_some())
+                            .checked_add(graph_commit.circle_packages().len())
                             .ok_or_else(|| {
                                 DbError::Message("package count overflow".to_string())
                             })?;
@@ -5224,10 +5697,10 @@ impl Database {
                         }
                         let expected_object = match value.audience() {
                             crate::sync::audience_package::PackageAudience::Store => {
-                                commit_value
+                                graph_commit
                                     .verify_store_package(package.semantic_bytes())
                                     .map_err(|error| DbError::Message(error.to_string()))?;
-                                &commit_value
+                                &graph_commit
                                     .store_package()
                                     .as_ref()
                                     .expect("verified present")
@@ -5237,10 +5710,10 @@ impl Database {
                                 circle_id,
                                 ..
                             } => {
-                                commit_value
+                                graph_commit
                                     .verify_circle_package(*circle_id, package.semantic_bytes())
                                     .map_err(|error| DbError::Message(error.to_string()))?;
-                                &commit_value
+                                &graph_commit
                                     .circle_packages()
                                     .iter()
                                     .find(|entry| entry.circle_id == *circle_id)
@@ -5287,15 +5760,15 @@ impl Database {
                         audiences,
                         commit: ExactProtocolObject {
                             value: commit_value,
-                            bytes: commit.semantic_bytes,
+                            bytes: commit.semantic_bytes.clone(),
                             object: commit.prepared.reference().clone(),
-                            prepared: commit.prepared,
+                            prepared: commit.prepared.clone(),
                         },
                         head: ExactProtocolObject {
                             value: head_value,
-                            bytes: head.semantic_bytes,
+                            bytes: head.semantic_bytes.clone(),
                             object: head.prepared.reference().clone(),
-                            prepared: head.prepared,
+                            prepared: head.prepared.clone(),
                         },
                     })
                 })
@@ -5676,7 +6149,7 @@ impl Database {
                     "Store publication expected one prepared write, found {prepared_count}"
                 )));
             }
-            let (stored_write_id, prepared): (String, String) = tx
+            let (stored_write_id, raw_prepared): (String, String) = tx
                 .query_row(
                     "SELECT write_id, prepared FROM store_writes
                      WHERE prepared IS NOT NULL ORDER BY ordinal LIMIT 1",
@@ -5684,8 +6157,113 @@ impl Database {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(DbError::from)?;
-            let prepared: PreparedStoreWriteState = serde_json::from_str(&prepared)
+            let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                 .map_err(|error| DbError::Message(format!("prepared Store write: {error}")))?;
+            if let PreparedStoreWriteState::MergeAbandonment {
+                candidate_commit,
+                candidate_head,
+                authority_commit,
+                authority_head,
+                ..
+            } = &prepared
+            {
+                let root = required_store_root_authority_on(&tx)?;
+                let candidate =
+                    parse_prepared_merge_candidate_parts_on(&tx, candidate_commit, candidate_head)?;
+                let authority =
+                    parse_prepared_merge_candidate_parts_on(&tx, authority_commit, authority_head)?;
+                if authority.commit.write_id.as_str() != stored_write_id
+                    || accepted != authority.reference
+                    || !matches!(
+                        &authority.commit.body,
+                        crate::sync::store_commit::StoreCommitBody::AbandonCandidates { .. }
+                    )
+                {
+                    return Err(DbError::Message(
+                        "accepted Merge abandonment differs from its durable authority".to_string(),
+                    ));
+                }
+                let registration = load_activated_registration_on(
+                    &tx,
+                    &root,
+                    &authority.commit.author_registration,
+                )?;
+                StoreDeviceHead::parse_at(
+                    &authority.head.to_bytes(),
+                    root.store_root_hash,
+                    &registration,
+                    &accepted,
+                )
+                .map_err(|error| {
+                    DbError::Message(format!("verify accepted Merge abandonment head: {error}"))
+                })?;
+                for object in [
+                    authority_commit.prepared.reference(),
+                    authority_head.prepared.reference(),
+                ] {
+                    let object_id = remote_object_id(object);
+                    let remote = load_remote_object_on(&tx, object_id)?
+                        .into_activated(&accepted)
+                        .map_err(|error| {
+                            DbError::Message(format!(
+                                "activate Merge abandonment object {object_id}: {error}"
+                            ))
+                        })?;
+                    update_remote_object_on(&tx, object_id, &remote)?;
+                }
+                let winner_head = crate::sync::store_commit::StoreDeviceHeadRef {
+                    head_hash: authority.head.head_hash(),
+                    object: authority.head_prepared.reference().clone(),
+                };
+                begin_merge_candidate_nonactivation_on(
+                    &tx,
+                    &WriteId::from_generated(stored_write_id.clone()),
+                    &candidate,
+                    winner_head.clone(),
+                    true,
+                )?;
+                Self::record_materialized_commit_on(&tx, &authority.commit, &accepted)?;
+                let mut completed_preparation = prepared.clone();
+                let PreparedStoreWriteState::MergeAbandonment { outcome, .. } =
+                    &mut completed_preparation
+                else {
+                    unreachable!("matched Merge abandonment")
+                };
+                *outcome = MergeAbandonmentOutcome::Accepted {
+                    authority: accepted.clone(),
+                };
+                let completed_preparation =
+                    serde_json::to_string(&completed_preparation).map_err(|error| {
+                        DbError::Message(format!("serialize accepted Merge abandonment: {error}"))
+                    })?;
+                let updated = tx
+                    .execute(
+                        "UPDATE store_writes SET prepared = ?2
+                         WHERE write_id = ?1 AND prepared = ?3",
+                        rusqlite::params![
+                            stored_write_id.as_str(),
+                            completed_preparation,
+                            raw_prepared
+                        ],
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError::Message(
+                        "Merge abandonment changed during activation".to_string(),
+                    ));
+                }
+                let blocked = WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
+                    reason: format!(
+                        "candidate abandonment {} is accepted; exact cleanup is pending",
+                        winner_head.head_hash
+                    ),
+                });
+                let write_id = authority.commit.write_id.clone();
+                Self::set_write_status_on(&tx, &write_id, &blocked)?;
+                tx.commit().map_err(DbError::from)?;
+                Self::notify_write_status_in(&statuses, &write_id, blocked);
+                return Ok(());
+            }
             let PreparedStoreWriteState::MergeConcurrent {
                 commit,
                 head,
@@ -5833,6 +6411,7 @@ impl Database {
     pub(crate) async fn mark_merge_candidate_conflict(
         &self,
         write_id: WriteId,
+        winner_commit: StoreBatchCommitRef,
         winner_head: crate::sync::store_commit::StoreDeviceHeadRef,
     ) -> Result<(), DbError> {
         let statuses = self.state.write_statuses.clone();
@@ -5846,9 +6425,8 @@ impl Database {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(DbError::from)?;
-            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
-                DbError::Message(format!("Merge candidate status: {error}"))
-            })?;
+            let status: WriteStatus = serde_json::from_str(&raw_status)
+                .map_err(|error| DbError::Message(format!("Merge candidate status: {error}")))?;
             if !matches!(status, WriteStatus::Publishing) {
                 return Err(DbError::Message(format!(
                     "Merge candidate {write_id} is not publishing"
@@ -5860,11 +6438,10 @@ impl Database {
                 .ok_or_else(|| {
                     DbError::Message("Serial branch reached Merge candidate conflict".to_string())
                 })?;
-            let PreparedStoreWriteState::MergeConcurrent { commit, head, .. } = prepared else {
-                unreachable!("parsed Merge candidate")
-            };
-            if winner_head.object.slot() != head.prepared.reference().slot()
-                || winner_head.object == *head.prepared.reference()
+            let publication = parse_prepared_merge_publication_on(&tx, &prepared)?
+                .expect("parsed Merge publication");
+            if winner_head.object.slot() != publication.head_prepared.reference().slot()
+                || winner_head.object == *publication.head_prepared.reference()
             {
                 return Err(DbError::Message(
                     "Merge winner does not replace the prepared exact head slot".to_string(),
@@ -5875,56 +6452,58 @@ impl Database {
                     "prepared Merge graph differs from its write identity".to_string(),
                 ));
             }
-            let candidate = prepared_candidate.reference;
-            let nonactivation = crate::sync::remote_object::CandidateNonactivation {
-                candidate: crate::sync::remote_object::StoreBatchCommitDeletionTarget {
-                    coord: candidate.coord.clone(),
-                    object: candidate.object.clone(),
-                    canonical_signed_bytes: commit.semantic_bytes,
-                },
-                proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner {
+            if matches!(&prepared, PreparedStoreWriteState::MergeAbandonment { .. }) {
+                begin_merge_candidate_nonactivation_on(
+                    &tx,
+                    &write_id,
+                    &publication,
+                    winner_head.clone(),
+                    false,
+                )?;
+                if winner_commit != prepared_candidate.reference {
+                    begin_merge_candidate_nonactivation_on(
+                        &tx,
+                        &write_id,
+                        &prepared_candidate,
+                        winner_head.clone(),
+                        true,
+                    )?;
+                }
+                let mut lost_preparation = prepared.clone();
+                let PreparedStoreWriteState::MergeAbandonment { outcome, .. } =
+                    &mut lost_preparation
+                else {
+                    unreachable!("matched Merge abandonment")
+                };
+                *outcome = MergeAbandonmentOutcome::Lost {
+                    winner_commit: winner_commit.clone(),
                     winner_head: winner_head.clone(),
-                },
-            };
-            let mut statement = tx
-                .prepare(
-                    "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
-                     UNION
-                     SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1
-                     ORDER BY remote_object_id",
-                )
-                .map_err(DbError::from)?;
-            let mut object_ids = statement
-                .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
-                .map_err(DbError::from)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(DbError::from)?;
-            drop(statement);
-            object_ids.push(remote_object_id(head.prepared.reference()).to_string());
-            for encoded in object_ids {
-                let object_id: ObjectHash = encoded.parse().map_err(|error| {
-                    DbError::Message(format!("Merge conflict remote object id: {error}"))
-                })?;
-                let mut remote = load_remote_object_on(&tx, object_id)?;
-                remote
-                    .begin_candidate_nonactivation(nonactivation.clone())
-                    .map_err(|error| {
-                        DbError::Message(format!(
-                            "record Merge candidate nonactivation for {object_id}: {error}"
-                        ))
+                };
+                let lost_preparation =
+                    serde_json::to_string(&lost_preparation).map_err(|error| {
+                        DbError::Message(format!("serialize lost Merge abandonment: {error}"))
                     })?;
-                update_remote_object_on(&tx, object_id, &remote)?;
+                let updated = tx
+                    .execute(
+                        "UPDATE store_writes SET prepared = ?2
+                         WHERE write_id = ?1 AND prepared = ?3",
+                        rusqlite::params![write_id.as_str(), lost_preparation, raw_prepared],
+                    )
+                    .map_err(DbError::from)?;
+                if updated != 1 {
+                    return Err(DbError::Message(
+                        "Merge abandonment changed while recording its winner".to_string(),
+                    ));
+                }
+            } else {
+                begin_merge_candidate_nonactivation_on(
+                    &tx,
+                    &write_id,
+                    &prepared_candidate,
+                    winner_head.clone(),
+                    true,
+                )?;
             }
-            let commit_object_id = remote_object_id(&candidate.object);
-            let mut remote = load_remote_object_on(&tx, commit_object_id)?;
-            remote
-                .begin_candidate_nonactivation(nonactivation)
-                .map_err(|error| {
-                    DbError::Message(format!(
-                        "record Merge candidate commit nonactivation for {commit_object_id}: {error}"
-                    ))
-                })?;
-            update_remote_object_on(&tx, commit_object_id, &remote)?;
             let blocked = WriteStatus::Blocked(crate::WriteBlock::InvalidProtocolState {
                 reason: format!(
                     "Merge successor slot is occupied by signed head {}",
@@ -6462,11 +7041,12 @@ impl Database {
                         DbError::Message(format!("resolved prepared write: {error}"))
                     })?;
                 match &prepared {
-                    PreparedStoreWriteState::MergeConcurrent { .. } => {
+                    PreparedStoreWriteState::MergeConcurrent { .. }
+                    | PreparedStoreWriteState::MergeAbandonment { .. } => {
                         let merge = parse_prepared_merge_candidate_on(tx, &prepared)?
                             .expect("matched Merge preparation");
                         removable.push(remote_object_id(&merge.reference.object));
-                        removable.push(remote_object_id(&merge.head_object));
+                        removable.push(remote_object_id(merge.head_prepared.reference()));
                         candidate = Some(merge.reference);
                     }
                     PreparedStoreWriteState::Serial { .. } => {
@@ -12145,6 +12725,299 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn blocked_merge_candidate(
+        &self,
+        write_id: WriteId,
+    ) -> Result<Option<BlockedMergeCandidate>, DbError> {
+        self.call(move |conn| {
+            let row: Option<(String, Option<String>)> = conn
+                .query_row(
+                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let Some((raw_status, raw_prepared)) = row else {
+                return Err(DbError::Message(format!("write {write_id} is absent")));
+            };
+            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                DbError::Message(format!("blocked Merge candidate status: {error}"))
+            })?;
+            if !matches!(status, WriteStatus::Blocked(_)) {
+                return Err(DbError::Message(format!("write {write_id} is not blocked")));
+            }
+            let Some(raw_prepared) = raw_prepared else {
+                return Ok(None);
+            };
+            let prepared: PreparedStoreWriteState =
+                serde_json::from_str(&raw_prepared).map_err(|error| {
+                    DbError::Message(format!("blocked Merge candidate preparation: {error}"))
+                })?;
+            let PreparedStoreWriteState::MergeConcurrent { .. } = &prepared else {
+                return match prepared {
+                    PreparedStoreWriteState::MergeAbandonment { .. } => Ok(None),
+                    PreparedStoreWriteState::SerialPreparing
+                    | PreparedStoreWriteState::Serial { .. } => Err(DbError::Message(
+                        "Serial state reached Merge candidate abandonment".to_string(),
+                    )),
+                    PreparedStoreWriteState::MergeConcurrent { .. } => unreachable!(),
+                };
+            };
+            let candidate = parse_prepared_merge_candidate_on(conn, &prepared)?
+                .expect("matched Merge preparation");
+            if candidate.commit.write_id != write_id {
+                return Err(DbError::Message(
+                    "blocked Merge candidate differs from its write identity".to_string(),
+                ));
+            }
+            Ok(Some(BlockedMergeCandidate {
+                commit: ExactProtocolObject {
+                    value: candidate.commit,
+                    bytes: candidate.canonical_signed_bytes,
+                    object: candidate.reference.object.clone(),
+                    prepared: match &prepared {
+                        PreparedStoreWriteState::MergeConcurrent { commit, .. } => {
+                            commit.prepared.clone()
+                        }
+                        _ => unreachable!("matched Merge preparation"),
+                    },
+                },
+                head: ExactProtocolObject {
+                    value: candidate.head,
+                    bytes: match &prepared {
+                        PreparedStoreWriteState::MergeConcurrent { head, .. } => {
+                            head.semantic_bytes.clone()
+                        }
+                        _ => unreachable!("matched Merge preparation"),
+                    },
+                    object: candidate.head_prepared.reference().clone(),
+                    prepared: candidate.head_prepared,
+                },
+            }))
+        })
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn merge_candidate_abandonment_required(
+        &self,
+        write_id: &WriteId,
+    ) -> Result<bool, DbError> {
+        if !matches!(
+            self.merge_abandonment_state(write_id).await?,
+            MergeAbandonmentState::None
+        ) {
+            return Ok(true);
+        }
+        Ok(self
+            .blocked_merge_candidate(write_id.clone())
+            .await?
+            .is_some())
+    }
+
+    pub(crate) async fn merge_abandonment_state(
+        &self,
+        write_id: &WriteId,
+    ) -> Result<MergeAbandonmentState, DbError> {
+        let write_id = write_id.clone();
+        self.call(move |conn| {
+            let raw_prepared: Option<String> = conn
+                .query_row(
+                    "SELECT prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let Some(raw_prepared) = raw_prepared else {
+                return Ok(MergeAbandonmentState::None);
+            };
+            let prepared: PreparedStoreWriteState =
+                serde_json::from_str(&raw_prepared).map_err(|error| {
+                    DbError::Message(format!("prepared Merge abandonment: {error}"))
+                })?;
+            let PreparedStoreWriteState::MergeAbandonment {
+                candidate_commit,
+                candidate_head,
+                outcome,
+                ..
+            } = &prepared
+            else {
+                return Ok(MergeAbandonmentState::None);
+            };
+            let candidate =
+                parse_prepared_merge_candidate_parts_on(conn, candidate_commit, candidate_head)?;
+            Ok(match outcome {
+                MergeAbandonmentOutcome::Prepared => MergeAbandonmentState::Prepared,
+                MergeAbandonmentOutcome::Accepted { .. } => MergeAbandonmentState::Accepted,
+                MergeAbandonmentOutcome::Lost { winner_commit, .. }
+                    if winner_commit == &candidate.reference =>
+                {
+                    MergeAbandonmentState::CandidateWon
+                }
+                MergeAbandonmentOutcome::Lost { .. } => MergeAbandonmentState::OtherWon,
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn resume_winning_merge_candidate(
+        &self,
+        write_id: WriteId,
+    ) -> Result<(), DbError> {
+        let statuses = self.state.write_statuses.clone();
+        let notified_write_id = write_id.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (raw_status, raw_prepared): (String, String) = tx
+                .query_row(
+                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                DbError::Message(format!("winning Merge candidate status: {error}"))
+            })?;
+            if !matches!(status, WriteStatus::Blocked(_)) {
+                return Err(DbError::Message(
+                    "winning Merge candidate is not blocked".to_string(),
+                ));
+            }
+            let prepared: PreparedStoreWriteState =
+                serde_json::from_str(&raw_prepared).map_err(|error| {
+                    DbError::Message(format!("winning Merge candidate preparation: {error}"))
+                })?;
+            let PreparedStoreWriteState::MergeAbandonment {
+                candidate_commit,
+                candidate_head,
+                authority_commit,
+                authority_head,
+                outcome: MergeAbandonmentOutcome::Lost { winner_commit, .. },
+                local_cleanup,
+                completion,
+            } = prepared
+            else {
+                return Err(DbError::Message(
+                    "Merge abandonment did not lose to its prepared candidate".to_string(),
+                ));
+            };
+            let candidate =
+                parse_prepared_merge_candidate_parts_on(&tx, &candidate_commit, &candidate_head)?;
+            if winner_commit != candidate.reference {
+                return Err(DbError::Message(
+                    "Merge abandonment winner is another candidate".to_string(),
+                ));
+            }
+            let authority =
+                parse_prepared_merge_candidate_parts_on(&tx, &authority_commit, &authority_head)?;
+            remove_cleaned_merge_authority_on(&tx, &authority)?;
+            let replacement = PreparedStoreWriteState::MergeConcurrent {
+                commit: candidate_commit,
+                head: candidate_head,
+                local_cleanup,
+                completion,
+            };
+            let replacement = serde_json::to_string(&replacement).map_err(|error| {
+                DbError::Message(format!("serialize winning Merge candidate: {error}"))
+            })?;
+            let publishing = serde_json::to_string(&WriteStatus::Publishing).map_err(|error| {
+                DbError::Message(format!("serialize winning Merge status: {error}"))
+            })?;
+            let updated = tx
+                .execute(
+                    "UPDATE store_writes SET prepared = ?2, status = ?3
+                     WHERE write_id = ?1 AND prepared = ?4",
+                    rusqlite::params![write_id.as_str(), replacement, publishing, raw_prepared],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "Merge abandonment changed while restoring its winner".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)?;
+            Self::notify_write_status_in(&statuses, &notified_write_id, WriteStatus::Publishing);
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn finish_lost_merge_abandonment(
+        &self,
+        write_id: WriteId,
+    ) -> Result<(), DbError> {
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let (raw_status, raw_prepared): (String, String) = tx
+                .query_row(
+                    "SELECT status, prepared FROM store_writes WHERE write_id = ?1",
+                    [write_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                DbError::Message(format!("lost Merge abandonment status: {error}"))
+            })?;
+            if !matches!(status, WriteStatus::Blocked(_)) {
+                return Err(DbError::Message(
+                    "lost Merge abandonment is not blocked".to_string(),
+                ));
+            }
+            let prepared: PreparedStoreWriteState =
+                serde_json::from_str(&raw_prepared).map_err(|error| {
+                    DbError::Message(format!("lost Merge abandonment preparation: {error}"))
+                })?;
+            let PreparedStoreWriteState::MergeAbandonment {
+                candidate_commit,
+                candidate_head,
+                authority_commit,
+                authority_head,
+                outcome: MergeAbandonmentOutcome::Lost { winner_commit, .. },
+                local_cleanup,
+                completion,
+            } = prepared
+            else {
+                return Err(DbError::Message(
+                    "Merge abandonment has no third-candidate winner".to_string(),
+                ));
+            };
+            let candidate =
+                parse_prepared_merge_candidate_parts_on(&tx, &candidate_commit, &candidate_head)?;
+            if winner_commit == candidate.reference {
+                return Err(DbError::Message(
+                    "original candidate won the Merge abandonment race".to_string(),
+                ));
+            }
+            let authority =
+                parse_prepared_merge_candidate_parts_on(&tx, &authority_commit, &authority_head)?;
+            remove_cleaned_merge_authority_on(&tx, &authority)?;
+            let replacement = PreparedStoreWriteState::MergeConcurrent {
+                commit: candidate_commit,
+                head: candidate_head,
+                local_cleanup,
+                completion,
+            };
+            let replacement = serde_json::to_string(&replacement).map_err(|error| {
+                DbError::Message(format!("serialize lost Merge candidate: {error}"))
+            })?;
+            let updated = tx
+                .execute(
+                    "UPDATE store_writes SET prepared = ?2
+                     WHERE write_id = ?1 AND status = ?3 AND prepared = ?4",
+                    rusqlite::params![write_id.as_str(), replacement, raw_status, raw_prepared],
+                )
+                .map_err(DbError::from)?;
+            if updated != 1 {
+                return Err(DbError::Message(
+                    "Merge abandonment changed while removing its losing authority".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
+        })
+        .await
+    }
+
     #[doc(hidden)]
     pub async fn merge_candidate_cleanup_pending(
         &self,
@@ -12167,19 +13040,49 @@ impl Database {
             let Some(candidate) = parse_prepared_merge_candidate_on(conn, &prepared)? else {
                 return Ok(false);
             };
-            let remote = load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
-            Ok(matches!(
-                remote,
-                RemoteObjectRecord::CandidateCommit(
-                    crate::sync::remote_object::CandidateCommitRecord {
-                        state:
-                            crate::sync::remote_object::CandidateCommitState::CleanupPending {
-                                proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-                            },
-                        ..
+            let cleanup_pending = |candidate: &PreparedMergeCandidate| -> Result<bool, DbError> {
+                let remote = load_remote_object_on(
+                    conn,
+                    remote_object_id(&candidate.reference.object),
+                )?;
+                Ok(matches!(
+                    remote,
+                    RemoteObjectRecord::CandidateCommit(
+                        crate::sync::remote_object::CandidateCommitRecord {
+                            state:
+                                crate::sync::remote_object::CandidateCommitState::CleanupPending {
+                                    proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+                                },
+                            ..
+                        }
+                    )
+                ))
+            };
+            match &prepared {
+                PreparedStoreWriteState::MergeConcurrent { .. } => cleanup_pending(&candidate),
+                PreparedStoreWriteState::MergeAbandonment {
+                    outcome,
+                    authority_commit,
+                    authority_head,
+                    ..
+                } => {
+                    let authority = parse_prepared_merge_candidate_parts_on(
+                        conn,
+                        authority_commit,
+                        authority_head,
+                    )?;
+                    match outcome {
+                        MergeAbandonmentOutcome::Prepared => Ok(false),
+                        MergeAbandonmentOutcome::Accepted { .. } => cleanup_pending(&candidate),
+                        MergeAbandonmentOutcome::Lost { winner_commit, .. } => Ok(
+                            (winner_commit != &candidate.reference && cleanup_pending(&candidate)?)
+                                || cleanup_pending(&authority)?,
+                        ),
                     }
-                )
-            ))
+                }
+                PreparedStoreWriteState::SerialPreparing
+                | PreparedStoreWriteState::Serial { .. } => Ok(false),
+            }
         })
         .await
     }
@@ -12210,88 +13113,49 @@ impl Database {
                     "Serial state reached Merge candidate cleanup".to_string(),
                 ));
             };
-            let commit_remote =
-                load_remote_object_on(conn, remote_object_id(&candidate.reference.object))?;
-            if !matches!(
-                &commit_remote,
-                RemoteObjectRecord::CandidateCommit(record)
-                    if matches!(
-                        &record.state,
-                        crate::sync::remote_object::CandidateCommitState::CleanupPending {
-                            proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
-                        } | crate::sync::remote_object::CandidateCommitState::AbsentVerified {
-                            proof: crate::sync::remote_object::CandidateNonactivationProof::MergeWinner { .. }
+            match &prepared {
+                PreparedStoreWriteState::MergeConcurrent { .. } => {
+                    merge_candidate_cleanup_targets_on(conn, &write_id, &candidate, true)
+                }
+                PreparedStoreWriteState::MergeAbandonment {
+                    outcome,
+                    authority_commit,
+                    authority_head,
+                    ..
+                } => {
+                    let authority = parse_prepared_merge_candidate_parts_on(
+                        conn,
+                        authority_commit,
+                        authority_head,
+                    )?;
+                    let mut targets = Vec::new();
+                    match outcome {
+                        MergeAbandonmentOutcome::Prepared => {
+                            return Err(DbError::Message(
+                                "Merge abandonment has no accepted winner".to_string(),
+                            ));
                         }
-                    )
-            ) {
-                return Err(DbError::Message(
-                    "Merge candidate has no durable winner proof".to_string(),
-                ));
-            }
-            let mut statement = conn
-                .prepare(
-                    "SELECT remote_object_id FROM store_write_packages WHERE write_id = ?1
-                     UNION
-                     SELECT remote_object_id FROM store_write_blobs WHERE write_id = ?1",
-                )
-                .map_err(DbError::from)?;
-            let encoded = statement
-                .query_map([write_id.as_str()], |row| row.get::<_, String>(0))
-                .map_err(DbError::from)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(DbError::from)?;
-            drop(statement);
-            let mut cleanup = BTreeMap::new();
-            for encoded in encoded {
-                let object_id: ObjectHash = encoded.parse().map_err(|error| {
-                    DbError::Message(format!("Merge cleanup remote object id: {error}"))
-                })?;
-                let remote = load_remote_object_on(conn, object_id)?;
-                if let Some(object) = remote.cleanup_target() {
-                    cleanup.insert(object.clone(), CandidateCleanupObject { object: object.clone() });
-                } else if !remote
-                    .candidate_cleanup_complete(&candidate.reference)
-                    .map_err(|error| DbError::Message(format!("Merge cleanup {object_id}: {error}")))?
-                {
-                    return Err(DbError::Message(format!(
-                        "Merge candidate object {object_id} has no cleanup transition"
-                    )));
+                        MergeAbandonmentOutcome::Accepted { .. } => {
+                            targets.extend(merge_candidate_cleanup_targets_on(
+                                conn, &write_id, &candidate, true,
+                            )?);
+                        }
+                        MergeAbandonmentOutcome::Lost { winner_commit, .. } => {
+                            if winner_commit != &candidate.reference {
+                                targets.extend(merge_candidate_cleanup_targets_on(
+                                    conn, &write_id, &candidate, true,
+                                )?);
+                            }
+                            targets.extend(merge_candidate_cleanup_targets_on(
+                                conn, &write_id, &authority, false,
+                            )?);
+                        }
+                    }
+                    Ok(targets)
                 }
+                PreparedStoreWriteState::SerialPreparing
+                | PreparedStoreWriteState::Serial { .. } => unreachable!("parsed Merge cleanup"),
             }
-            let head_remote = load_remote_object_on(conn, remote_object_id(&candidate.head_object))?;
-            if !head_remote
-                .candidate_cleanup_complete(&candidate.reference)
-                .map_err(|error| DbError::Message(format!("Merge cleanup head: {error}")))?
-            {
-                return Err(DbError::Message(
-                    "Merge candidate head absence is not verified".to_string(),
-                ));
-            }
-            let mut targets = Vec::new();
-            for object in candidate_manifest_exact_objects(&candidate.commit) {
-                if let Some(target) = cleanup.remove(object) {
-                    targets.push(target);
-                }
-            }
-            if !cleanup.is_empty() {
-                return Err(DbError::Message(
-                    "Merge cleanup contains an object outside the signed candidate manifest"
-                        .to_string(),
-                ));
-            }
-            if let Some(object) = commit_remote.cleanup_target() {
-                targets.push(CandidateCleanupObject {
-                    object: object.clone(),
-                });
-            } else if !commit_remote
-                .candidate_cleanup_complete(&candidate.reference)
-                .map_err(|error| DbError::Message(format!("Merge cleanup commit: {error}")))?
-            {
-                return Err(DbError::Message(
-                    "Merge candidate commit cleanup is incomplete".to_string(),
-                ));
-            }
-            Ok(targets)
         })
         .await
     }
@@ -12321,23 +13185,15 @@ impl Database {
             }
             let prepared: PreparedStoreWriteState = serde_json::from_str(&raw_prepared)
                 .map_err(|error| DbError::Message(format!("prepared Merge candidate: {error}")))?;
-            let prepared_candidate = parse_prepared_merge_candidate_on(&tx, &prepared)?
+            let publication = parse_prepared_merge_publication_on(&tx, &prepared)?
                 .ok_or_else(|| {
                     DbError::Message(
                         "Serial branch reached alternate Merge head adoption".to_string(),
                     )
                 })?;
-            let PreparedStoreWriteState::MergeConcurrent {
-                commit,
-                head: old_head,
-                local_cleanup,
-                completion,
-            } = prepared
-            else {
-                unreachable!("parsed Merge candidate")
-            };
-            if winner_prepared.reference().slot() != old_head.prepared.reference().slot()
-                || winner_prepared.reference() == old_head.prepared.reference()
+            if winner_prepared.reference().slot()
+                != publication.head_prepared.reference().slot()
+                || winner_prepared.reference() == publication.head_prepared.reference()
             {
                 return Err(DbError::Message(
                     "alternate Merge head does not replace the prepared exact slot".to_string(),
@@ -12347,9 +13203,9 @@ impl Database {
             let registration = load_activated_registration_on(
                 &tx,
                 &root,
-                &prepared_candidate.commit.author_registration,
+                &publication.commit.author_registration,
             )?;
-            let candidate = prepared_candidate.reference;
+            let candidate = publication.reference;
             let verified_winner = StoreDeviceHead::parse_at(
                 &winner.to_bytes(),
                 root.store_root_hash,
@@ -12362,7 +13218,7 @@ impl Database {
                     "alternate Merge head does not activate the prepared commit".to_string(),
                 ));
             }
-            let old_object_id = remote_object_id(old_head.prepared.reference());
+            let old_object_id = remote_object_id(publication.head_prepared.reference());
             let old_remote = load_remote_object_on(&tx, old_object_id)?;
             if !matches!(
                 &old_remote,
@@ -12407,14 +13263,43 @@ impl Database {
                 DbError::Message(format!("mark alternate Merge head uploaded: {error}"))
             })?;
             persist_exact_remote_object_on(&tx, &winner_remote, "alternate Merge head")?;
-            let replacement = PreparedStoreWriteState::MergeConcurrent {
-                commit,
-                head: DurablePreparedProtocolObject {
-                    semantic_bytes: winner.to_bytes(),
-                    prepared: winner_prepared,
+            let replacement_head = DurablePreparedProtocolObject {
+                semantic_bytes: winner.to_bytes(),
+                prepared: winner_prepared,
+            };
+            let replacement = match prepared {
+                PreparedStoreWriteState::MergeConcurrent {
+                    commit,
+                    local_cleanup,
+                    completion,
+                    ..
+                } => PreparedStoreWriteState::MergeConcurrent {
+                    commit,
+                    head: replacement_head,
+                    local_cleanup,
+                    completion,
                 },
-                local_cleanup,
-                completion,
+                PreparedStoreWriteState::MergeAbandonment {
+                    candidate_commit,
+                    candidate_head,
+                    authority_commit,
+                    outcome,
+                    local_cleanup,
+                    completion,
+                    ..
+                } => PreparedStoreWriteState::MergeAbandonment {
+                    candidate_commit,
+                    candidate_head,
+                    authority_commit,
+                    authority_head: replacement_head,
+                    outcome,
+                    local_cleanup,
+                    completion,
+                },
+                PreparedStoreWriteState::SerialPreparing
+                | PreparedStoreWriteState::Serial { .. } => {
+                    unreachable!("parsed Merge publication")
+                }
             };
             let replacement = serde_json::to_string(&replacement).map_err(|error| {
                 DbError::Message(format!("serialize alternate Merge preparation: {error}"))

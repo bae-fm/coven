@@ -258,14 +258,24 @@ impl SyncManager {
         .map_err(|error| SyncError::Protocol(error.to_string()))
     }
 
-    pub(crate) async fn cleanup_merge_candidate(
+    pub(crate) async fn abandon_merge_candidate(
         &self,
         write_id: coven_core::WriteId,
-    ) -> Result<(), SyncError> {
+    ) -> Result<coven_core::sync::store_outbound::MergeCandidateAbandonment, SyncError> {
         let loop_handle = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
-        crate::sync::store_pull::cleanup_merge_candidate(
+        let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let device_id = self
+            .db
+            .get_protocol_state(coven_core::database::LOCAL_DEVICE_ID_STATE_KEY)
+            .await?
+            .ok_or_else(|| {
+                SyncError::Protocol("local Store device identity is absent".to_string())
+            })?;
+        crate::sync::store_outbound::abandon_merge_candidate(
             &self.db,
             &**loop_handle.storage(),
+            &device_id,
+            &identity,
             write_id,
         )
         .await
