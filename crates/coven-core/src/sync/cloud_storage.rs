@@ -1678,6 +1678,21 @@ impl SyncStorage for CloudSyncStorage {
     }
 
     async fn delete_protocol_object(&self, object: &ExactObjectRef) -> Result<(), StorageError> {
+        match self.exact.read_at(object.slot()).await {
+            Err(crate::storage::cloud::CloudHomeError::NotFound(_)) => return Ok(()),
+            Err(error) => return Err(error.into()),
+            Ok(stored)
+                if stored.len() as u64 != object.stored_size()
+                    || crate::sync::store_commit::ObjectHash::digest(&stored)
+                        != object.stored_hash() =>
+            {
+                return Err(StorageError::SlotCollision(format!(
+                    "exact delete target {} contains different bytes",
+                    object.slot().logical_key()
+                )));
+            }
+            Ok(_) => {}
+        }
         let delete_error = self.exact.delete_at(object.slot()).await.err();
         if delete_error
             .as_ref()
@@ -2499,6 +2514,46 @@ mod tests {
 
         assert_eq!(opened, b"signed successor bytes");
         assert_eq!(&completed, prepared.reference());
+    }
+
+    #[tokio::test]
+    async fn exact_delete_refuses_to_remove_different_bytes_in_the_same_slot() {
+        let home = InMemoryCloudHome::new();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Encrypted(EncryptionService::from_key([7u8; 32])),
+            BlobPathScheme::Hashed,
+            "exact-delete-identity",
+            UserKeypair::generate(),
+        )
+        .expect("test cloud storage supports exact slots");
+        let root = ObjectHash::digest(b"exact delete root");
+        let semantic = "store-v1/heads/device-a/1";
+        let context = crate::sync::storage::ProtocolObjectContext::store(
+            root,
+            crate::sync::storage::ProtocolObjectDomain::StoreHead,
+        );
+        let slot = storage
+            .allocate_protocol_slot(&context, semantic, ".json")
+            .await
+            .expect("allocate exact slot");
+        let prepared = storage
+            .prepare_protocol_object(&context, slot.clone(), semantic, b"original".to_vec())
+            .expect("prepare exact object");
+        storage
+            .create_protocol_object(&prepared)
+            .await
+            .expect("create exact object");
+        home.replace_exact_object(&slot, b"competing stored bytes".to_vec());
+
+        assert!(matches!(
+            storage.delete_protocol_object(prepared.reference()).await,
+            Err(StorageError::SlotCollision(_))
+        ));
+        assert_eq!(
+            home.get(slot.logical_key()),
+            Some(b"competing stored bytes".to_vec())
+        );
     }
 
     #[tokio::test]
