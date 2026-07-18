@@ -141,4 +141,7 @@ pub struct WriteReceipt<R> {
     pub value: R,
     pub write_id: WriteId,
     pub status: WriteStatus,
+    /// The ordered provisional branch containing this write. MergeConcurrent
+    /// writes and transactions with no synchronized changes have no branch.
+    pub pending_branch_id: Option<PendingBranchId>,
 }

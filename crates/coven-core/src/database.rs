@@ -66,6 +66,7 @@ const COVEN_INITIALIZED_STATE_VALUE: &str = "1";
 pub const SERIAL_MEMBERSHIP_STATE_KEY: &str = "serial_membership_state";
 pub const SERIAL_KEY_GENERATION_STATE_KEY: &str = "serial_key_generation";
 pub const SERIAL_PROVIDER_ADMIN_STATE_KEY: &str = "serial_provider_admin_state";
+const SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY: &str = "serial_candidate_abandonment";
 const STORE_DEVICE_GENESIS_STATE_KEY: &str = "store_device_genesis_state";
 const GATE_BASELINE_SCHEMA: &str = "coven_gate_empty";
 
@@ -1054,6 +1055,24 @@ pub(crate) struct PreparedSerialStoreBranch {
     pub base_head_version: Option<VersionToken>,
     pub writes: Vec<PreparedSerialStoreWriteCommit>,
     pub head: CanonicalProtocolObject<StoreSerialHead>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSerialCandidateAbandonment {
+    pub branch_id: PendingBranchId,
+    pub base: Option<StoreBatchCommitRef>,
+    pub base_head: VersionedObject,
+    pub authority: ExactProtocolObject<StoreBatchCommit>,
+    pub head: CanonicalProtocolObject<StoreSerialHead>,
+    pub original_head_bytes: Vec<u8>,
+    durable_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SerialBranchDiscardState {
+    Local,
+    Abandonment,
+    Conflict,
 }
 
 #[derive(Debug, Clone)]
@@ -2345,6 +2364,14 @@ pub(crate) struct MergeCandidateAbandonmentPreparation {
     pub head: PreparedProtocolObject<StoreDeviceHead>,
 }
 
+pub(crate) struct SerialCandidateAbandonmentPreparation {
+    pub branch_id: PendingBranchId,
+    pub candidate: StoreBatchCommitRef,
+    pub commit: PreparedProtocolObject<StoreBatchCommit>,
+    pub head: StoreSerialHead,
+    pub original_head_bytes: Vec<u8>,
+}
+
 pub(crate) struct SerialStoreWritePreparation {
     pub branch_id: PendingBranchId,
     pub base: Option<StoreBatchCommitRef>,
@@ -2408,6 +2435,18 @@ enum MergeAbandonmentOutcome {
         winner_commit: StoreBatchCommitRef,
         winner_head: crate::sync::store_commit::StoreDeviceHeadRef,
     },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableSerialCandidateAbandonment {
+    branch_id: PendingBranchId,
+    base: Option<StoreBatchCommitRef>,
+    base_head: VersionedObject,
+    candidate: StoreBatchCommitRef,
+    commit: DurablePreparedProtocolObject,
+    head_bytes: Vec<u8>,
+    original_head_bytes: Vec<u8>,
 }
 
 struct PreparedSerialCandidate {
@@ -3506,6 +3545,202 @@ impl Database {
         .await
     }
 
+    pub async fn serial_branch_discard_state(
+        &self,
+        branch_id: &PendingBranchId,
+    ) -> Result<SerialBranchDiscardState, DbError> {
+        let branch_id = branch_id.clone();
+        self.call(move |conn| {
+            let abandonment: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if let Some(abandonment) = abandonment {
+                let abandonment: DurableSerialCandidateAbandonment =
+                    serde_json::from_str(&abandonment).map_err(|error| {
+                        DbError::Message(format!("Serial candidate abandonment: {error}"))
+                    })?;
+                if abandonment.branch_id != branch_id {
+                    return Err(DbError::Message(
+                        "another Serial branch owns candidate abandonment".to_string(),
+                    ));
+                }
+                return Ok(SerialBranchDiscardState::Abandonment);
+            }
+            let mut statement = conn
+                .prepare(
+                    "SELECT base, status, prepared FROM store_writes
+                     WHERE status != '\"local_only\"'
+                       AND json_extract(status, '$.published') IS NULL
+                       AND json_extract(status, '$.resolved') IS NULL
+                       AND json_type(base, '$.serial') IS NOT NULL
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            drop(statement);
+            if rows.is_empty() {
+                return Err(DbError::Message("Serial branch is absent".to_string()));
+            }
+            let mut base = None;
+            let mut saw_local = false;
+            let mut saw_prepared = false;
+            let mut saw_conflict = false;
+            for (raw_base, raw_status, raw_prepared) in rows {
+                let StoreWriteBase::Serial {
+                    branch_id: stored_branch_id,
+                    base: stored_base,
+                } = serde_json::from_str(&raw_base).map_err(|error| {
+                    DbError::Message(format!("Serial discard branch base: {error}"))
+                })?
+                else {
+                    unreachable!("selected Serial base")
+                };
+                if stored_branch_id != branch_id {
+                    return Err(DbError::Message(
+                        "Serial database contains another unresolved branch".to_string(),
+                    ));
+                }
+                if base.as_ref().is_some_and(|base| base != &stored_base) {
+                    return Err(DbError::Message(
+                        "Serial discard branch has inconsistent bases".to_string(),
+                    ));
+                }
+                base.get_or_insert(stored_base);
+                let status: WriteStatus = serde_json::from_str(&raw_status)
+                    .map_err(|error| DbError::Message(format!("Serial discard status: {error}")))?;
+                match status {
+                    WriteStatus::Pending | WriteStatus::Blocked(_) if raw_prepared.is_none() => {
+                        saw_local = true;
+                    }
+                    WriteStatus::Publishing if raw_prepared.is_some() => saw_prepared = true,
+                    WriteStatus::Conflict(conflict) if conflict.branch_id == branch_id => {
+                        saw_conflict = true;
+                    }
+                    other => {
+                        return Err(DbError::Message(format!(
+                            "Serial branch has non-discardable state {other:?}"
+                        )));
+                    }
+                }
+            }
+            match (saw_local, saw_prepared, saw_conflict) {
+                (true, false, false) => Ok(SerialBranchDiscardState::Local),
+                (false, true, false) => Ok(SerialBranchDiscardState::Abandonment),
+                (false, false, true) => {
+                    base.expect("nonempty branch");
+                    Ok(SerialBranchDiscardState::Conflict)
+                }
+                _ => Err(DbError::Message(
+                    "Serial branch mixes incompatible discard states".to_string(),
+                )),
+            }
+        })
+        .await
+    }
+
+    pub async fn discard_local_serial_branch(
+        &self,
+        branch_id: PendingBranchId,
+    ) -> Result<Vec<WriteId>, DbError> {
+        let synced_tables = self.synced_tables().to_vec();
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let mut statement = tx
+                .prepare(
+                    "SELECT write_id, base, status, prepared, inverse_changeset
+                     FROM store_writes
+                     WHERE status != '\"local_only\"'
+                       AND json_extract(status, '$.published') IS NULL
+                       AND json_extract(status, '$.resolved') IS NULL
+                       AND json_type(base, '$.serial') IS NOT NULL
+                     ORDER BY ordinal",
+                )
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                    ))
+                })
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)?;
+            drop(statement);
+            if rows.is_empty() {
+                return Err(DbError::Message("Serial branch is absent".to_string()));
+            }
+            let mut branch = Vec::new();
+            for (write_id, raw_base, raw_status, prepared, inverse) in rows {
+                let StoreWriteBase::Serial {
+                    branch_id: stored_branch_id,
+                    ..
+                } = serde_json::from_str(&raw_base).map_err(|error| {
+                    DbError::Message(format!("local Serial discard base: {error}"))
+                })?
+                else {
+                    unreachable!("selected Serial base")
+                };
+                let status: WriteStatus = serde_json::from_str(&raw_status).map_err(|error| {
+                    DbError::Message(format!("local Serial discard status: {error}"))
+                })?;
+                if stored_branch_id != branch_id
+                    || !matches!(status, WriteStatus::Pending | WriteStatus::Blocked(_))
+                    || prepared.is_some()
+                {
+                    return Err(DbError::Message(
+                        "Serial branch is not locally discardable".to_string(),
+                    ));
+                }
+                branch.push((WriteId::from_generated(write_id), inverse));
+            }
+            let schema = Arc::new(crate::sync::conflict::TableSchema::from_db(
+                &tx,
+                &synced_tables,
+            )?);
+            for (_, inverse) in branch.iter().rev() {
+                let inverse = crate::sync::apply::ValidatedChangeset::new(inverse, schema.clone())
+                    .map_err(|error| {
+                        DbError::Message(format!("invalid Serial inverse: {error}"))
+                    })?;
+                crate::sync::apply::apply_changeset_strict_on(&tx, inverse)
+                    .map_err(|error| DbError::Message(format!("reverse Serial branch: {error}")))?;
+            }
+            let write_ids = branch
+                .into_iter()
+                .map(|(write_id, _)| write_id)
+                .collect::<Vec<_>>();
+            let resolution = WriteResolution::Discarded;
+            Self::resolve_unpublished_writes_on(&tx, &write_ids, &resolution)?;
+            tx.commit().map_err(DbError::from)?;
+            let status = WriteStatus::Resolved(resolution);
+            for write_id in &write_ids {
+                Self::notify_write_status_in(&statuses, write_id, status.clone());
+            }
+            Ok(write_ids)
+        })
+        .await
+    }
+
     pub async fn conflicted_serial_branch_base(
         &self,
         branch_id: &PendingBranchId,
@@ -4398,11 +4633,16 @@ impl Database {
                 rows_changed,
             )
             .map_err(E::from)?;
+            let pending_branch_id = match (&status, &base) {
+                (WriteStatus::LocalOnly, _) | (_, StoreWriteBase::MergeConcurrent { .. }) => None,
+                (_, StoreWriteBase::Serial { branch_id, .. }) => Some(branch_id.clone()),
+            };
             tx.commit().map_err(DbError::from).map_err(E::from)?;
             Ok(WriteReceipt {
                 value,
                 write_id,
                 status,
+                pending_branch_id,
             })
         })()
     }
@@ -5140,6 +5380,219 @@ impl Database {
             tx.commit().map_err(DbError::from)?;
             Self::notify_write_status_in(&statuses, &notified_write_id, WriteStatus::Publishing);
             Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn prepare_serial_candidate_abandonment(
+        &self,
+        stage: SerialCandidateAbandonmentPreparation,
+    ) -> Result<(), DbError> {
+        if self.write_policy() != WritePolicy::Serial {
+            return Err(DbError::Message(
+                "Serial candidate abandonment requires the Serial write policy".to_string(),
+            ));
+        }
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            if existing.is_some() {
+                return Err(DbError::Message(
+                    "a Serial candidate abandonment is already prepared".to_string(),
+                ));
+            }
+            let (raw_base, raw_prepared): (String, String) = tx
+                .query_row(
+                    "SELECT base, prepared FROM store_writes
+                     WHERE prepared IS NOT NULL AND status = '\"publishing\"'
+                     ORDER BY ordinal LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let StoreWriteBase::Serial { branch_id, base } = serde_json::from_str(&raw_base)
+                .map_err(|error| {
+                    DbError::Message(format!("Serial abandonment branch base: {error}"))
+                })?
+            else {
+                return Err(DbError::Message(
+                    "Merge branch reached Serial candidate abandonment".to_string(),
+                ));
+            };
+            if branch_id != stage.branch_id {
+                return Err(DbError::Message(
+                    "Serial abandonment names another pending branch".to_string(),
+                ));
+            }
+            let prepared: PreparedStoreWriteState =
+                serde_json::from_str(&raw_prepared).map_err(|error| {
+                    DbError::Message(format!("prepared Serial abandonment candidate: {error}"))
+                })?;
+            let PreparedStoreWriteState::Serial {
+                base_head_bytes,
+                base_head_version,
+                commit: candidate_commit,
+                ..
+            } = &prepared
+            else {
+                return Err(DbError::Message(
+                    "Serial abandonment requires an exact prepared branch".to_string(),
+                ));
+            };
+            let base_head = VersionedObject {
+                bytes: base_head_bytes.clone().ok_or_else(|| {
+                    DbError::Message(
+                        "Serial abandonment base has no signed coordination head".to_string(),
+                    )
+                })?,
+                version: base_head_version.clone().ok_or_else(|| {
+                    DbError::Message(
+                        "Serial abandonment base has no provider version receipt".to_string(),
+                    )
+                })?,
+            };
+            let candidate = parse_prepared_serial_candidate(&raw_prepared)?
+                .expect("matched exact Serial candidate");
+            if candidate.reference != stage.candidate {
+                return Err(DbError::Message(
+                    "Serial abandonment target differs from the branch first candidate".to_string(),
+                ));
+            }
+            let root = required_store_root_authority_on(&tx)?;
+            let registration =
+                load_activated_registration_on(&tx, &root, &candidate.commit.author_registration)?;
+            stage
+                .commit
+                .value
+                .verify_at(
+                    root.store_root_hash,
+                    &candidate.reference.coord,
+                    &registration,
+                )
+                .map_err(|error| {
+                    DbError::Message(format!("verify Serial abandonment commit: {error}"))
+                })?;
+            if stage.commit.value.write_id != candidate.commit.write_id
+                || stage.commit.value.order != candidate.commit.order
+                || stage.commit.value.abandoned_candidates()
+                    != [crate::sync::store_commit::CandidateCleanupManifest {
+                        candidate: crate::sync::store_commit::StoreBatchCommitDeletionTarget {
+                            coord: candidate.reference.coord.clone(),
+                            object: candidate.reference.object.clone(),
+                            canonical_signed_bytes: candidate.canonical_signed_bytes.clone(),
+                        },
+                    }]
+            {
+                return Err(DbError::Message(
+                    "Serial abandonment does not replace its exact first candidate".to_string(),
+                ));
+            }
+            let authority_ref = StoreBatchCommitRef::from_commit(
+                &stage.commit.value,
+                candidate.reference.coord.clone(),
+                stage.commit.prepared.reference().clone(),
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            let parsed_head =
+                StoreSerialHead::parse(&stage.head.to_bytes(), root.store_root_hash, &registration)
+                    .map_err(|error| {
+                        DbError::Message(format!("verify Serial abandonment head: {error}"))
+                    })?;
+            if parsed_head != stage.head
+                || !matches!(
+                    &stage.head.state,
+                    StoreSerialHeadState::Commit {
+                        author_registration,
+                        commit,
+                    } if author_registration == &candidate.commit.author_registration
+                        && commit == &authority_ref
+                )
+            {
+                return Err(DbError::Message(
+                    "Serial abandonment head does not activate its exact authority".to_string(),
+                ));
+            }
+            let (raw_tip_base, raw_tip_prepared): (String, String) = tx
+                .query_row(
+                    "SELECT base, prepared FROM store_writes
+                     WHERE prepared IS NOT NULL AND status = '\"publishing\"'
+                     ORDER BY ordinal DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(DbError::from)?;
+            let StoreWriteBase::Serial {
+                branch_id: tip_branch_id,
+                base: tip_base,
+            } = serde_json::from_str(&raw_tip_base).map_err(|error| {
+                DbError::Message(format!("Serial abandonment tip branch base: {error}"))
+            })?
+            else {
+                return Err(DbError::Message(
+                    "Merge tip reached Serial candidate abandonment".to_string(),
+                ));
+            };
+            let tip_prepared: PreparedStoreWriteState = serde_json::from_str(&raw_tip_prepared)
+                .map_err(|error| {
+                    DbError::Message(format!("prepared Serial abandonment tip: {error}"))
+                })?;
+            let PreparedStoreWriteState::Serial {
+                tip_head_bytes: Some(tip_head_bytes),
+                ..
+            } = tip_prepared
+            else {
+                return Err(DbError::Message(
+                    "Serial abandonment branch has no activating tip head".to_string(),
+                ));
+            };
+            if tip_branch_id != branch_id
+                || tip_base != base
+                || tip_head_bytes != stage.original_head_bytes
+            {
+                return Err(DbError::Message(
+                    "Serial abandonment original head differs from its prepared branch".to_string(),
+                ));
+            }
+            let authority_remote = RemoteObjectRecord::candidate_commit(
+                authority_ref,
+                stage.commit.value.to_bytes(),
+                stage.commit.prepared.stored_bytes().to_vec(),
+            )
+            .map_err(|error| DbError::Message(format!("Serial abandonment commit: {error}")))?;
+            persist_exact_remote_object_on(&tx, &authority_remote, "Serial abandonment commit")?;
+            let durable = DurableSerialCandidateAbandonment {
+                branch_id,
+                base,
+                base_head,
+                candidate: candidate.reference,
+                commit: DurablePreparedProtocolObject {
+                    semantic_bytes: stage.commit.value.to_bytes(),
+                    prepared: stage.commit.prepared,
+                },
+                head_bytes: stage.head.to_bytes(),
+                original_head_bytes: stage.original_head_bytes,
+            };
+            let durable = serde_json::to_string(&durable).map_err(|error| {
+                DbError::Message(format!("serialize Serial candidate abandonment: {error}"))
+            })?;
+            tx.execute(
+                "INSERT INTO protocol_state (key, value) VALUES (?1, ?2)",
+                (SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY, durable),
+            )
+            .map_err(DbError::from)?;
+            if candidate_commit.prepared.reference() != &stage.candidate.object {
+                return Err(DbError::Message(
+                    "Serial abandonment candidate storage identity changed".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
         })
         .await
     }
@@ -6102,6 +6555,196 @@ impl Database {
             }
         }
         Ok(loaded)
+    }
+
+    pub(crate) async fn prepared_serial_candidate_abandonment(
+        &self,
+    ) -> Result<Option<PreparedSerialCandidateAbandonment>, DbError> {
+        self.call(|conn| {
+            let raw: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM protocol_state WHERE key = ?1",
+                    [SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let Some(raw) = raw else {
+                return Ok(None);
+            };
+            let durable: DurableSerialCandidateAbandonment =
+                serde_json::from_str(&raw).map_err(|error| {
+                    DbError::Message(format!("prepared Serial candidate abandonment: {error}"))
+                })?;
+            let expected_base = serde_json::to_string(&StoreWriteBase::Serial {
+                branch_id: durable.branch_id.clone(),
+                base: durable.base.clone(),
+            })
+            .map_err(|error| {
+                DbError::Message(format!("Serial abandonment branch base: {error}"))
+            })?;
+            let raw_prepared: String = conn
+                .query_row(
+                    "SELECT prepared FROM store_writes
+                     WHERE base = ?1 AND prepared IS NOT NULL
+                     ORDER BY ordinal LIMIT 1",
+                    [expected_base.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let parsed = parse_prepared_serial_candidate(&raw_prepared)?.ok_or_else(|| {
+                DbError::Message("Serial abandonment target is not an exact candidate".to_string())
+            })?;
+            if parsed.reference != durable.candidate {
+                return Err(DbError::Message(
+                    "Serial abandonment target differs from its durable candidate".to_string(),
+                ));
+            }
+            let prepared: PreparedStoreWriteState =
+                serde_json::from_str(&raw_prepared).map_err(|error| {
+                    DbError::Message(format!("Serial abandonment candidate state: {error}"))
+                })?;
+            let PreparedStoreWriteState::Serial {
+                base_head_bytes,
+                base_head_version,
+                commit,
+                ..
+            } = prepared
+            else {
+                return Err(DbError::Message(
+                    "Serial abandonment target is not an exact candidate".to_string(),
+                ));
+            };
+            if base_head_bytes.as_deref() != Some(durable.base_head.bytes.as_slice())
+                || base_head_version.as_ref() != Some(&durable.base_head.version)
+            {
+                return Err(DbError::Message(
+                    "Serial abandonment differs from its durable branch base".to_string(),
+                ));
+            }
+            let candidate = ExactProtocolObject {
+                value: parsed.commit,
+                bytes: parsed.canonical_signed_bytes,
+                object: parsed.reference.object,
+                prepared: commit.prepared,
+            };
+            let raw_tip_prepared: String = conn
+                .query_row(
+                    "SELECT prepared FROM store_writes
+                     WHERE base = ?1 AND prepared IS NOT NULL
+                     ORDER BY ordinal DESC LIMIT 1",
+                    [expected_base],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            let tip_prepared: PreparedStoreWriteState = serde_json::from_str(&raw_tip_prepared)
+                .map_err(|error| {
+                    DbError::Message(format!("Serial abandonment tip state: {error}"))
+                })?;
+            if !matches!(
+                tip_prepared,
+                PreparedStoreWriteState::Serial {
+                    tip_head_bytes: Some(ref tip_head_bytes),
+                    ..
+                } if tip_head_bytes == &durable.original_head_bytes
+            ) {
+                return Err(DbError::Message(
+                    "Serial abandonment original head differs from its durable branch tip"
+                        .to_string(),
+                ));
+            }
+            let root = required_store_root_authority_on(conn)?;
+            let unverified: StoreBatchCommit =
+                serde_json::from_slice(&durable.commit.semantic_bytes).map_err(|error| {
+                    DbError::Message(format!("Serial abandonment commit: {error}"))
+                })?;
+            let registration =
+                load_activated_registration_on(conn, &root, &unverified.author_registration)?;
+            let value = StoreBatchCommit::parse_at(
+                &durable.commit.semantic_bytes,
+                root.store_root_hash,
+                &durable.candidate.coord,
+                &registration,
+            )
+            .map_err(|error| {
+                DbError::Message(format!("verify Serial abandonment commit: {error}"))
+            })?;
+            let reference = StoreBatchCommitRef::from_commit(
+                &value,
+                durable.candidate.coord.clone(),
+                durable.commit.prepared.reference().clone(),
+            )
+            .map_err(|error| DbError::Message(error.to_string()))?;
+            if value.abandoned_candidates()
+                != [crate::sync::store_commit::CandidateCleanupManifest {
+                    candidate: crate::sync::store_commit::StoreBatchCommitDeletionTarget {
+                        coord: durable.candidate.coord.clone(),
+                        object: durable.candidate.object.clone(),
+                        canonical_signed_bytes: candidate.bytes.clone(),
+                    },
+                }]
+            {
+                return Err(DbError::Message(
+                    "durable Serial abandonment names another candidate".to_string(),
+                ));
+            }
+            let head =
+                StoreSerialHead::parse(&durable.head_bytes, root.store_root_hash, &registration)
+                    .map_err(|error| {
+                        DbError::Message(format!("verify Serial abandonment head: {error}"))
+                    })?;
+            if !matches!(
+                &head.state,
+                StoreSerialHeadState::Commit { commit, .. } if commit == &reference
+            ) {
+                return Err(DbError::Message(
+                    "durable Serial abandonment head names another commit".to_string(),
+                ));
+            }
+            let unverified_original: StoreSerialHead =
+                serde_json::from_slice(&durable.original_head_bytes).map_err(|error| {
+                    DbError::Message(format!("Serial abandonment original head: {error}"))
+                })?;
+            let original_author = match &unverified_original.state {
+                StoreSerialHeadState::Commit {
+                    author_registration,
+                    ..
+                } => author_registration,
+                StoreSerialHeadState::Genesis { .. } => {
+                    return Err(DbError::Message(
+                        "Serial abandonment original head is not a commit".to_string(),
+                    ));
+                }
+            };
+            let original_registration =
+                load_activated_registration_on(conn, &root, original_author)?;
+            StoreSerialHead::parse(
+                &durable.original_head_bytes,
+                root.store_root_hash,
+                &original_registration,
+            )
+            .map_err(|error| {
+                DbError::Message(format!("verify Serial abandonment original head: {error}"))
+            })?;
+            Ok(Some(PreparedSerialCandidateAbandonment {
+                branch_id: durable.branch_id,
+                base: durable.base,
+                base_head: durable.base_head,
+                authority: ExactProtocolObject {
+                    value,
+                    bytes: durable.commit.semantic_bytes,
+                    object: reference.object,
+                    prepared: durable.commit.prepared,
+                },
+                head: CanonicalProtocolObject {
+                    value: head,
+                    bytes: durable.head_bytes,
+                },
+                original_head_bytes: durable.original_head_bytes,
+                durable_state: raw,
+            }))
+        })
+        .await
     }
 
     pub(crate) async fn latest_local_store_position(
@@ -7232,6 +7875,8 @@ impl Database {
                         rows_changed,
                     )
                     .map_err(E::from)?;
+                    let pending_branch_id = (!matches!(&status, WriteStatus::LocalOnly))
+                        .then(|| PendingBranchId::from_first_write(replacement_write_id.clone()));
                     let resolution = WriteResolution::Replaced {
                         replacement: replacement_write_id.clone(),
                     };
@@ -7246,6 +7891,7 @@ impl Database {
                         value,
                         write_id: replacement_write_id,
                         status,
+                        pending_branch_id,
                     })
                 })())
             })
@@ -13553,6 +14199,265 @@ impl Database {
             tx.commit().map_err(DbError::from)?;
             exclusive_cleanup.extend(commit_cleanup);
             Ok(exclusive_cleanup)
+        })
+        .await
+    }
+
+    pub(crate) async fn prepare_serial_abandonment_authority_cleanup(
+        &self,
+        plan: &crate::sync::store_pull::SerialResolutionPlan,
+    ) -> Result<Option<CandidateCleanupObject>, DbError> {
+        let prepared = self
+            .prepared_serial_candidate_abandonment()
+            .await?
+            .ok_or_else(|| {
+                DbError::Message("Serial candidate abandonment is not prepared".to_string())
+            })?;
+        let accepted_refs = plan
+            .commits
+            .iter()
+            .map(|commit| commit.commit_ref.clone())
+            .collect::<Vec<_>>();
+        if accepted_refs.is_empty() {
+            return Err(DbError::Message(
+                "Serial abandonment cleanup requires an accepted successor".to_string(),
+            ));
+        }
+        let authority_ref = StoreBatchCommitRef::from_commit(
+            &prepared.authority.value,
+            StoreCommitCoord::Serial {
+                sequence: prepared.authority.value.seq(),
+            },
+            prepared.authority.object.clone(),
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        if accepted_refs.first() == Some(&authority_ref) {
+            return Ok(None);
+        }
+        let head_bytes = plan.head_object.bytes.clone();
+        if plan.head.to_bytes() != head_bytes
+            || !matches!(
+                &plan.head.state,
+                StoreSerialHeadState::Commit { commit, .. }
+                    if Some(commit) == accepted_refs.last()
+            )
+        {
+            return Err(DbError::Message(
+                "Serial abandonment cleanup head differs from its accepted suffix".to_string(),
+            ));
+        }
+        let mut predecessor = prepared.base.clone();
+        for commit in &plan.commits {
+            commit
+                .commit_ref
+                .verify_commit(&commit.commit)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            if commit.commit.order.predecessor() != predecessor.as_ref() {
+                return Err(DbError::Message(
+                    "Serial abandonment accepted suffix has a broken predecessor".to_string(),
+                ));
+            }
+            predecessor = Some(commit.commit_ref.clone());
+        }
+        let authority_target = crate::sync::store_commit::StoreBatchCommitDeletionTarget {
+            coord: authority_ref.coord.clone(),
+            object: authority_ref.object.clone(),
+            canonical_signed_bytes: prepared.authority.bytes.clone(),
+        };
+        let suffix = crate::sync::remote_object::SerialAcceptedSuffix {
+            predecessor: prepared.base,
+            commits: accepted_refs,
+            canonical_signed_head_bytes: head_bytes,
+            observed_version_hash: ObjectHash::digest(
+                plan.head_object.version.cloud().as_provider().as_bytes(),
+            ),
+        };
+        let expected_state = prepared.durable_state;
+        self.call(move |conn| {
+            let state_matches: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM protocol_state WHERE key = ?1 AND value = ?2
+                     )",
+                    rusqlite::params![SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY, expected_state],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)?;
+            if !state_matches {
+                return Err(DbError::Message(
+                    "Serial abandonment durable state changed before authority cleanup"
+                        .to_string(),
+                ));
+            }
+            let object_id = remote_object_id(&authority_ref.object);
+            let mut remote = load_remote_object_on(conn, object_id)?;
+            remote
+                .begin_candidate_nonactivation(
+                    crate::sync::remote_object::CandidateNonactivation {
+                        candidate: authority_target.clone(),
+                        proof: crate::sync::remote_object::CandidateNonactivationProof::SerialImmediateSuccessor {
+                            accepted_suffix: suffix,
+                            losing_prefix: vec![authority_target],
+                        },
+                    },
+                )
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "record Serial abandonment nonactivation for {object_id}: {error}"
+                    ))
+                })?;
+            let target = remote.cleanup_target().cloned();
+            update_remote_object_on(conn, object_id, &remote)?;
+            Ok(target.map(|object| CandidateCleanupObject { object }))
+        })
+        .await
+    }
+
+    pub(crate) async fn discard_serial_branch_after_abandonment(
+        &self,
+        branch_id: PendingBranchId,
+        plan: crate::sync::store_pull::SerialResolutionPlan,
+    ) -> Result<(), DbError> {
+        let prepared = self
+            .prepared_serial_candidate_abandonment()
+            .await?
+            .ok_or_else(|| {
+                DbError::Message("Serial candidate abandonment is not prepared".to_string())
+            })?;
+        if prepared.branch_id != branch_id {
+            return Err(DbError::Message(
+                "Serial abandonment belongs to another branch".to_string(),
+            ));
+        }
+        let authority_ref = StoreBatchCommitRef::from_commit(
+            &prepared.authority.value,
+            StoreCommitCoord::Serial {
+                sequence: prepared.authority.value.seq(),
+            },
+            prepared.authority.object.clone(),
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        let authority_accepted = plan
+            .commits
+            .first()
+            .is_some_and(|commit| commit.commit_ref == authority_ref);
+        let expected_state = prepared.durable_state;
+        let synced_tables = self.synced_tables().to_vec();
+        let statuses = self.state.write_statuses.clone();
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let write_ids =
+                Self::apply_serial_resolution_on(&tx, &synced_tables, &branch_id, plan)?;
+            let object_id = remote_object_id(&authority_ref.object);
+            let remote = load_remote_object_on(&tx, object_id)?;
+            if authority_accepted {
+                let retained = remote.into_activated(&authority_ref).map_err(|error| {
+                    DbError::Message(format!("activate Serial abandonment authority: {error}"))
+                })?;
+                update_remote_object_on(&tx, object_id, &retained)?;
+            } else {
+                if !remote
+                    .candidate_cleanup_complete(&authority_ref)
+                    .map_err(|error| {
+                        DbError::Message(format!(
+                            "validate Serial abandonment authority cleanup: {error}"
+                        ))
+                    })?
+                {
+                    return Err(DbError::Message(
+                        "Serial abandonment authority cleanup is incomplete".to_string(),
+                    ));
+                }
+                let removed = tx
+                    .execute(
+                        "DELETE FROM remote_objects WHERE object_id = ?1",
+                        [object_id.to_string()],
+                    )
+                    .map_err(DbError::from)?;
+                if removed != 1 {
+                    return Err(DbError::Message(
+                        "Serial abandonment authority disappeared during removal".to_string(),
+                    ));
+                }
+            }
+            let removed = tx
+                .execute(
+                    "DELETE FROM protocol_state WHERE key = ?1 AND value = ?2",
+                    rusqlite::params![SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY, expected_state],
+                )
+                .map_err(DbError::from)?;
+            if removed != 1 {
+                return Err(DbError::Message(
+                    "Serial abandonment durable state disappeared".to_string(),
+                ));
+            }
+            let resolution = WriteResolution::Discarded;
+            Self::resolve_unpublished_writes_on(&tx, &write_ids, &resolution)?;
+            tx.commit().map_err(DbError::from)?;
+            let status = WriteStatus::Resolved(resolution);
+            for write_id in write_ids {
+                Self::notify_write_status_in(&statuses, &write_id, status.clone());
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn remove_losing_serial_abandonment_authority(&self) -> Result<(), DbError> {
+        let prepared = self
+            .prepared_serial_candidate_abandonment()
+            .await?
+            .ok_or_else(|| {
+                DbError::Message("Serial candidate abandonment is not prepared".to_string())
+            })?;
+        let authority_ref = StoreBatchCommitRef::from_commit(
+            &prepared.authority.value,
+            StoreCommitCoord::Serial {
+                sequence: prepared.authority.value.seq(),
+            },
+            prepared.authority.object.clone(),
+        )
+        .map_err(|error| DbError::Message(error.to_string()))?;
+        let expected_state = prepared.durable_state;
+        self.call(move |conn| {
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            let object_id = remote_object_id(&authority_ref.object);
+            let remote = load_remote_object_on(&tx, object_id)?;
+            if !remote
+                .candidate_cleanup_complete(&authority_ref)
+                .map_err(|error| {
+                    DbError::Message(format!(
+                        "validate losing Serial abandonment cleanup: {error}"
+                    ))
+                })?
+            {
+                return Err(DbError::Message(
+                    "losing Serial abandonment cleanup is incomplete".to_string(),
+                ));
+            }
+            let removed = tx
+                .execute(
+                    "DELETE FROM remote_objects WHERE object_id = ?1",
+                    [object_id.to_string()],
+                )
+                .map_err(DbError::from)?;
+            if removed != 1 {
+                return Err(DbError::Message(
+                    "losing Serial abandonment authority disappeared".to_string(),
+                ));
+            }
+            let removed = tx
+                .execute(
+                    "DELETE FROM protocol_state WHERE key = ?1 AND value = ?2",
+                    rusqlite::params![SERIAL_CANDIDATE_ABANDONMENT_STATE_KEY, expected_state],
+                )
+                .map_err(DbError::from)?;
+            if removed != 1 {
+                return Err(DbError::Message(
+                    "Serial abandonment durable state disappeared".to_string(),
+                ));
+            }
+            tx.commit().map_err(DbError::from)
         })
         .await
     }

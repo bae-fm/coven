@@ -617,15 +617,43 @@ impl CovenHandle {
         &self,
         branch_id: coven_core::PendingBranchId,
     ) -> CovenResult<()> {
-        let plan = self.prepare_pending_branch_resolution(&branch_id).await?;
-        self.sync_manager()
-            .ok_or_else(|| CovenError::SerialResolution("sync is not connected".to_string()))?
-            .cleanup_serial_candidates(branch_id.clone(), &plan)
-            .await
-            .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
-        self.db()
-            .discard_pending_serial_branch(branch_id, plan)
-            .await?;
+        match self.db().serial_branch_discard_state(&branch_id).await? {
+            coven_core::database::SerialBranchDiscardState::Local => {
+                self.db().discard_local_serial_branch(branch_id).await?;
+            }
+            coven_core::database::SerialBranchDiscardState::Abandonment => {
+                let outcome = self
+                    .sync_manager()
+                    .ok_or_else(|| {
+                        CovenError::SerialResolution("sync is not connected".to_string())
+                    })?
+                    .abandon_serial_branch(branch_id, &self.store_dir())
+                    .await
+                    .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
+                if matches!(
+                    outcome,
+                    coven_core::sync::store_outbound::SerialBranchAbandonment::OriginalBranchActivated
+                ) {
+                    return Err(CovenError::SerialResolution(
+                        "the original Serial branch activated before abandonment and cannot be discarded"
+                            .to_string(),
+                    ));
+                }
+            }
+            coven_core::database::SerialBranchDiscardState::Conflict => {
+                let plan = self.prepare_pending_branch_resolution(&branch_id).await?;
+                self.sync_manager()
+                    .ok_or_else(|| {
+                        CovenError::SerialResolution("sync is not connected".to_string())
+                    })?
+                    .cleanup_serial_candidates(branch_id.clone(), &plan)
+                    .await
+                    .map_err(|error| CovenError::SerialResolution(error.to_string()))?;
+                self.db()
+                    .discard_pending_serial_branch(branch_id, plan)
+                    .await?;
+            }
+        }
         self.sync_now();
         Ok(())
     }
@@ -1173,6 +1201,63 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn local_serial_branch_can_be_discarded_without_sync() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let handle = Coven::builder(config(StoreDir::new(tmp.path())))
+            .write_policy(WritePolicy::Serial)
+            .synced_tables(vec![gated_roots_table()])
+            .migrations(vec![gated_roots_migration()])
+            .open()
+            .expect("open local Serial store");
+        let receipt = handle
+            .sql(|ctx| {
+                ctx.execute(
+                    "INSERT INTO roots (id, title, shared, _updated_at)
+                     VALUES ('discard-me', 'local', 1, '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("write local Serial branch");
+        let branch_id = receipt
+            .pending_branch_id
+            .expect("local Serial write names its pending branch");
+        let second = handle
+            .sql(|ctx| {
+                ctx.execute(
+                    "INSERT INTO roots (id, title, shared, _updated_at)
+                     VALUES ('discard-me-too', 'local', 1, '2026-01-01T00:00:01Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("write another transaction on the local Serial branch");
+        assert_eq!(second.pending_branch_id.as_ref(), Some(&branch_id));
+
+        handle
+            .discard_pending_branch(branch_id)
+            .await
+            .expect("discard local Serial branch");
+
+        assert!(!row_exists(handle.db(), "SELECT 1 FROM roots WHERE id = 'discard-me'").await);
+        assert!(
+            !row_exists(
+                handle.db(),
+                "SELECT 1 FROM roots WHERE id = 'discard-me-too'"
+            )
+            .await
+        );
+        assert!(handle
+            .db()
+            .pending_branches()
+            .await
+            .expect("read discarded Serial branch")
+            .is_none());
+    }
+
     #[test]
     fn precreated_empty_sqlite_file_initializes_coven_metadata() {
         let tmp = tempfile::tempdir().expect("temp dir");
@@ -1632,6 +1717,7 @@ mod tests {
 
         assert_eq!(receipt.value, "saved");
         assert_eq!(receipt.status, coven_core::WriteStatus::LocalOnly);
+        assert!(receipt.pending_branch_id.is_none());
         assert_eq!(
             handle
                 .write_status(&receipt.write_id)
@@ -1696,6 +1782,7 @@ mod tests {
             .expect("mixed transaction");
 
         assert_eq!(receipt.status, coven_core::WriteStatus::Pending);
+        assert!(receipt.pending_branch_id.is_none());
         let pending = handle.pending_writes().await.expect("pending mixed write");
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].write_id, receipt.write_id);

@@ -111,8 +111,10 @@ let receipt = handle.sql(move |sql| {
 
 `receipt.value` is the closure's result. `receipt.write_id` remains stable across
 restart, and `receipt.status` is `LocalOnly` when no shared rows changed or
-`Pending` when this transaction awaits publication. One successful `sql` or
-`write` call creates one write id and one Store commit.
+`Pending` when this transaction awaits publication. In a `Serial` store,
+`receipt.pending_branch_id` names the ordered provisional branch containing the
+write; MergeConcurrent and local-only receipts carry `None`. One successful
+`sql` or `write` call creates one write id and one Store commit.
 
 Don't read the stamp as a wall-clock time or compare two of them as dates. It is
 an opaque clock value coven advances past pulled rows so a later local write
@@ -249,10 +251,13 @@ repaired, `handle.retry_blocked_write(&write_id)` requeues them and wakes sync;
 a Serial retry revalidates the complete ordered branch, including writes that
 remained pending. `handle.discard_blocked_write(&write_id)` atomically reverses
 that write and every later unpublished write whose local rows depend on it.
-For a `Serial` store, `handle.pending_branches()` returns the stale branch, if present;
-`handle.discard_pending_branch(...)` removes one explicitly, while
-`handle.replace_pending_branch(...)` reruns the host's intent against the
-current global state and commits the replacement atomically.
+For a `Serial` store, `handle.pending_branches()` returns the stale branch after
+a serialization conflict. The branch id on each Serial `WriteReceipt` also lets
+the host discard a provisional local branch before publication. If candidate
+objects may already exist remotely, discard publishes signed nonactivation
+authority and verifies exact cleanup before reversing local rows.
+`handle.replace_pending_branch(...)` reruns a stale branch's host intent against
+the current global state and commits the replacement atomically.
 
 ## Attachments
 

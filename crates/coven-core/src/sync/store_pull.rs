@@ -2920,6 +2920,21 @@ pub async fn cleanup_serial_candidates(
     Ok(())
 }
 
+pub async fn cleanup_serial_abandonment_authority(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    plan: &SerialResolutionPlan,
+) -> Result<(), StorePullError> {
+    let target = db
+        .prepare_serial_abandonment_authority_cleanup(plan)
+        .await?;
+    if let Some(target) = target {
+        super::store_objects::delete_exact_object(storage, &target.object).await?;
+        db.mark_candidate_cleanup_absent(target.object).await?;
+    }
+    Ok(())
+}
+
 pub async fn cleanup_merge_candidate(
     db: &Database,
     storage: &dyn SyncStorage,

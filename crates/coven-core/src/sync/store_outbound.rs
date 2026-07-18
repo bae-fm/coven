@@ -24,8 +24,9 @@ const SERIAL_COORDINATION_HEAD: &str = "serial_coordination_head";
 use crate::database::{
     Database, MergeCandidateAbandonmentPreparation, PreparedAudienceBlob, PreparedAudienceObjects,
     PreparedAudiencePackage, PreparedProtocolObject, PreparedSerialStoreBranch, PreparedStoreWrite,
-    SerialStoreWritePreparation, SerialStoreWritePreparationEntry, StoreWriteBase,
-    StoreWriteBlobFact, StoreWriteBlobFacts, StoreWritePreparation,
+    SerialCandidateAbandonmentPreparation, SerialStoreWritePreparation,
+    SerialStoreWritePreparationEntry, StoreWriteBase, StoreWriteBlobFact, StoreWriteBlobFacts,
+    StoreWritePreparation,
 };
 use crate::keys::UserKeypair;
 use crate::store_dir::StoreDir;
@@ -94,6 +95,25 @@ pub enum MergeCandidateAbandonment {
     NotRequired,
     Abandoned,
     CandidateActivated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SerialCandidateAbandonmentWinner {
+    Authority {
+        accepted: super::storage::VersionedObject,
+    },
+    OriginalBranch {
+        accepted: super::storage::VersionedObject,
+    },
+    Other {
+        current: StoreSerialPredecessor,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerialBranchAbandonment {
+    Discarded,
+    OriginalBranchActivated,
 }
 
 pub(crate) async fn exact_next_announcement_slot(
@@ -1333,6 +1353,341 @@ pub async fn prepare_merge_candidate_abandonment(
     Ok(true)
 }
 
+pub async fn prepare_serial_candidate_abandonment(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    branch_id: crate::PendingBranchId,
+) -> Result<bool, StoreOutboundError> {
+    if let Some(prepared) = db.prepared_serial_candidate_abandonment().await? {
+        if prepared.branch_id != branch_id {
+            return Err(StoreOutboundError::InvalidOutbound(
+                "another Serial branch already owns candidate abandonment".to_string(),
+            ));
+        }
+        return Ok(false);
+    }
+    let branch = db.prepared_serial_store_branch().await?.ok_or_else(|| {
+        StoreOutboundError::InvalidOutbound(
+            "Serial candidate abandonment requires an exact prepared branch".to_string(),
+        )
+    })?;
+    if branch.branch_id != branch_id {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "Serial candidate abandonment names another prepared branch".to_string(),
+        ));
+    }
+    let candidate = branch.writes.first().ok_or_else(|| {
+        StoreOutboundError::InvalidOutbound("prepared Serial branch has no candidates".to_string())
+    })?;
+    let (root, registration_ref, registration, device_signer) =
+        load_local_store_authority(db, device_id, identity_signer).await?;
+    if candidate.commit.value.author_registration != registration_ref {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "Serial candidate belongs to another local registration".to_string(),
+        ));
+    }
+    let coord = StoreCommitCoord::Serial {
+        sequence: candidate.commit.value.seq(),
+    };
+    let candidate_ref = StoreBatchCommitRef::from_commit(
+        &candidate.commit.value,
+        coord.clone(),
+        candidate.commit.object.clone(),
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let commit = StoreBatchCommit::signed_with_candidate_abandonment(
+        root.store_root_hash,
+        candidate.commit.value.write_id.clone(),
+        coord.clone(),
+        registration_ref.clone(),
+        &registration,
+        candidate.commit.value.order.clone(),
+        candidate.commit.value.membership_state.clone(),
+        candidate.commit.value.device_state.clone(),
+        vec![CandidateCleanupManifest {
+            candidate: StoreBatchCommitDeletionTarget {
+                coord: coord.clone(),
+                object: candidate.commit.object.clone(),
+                canonical_signed_bytes: candidate.commit.bytes.clone(),
+            },
+        }],
+        &device_signer,
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let context =
+        ProtocolObjectContext::store(root.store_root_hash, ProtocolObjectDomain::StoreCommit);
+    let prefix = commit_semantic_prefix(
+        commit.candidate_family(),
+        SERIAL_STREAM_ID,
+        commit.seq(),
+        commit.commit_hash(),
+    );
+    let slot = storage
+        .allocate_protocol_slot(&context, &prefix, ".json")
+        .await
+        .map_err(StoreObjectError::from)?;
+    let commit_prepared = storage
+        .prepare_protocol_object(&context, slot, &prefix, commit.to_bytes())
+        .map_err(StoreObjectError::from)?;
+    let authority_ref =
+        StoreBatchCommitRef::from_commit(&commit, coord, commit_prepared.reference().clone())
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    let head = StoreSerialHead::signed(
+        root.store_root_hash,
+        StoreSerialHeadState::Commit {
+            author_registration: registration_ref,
+            commit: authority_ref,
+        },
+        &device_signer,
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    db.prepare_serial_candidate_abandonment(SerialCandidateAbandonmentPreparation {
+        branch_id,
+        candidate: candidate_ref,
+        commit: PreparedProtocolObject {
+            value: commit,
+            prepared: commit_prepared,
+        },
+        head,
+        original_head_bytes: branch.head.bytes,
+    })
+    .await?;
+    Ok(true)
+}
+
+pub async fn publish_serial_candidate_abandonment(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    branch_id: crate::PendingBranchId,
+) -> Result<SerialCandidateAbandonmentWinner, StoreOutboundError> {
+    let prepared = db
+        .prepared_serial_candidate_abandonment()
+        .await?
+        .ok_or_else(|| {
+            StoreOutboundError::InvalidOutbound(
+                "Serial candidate abandonment is not prepared".to_string(),
+            )
+        })?;
+    if prepared.branch_id != branch_id {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "Serial abandonment belongs to another branch".to_string(),
+        ));
+    }
+    let classify = |observed: SerialHeadObservation| {
+        let accepted = observed.versioned().ok_or_else(|| {
+            StoreOutboundError::InvalidOutbound(
+                "Serial abandonment observed no versioned coordination head".to_string(),
+            )
+        })?;
+        if observed.bytes() == Some(prepared.head.bytes.as_slice()) {
+            return Ok(SerialCandidateAbandonmentWinner::Authority { accepted });
+        }
+        if observed.bytes() == Some(prepared.original_head_bytes.as_slice()) {
+            return Ok(SerialCandidateAbandonmentWinner::OriginalBranch { accepted });
+        }
+        Ok(SerialCandidateAbandonmentWinner::Other {
+            current: observed.predecessor()?,
+        })
+    };
+    let observed = observe_serial_head(db, coordination).await?;
+    if observed.bytes() == Some(prepared.head.bytes.as_slice())
+        || observed.bytes() == Some(prepared.original_head_bytes.as_slice())
+        || observed.predecessor()? != db.exact_serial_predecessor(prepared.base.clone()).await?
+    {
+        return classify(observed);
+    }
+    if observed.bytes() != Some(prepared.base_head.bytes.as_slice())
+        || observed.version() != Some(&prepared.base_head.version)
+    {
+        return Err(StoreOutboundError::InvalidState {
+            key: SERIAL_COORDINATION_HEAD,
+            reason: "bytes or provider version changed at the abandonment base".to_string(),
+        });
+    }
+    storage
+        .create_protocol_object(&prepared.authority.prepared)
+        .await
+        .map_err(StoreObjectError::from)?;
+    let context = ProtocolObjectContext::store(
+        prepared.authority.value.store_root_hash,
+        ProtocolObjectDomain::StoreCommit,
+    );
+    let prefix = commit_semantic_prefix(
+        prepared.authority.value.candidate_family(),
+        SERIAL_STREAM_ID,
+        prepared.authority.value.seq(),
+        prepared.authority.value.commit_hash(),
+    );
+    let opened = storage
+        .read_protocol_object(&context, &prepared.authority.object, &prefix)
+        .await
+        .map_err(StoreObjectError::from)?;
+    if opened != prepared.authority.bytes {
+        return Err(StoreOutboundError::InvalidOutbound(
+            "Serial abandonment commit exact readback differs from its signed bytes".to_string(),
+        ));
+    }
+    let authority_ref = StoreBatchCommitRef::from_commit(
+        &prepared.authority.value,
+        StoreCommitCoord::Serial {
+            sequence: prepared.authority.value.seq(),
+        },
+        prepared.authority.object.clone(),
+    )
+    .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+    db.mark_candidate_commit_uploaded(authority_ref).await?;
+    let activation = coordination
+        .replace_head(
+            serial_head_key(),
+            &prepared.base_head.version,
+            &prepared.head.bytes,
+        )
+        .await;
+    match activation {
+        Ok(accepted) if accepted.bytes == prepared.head.bytes => {
+            Ok(SerialCandidateAbandonmentWinner::Authority { accepted })
+        }
+        Ok(_) => Err(StoreOutboundError::InvalidOutbound(
+            "Serial abandonment head readback differs from its signed bytes".to_string(),
+        )),
+        Err(ReplaceHeadError::Coordination(error)) => {
+            let after = observe_serial_head(db, coordination).await?;
+            if after.bytes() != Some(prepared.base_head.bytes.as_slice())
+                || after.version() != Some(&prepared.base_head.version)
+            {
+                classify(after)
+            } else {
+                Err(StoreOutboundError::Coordination(error))
+            }
+        }
+        Err(ReplaceHeadError::VersionMismatch) => {
+            classify(observe_serial_head(db, coordination).await?)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn abandon_serial_branch(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    device_id: &str,
+    identity_signer: &UserKeypair,
+    store_dir: &StoreDir,
+    branch_id: crate::PendingBranchId,
+) -> Result<SerialBranchAbandonment, StoreOutboundError> {
+    prepare_serial_candidate_abandonment(
+        db,
+        storage,
+        device_id,
+        identity_signer,
+        branch_id.clone(),
+    )
+    .await?;
+    let prepared = db
+        .prepared_serial_candidate_abandonment()
+        .await?
+        .ok_or_else(|| {
+            StoreOutboundError::InvalidOutbound(
+                "Serial candidate abandonment disappeared after preparation".to_string(),
+            )
+        })?;
+    let winner =
+        publish_serial_candidate_abandonment(db, storage, coordination, branch_id.clone()).await?;
+    let root = required_store_root(db).await?;
+    match winner {
+        SerialCandidateAbandonmentWinner::OriginalBranch { accepted } => {
+            let plan = super::store_pull::prepare_serial_resolution(
+                db,
+                storage,
+                coordination,
+                root.store_root_hash,
+                store_dir,
+                prepared.base,
+                identity_signer,
+            )
+            .await?;
+            super::store_pull::cleanup_serial_abandonment_authority(db, storage, &plan).await?;
+            db.remove_losing_serial_abandonment_authority().await?;
+            db.complete_prepared_serial_branch(accepted).await?;
+            Ok(SerialBranchAbandonment::OriginalBranchActivated)
+        }
+        SerialCandidateAbandonmentWinner::Authority { .. } => {
+            let authority_ref = StoreBatchCommitRef::from_commit(
+                &prepared.authority.value,
+                StoreCommitCoord::Serial {
+                    sequence: prepared.authority.value.seq(),
+                },
+                prepared.authority.object,
+            )
+            .map_err(|error| StoreOutboundError::InvalidOutbound(error.to_string()))?;
+            db.mark_serial_branch_conflict(
+                branch_id.clone(),
+                prepared.base.clone(),
+                StoreSerialPredecessor::Commit(authority_ref),
+            )
+            .await?;
+            finish_serial_branch_abandonment(
+                db,
+                storage,
+                coordination,
+                identity_signer,
+                store_dir,
+                root.store_root_hash,
+                branch_id,
+                prepared.base,
+            )
+            .await
+        }
+        SerialCandidateAbandonmentWinner::Other { current } => {
+            db.mark_serial_branch_conflict(branch_id.clone(), prepared.base.clone(), current)
+                .await?;
+            finish_serial_branch_abandonment(
+                db,
+                storage,
+                coordination,
+                identity_signer,
+                store_dir,
+                root.store_root_hash,
+                branch_id,
+                prepared.base,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_serial_branch_abandonment(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    coordination: &dyn CoordinationStorage,
+    identity_signer: &UserKeypair,
+    store_dir: &StoreDir,
+    store_root_hash: ObjectHash,
+    branch_id: crate::PendingBranchId,
+    branch_base: Option<StoreBatchCommitRef>,
+) -> Result<SerialBranchAbandonment, StoreOutboundError> {
+    let plan = super::store_pull::prepare_serial_resolution(
+        db,
+        storage,
+        coordination,
+        store_root_hash,
+        store_dir,
+        branch_base,
+        identity_signer,
+    )
+    .await?;
+    super::store_pull::cleanup_serial_candidates(db, storage, branch_id.clone(), &plan).await?;
+    super::store_pull::cleanup_serial_abandonment_authority(db, storage, &plan).await?;
+    db.discard_serial_branch_after_abandonment(branch_id, plan)
+        .await?;
+    Ok(SerialBranchAbandonment::Discarded)
+}
+
 pub async fn abandon_merge_candidate(
     db: &Database,
     storage: &dyn SyncStorage,
@@ -2352,6 +2707,9 @@ async fn drain_serial_store_branch(
     storage: &dyn SyncStorage,
     coordination: &dyn CoordinationStorage,
 ) -> Result<u64, StoreOutboundError> {
+    if db.prepared_serial_candidate_abandonment().await?.is_some() {
+        return Ok(0);
+    }
     let Some(branch) = db.prepared_serial_store_branch().await? else {
         return Ok(0);
     };
@@ -3111,6 +3469,7 @@ mod tests {
     use crate::sync::storage::VersionedObject;
     use crate::sync::test_helpers::{
         create_exact_test_store, host_exec, open_serial_test_db, open_test_db, temp_store_dir,
+        test_migrations, test_synced_tables,
     };
 
     fn exact_partition_blob(
@@ -3621,6 +3980,470 @@ mod tests {
                     if matches!(position.as_ref(), crate::PublishedPosition::Serial { .. })
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn serial_candidate_abandonment_persists_and_wins_the_branch_base() {
+        let (_home, storage, db, keypair, _root, pending) =
+            serial_fixture("serial-candidate-abandonment").await;
+        let (_temp, store_dir) = temp_store_dir();
+        assert!(prepare_pending_store_write_with_coordination(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().unwrap()),
+            &local_device_id(&db).await,
+            "2026-01-01T00:00:00Z",
+            &keypair,
+            &store_dir,
+            None,
+        )
+        .await
+        .expect("prepare exact Serial branch"));
+        let branch_id = crate::PendingBranchId::from_first_write(pending[0].write_id.clone());
+        assert!(prepare_serial_candidate_abandonment(
+            &db,
+            &storage,
+            &local_device_id(&db).await,
+            &keypair,
+            branch_id.clone(),
+        )
+        .await
+        .expect("persist exact Serial abandonment"));
+        let durable = db
+            .prepared_serial_candidate_abandonment()
+            .await
+            .expect("reload Serial abandonment")
+            .expect("Serial abandonment exists");
+        assert_eq!(durable.branch_id, branch_id);
+        assert_eq!(durable.authority.value.write_id, pending[0].write_id);
+        assert!(matches!(
+            durable.authority.value.body,
+            super::super::store_commit::StoreCommitBody::AbandonCandidates { .. }
+        ));
+
+        let outcome = abandon_serial_branch(
+            &db,
+            &storage,
+            storage.serial_coordination().unwrap(),
+            &local_device_id(&db).await,
+            &keypair,
+            &store_dir,
+            branch_id,
+        )
+        .await
+        .expect("activate and apply Serial abandonment");
+        assert_eq!(outcome, SerialBranchAbandonment::Discarded);
+        assert!(db
+            .prepared_serial_candidate_abandonment()
+            .await
+            .expect("read completed abandonment")
+            .is_none());
+        for write in pending {
+            assert!(matches!(
+                db.write_status(&write.write_id).await.unwrap(),
+                crate::WriteStatus::Resolved(crate::WriteResolution::Discarded)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn original_serial_branch_activation_wins_abandonment_race() {
+        let (_home, storage, db, keypair, root, pending) =
+            serial_fixture("serial-abandonment-original-wins").await;
+        let (_temp, store_dir) = temp_store_dir();
+        assert!(prepare_pending_store_write_with_coordination(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().unwrap()),
+            &local_device_id(&db).await,
+            "2026-01-01T00:00:00Z",
+            &keypair,
+            &store_dir,
+            None,
+        )
+        .await
+        .expect("prepare exact Serial branch"));
+        let branch_id = crate::PendingBranchId::from_first_write(pending[0].write_id.clone());
+        assert!(prepare_serial_candidate_abandonment(
+            &db,
+            &storage,
+            &local_device_id(&db).await,
+            &keypair,
+            branch_id.clone(),
+        )
+        .await
+        .expect("persist Serial abandonment"));
+        let branch = db
+            .prepared_serial_store_branch()
+            .await
+            .expect("load original Serial branch")
+            .expect("original Serial branch exists");
+        for write in &branch.writes {
+            publish_prepared_remote_objects(
+                &db,
+                &storage,
+                &write.commit.value.write_id,
+                root.store_root_hash,
+            )
+            .await
+            .expect("publish original candidate objects");
+            storage
+                .create_protocol_object(&write.commit.prepared)
+                .await
+                .expect("publish original candidate commit");
+            let reference = StoreBatchCommitRef::from_commit(
+                &write.commit.value,
+                StoreCommitCoord::Serial {
+                    sequence: write.commit.value.seq(),
+                },
+                write.commit.object.clone(),
+            )
+            .expect("reference original candidate");
+            db.mark_candidate_commit_uploaded(reference)
+                .await
+                .expect("record original candidate upload");
+        }
+        let coordination = storage.serial_coordination().unwrap();
+        let current = coordination
+            .read_head(serial_head_key())
+            .await
+            .expect("read Serial base head");
+        coordination
+            .replace_head(serial_head_key(), &current.version, &branch.head.bytes)
+            .await
+            .expect("activate original Serial branch");
+
+        assert_eq!(
+            abandon_serial_branch(
+                &db,
+                &storage,
+                coordination,
+                &local_device_id(&db).await,
+                &keypair,
+                &store_dir,
+                branch_id,
+            )
+            .await
+            .expect("settle original Serial winner"),
+            SerialBranchAbandonment::OriginalBranchActivated,
+        );
+        for write in pending {
+            assert!(matches!(
+                db.write_status(&write.write_id).await.unwrap(),
+                crate::WriteStatus::Published(_)
+            ));
+        }
+        assert!(db
+            .prepared_serial_candidate_abandonment()
+            .await
+            .expect("read completed abandonment")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn third_serial_successor_discards_both_losing_candidate_families() {
+        let (_home, storage, db, keypair, _root, pending) =
+            serial_fixture("serial-abandonment-third-wins").await;
+        let (_temp, store_dir) = temp_store_dir();
+        assert!(prepare_pending_store_write_with_coordination(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().unwrap()),
+            &local_device_id(&db).await,
+            "2026-01-01T00:00:00Z",
+            &keypair,
+            &store_dir,
+            None,
+        )
+        .await
+        .expect("prepare exact Serial branch"));
+        let branch_id = crate::PendingBranchId::from_first_write(pending[0].write_id.clone());
+        assert!(prepare_serial_candidate_abandonment(
+            &db,
+            &storage,
+            &local_device_id(&db).await,
+            &keypair,
+            branch_id.clone(),
+        )
+        .await
+        .expect("persist Serial abandonment"));
+        competing_head(&db, &storage, &keypair, "third-winner").await;
+
+        assert_eq!(
+            abandon_serial_branch(
+                &db,
+                &storage,
+                storage.serial_coordination().unwrap(),
+                &local_device_id(&db).await,
+                &keypair,
+                &store_dir,
+                branch_id,
+            )
+            .await
+            .expect("settle third Serial winner"),
+            SerialBranchAbandonment::Discarded,
+        );
+        for write in pending {
+            assert!(matches!(
+                db.write_status(&write.write_id).await.unwrap(),
+                crate::WriteStatus::Resolved(crate::WriteResolution::Discarded)
+            ));
+        }
+        assert!(db
+            .prepared_serial_candidate_abandonment()
+            .await
+            .expect("read completed abandonment")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn serial_abandonment_retries_commit_publication_and_candidate_cleanup() {
+        for failure in ["commit", "cleanup"] {
+            let (home, storage, db, keypair, root, pending) =
+                serial_fixture(&format!("serial-abandonment-retry-{failure}")).await;
+            let (_temp, store_dir) = temp_store_dir();
+            assert!(prepare_pending_store_write_with_coordination(
+                &db,
+                &storage,
+                Some(storage.serial_coordination().unwrap()),
+                &local_device_id(&db).await,
+                "2026-01-01T00:00:00Z",
+                &keypair,
+                &store_dir,
+                None,
+            )
+            .await
+            .expect("prepare exact Serial branch"));
+            let branch_id = crate::PendingBranchId::from_first_write(pending[0].write_id.clone());
+            if failure == "cleanup" {
+                let branch = db
+                    .prepared_serial_store_branch()
+                    .await
+                    .expect("load Serial branch")
+                    .expect("Serial branch exists");
+                let first = branch.writes.first().expect("branch has a first candidate");
+                publish_prepared_remote_objects(
+                    &db,
+                    &storage,
+                    &first.commit.value.write_id,
+                    root.store_root_hash,
+                )
+                .await
+                .expect("publish first candidate objects");
+                storage
+                    .create_protocol_object(&first.commit.prepared)
+                    .await
+                    .expect("publish first candidate commit");
+                let reference = StoreBatchCommitRef::from_commit(
+                    &first.commit.value,
+                    StoreCommitCoord::Serial {
+                        sequence: first.commit.value.seq(),
+                    },
+                    first.commit.object.clone(),
+                )
+                .expect("reference first candidate");
+                db.mark_candidate_commit_uploaded(reference)
+                    .await
+                    .expect("record first candidate upload");
+                home.fail_exact_delete_on_call(1);
+            } else {
+                home.fail_exact_create_before_call(1);
+            }
+            assert!(abandon_serial_branch(
+                &db,
+                &storage,
+                storage.serial_coordination().unwrap(),
+                &local_device_id(&db).await,
+                &keypair,
+                &store_dir,
+                branch_id.clone(),
+            )
+            .await
+            .is_err());
+            assert_eq!(
+                db.serial_branch_discard_state(&branch_id)
+                    .await
+                    .expect("read resumable Serial discard"),
+                crate::database::SerialBranchDiscardState::Abandonment,
+            );
+            assert_eq!(
+                abandon_serial_branch(
+                    &db,
+                    &storage,
+                    storage.serial_coordination().unwrap(),
+                    &local_device_id(&db).await,
+                    &keypair,
+                    &store_dir,
+                    branch_id,
+                )
+                .await
+                .expect("resume Serial abandonment"),
+                SerialBranchAbandonment::Discarded,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn serial_abandonment_resumes_candidate_cleanup_after_database_reopen() {
+        let database_temp = tempfile::tempdir().expect("temporary database directory");
+        let database_path = database_temp.path().join("serial-abandonment.db");
+        let tables = test_synced_tables();
+        let migrations = test_migrations();
+        let (db, _) = Database::open(
+            &database_path,
+            tables.clone(),
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::Serial,
+            "test-device".to_string(),
+            &migrations,
+        )
+        .expect("open file-backed Serial database");
+        let home = InMemoryCloudHome::new();
+        let keypair = UserKeypair::generate();
+        let storage = CloudSyncStorage::new(
+            Arc::new(home.clone()),
+            CloudCipher::Plaintext,
+            BlobPathScheme::Plain,
+            "serial-abandonment-reopen",
+            keypair.clone(),
+        )
+        .expect("create Serial storage")
+        .with_test_serial_coordination(Arc::new(home.clone()));
+        let (root, _) =
+            initialize_exact_store(&db, &storage, "serial-abandonment-reopen", &keypair).await;
+        host_exec(
+            &db,
+            "INSERT INTO notes (id, title, body, shared, _updated_at, created_at) \
+             VALUES ('serial-reopen', 'first', NULL, 1, '0000000001000-0000-writer', '2026-01-01')",
+        )
+        .await;
+        let (_store_temp, store_dir) = temp_store_dir();
+        let pending = db
+            .pending_writes()
+            .await
+            .expect("read pending Serial write");
+        assert!(prepare_pending_store_write_with_coordination(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().expect("Serial coordination")),
+            &local_device_id(&db).await,
+            "2026-01-01T00:00:00Z",
+            &keypair,
+            &store_dir,
+            None,
+        )
+        .await
+        .expect("prepare exact Serial branch"));
+        let branch_id = crate::PendingBranchId::from_first_write(pending[0].write_id.clone());
+        let branch = db
+            .prepared_serial_store_branch()
+            .await
+            .expect("load prepared Serial branch")
+            .expect("prepared Serial branch exists");
+        let first = branch.writes.first().expect("branch has a first candidate");
+        publish_prepared_remote_objects(
+            &db,
+            &storage,
+            &first.commit.value.write_id,
+            root.store_root_hash,
+        )
+        .await
+        .expect("publish first candidate objects");
+        storage
+            .create_protocol_object(&first.commit.prepared)
+            .await
+            .expect("publish first candidate commit");
+        let reference = StoreBatchCommitRef::from_commit(
+            &first.commit.value,
+            StoreCommitCoord::Serial {
+                sequence: first.commit.value.seq(),
+            },
+            first.commit.object.clone(),
+        )
+        .expect("reference first candidate");
+        db.mark_candidate_commit_uploaded(reference)
+            .await
+            .expect("record first candidate upload");
+        home.fail_exact_delete_on_call(1);
+        assert!(abandon_serial_branch(
+            &db,
+            &storage,
+            storage.serial_coordination().expect("Serial coordination"),
+            &local_device_id(&db).await,
+            &keypair,
+            &store_dir,
+            branch_id.clone(),
+        )
+        .await
+        .is_err());
+        drop(db);
+
+        let (reopened, _) = Database::open(
+            &database_path,
+            tables,
+            crate::blob::BLOB_TOMBSTONE_GRACE,
+            crate::blob::TransferLimits::serial(),
+            crate::WritePolicy::Serial,
+            "test-device".to_string(),
+            &migrations,
+        )
+        .expect("reopen Serial database");
+        assert_eq!(
+            abandon_serial_branch(
+                &reopened,
+                &storage,
+                storage.serial_coordination().expect("Serial coordination"),
+                &local_device_id(&reopened).await,
+                &keypair,
+                &store_dir,
+                branch_id,
+            )
+            .await
+            .expect("resume Serial abandonment after reopen"),
+            SerialBranchAbandonment::Discarded,
+        );
+        assert!(reopened
+            .prepared_serial_candidate_abandonment()
+            .await
+            .expect("read completed abandonment")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn serial_abandonment_settles_a_lost_success_response_by_head_readback() {
+        let (home, storage, db, keypair, _root, pending) =
+            serial_fixture("serial-abandonment-lost-response").await;
+        let (_temp, store_dir) = temp_store_dir();
+        assert!(prepare_pending_store_write_with_coordination(
+            &db,
+            &storage,
+            Some(storage.serial_coordination().unwrap()),
+            &local_device_id(&db).await,
+            "2026-01-01T00:00:00Z",
+            &keypair,
+            &store_dir,
+            None,
+        )
+        .await
+        .expect("prepare exact Serial branch"));
+        let branch_id = crate::PendingBranchId::from_first_write(pending[0].write_id.clone());
+        home.fail_next_head_mutation_after_visibility();
+
+        assert_eq!(
+            abandon_serial_branch(
+                &db,
+                &storage,
+                storage.serial_coordination().unwrap(),
+                &local_device_id(&db).await,
+                &keypair,
+                &store_dir,
+                branch_id,
+            )
+            .await
+            .expect("settle lost Serial abandonment response"),
+            SerialBranchAbandonment::Discarded,
+        );
     }
 
     #[tokio::test]
