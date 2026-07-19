@@ -3291,8 +3291,11 @@ impl PreparedCircleOperationRow {
     fn from_journal(
         journal: crate::sync::circle_ops::CircleOperationJournal,
     ) -> Result<Self, DbError> {
+        journal
+            .validate_identity()
+            .map_err(|error| DbError::Message(error.to_string()))?;
         let operation_id = journal.operation_id.as_str().to_string();
-        let circle_id = journal.circle_id().to_string();
+        let circle_id = journal.circle_id.to_string();
         let payload = serde_json::to_vec(&journal).map_err(|error| {
             DbError::Message(format!("serialize circle operation journal: {error}"))
         })?;
@@ -3302,6 +3305,56 @@ impl PreparedCircleOperationRow {
             payload,
         })
     }
+}
+
+fn parse_circle_operation_row(
+    stored_operation_id: &str,
+    stored_circle_id: &str,
+    payload: &[u8],
+) -> Result<crate::sync::circle_ops::CircleOperationJournal, DbError> {
+    let journal: crate::sync::circle_ops::CircleOperationJournal = serde_json::from_slice(payload)
+        .map_err(|error| DbError::Message(format!("parse circle operation journal: {error}")))?;
+    journal
+        .validate_identity()
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    if journal.operation_id.as_str() != stored_operation_id {
+        return Err(DbError::Message(format!(
+            "circle operation id row names {stored_operation_id} but its payload operation id is {}",
+            journal.operation_id
+        )));
+    }
+    if journal.circle_id.to_string() != stored_circle_id {
+        return Err(DbError::Message(format!(
+            "circle operation {stored_operation_id} row names circle {stored_circle_id} but its payload circle id is {}",
+            journal.circle_id
+        )));
+    }
+    Ok(journal)
+}
+
+fn load_circle_operation_on(
+    conn: &Connection,
+    operation_id: &str,
+) -> Result<Option<crate::sync::circle_ops::CircleOperationJournal>, DbError> {
+    conn.query_row(
+        "SELECT operation_id, circle_id, payload
+         FROM circle_operations
+         WHERE operation_id = ?1",
+        [operation_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(DbError::from)?
+    .map(|(operation_id, circle_id, payload)| {
+        parse_circle_operation_row(&operation_id, &circle_id, &payload)
+    })
+    .transpose()
 }
 
 impl Database {
@@ -12666,25 +12719,11 @@ impl Database {
 
     pub(crate) async fn circle_operation(
         &self,
-        circle_id: crate::sync::circle::CircleId,
+        operation_id: &crate::sync::circle::CircleOperationId,
     ) -> Result<Option<crate::sync::circle_ops::CircleOperationJournal>, DbError> {
-        let circle_id = circle_id.to_string();
-        self.call(move |conn| {
-            conn.query_row(
-                "SELECT payload FROM circle_operations WHERE circle_id = ?1",
-                [circle_id],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(DbError::from)?
-            .map(|payload| {
-                serde_json::from_slice(&payload).map_err(|error| {
-                    DbError::Message(format!("parse circle operation journal: {error}"))
-                })
-            })
-            .transpose()
-        })
-        .await
+        let operation_id = operation_id.as_str().to_string();
+        self.call(move |conn| load_circle_operation_on(conn, &operation_id))
+            .await
     }
 
     pub(crate) async fn oldest_pending_circle_operation(
@@ -12692,17 +12731,24 @@ impl Database {
     ) -> Result<Option<crate::sync::circle_ops::CircleOperationJournal>, DbError> {
         self.call(|conn| {
             let mut statement = conn
-                .prepare("SELECT payload FROM circle_operations ORDER BY rowid")
+                .prepare(
+                    "SELECT operation_id, circle_id, payload
+                     FROM circle_operations
+                     ORDER BY rowid",
+                )
                 .map_err(DbError::from)?;
             let rows = statement
-                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
                 .map_err(DbError::from)?;
-            for payload in rows {
-                let payload = payload.map_err(DbError::from)?;
-                let journal: crate::sync::circle_ops::CircleOperationJournal =
-                    serde_json::from_slice(&payload).map_err(|error| {
-                        DbError::Message(format!("parse circle operation journal: {error}"))
-                    })?;
+            for row in rows {
+                let (operation_id, circle_id, payload) = row.map_err(DbError::from)?;
+                let journal = parse_circle_operation_row(&operation_id, &circle_id, &payload)?;
                 if matches!(
                     journal.state(),
                     crate::sync::circle::CircleOperationState::Pending
@@ -12715,70 +12761,29 @@ impl Database {
         .await
     }
 
-    #[doc(hidden)]
-    pub async fn discard_blocked_circle_operation(
-        &self,
-        circle_id: crate::sync::circle::CircleId,
-    ) -> Result<(), DbError> {
-        let circle_id = circle_id.to_string();
-        self.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let payload = tx
-                .query_row(
-                    "SELECT payload FROM circle_operations WHERE circle_id = ?1",
-                    [&circle_id],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()
-                .map_err(DbError::from)?;
-            let Some(payload) = payload else {
-                tx.commit().map_err(DbError::from)?;
-                return Ok(());
-            };
-            let journal: crate::sync::circle_ops::CircleOperationJournal =
-                serde_json::from_slice(&payload).map_err(|error| {
-                    DbError::Message(format!("parse circle operation journal: {error}"))
-                })?;
-            match journal.state() {
-                crate::sync::circle::CircleOperationState::Pending => {
-                    return Err(DbError::Message(format!(
-                        "pending circle operation {circle_id} cannot be discarded"
-                    )));
-                }
-                crate::sync::circle::CircleOperationState::Blocked { .. } => {}
-            }
-            let deleted = tx
-                .execute(
-                    "DELETE FROM circle_operations WHERE circle_id = ?1",
-                    [&circle_id],
-                )
-                .map_err(DbError::from)?;
-            if deleted != 1 {
-                return Err(DbError::Message(format!(
-                    "blocked circle operation {circle_id} disappeared during discard"
-                )));
-            }
-            tx.commit().map_err(DbError::from)
-        })
-        .await
-    }
-
     pub async fn get_circle_operations(
         &self,
     ) -> Result<Vec<crate::sync::circle::CircleOperationInfo>, DbError> {
         self.call(|conn| {
             let mut statement = conn
-                .prepare("SELECT payload FROM circle_operations ORDER BY rowid")
+                .prepare(
+                    "SELECT operation_id, circle_id, payload
+                     FROM circle_operations
+                     ORDER BY rowid",
+                )
                 .map_err(DbError::from)?;
             let operations = statement
-                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
                 .map_err(DbError::from)?
-                .map(|payload| {
-                    let payload = payload.map_err(DbError::from)?;
-                    let journal: crate::sync::circle_ops::CircleOperationJournal =
-                        serde_json::from_slice(&payload).map_err(|error| {
-                            DbError::Message(format!("parse circle operation journal: {error}"))
-                        })?;
+                .map(|row| {
+                    let (operation_id, circle_id, payload) = row.map_err(DbError::from)?;
+                    let journal = parse_circle_operation_row(&operation_id, &circle_id, &payload)?;
                     Ok(crate::sync::circle::CircleOperationInfo {
                         operation_id: journal.operation_id.clone(),
                         circle_id: journal.circle_id(),
@@ -13091,7 +13096,14 @@ impl Database {
     ) -> Result<(), DbError> {
         let row = PreparedCircleOperationRow::from_journal(journal)?;
         self.call(move |conn| {
-            let updated = conn
+            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            load_circle_operation_on(&tx, &row.operation_id)?.ok_or_else(|| {
+                DbError::Message(format!(
+                    "circle operation {} disappeared during publication",
+                    row.operation_id
+                ))
+            })?;
+            let updated = tx
                 .execute(
                     "UPDATE circle_operations SET payload = ?3
                      WHERE operation_id = ?1 AND circle_id = ?2",
@@ -13103,20 +13115,19 @@ impl Database {
                     "circle operation disappeared during publication".to_string(),
                 ));
             }
-            Ok(())
+            tx.commit().map_err(DbError::from)
         })
         .await
     }
 
     pub(crate) async fn block_circle_operation(
         &self,
-        circle_id: crate::sync::circle::CircleId,
+        operation_id: &crate::sync::circle::CircleOperationId,
         reason: String,
     ) -> Result<(), DbError> {
-        let mut journal = self
-            .circle_operation(circle_id)
-            .await?
-            .ok_or_else(|| DbError::Message(format!("circle operation {circle_id} is absent")))?;
+        let mut journal = self.circle_operation(operation_id).await?.ok_or_else(|| {
+            DbError::Message(format!("circle operation {operation_id} is absent"))
+        })?;
         journal
             .block(reason)
             .map_err(|error| DbError::Message(error.to_string()))?;
@@ -13131,6 +13142,22 @@ impl Database {
         let identity = identity.clone();
         self.call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
+            journal
+                .validate_identity()
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let durable = load_circle_operation_on(&tx, journal.operation_id.as_str())?
+                .ok_or_else(|| {
+                    DbError::Message(format!(
+                        "circle operation {} disappeared during activation",
+                        journal.operation_id
+                    ))
+                })?;
+            if durable != journal {
+                return Err(DbError::Message(format!(
+                    "circle operation {} changed before activation",
+                    journal.operation_id
+                )));
+            }
             if !matches!(
                 journal.state(),
                 crate::sync::circle::CircleOperationState::Pending

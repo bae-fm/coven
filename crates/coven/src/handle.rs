@@ -1448,18 +1448,6 @@ impl CovenHandle {
             .await
             .map_err(SyncError::from)
     }
-
-    /// Discard a blocked circle command. Repeating the discard is a no-op;
-    /// pending commands must finish or become blocked before they can be discarded.
-    pub async fn discard_circle_operation(
-        &self,
-        circle_id: crate::CircleId,
-    ) -> Result<(), SyncError> {
-        self.db
-            .discard_blocked_circle_operation(circle_id)
-            .await
-            .map_err(SyncError::from)
-    }
 }
 
 #[cfg(test)]

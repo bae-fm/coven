@@ -940,6 +940,28 @@ mod tests {
     }
 
     #[test]
+    fn circle_operation_journal_allows_one_pending_operation_per_circle() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        apply_coven_schema(&conn).expect("apply coven schema");
+        conn.execute(
+            "INSERT INTO circle_operations (operation_id, circle_id, payload)
+             VALUES ('operation-a', 'circle-a', x'7b7d')",
+            [],
+        )
+        .expect("insert first pending Circle operation");
+
+        let error = conn
+            .execute(
+                "INSERT INTO circle_operations (operation_id, circle_id, payload)
+                 VALUES ('operation-b', 'circle-a', x'7b7d')",
+                [],
+            )
+            .expect_err("a Circle cannot have a second pending operation");
+
+        assert!(error.to_string().contains("circle_operations.circle_id"));
+    }
+
+    #[test]
     fn prepared_blob_identity_is_the_exact_remote_object() {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
         apply_coven_schema(&conn).expect("apply coven schema");

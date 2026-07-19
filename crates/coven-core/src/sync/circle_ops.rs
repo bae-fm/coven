@@ -79,7 +79,7 @@ pub(crate) enum CircleOperationIntent {
     Rename { name: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CircleOperationProgress {
     Ready(Box<PreparedCircleOperation>),
@@ -89,17 +89,18 @@ pub(crate) enum CircleOperationProgress {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CircleOperationJournal {
     pub operation_id: CircleOperationId,
+    pub circle_id: CircleId,
     pub intent: CircleOperationIntent,
     pub progress: CircleOperationProgress,
 }
 
 impl CircleOperationJournal {
     pub(crate) fn circle_id(&self) -> CircleId {
-        self.operation().creation.circle_id
+        self.circle_id
     }
 
     pub(crate) fn operation(&self) -> &PreparedCircleOperation {
@@ -140,6 +141,25 @@ impl CircleOperationJournal {
     pub(crate) fn commit(&self) -> Result<StoreBatchCommit, CircleOperationError> {
         serde_json::from_slice(&self.operation().commit_bytes)
             .map_err(|error| CircleOperationError::Journal(format!("parse Store commit: {error}")))
+    }
+
+    pub(crate) fn validate_identity(&self) -> Result<(), CircleOperationError> {
+        if self.operation().creation.circle_id != self.circle_id {
+            return Err(CircleOperationError::Journal(format!(
+                "circle operation {} payload names circle {} but its operation names circle {}",
+                self.operation_id,
+                self.circle_id,
+                self.operation().creation.circle_id
+            )));
+        }
+        let commit = self.commit()?;
+        if commit.write_id.as_str() != self.operation_id.as_str() {
+            return Err(CircleOperationError::Journal(format!(
+                "circle operation id {} differs from payload commit operation id {}",
+                self.operation_id, commit.write_id
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn kind(&self) -> CircleOperationKind {
@@ -658,8 +678,9 @@ pub(crate) async fn create_circle(
     )
     .await?;
     let circle_id = journal.circle_id();
+    let operation_id = journal.operation_id.clone();
     db.insert_circle_operation(journal).await?;
-    publish_circle_operation(db, storage, coordination, circle_id, signer).await?;
+    publish_circle_operation(db, storage, coordination, &operation_id, signer).await?;
     Ok(circle_id)
 }
 
@@ -728,8 +749,9 @@ pub(crate) async fn rename_circle(
             "prepared Circle rename changed Circle identity".to_string(),
         ));
     }
+    let operation_id = journal.operation_id.clone();
     db.insert_circle_operation(journal).await?;
-    publish_circle_operation(db, storage, coordination, circle_id, signer).await
+    publish_circle_operation(db, storage, coordination, &operation_id, signer).await
 }
 
 struct CircleRenameRequest {
@@ -784,7 +806,7 @@ pub(crate) async fn resume_circle_operations(
                 journal.circle_id()
             )));
         }
-        match publish_circle_operation(db, storage, coordination, journal.circle_id(), identity)
+        match publish_circle_operation(db, storage, coordination, &journal.operation_id, identity)
             .await
         {
             Ok(()) | Err(CircleOperationError::Blocked { .. }) => {}
@@ -1205,6 +1227,7 @@ async fn prepare_circle_operation_request(
     };
     Ok(CircleOperationJournal {
         operation_id,
+        circle_id: creation.circle_id,
         intent,
         progress: CircleOperationProgress::Ready(Box::new(PreparedCircleOperation {
             creation,
@@ -1222,13 +1245,13 @@ async fn publish_circle_operation(
     db: &Database,
     storage: &dyn SyncStorage,
     coordination: Option<&dyn super::storage::CoordinationStorage>,
-    circle_id: CircleId,
+    operation_id: &CircleOperationId,
     identity: &UserKeypair,
 ) -> Result<(), CircleOperationError> {
-    let mut journal = db
-        .circle_operation(circle_id)
-        .await?
-        .ok_or_else(|| CircleOperationError::Journal(format!("circle {circle_id} is absent")))?;
+    let mut journal = db.circle_operation(operation_id).await?.ok_or_else(|| {
+        CircleOperationError::Journal(format!("circle operation {operation_id} is absent"))
+    })?;
+    let circle_id = journal.circle_id();
     if let CircleOperationState::Blocked { reason } = journal.state() {
         return Err(CircleOperationError::Blocked { circle_id, reason });
     }
@@ -1273,7 +1296,8 @@ async fn publish_circle_operation(
     {
         let reason = "circle operation author is not a current Store writer under its exact grant"
             .to_string();
-        db.block_circle_operation(circle_id, reason.clone()).await?;
+        db.block_circle_operation(operation_id, reason.clone())
+            .await?;
         return Err(CircleOperationError::Blocked { circle_id, reason });
     }
     if let CircleOperationPolicy::MergeConcurrent { head } = &journal.operation().policy {
@@ -1576,7 +1600,8 @@ async fn publish_circle_operation(
                     super::store_outbound::StoreOutboundError::SerialControlConflict { .. }
                 ) {
                     let reason = error.to_string();
-                    db.block_circle_operation(circle_id, reason.clone()).await?;
+                    db.block_circle_operation(operation_id, reason.clone())
+                        .await?;
                     return Err(CircleOperationError::Blocked { circle_id, reason });
                 }
                 return Err(error.into());
@@ -1819,6 +1844,134 @@ mod tests {
         (store, signer, journal)
     }
 
+    #[tokio::test]
+    async fn circle_operation_lookup_rejects_a_payload_with_another_operation_id() {
+        let db = open_test_db();
+        let (_store, _signer, journal) =
+            persist_merge_operation(&db, "circle-operation-id-mismatch").await;
+        let expected_operation_id = journal.operation_id.clone();
+        let replacement_write_id =
+            crate::WriteId::from_generated("another-circle-operation".to_string());
+        let mut replacement = journal.clone();
+        replacement.operation_id = CircleOperationId::from_write_id(replacement_write_id.clone());
+        let mut replacement_commit = replacement.commit().expect("parse replacement commit");
+        replacement_commit.write_id = replacement_write_id;
+        replacement.operation_mut().commit_bytes =
+            serde_json::to_vec(&replacement_commit).expect("serialize replacement commit");
+        let payload =
+            serde_json::to_vec(&replacement).expect("serialize mismatched Circle operation");
+        db.call(move |conn| {
+            conn.execute(
+                "UPDATE circle_operations SET payload = ?2 WHERE operation_id = ?1",
+                rusqlite::params![expected_operation_id.as_str(), payload],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("install mismatched Circle operation payload");
+
+        let error = db
+            .circle_operation(&journal.operation_id)
+            .await
+            .expect_err("lookup authority must match the payload operation id");
+        assert!(error.to_string().contains("operation id"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn circle_operation_lookup_rejects_a_payload_with_another_circle_id() {
+        let db = open_test_db();
+        let (_store, _signer, journal) = persist_merge_operation(&db, "circle-id-mismatch").await;
+        let expected_operation_id = journal.operation_id.clone();
+        let replacement_circle_id = CircleId::from_bytes([7; 16]);
+        let mut replacement = journal.clone();
+        replacement.circle_id = replacement_circle_id;
+        replacement.operation_mut().creation.circle_id = replacement_circle_id;
+        let payload =
+            serde_json::to_vec(&replacement).expect("serialize mismatched Circle operation");
+        db.call(move |conn| {
+            conn.execute(
+                "UPDATE circle_operations SET payload = ?2 WHERE operation_id = ?1",
+                rusqlite::params![expected_operation_id.as_str(), payload],
+            )
+            .map(|_| ())
+            .map_err(DbError::from)
+        })
+        .await
+        .expect("install mismatched Circle operation payload");
+
+        let error = db
+            .circle_operation(&journal.operation_id)
+            .await
+            .expect_err("lookup authority must match the payload Circle id");
+        assert!(error.to_string().contains("payload circle id"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn blocking_a_circle_operation_targets_its_exact_operation_id() {
+        let db = open_test_db();
+        let (store, signer, first) = persist_merge_operation(&db, "circle-block-first").await;
+        let device_id = local_device_id(&db).await;
+        let second = prepare_circle_operation(
+            &db,
+            &store.storage,
+            None,
+            &device_id,
+            "0000000002000-0000-creator",
+            "Second household",
+            &signer,
+        )
+        .await
+        .expect("prepare second Circle operation");
+        db.insert_circle_operation(second.clone())
+            .await
+            .expect("persist second Circle operation");
+
+        db.block_circle_operation(&first.operation_id, "authority changed".to_string())
+            .await
+            .expect("block first Circle operation");
+
+        let first = db
+            .circle_operation(&first.operation_id)
+            .await
+            .expect("read first Circle operation")
+            .expect("first Circle operation remains durable");
+        let second = db
+            .circle_operation(&second.operation_id)
+            .await
+            .expect("read second Circle operation")
+            .expect("second Circle operation remains durable");
+        assert!(matches!(
+            first.state(),
+            CircleOperationState::Blocked { .. }
+        ));
+        assert_eq!(second.state(), CircleOperationState::Pending);
+    }
+
+    #[tokio::test]
+    async fn publishing_a_circle_operation_targets_its_exact_operation_id() {
+        let db = open_test_db();
+        let (store, signer, journal) = persist_merge_operation(&db, "circle-publish-id").await;
+        let absent_operation_id = CircleOperationId::from_write_id(crate::WriteId::from_generated(
+            "absent-circle-operation".to_string(),
+        ));
+
+        let error =
+            publish_circle_operation(&db, &store.storage, None, &absent_operation_id, &signer)
+                .await
+                .expect_err("publication requires the exact durable operation id");
+
+        assert!(matches!(error, CircleOperationError::Journal(_)), "{error}");
+        assert_eq!(
+            db.circle_operation(&journal.operation_id)
+                .await
+                .expect("read exact Circle operation")
+                .expect("exact Circle operation remains durable")
+                .state(),
+            CircleOperationState::Pending
+        );
+    }
+
     fn promote_store_member_access_without_adding_to_circle_roster(
         creation: &mut PreparedCircleTransition,
         owner: &UserKeypair,
@@ -1898,6 +2051,7 @@ mod tests {
 
     fn assert_exact_operation(expected: &CircleOperationJournal, actual: &CircleOperationJournal) {
         assert_eq!(actual.operation_id, expected.operation_id);
+        assert_eq!(actual.circle_id, expected.circle_id);
         assert_eq!(actual.intent, expected.intent);
         assert_eq!(actual.operation().creation, expected.operation().creation);
         assert_eq!(
@@ -1957,7 +2111,7 @@ mod tests {
                             first.expect_err("failure before exact create interrupts activation");
                         assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
                         let persisted = db
-                            .circle_operation(expected.circle_id())
+                            .circle_operation(&expected.operation_id)
                             .await
                             .expect("read interrupted operation")
                             .expect("interrupted operation remains durable");
@@ -1970,7 +2124,7 @@ mod tests {
                             .expect("resume exact circle operation");
                     }
                     assert!(db
-                        .circle_operation(expected.circle_id())
+                        .circle_operation(&expected.operation_id)
                         .await
                         .expect("read completed operation")
                         .is_none());
@@ -2028,8 +2182,18 @@ mod tests {
             &test_migrations(),
         )
         .expect("reopen circle database");
+        assert_eq!(
+            reopened
+                .get_circle_operations()
+                .await
+                .expect("list reopened Circle operations")
+                .into_iter()
+                .map(|operation| operation.operation_id)
+                .collect::<Vec<_>>(),
+            vec![expected.operation_id.clone()]
+        );
         let persisted = reopened
-            .circle_operation(expected.circle_id())
+            .circle_operation(&expected.operation_id)
             .await
             .expect("read reopened circle operation")
             .expect("circle operation survives restart");
@@ -2077,8 +2241,16 @@ mod tests {
         .await
         .expect_err("failed exact create interrupts rename publication");
         assert!(matches!(error, CircleOperationError::Object(_)), "{error}");
+        let operation_id = db
+            .get_circle_operations()
+            .await
+            .expect("list interrupted rename")
+            .into_iter()
+            .find(|operation| operation.circle_id == circle_id)
+            .expect("interrupted rename is listed")
+            .operation_id;
         let expected = db
-            .circle_operation(circle_id)
+            .circle_operation(&operation_id)
             .await
             .expect("read interrupted rename")
             .expect("interrupted rename remains durable");
@@ -2108,7 +2280,7 @@ mod tests {
         )
         .expect("reopen circle database");
         let persisted = reopened
-            .circle_operation(circle_id)
+            .circle_operation(&operation_id)
             .await
             .expect("read reopened rename")
             .expect("rename survives restart");
@@ -2195,7 +2367,7 @@ mod tests {
         )
         .expect("reopen Serial Circle database");
         let persisted = reopened
-            .circle_operation(expected.circle_id())
+            .circle_operation(&expected.operation_id)
             .await
             .expect("read reopened Serial Circle operation")
             .expect("Serial Circle operation survives restart");
@@ -2239,7 +2411,7 @@ mod tests {
         .await
         .expect("install invalid durable payload");
 
-        db.circle_operation(circle_id)
+        db.circle_operation(&journal.operation_id)
             .await
             .expect_err("Merge operation must reject Serial-only policy state");
     }
@@ -2270,7 +2442,7 @@ mod tests {
                 .await
                 .expect_err("second exact create failure interrupts publication");
             let persisted = db
-                .circle_operation(expected.circle_id())
+                .circle_operation(&expected.operation_id)
                 .await
                 .expect("read interrupted circle operation")
                 .expect("interrupted circle operation remains durable");
@@ -2308,7 +2480,7 @@ mod tests {
                 .expect_err("durable upload marker must not bypass readback");
             assert_eq!(activation_count(&reopened, expected.circle_id()).await, 0);
             assert!(reopened
-                .circle_operation(expected.circle_id())
+                .circle_operation(&expected.operation_id)
                 .await
                 .expect("read rejected circle operation")
                 .is_some());
@@ -2343,7 +2515,7 @@ mod tests {
 
         assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
         assert!(db
-            .circle_operation(journal.circle_id())
+            .circle_operation(&journal.operation_id)
             .await
             .expect("read rejected operation")
             .is_some());
@@ -3096,7 +3268,7 @@ mod tests {
             .expect("revoked journal is blocked without interrupting the resume loop");
 
         let blocked = successor_db
-            .circle_operation(journal.circle_id())
+            .circle_operation(&journal.operation_id)
             .await
             .expect("read revoked journal")
             .expect("revoked journal remains durable");
@@ -3105,7 +3277,7 @@ mod tests {
             CircleOperationState::Blocked { .. }
         ));
         assert!(successor_db
-            .circle_operation(later.circle_id())
+            .circle_operation(&later.operation_id)
             .await
             .expect("read later journal")
             .is_none());
@@ -3247,7 +3419,7 @@ mod tests {
             &db,
             &storage,
             Some(coordination),
-            journal.circle_id(),
+            &journal.operation_id,
             &founder,
         )
         .await
@@ -3363,7 +3535,7 @@ mod tests {
             &db,
             &storage,
             Some(coordination),
-            journal.circle_id(),
+            &journal.operation_id,
             &founder,
         )
         .await
@@ -3420,7 +3592,7 @@ mod tests {
             &db,
             &storage,
             Some(coordination),
-            journal.circle_id(),
+            &journal.operation_id,
             &founder,
         )
         .await
@@ -3428,7 +3600,7 @@ mod tests {
 
         assert_eq!(activation_count(&db, journal.circle_id()).await, 0);
         assert!(db
-            .circle_operation(journal.circle_id())
+            .circle_operation(&journal.operation_id)
             .await
             .expect("read Circle journal")
             .is_some());
@@ -3502,7 +3674,7 @@ mod tests {
             &db,
             &storage,
             Some(coordination),
-            expected.circle_id(),
+            &expected.operation_id,
             &signer,
         )
         .await
@@ -3512,7 +3684,7 @@ mod tests {
             "{error}"
         );
         let blocked = db
-            .circle_operation(expected.circle_id())
+            .circle_operation(&expected.operation_id)
             .await
             .expect("read blocked Serial operation")
             .expect("blocked Serial operation remains durable");
@@ -3544,21 +3716,17 @@ mod tests {
         resume_circle_operations(&db, &storage, Some(coordination), &signer)
             .await
             .expect("blocked circle operation remains inert during resume");
-        db.discard_blocked_circle_operation(expected.circle_id())
-            .await
-            .expect("discard blocked circle operation");
-        db.discard_blocked_circle_operation(expected.circle_id())
-            .await
-            .expect("repeated discard remains idempotent");
         assert!(db
-            .circle_operation(expected.circle_id())
+            .circle_operation(&expected.operation_id)
             .await
-            .expect("read discarded circle operation")
-            .is_none());
-        assert!(db
-            .get_circle_operations()
-            .await
-            .expect("read circle operations after discard")
-            .is_empty());
+            .expect("read blocked circle operation after resume")
+            .is_some());
+        assert_eq!(
+            db.get_circle_operations()
+                .await
+                .expect("read circle operations after resume")
+                .len(),
+            1
+        );
     }
 }
