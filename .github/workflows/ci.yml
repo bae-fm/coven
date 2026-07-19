@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Toolchain (1.92.0 + rustfmt/clippy) comes from rust-toolchain.toml on the
+      # The pinned toolchain and components come from rust-toolchain.toml on the
       # first cargo invocation.
       - uses: Swatinem/rust-cache@v2
       - name: Format
