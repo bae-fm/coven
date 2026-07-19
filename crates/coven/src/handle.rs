@@ -1270,6 +1270,19 @@ impl CovenHandle {
         .await?)
     }
 
+    pub async fn complete_owner_device_join_cleanup(
+        &self,
+        attempt_id: crate::DeviceJoinAttemptId,
+        activation: crate::DeviceJoinCleanupActivation,
+    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
+        Ok(
+            crate::sync::device_join::complete_owner_device_join_cleanup(
+                &self.db, attempt_id, activation,
+            )
+            .await?,
+        )
+    }
+
     pub async fn device_join_status(
         &self,
         attempt_id: crate::DeviceJoinAttemptId,
