@@ -590,6 +590,24 @@ impl DeviceJoinClient {
         )?)
     }
 
+    pub async fn close_pending_device_join(
+        &self,
+        cancellation: crate::DeviceJoinCancellation,
+    ) -> Result<crate::JoinerJoinTerminal, BootstrapError> {
+        let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
+        let join = self.build_storage(&signer).await?;
+        let pending = self.open_pending_journal()?;
+        Ok(crate::sync::device_join::close_joining_device(
+            &pending,
+            &join.storage,
+            join.exact.as_ref(),
+            &self.code.store_root,
+            &signer,
+            cancellation,
+        )
+        .await?)
+    }
+
     pub async fn prepare_registration_request(
         &self,
         approval: crate::DeviceProviderAdmissionApproval,
