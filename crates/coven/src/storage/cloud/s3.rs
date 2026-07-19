@@ -1434,12 +1434,15 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    shutdown_rx.await.expect("receive fake S3 shutdown");
-                })
-                .await
-                .expect("fake S3 endpoint failed");
+            axum::serve(
+                listener,
+                app.layer(axum::extract::DefaultBodyLimit::disable()),
+            )
+            .with_graceful_shutdown(async {
+                shutdown_rx.await.expect("receive fake S3 shutdown");
+            })
+            .await
+            .expect("fake S3 endpoint failed");
         });
         (endpoint, shutdown_tx)
     }
@@ -1809,6 +1812,7 @@ mod tests {
         method: Method,
         uri: Uri,
         headers: HeaderMap,
+        body: Bytes,
     ) -> Response<Body> {
         let path_ok = uri.path().starts_with(&format!("/{}/", state.bucket));
         if method == Method::POST && path_ok && uri.query().is_some_and(|query| query == "uploads")
@@ -1829,18 +1833,19 @@ mod tests {
                 .find_map(|part| part.strip_prefix("uploadId="))
                 .expect("multipart part uploadId")
                 .to_string();
-            let length = headers
+            let declared_length: usize = headers
                 .get(CONTENT_LENGTH)
                 .expect("multipart part Content-Length")
                 .to_str()
                 .expect("multipart part Content-Length is UTF-8")
                 .parse()
                 .expect("multipart part Content-Length is an integer");
+            assert_eq!(declared_length, body.len());
             state
                 .uploaded_parts
                 .lock()
                 .expect("lock parts")
-                .push((upload_id, length));
+                .push((upload_id, body.len()));
             return Response::builder()
                 .status(StatusCode::OK)
                 .header("etag", "part-etag")
@@ -1984,6 +1989,7 @@ mod tests {
         State((bucket, remaining_abort_failures)): State<(String, Arc<AtomicUsize>)>,
         method: Method,
         uri: Uri,
+        _body: Bytes,
     ) -> Response<Body> {
         let path_ok = uri.path().starts_with(&format!("/{bucket}/"));
         if method == Method::POST && path_ok && uri.query() == Some("uploads") {
@@ -2283,7 +2289,7 @@ mod tests {
             runtime.block_on(async {
                 let bucket = "immutable-cancel-failure-test".to_string();
                 let abort_failures = Arc::new(AtomicUsize::new(1));
-                let (endpoint, _shutdown) = spawn_fake_s3(
+                let (endpoint, shutdown) = spawn_fake_s3(
                     Router::new()
                         .fallback(fake_s3_body_failure_endpoint)
                         .with_state((bucket.clone(), abort_failures.clone())),
@@ -2312,6 +2318,7 @@ mod tests {
                 })
                 .await
                 .expect("multipart owner must finish the abort request");
+                shutdown.send(()).expect("shut down fake S3");
             });
             std::process::exit(0);
         }
