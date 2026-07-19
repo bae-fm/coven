@@ -580,6 +580,16 @@ impl DeviceJoinClient {
         .await?)
     }
 
+    pub fn device_join_status(
+        &self,
+        attempt_id: crate::DeviceJoinAttemptId,
+    ) -> Result<Option<crate::DeviceJoinStatus>, BootstrapError> {
+        let pending = self.open_pending_journal()?;
+        Ok(crate::sync::device_join::load_pending_device_join_status(
+            &pending, attempt_id,
+        )?)
+    }
+
     pub async fn prepare_registration_request(
         &self,
         approval: crate::DeviceProviderAdmissionApproval,
