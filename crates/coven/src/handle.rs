@@ -1224,7 +1224,7 @@ impl CovenHandle {
         .await?)
     }
 
-    pub async fn prepare_device_join_cleanup(
+    pub async fn cleanup_cancelled_device_join(
         &self,
         cancellation: crate::DeviceJoinCancellation,
         administrator_terminal: crate::ProviderAdminJoinTerminal,
@@ -1251,9 +1251,9 @@ impl CovenHandle {
 
     pub async fn activate_device_join_cleanup(
         &self,
-        attempt_id: crate::DeviceJoinAttemptId,
         receipt: crate::DeviceJoinCleanupReceipt,
     ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
+        let attempt_id = receipt.receipt.attempt_id;
         let storage = self.device_join_storage()?;
         let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
         let authorization = self.device_join_authorization(&storage).await?;
@@ -1270,17 +1270,16 @@ impl CovenHandle {
         .await?)
     }
 
-    pub async fn complete_owner_device_join_cleanup(
+    pub async fn complete_cancelled_device_join(
         &self,
-        attempt_id: crate::DeviceJoinAttemptId,
         activation: crate::DeviceJoinCleanupActivation,
-    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
-        Ok(
-            crate::sync::device_join::complete_owner_device_join_cleanup(
-                &self.db, attempt_id, activation,
-            )
-            .await?,
+    ) -> Result<(), SyncError> {
+        let attempt_id = activation.receipt.attempt_id;
+        crate::sync::device_join::complete_owner_device_join_cleanup(
+            &self.db, attempt_id, activation,
         )
+        .await?;
+        Ok(())
     }
 
     pub async fn device_join_status(
