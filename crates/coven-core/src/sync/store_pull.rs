@@ -314,6 +314,16 @@ enum RegistrationPredecessorAuthority<'a> {
     Serial {
         authorization: &'a SerialAuthorizationState,
         position: super::store_commit::SerialStorePosition,
+        history: SerialAuthorizationHistory<'a>,
+    },
+}
+
+enum SerialAuthorizationHistory<'a> {
+    ExactPredecessor,
+    Prefix {
+        genesis_position: &'a super::store_commit::SerialStorePosition,
+        genesis_authorization: &'a SerialAuthorizationState,
+        commits: &'a [AuthorizedSerialCommit],
     },
 }
 
@@ -353,6 +363,7 @@ impl RegistrationPredecessorAuthority<'_> {
             Self::Serial {
                 authorization,
                 position,
+                ..
             } => {
                 StoreMembershipStateRef::serial(
                     position.clone(),
@@ -365,6 +376,58 @@ impl RegistrationPredecessorAuthority<'_> {
                         .authorizes_owner_grant_id(owner_pubkey, owner_grant)
             }
         }
+    }
+
+    fn verifies_owner_at_ancestor(
+        &self,
+        membership: &StoreMembershipStateRef,
+        owner_pubkey: &str,
+        owner_grant: &super::membership::MembershipGrantId,
+    ) -> bool {
+        if self.verifies_owner(membership, owner_pubkey, owner_grant) {
+            return true;
+        }
+        let Self::Serial {
+            history:
+                SerialAuthorizationHistory::Prefix {
+                    genesis_position,
+                    genesis_authorization,
+                    commits,
+                },
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let StoreMembershipStateRef::Serial(state) = membership else {
+            return false;
+        };
+        let historical_authorization = match &state.position {
+            super::store_commit::SerialStorePosition::Genesis { .. }
+                if &state.position == *genesis_position =>
+            {
+                *genesis_authorization
+            }
+            super::store_commit::SerialStorePosition::Commit(reference) => {
+                let Some(accepted) = commits
+                    .iter()
+                    .find(|accepted| &accepted.commit_ref == reference)
+                else {
+                    return false;
+                };
+                &accepted.authorization_after
+            }
+            _ => return false,
+        };
+        StoreMembershipStateRef::serial(
+            state.position.clone(),
+            state.recovery.clone(),
+            historical_authorization,
+        )
+        .is_ok_and(|expected| membership == &expected)
+            && historical_authorization
+                .membership
+                .authorizes_owner_grant_id(owner_pubkey, owner_grant)
     }
 
     fn verifies_active_owner(&self, owner_pubkey: &str) -> bool {
@@ -558,16 +621,11 @@ async fn validate_commit_reclaim_authorization(
                     &authorization.authority.owner_grant,
                 )
         }
-        StoreMembershipStateRef::Serial { .. } => {
-            serial_reclaim_owner_authority_is_ancestor(
-                storage,
-                root,
-                commit,
-                &authorization.authority,
-                &evidence.author_pubkey,
-            )
-            .await?
-        }
+        StoreMembershipStateRef::Serial { .. } => predecessor.verifies_owner_at_ancestor(
+            &authorization.authority.membership,
+            &evidence.author_pubkey,
+            &authorization.authority.owner_grant,
+        ),
     };
     if evidence.author_pubkey != activating_author.author_pubkey || !owner_authorized {
         return Err(RegistrationLoadError::Invalid(
@@ -590,54 +648,6 @@ async fn validate_commit_reclaim_authorization(
         ));
     }
     Ok(())
-}
-
-async fn serial_reclaim_owner_authority_is_ancestor(
-    storage: &dyn SyncStorage,
-    root: &StoreRootRef,
-    commit: &StoreBatchCommit,
-    authority: &super::store_reclaim::StoreReclaimAuthority,
-    author_pubkey: &str,
-) -> Result<bool, RegistrationLoadError> {
-    let loaded = Box::pin(load_device_join_authorization(
-        storage,
-        root,
-        &authority.membership,
-    ))
-    .await
-    .map_err(|error| match error {
-        StorePullError::Object(error) => RegistrationLoadError::Object(error),
-        error => RegistrationLoadError::Invalid(error.to_string()),
-    })?;
-    let DeviceJoinBootstrapAuthorization::Serial {
-        state,
-        position,
-        authorization,
-    } = loaded
-    else {
-        return Ok(false);
-    };
-    let historical = RegistrationPredecessorAuthority::Serial {
-        authorization: &authorization,
-        position: position.clone(),
-    };
-    if state != authority.membership
-        || !historical.verifies_owner(&state, author_pubkey, &authority.owner_grant)
-    {
-        return Ok(false);
-    }
-    match position {
-        super::store_commit::SerialStorePosition::Genesis {
-            root: exact_root, ..
-        } => Ok(exact_root == *root),
-        super::store_commit::SerialStorePosition::Commit(reference) => Ok(
-            predecessor_commit_matching(storage, root, &commit.order, |candidate, _| {
-                candidate == &reference
-            })
-            .await?
-            .is_some(),
-        ),
-    }
 }
 
 async fn validate_commit_reclaim_receipt(
@@ -1322,6 +1332,7 @@ pub(crate) async fn load_local_commit_device_operations(
         } => RegistrationPredecessorAuthority::Serial {
             authorization,
             position: position.clone(),
+            history: SerialAuthorizationHistory::ExactPredecessor,
         },
     };
     let resolver = DeviceStateResolver::Database(db);
@@ -2982,6 +2993,7 @@ pub(crate) async fn prepare_device_join_bootstrap(
             } => RegistrationPredecessorAuthority::Serial {
                 authorization,
                 position: position.clone(),
+                history: SerialAuthorizationHistory::ExactPredecessor,
             },
         };
         let registrations = Box::pin(load_commit_registrations(
@@ -3100,6 +3112,7 @@ pub(crate) async fn materialize_device_join_activation(
         } => RegistrationPredecessorAuthority::Serial {
             authorization,
             position: position.clone(),
+            history: SerialAuthorizationHistory::ExactPredecessor,
         },
     };
     let registrations = Box::pin(load_commit_registrations(
@@ -3190,6 +3203,11 @@ async fn load_authorized_serial_prefix(
     let mut authorization =
         SerialAuthorizationState::from_founder(root, &root_value, &founder_ref, &founder.value)
             .map_err(|error| StorePullError::Serial(error.to_string()))?;
+    let genesis_authorization = Box::new(authorization.clone());
+    let genesis_position = super::store_commit::SerialStorePosition::Genesis {
+        root: root.clone(),
+        founder_registration: founder_ref.clone(),
+    };
     let mut device_state = ResolvedStoreDeviceState::founder(
         root,
         founder_ref.clone(),
@@ -3299,6 +3317,11 @@ async fn load_authorized_serial_prefix(
                         "Serial chain contains a Merge commit order".to_string(),
                     ));
                 }
+            },
+            history: SerialAuthorizationHistory::Prefix {
+                genesis_position: &genesis_position,
+                genesis_authorization: genesis_authorization.as_ref(),
+                commits: &authorized,
             },
         };
         let registrations = load_commit_registrations(

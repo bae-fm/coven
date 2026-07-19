@@ -980,7 +980,7 @@ async fn publish_device_exclusion_candidate(
         db,
         storage,
         coordination,
-        candidate,
+        Box::new(candidate),
     );
     let publication = Box::new(Box::pin(publish).await?);
     match publication.as_ref() {
@@ -994,13 +994,13 @@ async fn publish_device_exclusion_candidate(
         StoreOperationPublicationOutcome::RepreparedCandidate(candidate) => {
             **operation = Box::pin(db.replace_outbound_store_device_exclusion_candidate(
                 operation.as_ref().clone(),
-                candidate.clone(),
+                candidate.as_ref().clone(),
             ))
             .await?;
             Ok(DeviceExclusionPublicationProgress::Continue)
         }
         StoreOperationPublicationOutcome::NonactivatedCandidate { candidate, proof } => {
-            if operation.candidate() != Some(candidate) {
+            if operation.candidate() != Some(candidate.as_ref()) {
                 return Err(StoreDeviceExclusionError::InvalidState(
                     "publication conflict names another exclusion candidate".to_string(),
                 ));
@@ -1010,12 +1010,12 @@ async fn publish_device_exclusion_candidate(
                 DurableStoreDeviceExclusionObject::Outcome { .. }
             ) {
                 return Ok(DeviceExclusionPublicationProgress::ReplacementRequired(
-                    proof.clone(),
+                    proof.as_ref().clone(),
                 ));
             } else {
                 **operation = Box::pin(db.begin_outbound_store_device_exclusion_nonactivation(
                     operation.as_ref().clone(),
-                    proof.clone(),
+                    proof.as_ref().clone(),
                 ))
                 .await?;
             }

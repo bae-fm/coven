@@ -295,7 +295,7 @@ pub async fn drain_outbound_store_acks(
             db,
             storage,
             coordination,
-            candidate,
+            Box::new(candidate),
         )
         .await?;
         match outcome {
@@ -656,7 +656,7 @@ mod tests {
                     &db,
                     &storage,
                     Some(&storage),
-                    competing,
+                    Box::new(competing),
                 )
             )
             .await
@@ -977,7 +977,10 @@ mod tests {
             .await
             .expect("record acknowledgement upload");
         super::super::store_outbound::publish_prepared_store_operation(
-            &db, &storage, None, candidate,
+            &db,
+            &storage,
+            None,
+            Box::new(candidate),
         )
         .await
         .expect("activate acknowledgement commit");
@@ -1606,7 +1609,7 @@ mod tests {
                 &db,
                 &storage,
                 Some(&storage),
-                successor,
+                Box::new(successor),
             ),
         )
         .await

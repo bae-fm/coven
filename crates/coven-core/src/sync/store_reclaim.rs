@@ -968,16 +968,18 @@ async fn drive_reclaim_candidate(
             db,
             storage,
             coordination,
-            *candidate,
+            candidate,
         ))
         .await?
         {
-            super::store_outbound::StoreOperationPublicationOutcome::Activated(_) => return Ok(()),
+            super::store_outbound::StoreOperationPublicationOutcome::Activated(_) => {
+                return Ok(());
+            }
             super::store_outbound::StoreOperationPublicationOutcome::RepreparedCandidate(
                 replacement,
             ) => {
                 operation =
-                    Box::pin(db.replace_store_reclaim_candidate(operation, replacement)).await?;
+                    Box::pin(db.replace_store_reclaim_candidate(operation, *replacement)).await?;
             }
             super::store_outbound::StoreOperationPublicationOutcome::NonactivatedCandidate {
                 proof,
@@ -1017,7 +1019,7 @@ async fn drive_reclaim_candidate(
                 operation = Box::pin(db.begin_store_reclaim_candidate_replacement(
                     operation,
                     replacement,
-                    proof,
+                    *proof,
                 ))
                 .await?;
                 Box::pin(finish_reclaim_candidate_replacement(db, storage, operation)).await?;

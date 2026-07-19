@@ -4343,7 +4343,7 @@ pub async fn finalize_device_join(
         plan,
         crate::sync::store_outbound::StoreOperationBatch::Outcome {
             outcome: outcome_ref.clone(),
-            registration: Some(activated_registration),
+            registration: Some(Box::new(activated_registration)),
         },
     )
     .await?;
