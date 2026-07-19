@@ -1245,15 +1245,21 @@ pub enum OwnerJoinProgress {
         prepared: PreparedDeviceJoinObject,
     },
     AttemptActivated(ProvisionalDeviceBootstrap),
-    ProviderReady(ProviderReadyDeviceBootstrap),
-    AdmissionCompleted(DeviceProviderAdmissionCompletion),
+    ActivationCreateIntent {
+        bootstrap: ProvisionalDeviceBootstrap,
+        completion: DeviceProviderAdmissionCompletion,
+        outcome: DeviceJoinOutcomeRef,
+        prepared: PreparedDeviceJoinObject,
+    },
     CancellationCreateIntent {
         attempt: DeviceJoinAttemptRef,
         cancellation: DeviceJoinOutcomeRef,
         prepared: PreparedDeviceJoinObject,
     },
-    ActivationPrepared(DeviceJoinActivation),
-    Activated(JoinedStore),
+    ActivationPrepared {
+        completion: DeviceProviderAdmissionCompletion,
+        activation: DeviceJoinActivation,
+    },
     Abandoned(DeviceJoinAbandonment),
     Cancelled(DeviceJoinCancellation),
     CleanupReceiptCreateIntent {
@@ -2794,12 +2800,6 @@ pub async fn cancel_device_join(
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) => {
             &bootstrap.publication_authorization.attempt
         }
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderReady(bootstrap)) => {
-            &bootstrap.bootstrap.publication_authorization.attempt
-        }
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AdmissionCompleted(completion)) => {
-            &completion.readiness.proof.attempt
-        }
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CancellationCreateIntent {
             attempt,
             ..
@@ -2883,9 +2883,7 @@ pub async fn cancel_device_join(
         )),
     };
     match &*current.progress {
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(_))
-        | DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderReady(_))
-        | DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AdmissionCompleted(_)) => {
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(_)) => {
             advance_store_journal(db, &current, intent.clone()).await?;
         }
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CancellationCreateIntent {
@@ -4007,8 +4005,7 @@ pub fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoinStatus 
         ) => DeviceJoinStatus::AwaitingChallengePublication {
             bootstrap: bootstrap.clone(),
         },
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ProviderReady(bootstrap))
-        | DeviceJoinRoleProgress::ProviderAdministrator(
+        DeviceJoinRoleProgress::ProviderAdministrator(
             ProviderAdminJoinProgress::ProviderReady(bootstrap),
         )
         | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ProviderReady(bootstrap))
@@ -4025,20 +4022,24 @@ pub fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoinStatus 
                 readiness: readiness.clone(),
             }
         }
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AdmissionCompleted(completion))
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationCreateIntent {
+            completion,
+            ..
+        })
         | DeviceJoinRoleProgress::ProviderAdministrator(ProviderAdminJoinProgress::Completed(
             completion,
         )) => DeviceJoinStatus::AwaitingActivation {
             completion: completion.clone(),
         },
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared(activation))
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
+            activation, ..
+        })
         | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ActivationObserved(activation)) => {
             DeviceJoinStatus::AwaitingCompletion {
                 activation: activation.clone(),
             }
         }
-        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Activated(store))
-        | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Activated(store)) => {
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Activated(store)) => {
             DeviceJoinStatus::Activated {
                 store: store.clone(),
             }
@@ -4233,15 +4234,25 @@ pub async fn finalize_device_join(
     let current = load_store_journal(db, attempt_id, DeviceJoinRole::Owner)
         .await?
         .ok_or(DeviceJoinError::JournalConflict)?;
-    if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared(existing)) =
-        &*current.progress
+    if let DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
+        completion: durable_completion,
+        activation,
+    }) = &*current.progress
     {
-        return Ok(existing.clone());
+        if durable_completion == &completion {
+            return Ok(activation.clone());
+        }
+        return Err(DeviceJoinError::JournalConflict);
     }
     let provisional = match &*current.progress {
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) => {
             bootstrap.clone()
         }
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationCreateIntent {
+            bootstrap,
+            completion: durable_completion,
+            ..
+        }) if durable_completion == &completion => bootstrap.clone(),
         _ => return Err(DeviceJoinError::JournalConflict),
     };
     let offer = &provisional.request.approval.request.offer;
@@ -4335,12 +4346,55 @@ pub async fn finalize_device_join(
         ProtocolObjectDomain::DeviceJoinOutcome,
     );
     let prefix = crate::sync::store_commit::device_join_outcome_semantic_prefix(attempt_id);
-    let prepared = storage.prepare_protocol_object(
-        &context,
-        attempt.outcome_slot.clone(),
-        &prefix,
-        outcome.to_bytes(),
-    )?;
+    let outcome_hash = outcome.outcome_hash();
+    let (prepared, outcome_ref, intent) = match &*current.progress {
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(_)) => {
+            let prepared = storage.prepare_protocol_object(
+                &context,
+                attempt.outcome_slot.clone(),
+                &prefix,
+                outcome.to_bytes(),
+            )?;
+            let outcome_ref = DeviceJoinOutcomeRef::Activated {
+                attempt: attempt_ref.clone(),
+                outcome_hash,
+                object: prepared.reference().clone(),
+            };
+            let intent = DeviceJoinJournalRecord {
+                attempt_id,
+                progress: Box::new(DeviceJoinRoleProgress::Owner(
+                    OwnerJoinProgress::ActivationCreateIntent {
+                        bootstrap: provisional.clone(),
+                        completion: completion.clone(),
+                        outcome: outcome_ref.clone(),
+                        prepared: PreparedDeviceJoinObject::from_prepared(&prepared),
+                    },
+                )),
+            };
+            advance_store_journal(db, &current, intent.clone()).await?;
+            (prepared, outcome_ref, intent)
+        }
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationCreateIntent {
+            outcome: durable_outcome,
+            prepared: durable_prepared,
+            ..
+        }) => {
+            let expected = DeviceJoinOutcomeRef::Activated {
+                attempt: attempt_ref.clone(),
+                outcome_hash,
+                object: durable_prepared.object.clone(),
+            };
+            if durable_outcome != &expected {
+                return Err(DeviceJoinError::JournalConflict);
+            }
+            let prepared = crate::sync::storage::PreparedExactObject::new(
+                durable_prepared.object.clone(),
+                durable_prepared.stored_bytes.clone(),
+            )?;
+            (prepared, expected, current.clone())
+        }
+        _ => return Err(DeviceJoinError::JournalConflict),
+    };
     storage.create_protocol_object(&prepared).await?;
     let opened = storage
         .read_protocol_object(&context, prepared.reference(), &prefix)
@@ -4348,11 +4402,6 @@ pub async fn finalize_device_join(
     if opened != outcome.to_bytes() {
         return Err(DeviceJoinError::AttemptMismatch);
     }
-    let outcome_ref = DeviceJoinOutcomeRef::Activated {
-        attempt: attempt_ref,
-        outcome_hash: outcome.outcome_hash(),
-        object: prepared.reference().clone(),
-    };
     let activated_registration = crate::sync::store_outbound::DeviceJoinRegistrationActivation {
         reference: crate::sync::store_commit::ActivatedStoreDeviceRegistrationRef {
             registration: completion.readiness.proof.registration.clone(),
@@ -4396,40 +4445,16 @@ pub async fn finalize_device_join(
         outcome: outcome_ref,
         outcome_activation: activation_ref,
     };
-    let provider_ready = ProviderReadyDeviceBootstrap {
-        bootstrap: Box::new(provisional),
-        challenge_publication: match &attempt.provider_approval.admission {
-            DeviceProviderAdmissionChallenge::SamePrincipal => {
-                DeviceProviderChallengePublication::SamePrincipal
-            }
-            DeviceProviderAdmissionChallenge::CrossPrincipal(challenge) => {
-                DeviceProviderChallengePublication::CrossPrincipal {
-                    challenge: challenge.clone(),
-                }
-            }
-        },
-    };
-    let ready_record = DeviceJoinJournalRecord {
-        attempt_id,
-        progress: Box::new(DeviceJoinRoleProgress::Owner(
-            OwnerJoinProgress::ProviderReady(provider_ready),
-        )),
-    };
-    advance_store_journal(db, &current, ready_record.clone()).await?;
-    let completion_record = DeviceJoinJournalRecord {
-        attempt_id,
-        progress: Box::new(DeviceJoinRoleProgress::Owner(
-            OwnerJoinProgress::AdmissionCompleted(completion),
-        )),
-    };
-    advance_store_journal(db, &ready_record, completion_record.clone()).await?;
     advance_store_journal(
         db,
-        &completion_record,
+        &intent,
         DeviceJoinJournalRecord {
             attempt_id,
             progress: Box::new(DeviceJoinRoleProgress::Owner(
-                OwnerJoinProgress::ActivationPrepared(activation.clone()),
+                OwnerJoinProgress::ActivationPrepared {
+                    completion,
+                    activation: activation.clone(),
+                },
             )),
         },
     )
@@ -5100,28 +5125,16 @@ fn owner_adjacent(previous: &OwnerJoinProgress, next: &OwnerJoinProgress) -> boo
             OwnerJoinProgress::Abandoned(_)
         ) | (
             OwnerJoinProgress::AttemptActivated(_),
-            OwnerJoinProgress::ProviderReady(_)
+            OwnerJoinProgress::ActivationCreateIntent { .. }
         ) | (
             OwnerJoinProgress::AttemptActivated(_),
             OwnerJoinProgress::CancellationCreateIntent { .. }
         ) | (
-            OwnerJoinProgress::ProviderReady(_),
-            OwnerJoinProgress::AdmissionCompleted(_)
-        ) | (
-            OwnerJoinProgress::ProviderReady(_),
-            OwnerJoinProgress::CancellationCreateIntent { .. }
-        ) | (
-            OwnerJoinProgress::AdmissionCompleted(_),
-            OwnerJoinProgress::ActivationPrepared(_)
-        ) | (
-            OwnerJoinProgress::AdmissionCompleted(_),
-            OwnerJoinProgress::CancellationCreateIntent { .. }
+            OwnerJoinProgress::ActivationCreateIntent { .. },
+            OwnerJoinProgress::ActivationPrepared { .. }
         ) | (
             OwnerJoinProgress::CancellationCreateIntent { .. },
             OwnerJoinProgress::Cancelled(_)
-        ) | (
-            OwnerJoinProgress::ActivationPrepared(_),
-            OwnerJoinProgress::Activated(_)
         ) | (
             OwnerJoinProgress::Cancelled(_),
             OwnerJoinProgress::CleanupReceiptCreateIntent { .. }

@@ -203,6 +203,31 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     )
     .await
     .expect("complete provider admission");
+    store.home.fail_exact_create_before_call(1);
+    let interrupted = Box::pin(crate::sync::device_join::finalize_device_join(
+        &owner_db,
+        &store.storage,
+        None,
+        &authorization,
+        &owner,
+        completion.clone(),
+    ))
+    .await;
+    assert!(
+        interrupted.is_err(),
+        "the outcome create interruption surfaces"
+    );
+    assert!(matches!(
+        crate::sync::device_join::load_store_device_join_status(
+            &owner_db,
+            completion.readiness.proof.attempt.attempt_id,
+            crate::DeviceJoinRole::Owner,
+        )
+        .await
+        .expect("load interrupted owner finalization"),
+        Some(crate::DeviceJoinStatus::AwaitingActivation { completion: durable })
+            if durable == completion
+    ));
     let activation = Box::pin(crate::sync::device_join::finalize_device_join(
         &owner_db,
         &store.storage,
@@ -212,7 +237,7 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         completion,
     ))
     .await
-    .expect("finalize join");
+    .expect("resume finalization from the durable completion");
     let config = new_client()
         .complete_device_join(activation.clone(), |_status| {})
         .await
