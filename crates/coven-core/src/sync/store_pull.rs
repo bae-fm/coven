@@ -3517,7 +3517,8 @@ async fn load_authorized_serial_chain(
         }
         StoreSerialHeadState::Commit { commit, .. } => Some(commit.clone()),
     };
-    let (authorized, _) = load_authorized_serial_prefix(storage, root, tip.clone()).await?;
+    let (authorized, _) =
+        Box::pin(load_authorized_serial_prefix(storage, root, tip.clone())).await?;
     match (&head.state, authorized.last()) {
         (StoreSerialHeadState::Genesis { .. }, None) => {}
         (
