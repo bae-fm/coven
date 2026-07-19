@@ -3880,11 +3880,13 @@ pub async fn complete_owner_device_join_cleanup(
     Ok(activation)
 }
 
-pub fn complete_joiner_device_join_cleanup(
+pub async fn accept_joiner_device_join_cleanup(
     pending: &DeviceJoinJournalDatabase,
-    attempt_id: DeviceJoinAttemptId,
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
     activation: DeviceJoinCleanupActivation,
 ) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
+    let attempt_id = activation.receipt.attempt_id;
     let current = pending
         .load(attempt_id, DeviceJoinRole::Joiner)?
         .ok_or(DeviceJoinError::JournalConflict)?;
@@ -3896,23 +3898,66 @@ pub fn complete_joiner_device_join_cleanup(
         }
         return Err(DeviceJoinError::JournalConflict);
     }
+    if let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CleanupActivated(existing)) =
+        &*current.progress
+    {
+        if existing == &activation {
+            return Ok(existing.clone());
+        }
+        return Err(DeviceJoinError::JournalConflict);
+    }
+    let terminal = match &*current.progress {
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Cancelled(closure)) => {
+            JoinerJoinTerminal::Cancelled(closure.clone())
+        }
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(revocation)) => {
+            JoinerJoinTerminal::WriteRevoked(revocation.clone())
+        }
+        _ => return Err(DeviceJoinError::JournalConflict),
+    };
+    crate::sync::store_pull::verify_device_join_cleanup_activation(
+        storage,
+        root,
+        &activation,
+        &terminal,
+    )
+    .await?;
     let activated = DeviceJoinJournalRecord {
         attempt_id,
         progress: Box::new(DeviceJoinRoleProgress::Joiner(
             JoinerJoinProgress::CleanupActivated(activation.clone()),
         )),
     };
-    match &*current.progress {
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Cancelled(_))
-        | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(_)) => {
-            pending.advance(&current, activated.clone())?;
+    pending.advance(&current, activated)?;
+    Ok(activation)
+}
+
+pub fn complete_joiner_device_join_cleanup(
+    pending: &DeviceJoinJournalDatabase,
+    activation: DeviceJoinCleanupActivation,
+) -> Result<DeviceJoinCleanupActivation, DeviceJoinError> {
+    let attempt_id = activation.receipt.attempt_id;
+    let current = pending
+        .load(attempt_id, DeviceJoinRole::Joiner)?
+        .ok_or(DeviceJoinError::JournalConflict)?;
+    if let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CancelledComplete(existing)) =
+        &*current.progress
+    {
+        if existing == &activation {
+            return Ok(existing.clone());
         }
-        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CleanupActivated(durable))
-            if durable == &activation => {}
-        _ => return Err(DeviceJoinError::JournalConflict),
+        return Err(DeviceJoinError::JournalConflict);
+    }
+    let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CleanupActivated(durable)) =
+        &*current.progress
+    else {
+        return Err(DeviceJoinError::JournalConflict);
+    };
+    if durable != &activation {
+        return Err(DeviceJoinError::JournalConflict);
     }
     pending.advance(
-        &activated,
+        &current,
         DeviceJoinJournalRecord {
             attempt_id,
             progress: Box::new(DeviceJoinRoleProgress::Joiner(

@@ -1098,18 +1098,36 @@ fn exercise_post_attempt_cancellation<'a>(
         .await
         .expect("retry exact owner cleanup completion");
         assert_eq!(owner_complete_retry, owner_complete);
+        let mut forged_activation = (*activation).clone();
+        forged_activation.activation.commit_hash =
+            crate::sync::store_commit::ObjectHash::digest(b"forged cleanup activation");
+        assert!(
+            crate::sync::device_join::accept_joiner_device_join_cleanup(
+                &pending,
+                &storage.storage,
+                &storage.root,
+                forged_activation,
+            )
+            .await
+            .is_err(),
+            "joiner cleanup must reject an activation whose exact Store commit was not verified",
+        );
+        crate::sync::device_join::accept_joiner_device_join_cleanup(
+            &pending,
+            &storage.storage,
+            &storage.root,
+            (*activation).clone(),
+        )
+        .await
+        .expect("accept exact joiner cleanup activation");
         let joiner_complete = crate::sync::device_join::complete_joiner_device_join_cleanup(
             &pending,
-            attempt_id,
             (*activation).clone(),
         )
         .expect("complete exact joiner cleanup");
-        let joiner_complete_retry = crate::sync::device_join::complete_joiner_device_join_cleanup(
-            &pending,
-            attempt_id,
-            *activation,
-        )
-        .expect("retry exact joiner cleanup completion");
+        let joiner_complete_retry =
+            crate::sync::device_join::complete_joiner_device_join_cleanup(&pending, *activation)
+                .expect("retry exact joiner cleanup completion");
         assert_eq!(joiner_complete_retry, joiner_complete);
         assert!(matches!(
             crate::sync::device_join::load_store_device_join_status(
@@ -1370,12 +1388,16 @@ fn exercise_missing_provider_administrator<'a>(
         )
         .await
         .expect("complete owner cleanup");
-        crate::sync::device_join::complete_joiner_device_join_cleanup(
+        crate::sync::device_join::accept_joiner_device_join_cleanup(
             &pending,
-            attempt_id,
-            *activation,
+            &storage.storage,
+            &storage.root,
+            (*activation).clone(),
         )
-        .expect("complete joiner cleanup");
+        .await
+        .expect("accept exact joiner cleanup activation");
+        crate::sync::device_join::complete_joiner_device_join_cleanup(&pending, *activation)
+            .expect("complete joiner cleanup");
     })
 }
 

@@ -548,6 +548,50 @@ pub(crate) async fn load_device_join_authorization(
     }
 }
 
+pub(crate) async fn verify_device_join_cleanup_activation(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    activation: &super::device_join::DeviceJoinCleanupActivation,
+    expected_joiner_terminal: &super::device_join::JoinerJoinTerminal,
+) -> Result<(), StorePullError> {
+    let (commit, author) = load_commit_with_author(storage, root, &activation.activation).await?;
+    if commit.device_join_cleanup_receipts() != std::slice::from_ref(&activation.receipt) {
+        return Err(StorePullError::Database(
+            "device join cleanup activation does not contain its exact sole receipt".to_string(),
+        ));
+    }
+    let authorization =
+        load_device_join_authorization(storage, root, &commit.membership_state).await?;
+    let predecessor = match &authorization {
+        DeviceJoinBootstrapAuthorization::MergeConcurrent { chain, .. } => {
+            RegistrationPredecessorAuthority::MergeConcurrent(chain)
+        }
+        DeviceJoinBootstrapAuthorization::Serial {
+            position,
+            authorization,
+            ..
+        } => RegistrationPredecessorAuthority::Serial {
+            authorization,
+            position: position.clone(),
+            history: SerialAuthorizationHistory::ExactPredecessor,
+        },
+    };
+    let receipts =
+        validate_commit_join_cleanup_receipts(storage, root, &commit, &author, Some(&predecessor))
+            .await
+            .map_err(|error| match error {
+                RegistrationLoadError::Object(error) => StorePullError::Object(error),
+                RegistrationLoadError::Invalid(error) => StorePullError::Database(error),
+            })?;
+    if receipts.len() != 1 || receipts[0].joiner_terminal != *expected_joiner_terminal {
+        return Err(StorePullError::Database(
+            "device join cleanup receipt differs from the joining device's terminal record"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn validate_commit_acknowledgement(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -1417,9 +1461,9 @@ async fn validate_commit_join_cleanup_receipts(
     commit: &StoreBatchCommit,
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
-) -> Result<(), RegistrationLoadError> {
+) -> Result<Vec<super::device_join::DeviceJoinCleanupReceiptObject>, RegistrationLoadError> {
     if commit.device_join_cleanup_receipts().is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let predecessor = predecessor.ok_or_else(|| {
         RegistrationLoadError::Invalid(
@@ -1431,6 +1475,7 @@ async fn validate_commit_join_cleanup_receipts(
             "device join cleanup activation author is not an active Owner".to_string(),
         ));
     }
+    let mut receipts = Vec::with_capacity(commit.device_join_cleanup_receipts().len());
     for reference in commit.device_join_cleanup_receipts() {
         let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
@@ -1542,8 +1587,9 @@ async fn validate_commit_join_cleanup_receipts(
                     .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
             }
         }
+        receipts.push(receipt);
     }
-    Ok(())
+    Ok(receipts)
 }
 
 async fn validate_commit_join_outcomes(
