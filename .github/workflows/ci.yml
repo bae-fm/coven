@@ -9,7 +9,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # The pinned toolchain and components come from rust-toolchain.toml on the
       # first cargo invocation.
       - uses: Swatinem/rust-cache@v2
@@ -38,7 +38,7 @@ jobs:
   check-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy -p coven --all-targets --all-features -- -D warnings
@@ -48,7 +48,7 @@ jobs:
   check-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy -p coven --all-targets --all-features -- -D warnings
