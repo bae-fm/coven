@@ -52,6 +52,13 @@ pub struct VerifiedReclaimAuthorization {
     pub evidence: VerifiedObject<super::store_reclaim::ReclaimEvidence>,
 }
 
+#[derive(Debug)]
+pub struct VerifiedReclaimReceipt {
+    pub receipt: VerifiedObject<super::store_reclaim::ReclaimReceipt>,
+    pub authorization: VerifiedReclaimAuthorization,
+    pub executor: StoreDeviceRegistration,
+}
+
 pub async fn load_provider_access_grant_ref(
     storage: &dyn SyncStorage,
     store_root: &StoreRootRef,
@@ -618,6 +625,66 @@ pub async fn load_reclaim_authorization_ref(
     Ok(VerifiedReclaimAuthorization {
         authorization,
         evidence,
+    })
+}
+
+pub async fn load_reclaim_receipt_ref(
+    storage: &dyn SyncStorage,
+    store_root: &StoreRootRef,
+    reference: &super::store_reclaim::ReclaimReceiptRef,
+) -> Result<VerifiedReclaimReceipt, StoreObjectError> {
+    let authorization = Box::pin(load_reclaim_authorization_ref(
+        storage,
+        store_root,
+        &reference.authorization,
+    ))
+    .await?;
+    let context = ProtocolObjectContext::signed_plaintext(
+        store_root.store_root_hash,
+        ProtocolObjectDomain::StoreReclaimReceipt,
+    );
+    let prefix = super::store_reclaim::reclaim_receipt_semantic_prefix(reference.receipt_hash);
+    let bytes = storage
+        .read_protocol_object(&context, &reference.object, &prefix)
+        .await?;
+    let unverified: super::store_reclaim::ReclaimReceipt =
+        serde_json::from_slice(&bytes).map_err(|error| StoreObjectError::InvalidObject {
+            semantic_prefix: prefix.clone(),
+            key: reference.object.slot().logical_key().to_string(),
+            source: Box::new(StoreProtocolError::Malformed(error.to_string())),
+        })?;
+    let executor = Box::pin(load_registration_ref(
+        storage,
+        store_root,
+        &unverified.executor,
+    ))
+    .await?
+    .value;
+    let receipt = reference
+        .verify(&unverified, &executor)
+        .and_then(|()| {
+            if unverified.store_root_hash != store_root.store_root_hash {
+                return Err(StoreProtocolError::StoreRootMismatch {
+                    expected: store_root.store_root_hash,
+                    actual: unverified.store_root_hash,
+                });
+            }
+            Ok(unverified)
+        })
+        .map_err(|source| StoreObjectError::InvalidObject {
+            semantic_prefix: prefix,
+            key: reference.object.slot().logical_key().to_string(),
+            source: Box::new(source),
+        })?;
+    Ok(VerifiedReclaimReceipt {
+        receipt: VerifiedObject {
+            value: receipt,
+            bytes,
+            semantic_hash: reference.receipt_hash,
+            object: reference.object.clone(),
+        },
+        authorization,
+        executor,
     })
 }
 

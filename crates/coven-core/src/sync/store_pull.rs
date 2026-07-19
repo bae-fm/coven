@@ -34,8 +34,9 @@ use super::store_commit::{
 use super::store_objects::{
     load_commit_ref, load_device_exclusion_outcome_ref, load_device_exclusion_proposal_ref,
     load_device_join_attempt_ref, load_device_join_outcome_ref, load_founder_registration,
-    load_owner_recovery_node_ref, load_reclaim_authorization_ref, load_registration_ref,
-    load_store_ack_ref, load_store_package, load_store_protocol_root, StoreObjectError,
+    load_owner_recovery_node_ref, load_reclaim_authorization_ref, load_reclaim_receipt_ref,
+    load_registration_ref, load_store_ack_ref, load_store_package, load_store_protocol_root,
+    StoreObjectError,
 };
 use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
 use crate::changeset::RowChange;
@@ -261,6 +262,18 @@ enum RegistrationPredecessorAuthority<'a> {
 }
 
 impl RegistrationPredecessorAuthority<'_> {
+    fn provider_admin_state(&self) -> Option<&super::provider::ProviderAdminState> {
+        match self {
+            Self::MergeConcurrent(chain) => {
+                let super::membership::MembershipStatus::Resolved(resolved) = chain.status() else {
+                    return None;
+                };
+                Some(resolved.provider_admin.combined_state())
+            }
+            Self::Serial { authorization, .. } => Some(&authorization.provider_admin),
+        }
+    }
+
     fn verifies_owner(
         &self,
         membership: &StoreMembershipStateRef,
@@ -311,20 +324,23 @@ impl RegistrationPredecessorAuthority<'_> {
         executor: &StoreDeviceRegistrationRef,
         expected: &super::provider::ProviderAdminGrantRecord,
     ) -> bool {
-        let state = match self {
-            Self::MergeConcurrent(chain) => {
-                let super::membership::MembershipStatus::Resolved(resolved) = chain.status() else {
-                    return false;
-                };
-                resolved.provider_admin.combined_state()
-            }
-            Self::Serial { authorization, .. } => &authorization.provider_admin,
+        let Some(state) = self.provider_admin_state() else {
+            return false;
         };
         state.authorizes(grant_id, executor)
             && state
                 .records()
                 .get(grant_id)
                 .is_some_and(|record| record == expected)
+    }
+
+    fn verifies_provider_administrator_grant(
+        &self,
+        grant_id: &super::provider::ProviderAdminGrantId,
+        executor: &StoreDeviceRegistrationRef,
+    ) -> bool {
+        self.provider_admin_state()
+            .is_some_and(|state| state.authorizes(grant_id, executor))
     }
 }
 
@@ -509,6 +525,60 @@ async fn validate_commit_reclaim_authorization(
     Ok(())
 }
 
+async fn validate_commit_reclaim_receipt(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    activating_author: &StoreDeviceRegistration,
+    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+) -> Result<(), RegistrationLoadError> {
+    let Some(reference) = commit.reclaim_receipt() else {
+        return Ok(());
+    };
+    let predecessor = predecessor.ok_or_else(|| {
+        RegistrationLoadError::Invalid(
+            "reclaim receipt activation has no exact predecessor provider authority".to_string(),
+        )
+    })?;
+    let (receipt_executor, provider_admin_state, provider_admin_grant, authorization, executor) = {
+        let opened = Box::pin(load_reclaim_receipt_ref(storage, root, reference))
+            .await
+            .map_err(RegistrationLoadError::Object)?;
+        (
+            opened.receipt.value.executor.clone(),
+            opened.receipt.value.provider_admin_state.clone(),
+            opened.receipt.value.provider_admin_grant.clone(),
+            opened.receipt.value.authorization.clone(),
+            opened.executor,
+        )
+    };
+    if receipt_executor != commit.author_registration
+        || executor != *activating_author
+        || provider_admin_state != commit.membership_state
+        || !predecessor
+            .verifies_provider_administrator_grant(&provider_admin_grant, &receipt_executor)
+    {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim receipt signer is not the effective provider administrator at its exact predecessor"
+                .to_string(),
+        ));
+    }
+    if Box::pin(predecessor_commit_matching(
+        storage,
+        root,
+        &commit.order,
+        |_, candidate| candidate.reclaim_authorization() == Some(&authorization),
+    ))
+    .await?
+    .is_none()
+    {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim receipt authorization is absent from predecessor history".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn load_commit_registrations(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -525,6 +595,14 @@ async fn load_commit_registrations(
     ))
     .await?;
     Box::pin(validate_commit_reclaim_authorization(
+        storage,
+        root,
+        commit,
+        activating_author,
+        predecessor,
+    ))
+    .await?;
+    Box::pin(validate_commit_reclaim_receipt(
         storage,
         root,
         commit,
@@ -1978,6 +2056,7 @@ pub async fn pull_store_commits_with_identity(
                 && commit.device_exclusion_proposals().is_empty()
                 && commit.device_exclusion_outcomes().is_empty()
                 && commit.reclaim_authorization().is_none()
+                && commit.reclaim_receipt().is_none()
             {
                 None
             } else {
@@ -2766,7 +2845,8 @@ pub(crate) async fn prepare_device_join_bootstrap(
             && commit.device_registrations().is_empty()
             && commit.device_exclusion_proposals().is_empty()
             && commit.device_exclusion_outcomes().is_empty()
-            && commit.reclaim_authorization().is_none());
+            && commit.reclaim_authorization().is_none()
+            && commit.reclaim_receipt().is_none());
         let verified_state = match verified_authorization {
             DeviceJoinBootstrapAuthorization::MergeConcurrent { state, .. }
             | DeviceJoinBootstrapAuthorization::Serial { state, .. } => state,
@@ -2887,6 +2967,7 @@ pub(crate) async fn materialize_device_join_activation(
         || !commit.circle_packages().is_empty()
         || commit.store_package().is_some()
         || commit.reclaim_authorization().is_some()
+        || commit.reclaim_receipt().is_some()
         || commit.membership_authority.is_some()
         || commit.control().is_some()
     {

@@ -28,6 +28,7 @@ pub(crate) enum ProtectedObjectDomain {
     StoreDeviceExclusionOutcome,
     StoreReclaimEvidence,
     StoreReclaimAuthorization,
+    StoreReclaimReceipt,
     ProviderAccessGrant,
     ProviderAccessWithdrawal,
     OwnerRecoveryNode,
@@ -284,6 +285,14 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
+            Self::StoreReclaimReceipt => ProtocolObjectMetadata {
+                aad_label: b"store-reclaim-receipt",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "reclaim"), (2, "receipts")],
+                }]),
+                extension: ".json",
+            },
             Self::ProviderAccessGrant => ProtocolObjectMetadata {
                 aad_label: b"provider-access-grant",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
@@ -506,6 +515,8 @@ impl ProtocolObjectDomain {
         StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::StoreReclaimEvidence);
     pub const StoreReclaimAuthorization: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreReclaimAuthorization);
+    pub const StoreReclaimReceipt: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreReclaimReceipt);
     pub const ProviderAccessGrant: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessGrant);
     pub const ProviderAccessWithdrawal: SignedStoreProtocolObjectDomain =
@@ -1510,6 +1521,11 @@ mod tests {
                 domain: ProtectedObjectDomain::StoreReclaimAuthorization,
                 valid: &["store-v1/reclaim/authorizations/hash"],
                 cross_domain: "store-v1/reclaim/evidence/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreReclaimReceipt,
+                valid: &["store-v1/reclaim/receipts/hash"],
+                cross_domain: "store-v1/reclaim/authorizations/hash",
             },
             DomainPathCase {
                 domain: ProtectedObjectDomain::ProviderAccessGrant,

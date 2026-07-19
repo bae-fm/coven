@@ -1033,7 +1033,10 @@ impl StoreCommitOperations {
 pub enum StoreCommitBody {
     Operations(StoreCommitOperations),
     ReclaimAuthorization {
-        authorization: super::store_reclaim::ReclaimAuthorizationRef,
+        authorization: Box<super::store_reclaim::ReclaimAuthorizationRef>,
+    },
+    ReclaimReceipt {
+        receipt: Box<super::store_reclaim::ReclaimReceiptRef>,
     },
     SelfRetirement {
         retirement: StoreDeviceSelfRetirementRef,
@@ -1116,6 +1119,7 @@ impl StoreBatchCommit {
         match &self.body {
             StoreCommitBody::Operations(operations) => Some(operations),
             StoreCommitBody::ReclaimAuthorization { .. }
+            | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
@@ -1137,6 +1141,7 @@ impl StoreBatchCommit {
             StoreCommitBody::SerialRecoveryActivation { activation } => Some(activation),
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
+            | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -1147,6 +1152,7 @@ impl StoreBatchCommit {
             StoreCommitBody::SelfRetirement { retirement } => Some(retirement),
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
+            | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -1157,6 +1163,7 @@ impl StoreBatchCommit {
             StoreCommitBody::AbandonCandidates { manifests } => manifests,
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
+            | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. } => &[],
         }
@@ -1164,8 +1171,20 @@ impl StoreBatchCommit {
 
     pub fn reclaim_authorization(&self) -> Option<&super::store_reclaim::ReclaimAuthorizationRef> {
         match &self.body {
-            StoreCommitBody::ReclaimAuthorization { authorization } => Some(authorization),
+            StoreCommitBody::ReclaimAuthorization { authorization } => Some(authorization.as_ref()),
             StoreCommitBody::Operations(_)
+            | StoreCommitBody::ReclaimReceipt { .. }
+            | StoreCommitBody::SelfRetirement { .. }
+            | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::AbandonCandidates { .. } => None,
+        }
+    }
+
+    pub fn reclaim_receipt(&self) -> Option<&super::store_reclaim::ReclaimReceiptRef> {
+        match &self.body {
+            StoreCommitBody::ReclaimReceipt { receipt } => Some(receipt.as_ref()),
+            StoreCommitBody::Operations(_)
+            | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
@@ -1217,6 +1236,7 @@ impl StoreBatchCommit {
                 std::slice::from_ref(&activation.registration)
             }
             StoreCommitBody::ReclaimAuthorization { .. }
+            | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SelfRetirement { .. } => &[],
             StoreCommitBody::AbandonCandidates { .. } => &[],
         }
@@ -1239,6 +1259,7 @@ impl StoreBatchCommit {
             StoreCommitBody::SelfRetirement { retirement } => std::slice::from_ref(retirement),
             StoreCommitBody::Operations(_)
             | StoreCommitBody::ReclaimAuthorization { .. }
+            | StoreCommitBody::ReclaimReceipt { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. } => &[],
             StoreCommitBody::AbandonCandidates { .. } => &[],
         }
@@ -1291,7 +1312,48 @@ impl StoreBatchCommit {
             membership_state,
             device_state,
             None,
-            StoreCommitBody::ReclaimAuthorization { authorization },
+            StoreCommitBody::ReclaimAuthorization {
+                authorization: Box::new(authorization),
+            },
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_reclaim_receipt(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        receipt: super::store_reclaim::ReclaimReceiptRef,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            None,
+            signer,
+        )?;
+        Self::finish_signed_body(
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            None,
+            StoreCommitBody::ReclaimReceipt {
+                receipt: Box::new(receipt),
+            },
             signer,
         )
     }
@@ -2244,6 +2306,7 @@ fn validate_commit_body(
             )?;
         }
         StoreCommitBody::ReclaimAuthorization { .. } => {}
+        StoreCommitBody::ReclaimReceipt { .. } => {}
         StoreCommitBody::SelfRetirement { retirement } => {
             validate_device_retirement_refs(
                 std::slice::from_ref(retirement),
@@ -2365,6 +2428,7 @@ fn candidate_manifest(
             }
         }
         StoreCommitBody::ReclaimAuthorization { .. } => {}
+        StoreCommitBody::ReclaimReceipt { .. } => {}
         StoreCommitBody::SelfRetirement { retirement } => {
             objects.push(CandidateExclusiveObjectRef::SelfRetirement(
                 retirement.clone(),

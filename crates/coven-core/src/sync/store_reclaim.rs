@@ -21,6 +21,7 @@ use crate::keys::{self, UserKeypair};
 
 const RECLAIM_EVIDENCE_DOMAIN: &[u8] = b"coven.store-reclaim-evidence.v1\0";
 const RECLAIM_AUTHORIZATION_DOMAIN: &[u8] = b"coven.store-reclaim-authorization.v1\0";
+const RECLAIM_RECEIPT_DOMAIN: &[u8] = b"coven.store-reclaim-receipt.v1\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,10 +202,9 @@ impl ReclaimAuthorizationRef {
         }
     }
 
-    pub fn verify(
+    fn verify_identity(
         &self,
         authorization: &ReclaimAuthorization,
-        owner_pubkey: &str,
     ) -> Result<(), StoreProtocolError> {
         let actual = authorization.authorization_hash();
         if actual != self.authorization_hash {
@@ -218,6 +218,15 @@ impl ReclaimAuthorizationRef {
                 "reclaim authorization evidence differs from its exact reference".to_string(),
             ));
         }
+        Ok(())
+    }
+
+    pub fn verify(
+        &self,
+        authorization: &ReclaimAuthorization,
+        owner_pubkey: &str,
+    ) -> Result<(), StoreProtocolError> {
+        self.verify_identity(authorization)?;
         authorization.verify(owner_pubkey)
     }
 }
@@ -299,12 +308,160 @@ impl ReclaimAuthorization {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReclaimReceiptRef {
+    pub receipt_hash: ObjectHash,
+    pub authorization: ReclaimAuthorizationRef,
+    pub object: ExactObjectRef,
+}
+
+impl ReclaimReceiptRef {
+    pub fn from_receipt(receipt: &ReclaimReceipt, object: ExactObjectRef) -> Self {
+        Self {
+            receipt_hash: receipt.receipt_hash(),
+            authorization: receipt.authorization.clone(),
+            object,
+        }
+    }
+
+    fn verify_identity(&self, receipt: &ReclaimReceipt) -> Result<(), StoreProtocolError> {
+        let actual = receipt.receipt_hash();
+        if actual != self.receipt_hash {
+            return Err(StoreProtocolError::ObjectHashMismatch {
+                expected: self.receipt_hash,
+                actual,
+            });
+        }
+        if receipt.authorization != self.authorization {
+            return Err(StoreProtocolError::Malformed(
+                "reclaim receipt authorization differs from its exact reference".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn verify(
+        &self,
+        receipt: &ReclaimReceipt,
+        executor: &StoreDeviceRegistration,
+    ) -> Result<(), StoreProtocolError> {
+        self.verify_identity(receipt)?;
+        receipt.verify(executor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReclaimReceipt {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub authorization: ReclaimAuthorizationRef,
+    pub provider_admin_state: StoreMembershipStateRef,
+    pub provider_admin_grant: super::provider::ProviderAdminGrantId,
+    pub executor: StoreDeviceRegistrationRef,
+    pub signature: String,
+}
+
+#[derive(Serialize)]
+struct ReclaimReceiptSignedFields<'a> {
+    version: u32,
+    store_root_hash: ObjectHash,
+    authorization: &'a ReclaimAuthorizationRef,
+    provider_admin_state: &'a StoreMembershipStateRef,
+    provider_admin_grant: &'a super::provider::ProviderAdminGrantId,
+    executor: &'a StoreDeviceRegistrationRef,
+}
+
+impl ReclaimReceipt {
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed(
+        store_root_hash: ObjectHash,
+        authorization: ReclaimAuthorizationRef,
+        provider_admin_state: StoreMembershipStateRef,
+        provider_admin_grant: super::provider::ProviderAdminGrantId,
+        executor: StoreDeviceRegistrationRef,
+        executor_registration: &StoreDeviceRegistration,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        executor.verify_registration(executor_registration)?;
+        if executor_registration.store_root.store_root_hash != store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: store_root_hash,
+                actual: executor_registration.store_root.store_root_hash,
+            });
+        }
+        if keys::public_key_hex(signer) != executor_registration.device_signing_pubkey {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        let mut receipt = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            authorization,
+            provider_admin_state,
+            provider_admin_grant,
+            executor,
+            signature: String::new(),
+        };
+        let (_, signature) = keys::sign_hex(signer, &receipt.canonical_signed_bytes());
+        receipt.signature = signature;
+        Ok(receipt)
+    }
+
+    pub fn canonical_signed_bytes(&self) -> Vec<u8> {
+        super::store_commit::domain_json(
+            RECLAIM_RECEIPT_DOMAIN,
+            &ReclaimReceiptSignedFields {
+                version: self.version,
+                store_root_hash: self.store_root_hash,
+                authorization: &self.authorization,
+                provider_admin_state: &self.provider_admin_state,
+                provider_admin_grant: &self.provider_admin_grant,
+                executor: &self.executor,
+            },
+        )
+    }
+
+    pub fn receipt_hash(&self) -> ObjectHash {
+        ObjectHash::digest(&self.canonical_signed_bytes())
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("ReclaimReceipt serialization cannot fail")
+    }
+
+    pub fn verify(&self, executor: &StoreDeviceRegistration) -> Result<(), StoreProtocolError> {
+        if self.version != STORE_PROTOCOL_VERSION {
+            return Err(StoreProtocolError::UnsupportedVersion(self.version));
+        }
+        self.executor.verify_registration(executor)?;
+        if executor.store_root.store_root_hash != self.store_root_hash {
+            return Err(StoreProtocolError::StoreRootMismatch {
+                expected: self.store_root_hash,
+                actual: executor.store_root.store_root_hash,
+            });
+        }
+        if !keys::verify_signature_hex(
+            &executor.device_signing_pubkey,
+            &self.signature,
+            &self.canonical_signed_bytes(),
+        ) {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        Ok(())
+    }
+}
+
 pub fn reclaim_evidence_semantic_prefix(evidence_hash: ObjectHash) -> String {
     format!("store-v1/reclaim/evidence/{evidence_hash}")
 }
 
 pub fn reclaim_authorization_semantic_prefix(authorization_hash: ObjectHash) -> String {
     format!("store-v1/reclaim/authorizations/{authorization_hash}")
+}
+
+pub fn reclaim_receipt_semantic_prefix(receipt_hash: ObjectHash) -> String {
+    format!("store-v1/reclaim/receipts/{receipt_hash}")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -825,7 +982,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_reclaim_authorization_opens_its_encrypted_evidence() {
+    async fn exact_reclaim_receipt_opens_its_authorization_and_encrypted_evidence() {
         let db = crate::sync::test_helpers::open_test_db();
         let store = crate::sync::test_helpers::TestStore::create(
             &db,
@@ -847,7 +1004,7 @@ mod tests {
             .publish_changeset("founder", 1, &changeset, db.schema_version())
             .await
             .expect("publish package activation");
-        let (founder_ref, founder, _) = store
+        let (founder_ref, founder, device_signer) = store
             .founder_device_authority()
             .await
             .expect("load founder authority");
@@ -875,7 +1032,7 @@ mod tests {
                     object: proof_object("store-v1/snapshots/founder/covering"),
                 },
                 acknowledgements: vec![StoreAckRef {
-                    registration: founder_ref,
+                    registration: founder_ref.clone(),
                     sequence: 1,
                     ack_hash: ObjectHash::digest(b"acknowledgement"),
                     object: proof_object("store-v1/acks/founder/1.json"),
@@ -968,6 +1125,70 @@ mod tests {
             .is_ok());
         assert!(matches!(
             relocated.verify(&keys::public_key_hex(&store.signer)),
+            Err(StoreProtocolError::InvalidSignature)
+        ));
+
+        let receipt = ReclaimReceipt::signed(
+            store.root.store_root_hash,
+            authorization_ref,
+            authorization.authority.membership.clone(),
+            store
+                .protocol_root
+                .descriptor
+                .founder_provider_admin
+                .grant_id
+                .clone(),
+            founder_ref,
+            &founder,
+            &device_signer,
+        )
+        .expect("sign reclaim receipt");
+        let receipt_context = ProtocolObjectContext::signed_plaintext(
+            store.root.store_root_hash,
+            ProtocolObjectDomain::StoreReclaimReceipt,
+        );
+        let receipt_prefix = reclaim_receipt_semantic_prefix(receipt.receipt_hash());
+        let receipt_slot = store
+            .storage
+            .allocate_protocol_slot(&receipt_context, &receipt_prefix, ".json")
+            .await
+            .expect("allocate receipt slot");
+        let prepared_receipt = store
+            .storage
+            .prepare_protocol_object(
+                &receipt_context,
+                receipt_slot,
+                &receipt_prefix,
+                receipt.to_bytes(),
+            )
+            .expect("prepare receipt");
+        store
+            .storage
+            .create_protocol_object(&prepared_receipt)
+            .await
+            .expect("create receipt");
+        let receipt_ref =
+            ReclaimReceiptRef::from_receipt(&receipt, prepared_receipt.reference().clone());
+
+        let opened_receipt = super::super::store_objects::load_reclaim_receipt_ref(
+            &store.storage,
+            &store.root,
+            &receipt_ref,
+        )
+        .await
+        .expect("open exact reclaim receipt graph");
+
+        assert_eq!(opened_receipt.receipt.value, receipt);
+        assert_eq!(
+            opened_receipt.authorization.authorization.value,
+            authorization
+        );
+        assert_eq!(opened_receipt.authorization.evidence.value, evidence);
+        let mut reassigned = receipt.clone();
+        reassigned.provider_admin_grant =
+            super::super::provider::ProviderAdminGrantId(ObjectHash::digest(b"another admin"));
+        assert!(matches!(
+            reassigned.verify(&founder),
             Err(StoreProtocolError::InvalidSignature)
         ));
     }
