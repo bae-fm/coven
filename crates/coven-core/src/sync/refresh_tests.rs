@@ -37,11 +37,10 @@ const LIB_ID: &str = "lib-refresh-test";
 
 async fn exact_store(owner: &UserKeypair) -> (TestStore, crate::database::Database) {
     let owner_db = open_test_db();
-    let storage = TestStore::create(&owner_db, LIB_ID, owner.clone())
+    let storage = Box::pin(TestStore::create(&owner_db, LIB_ID, owner.clone()))
         .await
         .expect("create exact refresh Store");
-    storage
-        .open_into(&owner_db)
+    Box::pin(storage.open_into(&owner_db))
         .await
         .expect("open exact refresh Store on owner device");
     (storage, owner_db)

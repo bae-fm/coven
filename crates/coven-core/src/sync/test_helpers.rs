@@ -1180,9 +1180,11 @@ pub async fn create_exact_test_store(
     store_id: &str,
     signer: &UserKeypair,
 ) -> Result<crate::sync::store_commit::StoreRootRef, String> {
-    crate::sync::store_protocol_root::create_store(db, storage, store_id, signer)
-        .await
-        .map_err(|error| error.to_string())?;
+    Box::pin(crate::sync::store_protocol_root::create_store(
+        db, storage, store_id, signer,
+    ))
+    .await
+    .map_err(|error| error.to_string())?;
     db.local_store_root_ref()
         .await
         .map_err(|error| error.to_string())?

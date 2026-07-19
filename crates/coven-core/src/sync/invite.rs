@@ -1331,7 +1331,7 @@ pub(crate) async fn revoke_member_durable(
                 .await;
             }
             let stream_id = select_mutation_author_stream(db, chain, owner_keypair).await?;
-            let plan = build_revoke_mutation(
+            let plan = Box::pin(build_revoke_mutation(
                 storage,
                 db,
                 store_root_hash,
@@ -1342,7 +1342,7 @@ pub(crate) async fn revoke_member_durable(
                 store_id,
                 timestamp,
                 current_encryption,
-            )
+            ))
             .await?;
             let encoded =
                 encode_membership_mutation(&MembershipMutationPlan::Revoke(plan.clone()))?;
@@ -1353,7 +1353,7 @@ pub(crate) async fn revoke_member_durable(
             (plan, progress, intent_hash)
         }
     };
-    execute_revoke_mutation(
+    Box::pin(execute_revoke_mutation(
         storage,
         cloud_home,
         store_root_hash,
@@ -1361,7 +1361,7 @@ pub(crate) async fn revoke_member_durable(
         plan,
         progress,
         MutationPersistence { db, intent_hash },
-    )
+    ))
     .await
 }
 

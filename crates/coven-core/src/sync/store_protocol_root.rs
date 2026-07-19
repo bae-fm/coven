@@ -1078,7 +1078,13 @@ pub async fn create_store(
     {
         Some(graph) => graph,
         None => {
-            let graph = prepare_founder_graph(db, storage, founder_timestamp, signer).await?;
+            let graph = Box::pin(prepare_founder_graph(
+                db,
+                storage,
+                founder_timestamp,
+                signer,
+            ))
+            .await?;
             db.stage_store_founder_graph(graph)
                 .await
                 .map_err(|error| StoreProtocolRootError::Database(error.to_string()))?;
@@ -1103,7 +1109,7 @@ pub async fn create_store(
         }
     };
     if rollback_allowed {
-        rollback_founder_publication(db, storage, &graph)
+        Box::pin(rollback_founder_publication(db, storage, &graph))
             .await
             .map_err(|rollback| {
                 StoreProtocolRootError::Database(format!(
@@ -1120,10 +1126,18 @@ pub async fn create_store(
                 )
             })?;
     }
-    match publish_store_founder_graph(db, storage, founder_timestamp, signer, graph.clone()).await {
+    match Box::pin(publish_store_founder_graph(
+        db,
+        storage,
+        founder_timestamp,
+        signer,
+        graph.clone(),
+    ))
+    .await
+    {
         Ok(root) => Ok(root),
         Err(operation) if rollback_allowed => {
-            match rollback_founder_publication(db, storage, &graph).await {
+            match Box::pin(rollback_founder_publication(db, storage, &graph)).await {
                 Ok(()) => Err(operation),
                 Err(rollback) => Err(StoreProtocolRootError::Rollback {
                     operation: Box::new(operation),
