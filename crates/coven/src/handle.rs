@@ -1269,6 +1269,16 @@ impl CovenHandle {
         manager.create_circle(name).await
     }
 
+    /// Rename a Circle without changing its epoch key or membership.
+    pub async fn rename_circle(
+        &self,
+        circle_id: &crate::CircleId,
+        name: &str,
+    ) -> Result<(), SyncError> {
+        let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
+        manager.rename_circle(circle_id, name).await
+    }
+
     /// Return circles with a locally verified active access record.
     pub async fn get_circles(&self) -> Result<Vec<crate::CircleInfo>, SyncError> {
         let identity = crate::keys::require_identity(self.identity_custody.as_ref())?;
@@ -2728,11 +2738,16 @@ mod tests {
                 .await
                 .expect("create and activate circle");
 
+            handle
+                .rename_circle(&circle_id, "Household money")
+                .await
+                .expect("rename and activate circle");
+
             assert_eq!(
                 handle.get_circles().await.expect("read active circles"),
                 vec![crate::CircleInfo {
                     id: circle_id,
-                    name: "Household".to_string(),
+                    name: "Household money".to_string(),
                     role: crate::CircleRole::Owner,
                 }]
             );
@@ -2785,7 +2800,7 @@ mod tests {
                     [&circle],
                     |row| row.get(0),
                 )?;
-                assert_eq!((activated, active_access, pending), (1, 1, 0));
+                assert_eq!((activated, active_access, pending), (2, 2, 0));
                 Ok::<_, crate::DbError>(())
             })
             .await
@@ -2825,6 +2840,25 @@ mod tests {
                 .await
                 .expect("create and activate Serial circle");
 
+            handle
+                .rename_circle(&circle_id, "Household money")
+                .await
+                .expect("rename and activate Serial circle");
+
+            assert_eq!(
+                handle.get_circles().await.expect("read active circles"),
+                vec![crate::CircleInfo {
+                    id: circle_id,
+                    name: "Household money".to_string(),
+                    role: crate::CircleRole::Owner,
+                }]
+            );
+            assert!(handle
+                .get_circle_operations()
+                .await
+                .expect("read completed circle operations")
+                .is_empty());
+
             let circle = circle_id.to_string();
             db.call(move |conn| {
                 let activated: i64 = conn.query_row(
@@ -2842,7 +2876,7 @@ mod tests {
                     [],
                     |row| row.get(0),
                 )?;
-                assert_eq!((activated, pending), (1, 0));
+                assert_eq!((activated, pending), (2, 0));
                 assert!(serial_positions >= 1);
                 Ok::<_, crate::DbError>(())
             })

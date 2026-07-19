@@ -1847,29 +1847,60 @@ impl SyncComponents {
         )
     }
 
+    fn circle_coordination(
+        &self,
+    ) -> Result<
+        Option<&dyn super::storage::CoordinationStorage>,
+        super::circle_ops::CircleOperationError,
+    > {
+        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
+            return Err(super::circle_ops::CircleOperationError::BrowsableStorage);
+        }
+        match self.db.write_policy() {
+            crate::WritePolicy::MergeConcurrent => Ok(None),
+            crate::WritePolicy::Serial => {
+                self.storage
+                    .serial_coordination()
+                    .map(Some)
+                    .map_err(|error| {
+                        super::circle_ops::CircleOperationError::InvalidState(format!(
+                            "Serial coordination: {error}"
+                        ))
+                    })
+            }
+        }
+    }
+
     pub async fn create_circle(
         &self,
         name: &str,
     ) -> Result<super::circle::CircleId, super::circle_ops::CircleOperationError> {
-        if matches!(self.blob_path_scheme(), BlobPathScheme::Plain) {
-            return Err(super::circle_ops::CircleOperationError::BrowsableStorage);
-        }
-        let coordination = match self.db.write_policy() {
-            crate::WritePolicy::MergeConcurrent => None,
-            crate::WritePolicy::Serial => {
-                Some(self.storage.serial_coordination().map_err(|error| {
-                    super::circle_ops::CircleOperationError::InvalidState(format!(
-                        "Serial coordination: {error}"
-                    ))
-                })?)
-            }
-        };
+        let coordination = self.circle_coordination()?;
         super::circle_ops::create_circle(
             &self.db,
             &*self.storage,
             coordination,
             &self.device_id,
             &self.hlc.now().to_string(),
+            name,
+            &self.user_keypair,
+        )
+        .await
+    }
+
+    pub async fn rename_circle(
+        &self,
+        circle_id: super::circle::CircleId,
+        name: &str,
+    ) -> Result<(), super::circle_ops::CircleOperationError> {
+        let coordination = self.circle_coordination()?;
+        super::circle_ops::rename_circle(
+            &self.db,
+            &*self.storage,
+            coordination,
+            &self.device_id,
+            &self.hlc.now().to_string(),
+            circle_id,
             name,
             &self.user_keypair,
         )

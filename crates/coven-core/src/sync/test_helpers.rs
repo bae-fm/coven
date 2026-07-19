@@ -263,7 +263,7 @@ fn install_test_circle_current_state(
     use std::collections::BTreeMap;
 
     use crate::storage::cloud::ObjectSlot;
-    use crate::sync::circle::{CircleCreation, CircleRole, StoreMembershipStateRef};
+    use crate::sync::circle::{CircleRole, PreparedCircleTransition, StoreMembershipStateRef};
     use crate::sync::circle_activation::{
         CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
     };
@@ -378,7 +378,7 @@ fn install_test_circle_current_state(
         format!("{label} candidate family").as_bytes(),
     ));
     let ids = crate::id_provider::SequentialIdProvider::new(label);
-    let creation = CircleCreation::founder(
+    let creation = PreparedCircleTransition::founder(
         store_root_hash,
         candidate_family,
         &format!("{label}-device"),

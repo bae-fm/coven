@@ -42,6 +42,15 @@ pub(crate) struct VerifiedCircleActive {
     pub metadata: CircleMetadata,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CircleAuthoringState {
+    pub candidate_family: CandidateFamilyId,
+    pub control: PreparedCircleControl,
+    pub access: CircleAccessLeaf,
+    pub roster: CircleMaterializedRoster,
+    pub metadata: CircleMetadata,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CircleCurrentControl {
@@ -273,6 +282,19 @@ impl CircleCurrentState {
             Self::Active(_) => 1,
             Self::Inactive(_) => 0,
             Self::ControlConflict { branches } => branches.len(),
+        }
+    }
+
+    pub(crate) fn authoring_state(&self) -> Option<CircleAuthoringState> {
+        match self {
+            Self::Active(active) => Some(CircleAuthoringState {
+                candidate_family: active.candidate_family,
+                control: active.current.control.clone(),
+                access: active.access.clone(),
+                roster: active.roster.clone(),
+                metadata: active.metadata.clone(),
+            }),
+            Self::Inactive(_) | Self::ControlConflict { .. } => None,
         }
     }
 

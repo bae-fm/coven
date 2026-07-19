@@ -128,6 +128,12 @@ enum SyncCommand {
             Result<crate::CircleId, crate::sync::circle_ops::CircleOperationError>,
         >,
     },
+    RenameCircle {
+        circle_id: crate::CircleId,
+        name: String,
+        reply:
+            tokio::sync::oneshot::Sender<Result<(), crate::sync::circle_ops::CircleOperationError>>,
+    },
 }
 
 impl SyncLoopHandle {
@@ -497,6 +503,25 @@ impl SyncLoopHandle {
             .await
             .map_err(|_| crate::sync::circle_ops::CircleOperationError::ReplyChannelClosed)?
     }
+
+    pub(crate) async fn rename_circle(
+        &self,
+        circle_id: crate::CircleId,
+        name: &str,
+    ) -> Result<(), crate::sync::circle_ops::CircleOperationError> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.command_tx
+            .send(SyncCommand::RenameCircle {
+                circle_id,
+                name: name.to_string(),
+                reply,
+            })
+            .await
+            .map_err(|_| crate::sync::circle_ops::CircleOperationError::CommandChannelClosed)?;
+        response
+            .await
+            .map_err(|_| crate::sync::circle_ops::CircleOperationError::ReplyChannelClosed)?
+    }
 }
 
 async fn execute_command(inner: &SyncLoopInner, command: SyncCommand) {
@@ -505,6 +530,16 @@ async fn execute_command(inner: &SyncLoopInner, command: SyncCommand) {
             let result = inner.components.create_circle(&name).await;
             if reply.send(result).is_err() {
                 debug!("create_circle caller dropped its reply receiver");
+            }
+        }
+        SyncCommand::RenameCircle {
+            circle_id,
+            name,
+            reply,
+        } => {
+            let result = inner.components.rename_circle(circle_id, &name).await;
+            if reply.send(result).is_err() {
+                debug!("rename_circle caller dropped its reply receiver");
             }
         }
     }

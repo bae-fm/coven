@@ -162,6 +162,7 @@ impl fmt::Display for CircleOperationId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircleOperationKind {
     Create,
+    Rename,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,7 +708,7 @@ mod tests {
         ] {
             let ids = crate::id_provider::SequentialIdProvider::new("founder-circle");
             let candidate_family = candidate_family("founder-circle");
-            let creation = CircleCreation::founder(
+            let creation = PreparedCircleTransition::founder(
                 ObjectHash::digest(b"store-root"),
                 candidate_family,
                 "device-a",
@@ -807,7 +808,7 @@ mod tests {
         let (membership, authority) = merge_membership_ref(&owner, &members, "access-verification");
         let ids = crate::id_provider::SequentialIdProvider::new("access-verification");
         let candidate_family = candidate_family("access-verification");
-        let creation = CircleCreation::founder(
+        let creation = PreparedCircleTransition::founder(
             ObjectHash::digest(b"store-root"),
             candidate_family,
             "device-a",
@@ -948,7 +949,7 @@ mod tests {
 
         assert_eq!(
             recipient_slot_with_peer(&local, &recipient, CircleId::from_bytes([9; 16])),
-            Err(CircleCreateError::InvalidRecipient(recipient))
+            Err(CircleTransitionError::InvalidRecipient(recipient))
         );
     }
 
@@ -1035,7 +1036,7 @@ mod tests {
             &operation_id,
             &order,
         );
-        let creation = CircleCreation::founder(
+        let creation = PreparedCircleTransition::founder(
             store_root_hash,
             candidate_family,
             &device.reference.device_id.to_string(),

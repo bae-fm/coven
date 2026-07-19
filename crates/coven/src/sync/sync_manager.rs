@@ -906,6 +906,18 @@ impl SyncManager {
         sync_loop.create_circle(name).await.map_err(SyncError::from)
     }
 
+    pub(crate) async fn rename_circle(
+        &self,
+        circle_id: &crate::CircleId,
+        name: &str,
+    ) -> Result<(), SyncError> {
+        let sync_loop = self.sync_loop_handle().ok_or(SyncError::LoopNotRunning)?;
+        sync_loop
+            .rename_circle(*circle_id, name)
+            .await
+            .map_err(SyncError::from)
+    }
+
     pub(crate) async fn get_circle_members(
         &self,
         circle_id: &crate::CircleId,

@@ -12878,6 +12878,77 @@ impl Database {
         .await
     }
 
+    pub(crate) async fn circle_authoring_context(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        identity_pubkey: &str,
+    ) -> Result<
+        (
+            crate::sync::circle_activation::CircleAuthoringState,
+            StoreBatchCommitRef,
+        ),
+        DbError,
+    > {
+        let identity_pubkey = identity_pubkey.to_string();
+        self.call(move |conn| {
+            let state = Self::circle_current_state_on(conn, circle_id)?.ok_or_else(|| {
+                DbError::Message(format!("Circle {circle_id} has no current state"))
+            })?;
+            let authoring = state.authoring_state().ok_or_else(|| {
+                DbError::Message(format!("Circle {circle_id} has no active authoring state"))
+            })?;
+            if authoring.access.recipient_pubkey != identity_pubkey {
+                return Err(DbError::Message(format!(
+                    "active Circle {circle_id} belongs to another local identity"
+                )));
+            }
+            let control_coord = serde_json::to_string(&authoring.control.coord).map_err(|error| {
+                DbError::Message(format!("serialize current Circle control coordinate: {error}"))
+            })?;
+            let commit_hash = conn
+                .query_row(
+                    "SELECT commit_hash FROM circle_control_activations
+                     WHERE circle_id = ?1 AND control_coord = ?2",
+                    rusqlite::params![circle_id.to_string(), control_coord],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(DbError::from)?;
+            let mut statement = conn
+                .prepare("SELECT device_id, seq, commit_ref FROM materialized_commits")
+                .map_err(DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(DbError::from)?;
+            let mut activated_commit = None;
+            for row in rows {
+                let (stream_id, sequence, encoded) = row.map_err(DbError::from)?;
+                let sequence = Self::sequence_from_sqlite(&stream_id, sequence)?;
+                let reference = Self::parse_stored_commit_ref(&stream_id, sequence, &encoded)?;
+                if reference.commit_hash.to_string() != commit_hash {
+                    continue;
+                }
+                if activated_commit.replace(reference).is_some() {
+                    return Err(DbError::Message(format!(
+                        "Circle {circle_id} activation commit is duplicated in the materialized ledger"
+                    )));
+                }
+            }
+            let activated_commit = activated_commit.ok_or_else(|| {
+                DbError::Message(format!(
+                    "Circle {circle_id} activation commit {commit_hash} is absent from the materialized ledger"
+                ))
+            })?;
+            Ok((authoring, activated_commit))
+        })
+        .await
+    }
+
     pub(crate) async fn circle_publication_context(
         &self,
         circle_id: crate::sync::circle::CircleId,
