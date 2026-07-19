@@ -1074,6 +1074,25 @@ impl CovenHandle {
         .await?)
     }
 
+    pub async fn abandon_device_join(
+        &self,
+        offer: crate::DeviceJoinOffer,
+    ) -> Result<crate::DeviceJoinAbandonment, SyncError> {
+        let storage = self.device_join_storage()?;
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let authorization = self.device_join_authorization(&storage).await?;
+        let coordination = self.device_join_coordination(&storage)?;
+        Ok(crate::sync::device_join::abandon_device_join(
+            &self.db,
+            storage.as_ref(),
+            coordination,
+            &authorization,
+            &signer,
+            offer,
+        )
+        .await?)
+    }
+
     pub async fn authorize_device_provider_access(
         &self,
         request: crate::DeviceProviderAccessRequest,
