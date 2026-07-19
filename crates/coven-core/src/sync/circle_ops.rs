@@ -1490,8 +1490,8 @@ mod tests {
             .expect("Store member has a prepared inactive access leaf");
         access.leaf.value.disposition = CircleAccessDisposition::Active {
             keyring: creation.keyring.clone(),
-            key_fingerprint: creation.control.value.key_fingerprint,
-            roster: creation.control.value.roster.clone(),
+            key_fingerprint: creation.control.value.key_fingerprint(),
+            roster: creation.control.value.roster_state_ref(),
         };
         access.leaf.value.signature = keys::sign_hex(owner, &access.leaf.value.canonical_bytes()).1;
         let recipient_key = keys::ed25519_to_x25519_public_key(&recipient.public_key())
@@ -1509,7 +1509,14 @@ mod tests {
             .collect::<Vec<_>>();
         let (access_root, proofs) =
             super::super::circle_control::merkle_root_and_proofs(&leaf_hashes);
-        creation.control.value.access_root = access_root;
+        match &mut creation.control.value.value {
+            super::super::circle::CircleControlValue::MergeConcurrent { active_epoch, .. } => {
+                active_epoch.common.access_root = access_root;
+            }
+            super::super::circle::CircleControlValue::Serial { active_epoch, .. } => {
+                active_epoch.common.access_root = access_root;
+            }
+        }
         creation.control.value.signature =
             keys::sign_hex(owner, &creation.control.value.canonical_bytes()).1;
         creation.control.coord = creation.control.value.coord();
@@ -2404,16 +2411,18 @@ mod tests {
             keys::sign_hex(&signer, &creation.metadata.canonical_bytes()).1;
         let metadata_head =
             super::super::circle::CircleMetadataHead::signed(&creation.metadata, &signer);
-        creation.control.value.metadata =
-            super::super::circle::CircleMetadataStateRef::MergeConcurrent(
-                super::super::circle::MergeCircleMetadataStateRef {
-                    heads: vec![super::super::circle::CircleMetadataHeadRef::from_head(
-                        &metadata_head,
-                    )],
-                    selected: creation.metadata.coord(),
-                    state_hash: creation.metadata.metadata_hash(),
-                },
-            );
+        let super::super::circle::CircleControlValue::MergeConcurrent { active_epoch, .. } =
+            &mut creation.control.value.value
+        else {
+            panic!("Merge creation must carry Merge control")
+        };
+        active_epoch.metadata = super::super::circle::MergeCircleMetadataStateRef {
+            heads: vec![super::super::circle::CircleMetadataHeadRef::from_head(
+                &metadata_head,
+            )],
+            selected: creation.metadata.coord(),
+            state_hash: creation.metadata.metadata_hash(),
+        };
         creation.control.value.signature =
             keys::sign_hex(&signer, &creation.control.value.canonical_bytes()).1;
         creation.control.coord = creation.control.value.coord();

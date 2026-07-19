@@ -728,8 +728,8 @@ mod tests {
             ));
 
             if matches!(
-                creation.control.value.order,
-                CircleControlOrder::MergeConcurrent { .. }
+                creation.control.value.value,
+                CircleControlValue::MergeConcurrent { .. }
             ) {
                 let mut seized = creation.control.value.clone();
                 seized.circle_id = CircleId::from_bytes([0x5a; 16]);
@@ -740,11 +740,11 @@ mod tests {
                 );
 
                 let mut discontinuous = creation.control.value.clone();
-                let CircleControlOrder::MergeConcurrent { seq, .. } = &mut discontinuous.order
+                let CircleControlValue::MergeConcurrent { order, .. } = &mut discontinuous.value
                 else {
                     unreachable!()
                 };
-                *seq = 2;
+                order.seq = 2;
                 discontinuous.signature =
                     keys::sign_hex(&owner, &discontinuous.canonical_bytes()).1;
                 assert!(
@@ -883,13 +883,16 @@ mod tests {
         };
         assert!(!wrong_keyring_leaf.verify(&creation.control, candidate_family));
 
-        let mut wrong_policy_control = creation.control.value.clone();
-        wrong_policy_control.store_membership =
-            serial_membership_ref(&owner, &members, "wrong-policy-control");
-        wrong_policy_control.membership_authority = None;
-        wrong_policy_control.signature =
-            keys::sign_hex(&owner, &wrong_policy_control.canonical_bytes()).1;
-        assert!(!wrong_policy_control.verify());
+        let mut wrong_policy_control =
+            serde_json::to_value(&creation.control.value).expect("serialize Merge control");
+        let value = wrong_policy_control["value"]
+            .as_object_mut()
+            .expect("control value is a tagged object");
+        let merge = value
+            .remove("merge_concurrent")
+            .expect("Merge control has Merge value");
+        value.insert("serial".to_string(), merge);
+        assert!(serde_json::from_value::<CircleControl>(wrong_policy_control).is_err());
     }
 
     #[test]
@@ -1013,9 +1016,12 @@ mod tests {
         )
         .expect("construct founder circle");
         let mut control = creation.control.value.clone();
-        control.owners = vec![earlier_owner_pubkey, author_pubkey.clone()];
-        control.owners.sort();
-        assert_ne!(control.owners[0], control.author_pubkey);
+        let CircleControlValue::MergeConcurrent { active_epoch, .. } = &mut control.value else {
+            panic!("Merge creation must carry Merge control")
+        };
+        active_epoch.common.owners = vec![earlier_owner_pubkey, author_pubkey.clone()];
+        active_epoch.common.owners.sort();
+        assert_ne!(active_epoch.common.owners[0], control.author_pubkey);
         control.signature = keys::sign_hex(&author, &control.canonical_bytes()).1;
         let control = PreparedCircleControl {
             coord: control.coord(),
@@ -1133,10 +1139,14 @@ mod tests {
             publication_encryption.seal_key_fingerprint(),
             publication_fingerprint
         );
-        assert_eq!(publication_fingerprint, control.value.key_fingerprint);
+        assert_eq!(publication_fingerprint, control.value.key_fingerprint());
 
         let mut second_value = control.value.clone();
-        second_value.access_root = ObjectHash::digest(b"different founder access root");
+        let CircleControlValue::MergeConcurrent { active_epoch, .. } = &mut second_value.value
+        else {
+            panic!("Merge creation must carry Merge control")
+        };
+        active_epoch.common.access_root = ObjectHash::digest(b"different founder access root");
         second_value.signature = keys::sign_hex(&author, &second_value.canonical_bytes()).1;
         let second_control = PreparedCircleControl {
             coord: second_value.coord(),
@@ -1172,7 +1182,7 @@ mod tests {
                 recovery: Vec::new(),
                 state_hash: ObjectHash::digest(b"multi-owner second device state"),
             },
-            control.value.membership_authority.clone(),
+            control.value.membership_authority().cloned(),
             super::super::store_commit::StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,

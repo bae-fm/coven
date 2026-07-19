@@ -4441,7 +4441,7 @@ fn circle_package_access(
             activation.circle_id
         ));
     };
-    if *key_fingerprint != activation.control.value.key_fingerprint {
+    if *key_fingerprint != activation.control.value.key_fingerprint() {
         return Err(format!(
             "Circle package key for {} differs from its activated control",
             activation.circle_id

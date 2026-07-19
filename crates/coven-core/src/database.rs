@@ -12851,7 +12851,7 @@ impl Database {
                     || !roster.verify()
                     || control.circle_id != circle_id
                     || metadata.circle_id != circle_id
-                    || match &control.metadata {
+                    || match control.metadata_state_ref() {
                         crate::sync::circle::CircleMetadataStateRef::MergeConcurrent(state) => {
                             state.selected != metadata.coord()
                                 || state.state_hash != metadata.metadata_hash()
@@ -12860,7 +12860,7 @@ impl Database {
                             state.current != metadata.coord()
                         }
                     }
-                    || match &control.roster {
+                    || match control.roster_state_ref() {
                         crate::sync::circle::CircleRosterStateRef::MergeConcurrent(state) => {
                             state.state_hash != roster.state_hash()
                         }
@@ -12945,7 +12945,7 @@ impl Database {
                 || control.coord() != expected_control
                 || !access.verify_signature()
                 || access.circle_id != circle_id
-                || access.epoch_id != control.epoch_id
+                || access.epoch_id != control.epoch_id()
             {
                 return Err(DbError::Message(format!(
                     "Circle {circle_id} publication authority differs from its exact activation"
@@ -12959,7 +12959,8 @@ impl Database {
             else {
                 return Ok(None);
             };
-            if key_fingerprint != control.key_fingerprint || roster != control.roster {
+            if key_fingerprint != control.key_fingerprint() || roster != control.roster_state_ref()
+            {
                 return Err(DbError::Message(format!(
                     "Circle {circle_id} publication key differs from its exact control"
                 )));
@@ -14239,15 +14240,9 @@ impl Database {
             let circle_id = activation.circle_id.to_string();
             if let Some(access) = &activation.local_access {
                 let leaf = &access.leaf.value;
-                if activation
-                    .control
-                    .value
-                    .owners
-                    .binary_search(&leaf.owner_pubkey)
-                    .is_err()
-                {
+                if activation.control.value.author_pubkey != leaf.owner_pubkey {
                     return Err(DbError::Message(format!(
-                        "circle {circle_id} local access signer is not a control Owner"
+                        "circle {circle_id} local access signer differs from its control author"
                     )));
                 }
                 match (&leaf.disposition, &access.active) {
@@ -14279,7 +14274,7 @@ impl Database {
                 existing_controls.push(control);
             }
             drop(statement);
-            match activation.control.value.order.previous_control_hash() {
+            match activation.control.value.previous_control_hash() {
                 None if !existing_controls.is_empty() => {
                     return Err(DbError::Message(format!(
                         "circle {circle_id} already has a founder control"
@@ -14298,11 +14293,11 @@ impl Database {
                     if previous.store_root_hash != activation.control.value.store_root_hash
                         || previous.circle_id != activation.circle_id
                         || previous
-                            .owners
+                            .owners()
                             .binary_search(&activation.control.value.author_pubkey)
                             .is_err()
-                        || activation.control.value.order.ordinal()
-                            != previous.order.ordinal().checked_add(1).ok_or_else(|| {
+                        || activation.control.value.ordinal()
+                            != previous.ordinal().checked_add(1).ok_or_else(|| {
                                 DbError::Message("circle control ordinal overflow".to_string())
                             })?
                     {
