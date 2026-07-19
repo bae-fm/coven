@@ -1249,6 +1249,27 @@ impl CovenHandle {
         .await?)
     }
 
+    pub async fn activate_device_join_cleanup(
+        &self,
+        attempt_id: crate::DeviceJoinAttemptId,
+        receipt: crate::DeviceJoinCleanupReceipt,
+    ) -> Result<crate::DeviceJoinCleanupActivation, SyncError> {
+        let storage = self.device_join_storage()?;
+        let signer = crate::keys::require_identity(self.identity_custody.as_ref())?;
+        let authorization = self.device_join_authorization(&storage).await?;
+        let coordination = self.device_join_coordination(&storage)?;
+        Ok(crate::sync::device_join::activate_device_join_cleanup(
+            &self.db,
+            storage.as_ref(),
+            coordination,
+            &authorization,
+            &signer,
+            attempt_id,
+            receipt,
+        )
+        .await?)
+    }
+
     pub async fn device_join_status(
         &self,
         attempt_id: crate::DeviceJoinAttemptId,
