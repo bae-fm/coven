@@ -448,6 +448,13 @@ macro_rules! coven_tables {
 "
         );
         $visit!(
+            circle_current_state,
+            "
+    circle_id TEXT PRIMARY KEY,
+    state BLOB NOT NULL
+"
+        );
+        $visit!(
             circle_snapshot_coverage,
             "
     circle_id TEXT NOT NULL,

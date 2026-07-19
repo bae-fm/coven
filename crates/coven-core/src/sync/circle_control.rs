@@ -579,6 +579,35 @@ impl CircleAccessLeaf {
                 &self.canonical_bytes(),
             )
     }
+
+    pub(crate) fn verify_for_control(
+        &self,
+        control: &PreparedCircleControl,
+        candidate_family: super::store_commit::CandidateFamilyId,
+    ) -> bool {
+        self.verify_signature()
+            && self.store_root_hash == control.value.store_root_hash
+            && self.candidate_family == candidate_family
+            && self.circle_id == control.value.circle_id
+            && self.epoch_id == control.value.epoch_id()
+            && self.store_membership == control.value.store_membership_state_ref()
+            && match &self.disposition {
+                CircleAccessDisposition::Active {
+                    keyring,
+                    key_fingerprint,
+                    roster,
+                } => {
+                    roster == &control.value.roster_state_ref()
+                        && *key_fingerprint == control.value.key_fingerprint()
+                        && MasterKeyring::from_serialized(keyring).is_ok_and(|keyring| {
+                            EncryptionService::from(keyring).seal_key_fingerprint()
+                                == *key_fingerprint
+                        })
+                }
+                CircleAccessDisposition::Inactive => true,
+            }
+            && self.owner_pubkey == control.value.author_pubkey
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1144,28 +1173,7 @@ impl PreparedAccessLeaf {
         control: &PreparedCircleControl,
         candidate_family: super::store_commit::CandidateFamilyId,
     ) -> bool {
-        self.value.verify_signature()
-            && self.value.store_root_hash == control.value.store_root_hash
-            && self.value.candidate_family == candidate_family
-            && self.value.circle_id == control.value.circle_id
-            && self.value.epoch_id == control.value.epoch_id()
-            && self.value.store_membership == control.value.store_membership_state_ref()
-            && match &self.value.disposition {
-                CircleAccessDisposition::Active {
-                    keyring,
-                    key_fingerprint,
-                    roster,
-                } => {
-                    roster == &control.value.roster_state_ref()
-                        && *key_fingerprint == control.value.key_fingerprint()
-                        && MasterKeyring::from_serialized(keyring).is_ok_and(|keyring| {
-                            EncryptionService::from(keyring).seal_key_fingerprint()
-                                == *key_fingerprint
-                        })
-                }
-                CircleAccessDisposition::Inactive => true,
-            }
-            && self.value.owner_pubkey == control.value.author_pubkey
+        self.value.verify_for_control(control, candidate_family)
             && ObjectHash::digest(&self.bytes) == self.leaf_hash
     }
 

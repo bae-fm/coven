@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
+
 use super::circle::{
     circle_semantic_prefix, recipient_slot_with_peer, verify_circle_semantic_prefix,
     AccessEnvelope, CircleAccessDisposition, CircleAccessLeaf, CircleControl, CircleControlCoord,
@@ -13,7 +15,7 @@ use super::circle_ops::{CircleOperationError, CircleOperationJournal};
 use super::circle_roster::CircleMaterializedRoster;
 use super::storage::{ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, SyncStorage};
 use super::store_commit::{
-    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix,
+    circle_access_envelope_semantic_prefix, circle_access_leaf_semantic_prefix, CandidateFamilyId,
     CircleAccessObjectRef, CircleActivationObjects, CircleControlRef, ObjectHash, StoreBatchCommit,
     StoreBatchCommitRef, StoreDeviceRegistration, StoreRootRef,
 };
@@ -38,6 +40,304 @@ pub(crate) struct VerifiedCircleAccess {
 pub(crate) struct VerifiedCircleActive {
     pub roster: CircleMaterializedRoster,
     pub metadata: CircleMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CircleCurrentControl {
+    control: PreparedCircleControl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum CircleInactiveAccess {
+    NotGranted,
+    Inactive {
+        candidate_family: CandidateFamilyId,
+        access: CircleAccessLeaf,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct CircleActiveState {
+    current: CircleCurrentControl,
+    candidate_family: CandidateFamilyId,
+    access: CircleAccessLeaf,
+    roster: CircleMaterializedRoster,
+    metadata: CircleMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CircleInactiveState {
+    current: CircleCurrentControl,
+    access: CircleInactiveAccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum CircleCurrentState {
+    Active(Box<CircleActiveState>),
+    Inactive(Box<CircleInactiveState>),
+    ControlConflict { branches: Vec<CircleCurrentControl> },
+}
+
+impl CircleCurrentControl {
+    fn from_verified(activation: &VerifiedCircleReference) -> Self {
+        Self {
+            control: activation.control.clone(),
+        }
+    }
+
+    pub(crate) fn circle_id(&self) -> CircleId {
+        self.control.value.circle_id
+    }
+
+    pub(crate) fn coordinate(&self) -> &CircleControlCoord {
+        &self.control.coord
+    }
+
+    fn control_hash(&self) -> ObjectHash {
+        self.control.coord.control_hash()
+    }
+
+    fn previous_control_hash(&self) -> Option<ObjectHash> {
+        self.control.value.previous_control_hash()
+    }
+
+    fn verify(&self) -> bool {
+        self.control.verify()
+    }
+}
+
+impl CircleCurrentState {
+    pub(crate) fn from_verified(
+        candidate_family: CandidateFamilyId,
+        activation: &VerifiedCircleReference,
+    ) -> Result<Self, String> {
+        let current = CircleCurrentControl::from_verified(activation);
+        let state = match &activation.local_access {
+            None => Self::Inactive(Box::new(CircleInactiveState {
+                current,
+                access: CircleInactiveAccess::NotGranted,
+            })),
+            Some(VerifiedCircleAccess { leaf, active: None }) => {
+                Self::Inactive(Box::new(CircleInactiveState {
+                    current,
+                    access: CircleInactiveAccess::Inactive {
+                        candidate_family,
+                        access: leaf.value.clone(),
+                    },
+                }))
+            }
+            Some(VerifiedCircleAccess {
+                leaf,
+                active: Some(active),
+            }) => Self::Active(Box::new(CircleActiveState {
+                current,
+                candidate_family,
+                access: leaf.value.clone(),
+                roster: active.roster.clone(),
+                metadata: active.metadata.clone(),
+            })),
+        };
+        if state.verify() {
+            Ok(state)
+        } else {
+            Err("verified Circle activation cannot form a valid current state".to_string())
+        }
+    }
+
+    pub(crate) fn advance(self, next: Self) -> Result<Self, String> {
+        if !self.verify() || !next.verify() {
+            return Err("Circle current-state reduction received invalid state".to_string());
+        }
+        if self.circle_id() != next.circle_id() {
+            return Err("Circle current-state reduction crossed Circle identities".to_string());
+        }
+        match self {
+            Self::Active(active) => advance_resolved_control(active.current, next),
+            Self::Inactive(inactive) => advance_resolved_control(inactive.current, next),
+            Self::ControlConflict { mut branches } => {
+                let next_current = next
+                    .resolved_control()
+                    .ok_or_else(|| "new Circle activation is already conflicted".to_string())?;
+                if !matches!(
+                    next_current.coordinate(),
+                    CircleControlCoord::MergeConcurrent { .. }
+                ) {
+                    return Err(
+                        "Serial Circle control cannot enter a Merge control conflict".to_string(),
+                    );
+                }
+                if let Some(previous_hash) = next_current.previous_control_hash() {
+                    if let Some(branch) = branches
+                        .iter_mut()
+                        .find(|branch| branch.control_hash() == previous_hash)
+                    {
+                        *branch = next_current.clone();
+                    } else {
+                        branches.push(next_current.clone());
+                    }
+                } else {
+                    return Err(
+                        "Circle control conflict cannot contain another founder".to_string()
+                    );
+                }
+                canonicalize_control_branches(&mut branches)?;
+                Ok(Self::ControlConflict { branches })
+            }
+        }
+    }
+
+    pub(crate) fn verify(&self) -> bool {
+        match self {
+            Self::Active(active) => {
+                active.current.verify()
+                    && active
+                        .access
+                        .verify_for_control(&active.current.control, active.candidate_family)
+                    && matches!(
+                        active.access.disposition,
+                        CircleAccessDisposition::Active { .. }
+                    )
+                    && active.roster.verify()
+                    && active.metadata.verify()
+                    && active.metadata.circle_id == active.current.circle_id()
+                    && active.metadata.epoch_id == active.current.control.value.epoch_id()
+                    && active.metadata.key_fingerprint
+                        == active.current.control.value.key_fingerprint()
+                    && metadata_matches_control(&active.metadata, &active.current.control.value)
+                    && roster_matches_control(&active.roster, &active.current.control.value)
+            }
+            Self::Inactive(inactive) => {
+                inactive.current.verify()
+                    && match &inactive.access {
+                        CircleInactiveAccess::NotGranted => true,
+                        CircleInactiveAccess::Inactive {
+                            candidate_family,
+                            access,
+                        } => {
+                            access.verify_for_control(&inactive.current.control, *candidate_family)
+                                && matches!(access.disposition, CircleAccessDisposition::Inactive)
+                        }
+                    }
+            }
+            Self::ControlConflict { branches } => {
+                branches.len() >= 2
+                    && branches.iter().all(|branch| {
+                        branch.verify()
+                            && matches!(
+                                branch.coordinate(),
+                                CircleControlCoord::MergeConcurrent { .. }
+                            )
+                            && branch.circle_id() == branches[0].circle_id()
+                    })
+                    && branches
+                        .windows(2)
+                        .all(|pair| pair[0].control_hash() < pair[1].control_hash())
+            }
+        }
+    }
+
+    pub(crate) fn circle_id(&self) -> CircleId {
+        match self {
+            Self::Active(active) => active.current.circle_id(),
+            Self::Inactive(inactive) => inactive.current.circle_id(),
+            Self::ControlConflict { branches } => branches[0].circle_id(),
+        }
+    }
+
+    pub(crate) fn active(
+        &self,
+    ) -> Option<(
+        &CircleCurrentControl,
+        &CircleAccessLeaf,
+        &CircleMaterializedRoster,
+        &CircleMetadata,
+    )> {
+        match self {
+            Self::Active(active) => Some((
+                &active.current,
+                &active.access,
+                &active.roster,
+                &active.metadata,
+            )),
+            Self::Inactive(_) | Self::ControlConflict { .. } => None,
+        }
+    }
+
+    pub(crate) fn active_record_count(&self) -> usize {
+        match self {
+            Self::Active(_) => 1,
+            Self::Inactive(_) => 0,
+            Self::ControlConflict { branches } => branches.len(),
+        }
+    }
+
+    fn resolved_control(&self) -> Option<&CircleCurrentControl> {
+        match self {
+            Self::Active(active) => Some(&active.current),
+            Self::Inactive(inactive) => Some(&inactive.current),
+            Self::ControlConflict { .. } => None,
+        }
+    }
+}
+
+fn advance_resolved_control(
+    current: CircleCurrentControl,
+    next: CircleCurrentState,
+) -> Result<CircleCurrentState, String> {
+    let next_current = next
+        .resolved_control()
+        .ok_or_else(|| "new Circle activation is already conflicted".to_string())?;
+    if next_current.previous_control_hash() == Some(current.control_hash()) {
+        Ok(next)
+    } else if matches!(
+        (&current.control.coord, next_current.coordinate()),
+        (
+            CircleControlCoord::MergeConcurrent { .. },
+            CircleControlCoord::MergeConcurrent { .. }
+        )
+    ) {
+        let mut branches = vec![current, next_current.clone()];
+        canonicalize_control_branches(&mut branches)?;
+        Ok(CircleCurrentState::ControlConflict { branches })
+    } else {
+        Err("Serial Circle control does not advance its current control".to_string())
+    }
+}
+
+fn canonicalize_control_branches(branches: &mut [CircleCurrentControl]) -> Result<(), String> {
+    branches.sort_by_key(CircleCurrentControl::control_hash);
+    if branches
+        .windows(2)
+        .any(|pair| pair[0].control_hash() == pair[1].control_hash())
+    {
+        return Err("Circle control conflict contains a duplicate branch".to_string());
+    }
+    Ok(())
+}
+
+fn roster_matches_control(roster: &CircleMaterializedRoster, control: &CircleControl) -> bool {
+    match control.roster_state_ref() {
+        super::circle::CircleRosterStateRef::MergeConcurrent(state) => {
+            state.state_hash == roster.state_hash()
+        }
+        super::circle::CircleRosterStateRef::Serial(state) => {
+            state.state_hash == roster.state_hash()
+        }
+    }
+}
+
+fn metadata_matches_control(metadata: &CircleMetadata, control: &CircleControl) -> bool {
+    match control.metadata_state_ref() {
+        super::circle::CircleMetadataStateRef::MergeConcurrent(state) => {
+            state.selected == metadata.coord() && state.state_hash == metadata.metadata_hash()
+        }
+        super::circle::CircleMetadataStateRef::Serial(state) => state.current == metadata.coord(),
+    }
 }
 
 struct VerifiedAccessPair {
@@ -2315,5 +2615,88 @@ mod authority_tests {
             &authority,
             &after,
         ));
+    }
+
+    #[tokio::test]
+    async fn current_state_reducer_retains_each_concurrent_control_branch() {
+        fn successor(
+            mut state: CircleCurrentState,
+            owner: &UserKeypair,
+            device_id: &str,
+        ) -> CircleCurrentState {
+            let CircleCurrentState::Active(active) = &mut state else {
+                panic!("successor source must be active")
+            };
+            let current = &mut active.current;
+            let previous = current.control_hash();
+            let CircleControlValue::MergeConcurrent { order, .. } =
+                &mut current.control.value.value
+            else {
+                panic!("successor source must use Merge controls")
+            };
+            order.device_id = device_id.to_string();
+            order.seq = order.seq.checked_add(1).expect("control sequence fits u64");
+            order.previous_control_hash = Some(previous);
+            current.control.value.signature =
+                keys::sign_hex(owner, &current.control.value.canonical_bytes()).1;
+            current.control.coord = current.control.value.coord();
+            current.control.bytes =
+                serde_json::to_vec(&current.control.value).expect("serialize successor control");
+            assert!(state.verify(), "successor current state must verify");
+            state
+        }
+
+        let db = super::super::test_helpers::open_test_db();
+        let circle_id = db
+            .call(|conn| {
+                Ok(super::super::test_helpers::install_test_active_circle(
+                    conn,
+                    "current-control-conflict",
+                    crate::WritePolicy::MergeConcurrent,
+                )
+                .0)
+            })
+            .await
+            .expect("install founder current state");
+        let founder = db
+            .call(move |conn| {
+                let payload = conn
+                    .query_row(
+                        "SELECT state FROM circle_current_state WHERE circle_id = ?1",
+                        [circle_id.to_string()],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .map_err(crate::database::DbError::from)?;
+                serde_json::from_slice::<CircleCurrentState>(&payload).map_err(|error| {
+                    crate::database::DbError::Message(format!(
+                        "parse test Circle current state: {error}"
+                    ))
+                })
+            })
+            .await
+            .expect("load founder current state");
+        let owner = super::super::test_helpers::test_circle_owner_keypair();
+        let first = successor(founder.clone(), &owner, "first-successor-device");
+        let second = successor(founder, &owner, "second-successor-device");
+        let first_current = first
+            .clone()
+            .advance(first.clone())
+            .expect_err("a control cannot advance itself");
+        assert!(first_current.contains("duplicate branch"));
+
+        let conflict = first
+            .clone()
+            .advance(second)
+            .expect("concurrent successors form a conflict");
+        assert!(conflict.verify());
+        assert_eq!(conflict.active_record_count(), 2);
+        assert!(conflict.active().is_none());
+
+        let first_descendant = successor(first, &owner, "first-descendant-device");
+        let advanced_conflict = conflict
+            .advance(first_descendant)
+            .expect("a branch descendant replaces its branch tip");
+        assert!(advanced_conflict.verify());
+        assert_eq!(advanced_conflict.active_record_count(), 2);
     }
 }

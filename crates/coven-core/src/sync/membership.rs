@@ -133,7 +133,7 @@ pub enum SerialMembershipError {
 }
 
 impl SerialAuthorizationState {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn from_test_membership(
         founder: &MembershipEntry,
         membership: SerialMembershipState,

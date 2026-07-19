@@ -1131,10 +1131,33 @@ mod tests {
             .await
             .expect("read cached access owner");
         assert_eq!(cached_owner, author_pubkey);
+        db.call(|conn| {
+            conn.execute("DELETE FROM circle_metadata_cache", [])
+                .map_err(crate::database::DbError::from)?;
+            conn.execute("DELETE FROM circle_roster_cache", [])
+                .map_err(crate::database::DbError::from)?;
+            conn.execute("DELETE FROM circle_access_cache", [])
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("remove historical Circle projections");
+        let circles = db
+            .get_circles(&author_pubkey)
+            .await
+            .expect("list Circle from its derived current state");
+        assert_eq!(
+            circles,
+            vec![CircleInfo {
+                id: creation.circle_id,
+                name: creation.metadata.name.clone(),
+                role: CircleRole::Owner,
+            }]
+        );
         let (publication_encryption, publication_fingerprint) = db
             .circle_publication_context(creation.circle_id, control.coord.clone())
             .await
-            .expect("load publication authority from verified access cache");
+            .expect("load publication authority from derived current state");
         assert_eq!(
             publication_encryption.seal_key_fingerprint(),
             publication_fingerprint

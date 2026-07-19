@@ -215,6 +215,294 @@ pub fn install_test_store_root_authority(
 }
 
 #[cfg(any(test, feature = "test-utils"))]
+pub fn install_test_active_circle(
+    conn: &Connection,
+    label: &str,
+    policy: crate::WritePolicy,
+) -> (
+    crate::sync::circle::CircleId,
+    crate::sync::circle::CircleControlCoord,
+) {
+    install_test_circle_current_state(conn, label, policy, true)
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn test_circle_owner_keypair() -> UserKeypair {
+    let keypair_bytes: [u8; crate::keys::SIGN_SECRETKEYBYTES] = hex::decode(concat!(
+        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+    ))
+    .expect("fixed Circle signing key is hexadecimal")
+    .try_into()
+    .expect("fixed Circle signing key is 64 bytes");
+    UserKeypair::from_signing_key_bytes(&keypair_bytes).expect("fixed Circle signing key is valid")
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub fn install_test_inactive_circle(
+    conn: &Connection,
+    label: &str,
+    policy: crate::WritePolicy,
+) -> (
+    crate::sync::circle::CircleId,
+    crate::sync::circle::CircleControlCoord,
+) {
+    install_test_circle_current_state(conn, label, policy, false)
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+fn install_test_circle_current_state(
+    conn: &Connection,
+    label: &str,
+    policy: crate::WritePolicy,
+    active: bool,
+) -> (
+    crate::sync::circle::CircleId,
+    crate::sync::circle::CircleControlCoord,
+) {
+    use std::collections::BTreeMap;
+
+    use crate::storage::cloud::ObjectSlot;
+    use crate::sync::circle::{CircleCreation, CircleRole, StoreMembershipStateRef};
+    use crate::sync::circle_activation::{
+        CircleCurrentState, VerifiedCircleAccess, VerifiedCircleActive, VerifiedCircleReference,
+    };
+    use crate::sync::membership::{
+        MemberRole, MembershipChain, MembershipGrantCreationAuthority, MembershipHeadRef,
+        MembershipStatus, SerialAuthorizationState, SerialMembershipState,
+    };
+    use crate::sync::storage::ExactObjectRef;
+    use crate::sync::store_commit::{
+        CandidateFamilyId, CircleActivationObjects, CircleControlRef, GrantStreamAnchor,
+        ObjectHash, SerialStorePosition, StoreCreationId, StoreDeviceId,
+        StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreRootRef,
+    };
+
+    fn exact_object(label: &str, bytes: &[u8]) -> ExactObjectRef {
+        ExactObjectRef::new(
+            ObjectSlot::logical(format!("store-v1/test/{label}.json"))
+                .expect("valid test object slot"),
+            bytes.len() as u64,
+            ObjectHash::digest(bytes),
+        )
+    }
+
+    fn founder_entry(
+        label: &str,
+        owner: &UserKeypair,
+        membership: GrantStreamAnchor,
+    ) -> crate::sync::membership::MembershipEntry {
+        crate::sync::membership::founder_entry(
+            label,
+            owner,
+            test_membership_grant_id(label),
+            "founder",
+            membership,
+            test_founder_provider_admin(label),
+        )
+    }
+
+    let owner = test_circle_owner_keypair();
+    let owner_pubkey = crate::keys::public_key_hex(&owner);
+    let store_root_hash = ObjectHash::digest(format!("{label} Store root").as_bytes());
+    let membership_anchor = GrantStreamAnchor::StoreMembership {
+        first_slot: ObjectSlot::logical(format!("store-v1/test/{label}/membership/1.json"))
+            .expect("valid test membership slot"),
+    };
+    let founder = founder_entry(label, &owner, membership_anchor);
+    let founder_coord = founder.coord();
+    let (membership, membership_authority) = match policy {
+        crate::WritePolicy::MergeConcurrent => {
+            let chain = MembershipChain::from_entries(vec![founder.clone()])
+                .expect("found test Merge membership");
+            let MembershipStatus::Resolved(resolved) = chain.status() else {
+                panic!("founder membership must resolve")
+            };
+            let head = MembershipHeadRef {
+                coord: founder_coord.clone(),
+                head_hash: ObjectHash::digest(format!("{label} membership head").as_bytes()),
+                object: exact_object(&format!("{label}/membership-head"), b"test membership head"),
+            };
+            (
+                StoreMembershipStateRef::merge_concurrent(
+                    vec![head],
+                    Vec::new(),
+                    Vec::new(),
+                    resolved.state_hash,
+                )
+                .expect("valid test Merge membership reference"),
+                Some(MembershipGrantCreationAuthority::Entry(founder_coord)),
+            )
+        }
+        crate::WritePolicy::Serial => {
+            let root_bytes = format!("{label} root").into_bytes();
+            let root = StoreRootRef {
+                store_root_id: ObjectHash::digest(format!("{label} identity").as_bytes()),
+                store_root_hash,
+                object: exact_object(&format!("{label}/root"), &root_bytes),
+            };
+            let origin = StoreDeviceRegistrationOrigin::Founder {
+                creation_id: StoreCreationId::from_random_bytes(
+                    *ObjectHash::digest(label.as_bytes()).as_bytes(),
+                ),
+            };
+            let founder_registration = StoreDeviceRegistrationRef {
+                device_id: StoreDeviceId::derive(&root, &origin),
+                registration_hash: ObjectHash::digest(format!("{label} registration").as_bytes()),
+                object: exact_object(
+                    &format!("{label}/registration"),
+                    format!("{label} registration").as_bytes(),
+                ),
+            };
+            let membership_state =
+                SerialMembershipState::from_founder(root.store_root_id, &founder)
+                    .expect("found test Serial membership");
+            let authorization =
+                SerialAuthorizationState::from_test_membership(&founder, membership_state)
+                    .expect("build test Serial authorization");
+            (
+                StoreMembershipStateRef::serial(
+                    SerialStorePosition::Genesis {
+                        root,
+                        founder_registration,
+                    },
+                    Vec::new(),
+                    &authorization,
+                )
+                .expect("valid test Serial membership reference"),
+                None,
+            )
+        }
+    };
+    let candidate_family = CandidateFamilyId::from_hash(ObjectHash::digest(
+        format!("{label} candidate family").as_bytes(),
+    ));
+    let ids = crate::id_provider::SequentialIdProvider::new(label);
+    let creation = CircleCreation::founder(
+        store_root_hash,
+        candidate_family,
+        &format!("{label}-device"),
+        label,
+        "0000000001000-0000-test",
+        membership,
+        membership_authority,
+        vec![(owner_pubkey.clone(), MemberRole::Owner)],
+        &ids,
+        &owner,
+    )
+    .expect("construct test Circle");
+    let control = creation.control.clone();
+    let objects = CircleActivationObjects {
+        control: exact_object(&format!("{label}/control"), &control.bytes),
+        control_head: None,
+        roster_entries: BTreeMap::new(),
+        roster_heads: BTreeMap::new(),
+        roster_resolutions: BTreeMap::new(),
+        metadata_entries: BTreeMap::new(),
+        metadata_heads: BTreeMap::new(),
+        access: Vec::new(),
+    };
+    let reference = match policy {
+        crate::WritePolicy::MergeConcurrent => CircleControlRef::MergeConcurrent {
+            circle_id: creation.circle_id,
+            control: control.coord.clone(),
+            head_hash: ObjectHash::digest(format!("{label} control head").as_bytes()),
+            objects,
+        },
+        crate::WritePolicy::Serial => CircleControlRef::Serial {
+            circle_id: creation.circle_id,
+            control: control.coord.clone(),
+            objects,
+        },
+    };
+    let own_access = creation
+        .access
+        .iter()
+        .find(|access| access.leaf.value.recipient_pubkey == owner_pubkey)
+        .expect("test Circle owner access");
+    let activation = VerifiedCircleReference {
+        reference,
+        circle_id: creation.circle_id,
+        control: control.clone(),
+        local_access: active.then(|| VerifiedCircleAccess {
+            leaf: own_access.leaf.clone(),
+            active: Some(VerifiedCircleActive {
+                roster: creation.resolved_roster(),
+                metadata: creation.metadata.clone(),
+            }),
+        }),
+    };
+    let current = CircleCurrentState::from_verified(candidate_family, &activation)
+        .expect("derive test Circle current state");
+    let control_coord =
+        serde_json::to_string(&control.coord).expect("serialize test Circle control coordinate");
+    conn.execute(
+        "INSERT INTO circle_control_activations
+         (circle_id, control_coord, stream_id, seq, commit_hash, control_bytes)
+         VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+        rusqlite::params![
+            creation.circle_id.to_string(),
+            &control_coord,
+            format!("{label}-device"),
+            ObjectHash::digest(format!("{label} commit").as_bytes()).to_string(),
+            &control.bytes,
+        ],
+    )
+    .expect("insert test Circle activation");
+    if active {
+        conn.execute(
+            "INSERT INTO circle_access_cache
+             (circle_id, control_coord, owner_pubkey, disposition, access_bytes)
+             VALUES (?1, ?2, ?3, 'active', ?4)",
+            rusqlite::params![
+                creation.circle_id.to_string(),
+                &control_coord,
+                owner_pubkey,
+                serde_json::to_vec(&own_access.leaf.value).expect("serialize test Circle access"),
+            ],
+        )
+        .expect("insert test Circle access history");
+        conn.execute(
+            "INSERT INTO circle_roster_cache (circle_id, control_coord, roster_bytes)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                creation.circle_id.to_string(),
+                &control_coord,
+                serde_json::to_vec(&creation.resolved_roster())
+                    .expect("serialize test Circle roster"),
+            ],
+        )
+        .expect("insert test Circle roster history");
+        conn.execute(
+            "INSERT INTO circle_metadata_cache (circle_id, control_coord, metadata_bytes)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                creation.circle_id.to_string(),
+                &control_coord,
+                serde_json::to_vec(&creation.metadata).expect("serialize test Circle metadata"),
+            ],
+        )
+        .expect("insert test Circle metadata history");
+    }
+    conn.execute(
+        "INSERT INTO circle_current_state (circle_id, state) VALUES (?1, ?2)",
+        rusqlite::params![
+            creation.circle_id.to_string(),
+            serde_json::to_vec(&current).expect("serialize test Circle current state"),
+        ],
+    )
+    .expect("insert test Circle current state");
+    assert_eq!(
+        creation
+            .resolved_roster()
+            .members()
+            .get(&crate::keys::public_key_hex(&owner)),
+        Some(&CircleRole::Owner)
+    );
+    (creation.circle_id, control.coord)
+}
+
+#[cfg(any(test, feature = "test-utils"))]
 pub fn test_row_routing_id(
     conn: &Connection,
     generation_one_key: [u8; 32],

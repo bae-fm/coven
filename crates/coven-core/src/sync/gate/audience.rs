@@ -14,6 +14,7 @@ use super::outbound::{
 };
 use super::{query_mapped_rows, query_row_optional, GateError};
 use crate::sync::circle::{row_routing_id, Audience, CircleControlCoord, CircleId, RowRoutingKey};
+use crate::sync::circle_activation::CircleCurrentState;
 use crate::sync::session::quote_ident;
 use crate::WritePolicy;
 
@@ -1356,30 +1357,42 @@ pub(crate) fn active_circle_control(
     circle_id: CircleId,
     write_policy: WritePolicy,
 ) -> Result<CirclePartitionControl, GateError> {
-    let mut statement = conn
-        .prepare(
-            "SELECT access.control_coord
-             FROM circle_access_cache AS access
-             JOIN circle_control_activations AS activation
-               ON activation.circle_id = access.circle_id
-              AND activation.control_coord = access.control_coord
-             WHERE access.circle_id = ?1 AND access.disposition = 'active'
-             ORDER BY access.control_coord, access.owner_pubkey
-             LIMIT 2",
-        )
-        .map_err(|error| GateError::Sql("prepare active circle authority".to_string(), error))?;
-    let controls = statement
-        .query_map([circle_id.to_string()], |row| row.get::<_, String>(0))
-        .map_err(|error| GateError::Sql("query active circle authority".to_string(), error))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|error| GateError::Sql("read active circle authority".to_string(), error))?;
-    let [control] = controls.as_slice() else {
+    let state = query_row_optional(
+        conn,
+        "SELECT state FROM circle_current_state WHERE circle_id = ?1",
+        [circle_id.to_string()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    let Some(state) = state else {
         return Err(GateError::CircleAuthority {
             circle_id,
-            active_records: controls.len(),
+            active_records: 0,
         });
     };
-    let parsed = CirclePartitionControl::from_stored_json(control.clone())
+    let state: CircleCurrentState =
+        serde_json::from_slice(&state).map_err(|error| GateError::InvalidCircleControl {
+            circle_id,
+            reason: format!("parse current state: {error}"),
+        })?;
+    if !state.verify() || state.circle_id() != circle_id {
+        return Err(GateError::InvalidCircleControl {
+            circle_id,
+            reason: "current state failed verification".to_string(),
+        });
+    }
+    let Some((current, _access, _roster, _metadata)) = state.active() else {
+        return Err(GateError::CircleAuthority {
+            circle_id,
+            active_records: state.active_record_count(),
+        });
+    };
+    let stored_control = serde_json::to_string(current.coordinate()).map_err(|error| {
+        GateError::InvalidCircleControl {
+            circle_id,
+            reason: format!("serialize current control coordinate: {error}"),
+        }
+    })?;
+    let parsed = CirclePartitionControl::from_stored_json(stored_control)
         .map_err(|reason| GateError::InvalidCircleControl { circle_id, reason })?;
     let control_policy = match parsed.coordinate() {
         CircleControlCoord::MergeConcurrent { .. } => WritePolicy::MergeConcurrent,
