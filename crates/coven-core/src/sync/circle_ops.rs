@@ -2394,24 +2394,26 @@ mod tests {
         let commit_coord = journal.commit_ref.coord.clone();
         let creation = &mut journal.creation;
         let store_root_hash = creation.control.value.store_root_hash;
-        let super::super::circle::CircleRosterStateRef::MergeConcurrent { state_hash, .. } =
+        let super::super::circle::CircleRosterStateRef::MergeConcurrent(roster_state) =
             &mut creation.metadata.author_roster
         else {
             panic!("Merge creation metadata must name a Merge roster")
         };
-        *state_hash = ObjectHash::digest(b"different historical roster state");
+        roster_state.state_hash = ObjectHash::digest(b"different historical roster state");
         creation.metadata.signature =
             keys::sign_hex(&signer, &creation.metadata.canonical_bytes()).1;
         let metadata_head =
             super::super::circle::CircleMetadataHead::signed(&creation.metadata, &signer);
         creation.control.value.metadata =
-            super::super::circle::CircleMetadataStateRef::MergeConcurrent {
-                heads: vec![super::super::circle::CircleMetadataHeadRef::from_head(
-                    &metadata_head,
-                )],
-                selected: creation.metadata.coord(),
-                state_hash: creation.metadata.metadata_hash(),
-            };
+            super::super::circle::CircleMetadataStateRef::MergeConcurrent(
+                super::super::circle::MergeCircleMetadataStateRef {
+                    heads: vec![super::super::circle::CircleMetadataHeadRef::from_head(
+                        &metadata_head,
+                    )],
+                    selected: creation.metadata.coord(),
+                    state_hash: creation.metadata.metadata_hash(),
+                },
+            );
         creation.control.value.signature =
             keys::sign_hex(&signer, &creation.control.value.canonical_bytes()).1;
         creation.control.coord = creation.control.value.coord();

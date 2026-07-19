@@ -12852,24 +12852,20 @@ impl Database {
                     || control.circle_id != circle_id
                     || metadata.circle_id != circle_id
                     || match &control.metadata {
-                        crate::sync::circle::CircleMetadataStateRef::MergeConcurrent {
-                            selected,
-                            state_hash,
-                            ..
-                        } => {
-                            selected != &metadata.coord() || *state_hash != metadata.metadata_hash()
+                        crate::sync::circle::CircleMetadataStateRef::MergeConcurrent(state) => {
+                            state.selected != metadata.coord()
+                                || state.state_hash != metadata.metadata_hash()
                         }
-                        crate::sync::circle::CircleMetadataStateRef::Serial { current } => {
-                            current != &metadata.coord()
+                        crate::sync::circle::CircleMetadataStateRef::Serial(state) => {
+                            state.current != metadata.coord()
                         }
                     }
                     || match &control.roster {
-                        crate::sync::circle::CircleRosterStateRef::MergeConcurrent {
-                            state_hash,
-                            ..
+                        crate::sync::circle::CircleRosterStateRef::MergeConcurrent(state) => {
+                            state.state_hash != roster.state_hash()
                         }
-                        | crate::sync::circle::CircleRosterStateRef::Serial { state_hash } => {
-                            *state_hash != roster.state_hash()
+                        crate::sync::circle::CircleRosterStateRef::Serial(state) => {
+                            state.state_hash != roster.state_hash()
                         }
                     }
                 {

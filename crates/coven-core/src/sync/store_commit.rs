@@ -6593,13 +6593,13 @@ fn validate_commit_predecessor_states(
         }
         (
             StoreCommitOrder::Serial { predecessor, .. },
-            StoreMembershipStateRef::Serial { position, .. },
+            StoreMembershipStateRef::Serial(state),
             StoreDeviceStateRef::Serial {
                 position: device_position,
                 ..
             },
         ) => {
-            if position != predecessor || device_position != predecessor {
+            if &state.position != predecessor || device_position != predecessor {
                 return Err(StoreProtocolError::Malformed(
                     "Store predecessor state differs from the exact Serial predecessor".to_string(),
                 ));

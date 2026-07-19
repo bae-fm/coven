@@ -405,10 +405,7 @@ async fn load_merge_predecessor_membership(
     root: &StoreRootRef,
     state: &StoreMembershipStateRef,
 ) -> Result<MembershipChain, RegistrationLoadError> {
-    let StoreMembershipStateRef::MergeConcurrent {
-        heads, resolutions, ..
-    } = state
-    else {
+    let StoreMembershipStateRef::MergeConcurrent(state) = state else {
         return Err(RegistrationLoadError::Invalid(
             "Merge registration lifecycle commit carries Serial membership state".to_string(),
         ));
@@ -421,8 +418,8 @@ async fn load_merge_predecessor_membership(
         storage,
         root,
         &root_value.descriptor.founder_pubkey,
-        heads,
-        resolutions,
+        &state.heads,
+        &state.resolutions,
     ))
     .await
     .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))
@@ -446,7 +443,7 @@ pub(crate) async fn load_device_join_authorization(
     state: &StoreMembershipStateRef,
 ) -> Result<DeviceJoinBootstrapAuthorization, StorePullError> {
     match state {
-        StoreMembershipStateRef::MergeConcurrent { .. } => {
+        StoreMembershipStateRef::MergeConcurrent(_) => {
             let chain = load_merge_predecessor_membership(storage, root, state)
                 .await
                 .map_err(|error| match error {
@@ -458,10 +455,8 @@ pub(crate) async fn load_device_join_authorization(
                 chain,
             })
         }
-        StoreMembershipStateRef::Serial {
-            position, recovery, ..
-        } => {
-            let reference = match position {
+        StoreMembershipStateRef::Serial(state_ref) => {
+            let reference = match &state_ref.position {
                 super::store_commit::SerialStorePosition::Genesis { .. } => None,
                 super::store_commit::SerialStorePosition::Commit(reference) => {
                     Some(reference.clone())
@@ -469,9 +464,12 @@ pub(crate) async fn load_device_join_authorization(
             };
             let authorization =
                 load_serial_authorization_at_position(storage, root, reference).await?;
-            let expected =
-                StoreMembershipStateRef::serial(position.clone(), recovery.clone(), &authorization)
-                    .map_err(|error| StorePullError::Database(error.to_string()))?;
+            let expected = StoreMembershipStateRef::serial(
+                state_ref.position.clone(),
+                state_ref.recovery.clone(),
+                &authorization,
+            )
+            .map_err(|error| StorePullError::Database(error.to_string()))?;
             if &expected != state {
                 return Err(StorePullError::Database(
                     "Serial device join membership state differs from its exact authorization"
@@ -480,7 +478,7 @@ pub(crate) async fn load_device_join_authorization(
             }
             Ok(DeviceJoinBootstrapAuthorization::Serial {
                 state: expected,
-                position: position.clone(),
+                position: state_ref.position.clone(),
                 authorization,
             })
         }

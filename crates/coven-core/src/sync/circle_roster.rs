@@ -403,16 +403,24 @@ impl CircleRosterHeadRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeCircleRosterStateRef {
+    pub heads: Vec<CircleRosterHeadRef>,
+    pub resolutions: Vec<CircleRosterConflictResolutionRef>,
+    pub state_hash: ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SerialCircleRosterStateRef {
+    pub state_hash: ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleRosterStateRef {
-    MergeConcurrent {
-        heads: Vec<CircleRosterHeadRef>,
-        resolutions: Vec<CircleRosterConflictResolutionRef>,
-        state_hash: ObjectHash,
-    },
-    Serial {
-        state_hash: ObjectHash,
-    },
+    MergeConcurrent(MergeCircleRosterStateRef),
+    Serial(SerialCircleRosterStateRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

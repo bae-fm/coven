@@ -9,7 +9,8 @@ use super::circle::{generated_id_digest, AccessLeafId, CircleEpochId, CircleId};
 use super::circle_roster::{
     CircleAuthorStreamKey, CircleMaterializedRoster, CircleRosterChain, CircleRosterEntry,
     CircleRosterError, CircleRosterHead, CircleRosterHeadRef, CircleRosterStateRef,
-    ResolvedCircleRoster, SerialCircleRoster,
+    MergeCircleRosterStateRef, ResolvedCircleRoster, SerialCircleRoster,
+    SerialCircleRosterStateRef,
 };
 #[cfg(test)]
 use super::membership::SerialMembershipState;
@@ -102,19 +103,27 @@ pub struct CircleControlCoordError;
 
 /// The exact Store membership state whose identities require access dispositions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeStoreMembershipStateRef {
+    pub heads: Vec<MembershipHeadRef>,
+    pub resolutions: Vec<StoreMembershipConflictResolutionRef>,
+    pub recovery: Vec<OwnerRecoveryCursor>,
+    pub state_hash: ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SerialStoreMembershipStateRef {
+    pub position: SerialStorePosition,
+    pub recovery: Vec<OwnerRecoveryCursor>,
+    pub state_hash: ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreMembershipStateRef {
-    MergeConcurrent {
-        heads: Vec<MembershipHeadRef>,
-        resolutions: Vec<StoreMembershipConflictResolutionRef>,
-        recovery: Vec<OwnerRecoveryCursor>,
-        state_hash: ObjectHash,
-    },
-    Serial {
-        position: SerialStorePosition,
-        recovery: Vec<OwnerRecoveryCursor>,
-        state_hash: ObjectHash,
-    },
+    MergeConcurrent(MergeStoreMembershipStateRef),
+    Serial(SerialStoreMembershipStateRef),
 }
 
 impl StoreMembershipStateRef {
@@ -127,7 +136,7 @@ impl StoreMembershipStateRef {
         heads.sort();
         resolutions.sort();
         let recovery = super::store_commit::canonical_recovery_cursors(recovery)?;
-        Ok(Self::MergeConcurrent {
+        Ok(Self::MergeConcurrent(MergeStoreMembershipStateRef {
             heads,
             resolutions,
             state_hash: membership_state_ref_hash(
@@ -136,7 +145,7 @@ impl StoreMembershipStateRef {
                 &recovery,
             ),
             recovery,
-        })
+        }))
     }
 
     pub fn serial(
@@ -145,7 +154,7 @@ impl StoreMembershipStateRef {
         authorization: &super::membership::SerialAuthorizationState,
     ) -> Result<Self, super::store_commit::StoreProtocolError> {
         let recovery = super::store_commit::canonical_recovery_cursors(recovery)?;
-        Ok(Self::Serial {
+        Ok(Self::Serial(SerialStoreMembershipStateRef {
             position,
             state_hash: membership_state_ref_hash(
                 crate::WritePolicy::Serial,
@@ -153,38 +162,35 @@ impl StoreMembershipStateRef {
                 &recovery,
             ),
             recovery,
-        })
+        }))
     }
 
     pub fn state_hash(&self) -> ObjectHash {
         match self {
-            Self::MergeConcurrent { state_hash, .. } | Self::Serial { state_hash, .. } => {
-                *state_hash
-            }
+            Self::MergeConcurrent(state) => state.state_hash,
+            Self::Serial(state) => state.state_hash,
         }
     }
 
     pub fn write_policy(&self) -> crate::WritePolicy {
         match self {
-            Self::MergeConcurrent { .. } => crate::WritePolicy::MergeConcurrent,
-            Self::Serial { .. } => crate::WritePolicy::Serial,
+            Self::MergeConcurrent(_) => crate::WritePolicy::MergeConcurrent,
+            Self::Serial(_) => crate::WritePolicy::Serial,
         }
     }
 
     pub fn recovery(&self) -> &[OwnerRecoveryCursor] {
         match self {
-            Self::MergeConcurrent { recovery, .. } | Self::Serial { recovery, .. } => recovery,
+            Self::MergeConcurrent(state) => &state.recovery,
+            Self::Serial(state) => &state.recovery,
         }
     }
 
     pub(crate) fn validate_shape(&self) -> Result<(), super::store_commit::StoreProtocolError> {
         super::store_commit::validate_recovery_cursors(self.recovery())?;
-        if let Self::MergeConcurrent {
-            heads, resolutions, ..
-        } = self
-        {
-            if heads.windows(2).any(|pair| pair[0] >= pair[1])
-                || resolutions.windows(2).any(|pair| pair[0] >= pair[1])
+        if let Self::MergeConcurrent(state) = self {
+            if state.heads.windows(2).any(|pair| pair[0] >= pair[1])
+                || state.resolutions.windows(2).any(|pair| pair[0] >= pair[1])
             {
                 return Err(super::store_commit::StoreProtocolError::Malformed(
                     "Store membership state reference is not canonical".to_string(),
@@ -483,16 +489,24 @@ impl CircleMetadataHeadRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeCircleMetadataStateRef {
+    pub heads: Vec<CircleMetadataHeadRef>,
+    pub selected: CircleMetadataCoord,
+    pub state_hash: ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SerialCircleMetadataStateRef {
+    pub current: CircleMetadataCoord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CircleMetadataStateRef {
-    MergeConcurrent {
-        heads: Vec<CircleMetadataHeadRef>,
-        selected: CircleMetadataCoord,
-        state_hash: ObjectHash,
-    },
-    Serial {
-        current: CircleMetadataCoord,
-    },
+    MergeConcurrent(MergeCircleMetadataStateRef),
+    Serial(SerialCircleMetadataStateRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -833,8 +847,8 @@ impl CircleControl {
                         CircleOwnerAuthorityRef::Serial {
                             roster_state_hash, ..
                         },
-                        CircleRosterStateRef::Serial { state_hash },
-                    ) => roster_state_hash == state_hash,
+                        CircleRosterStateRef::Serial(state),
+                    ) => roster_state_hash == &state.state_hash,
                     _ => false,
                 };
                 self.order.ordinal() == 1
@@ -1239,15 +1253,17 @@ impl CircleCreation {
         };
         let roster_state = match &roster_objects {
             FounderRosterObjects::MergeConcurrent { head, resolved, .. } => {
-                CircleRosterStateRef::MergeConcurrent {
+                CircleRosterStateRef::MergeConcurrent(MergeCircleRosterStateRef {
                     heads: vec![CircleRosterHeadRef::from_head(head)],
                     resolutions: Vec::new(),
                     state_hash: resolved.state_hash,
-                }
+                })
             }
-            FounderRosterObjects::Serial { roster } => CircleRosterStateRef::Serial {
-                state_hash: roster.state_hash,
-            },
+            FounderRosterObjects::Serial { roster } => {
+                CircleRosterStateRef::Serial(SerialCircleRosterStateRef {
+                    state_hash: roster.state_hash,
+                })
+            }
         };
         let metadata = CircleMetadata::founder(
             store_root_hash,
@@ -1264,14 +1280,18 @@ impl CircleCreation {
         )?;
         let metadata_head = CircleMetadataHead::signed(&metadata, signer);
         let metadata_state = match store_membership.write_policy() {
-            crate::WritePolicy::MergeConcurrent => CircleMetadataStateRef::MergeConcurrent {
-                heads: vec![CircleMetadataHeadRef::from_head(&metadata_head)],
-                selected: metadata.coord(),
-                state_hash: metadata.metadata_hash(),
-            },
-            crate::WritePolicy::Serial => CircleMetadataStateRef::Serial {
-                current: metadata.coord(),
-            },
+            crate::WritePolicy::MergeConcurrent => {
+                CircleMetadataStateRef::MergeConcurrent(MergeCircleMetadataStateRef {
+                    heads: vec![CircleMetadataHeadRef::from_head(&metadata_head)],
+                    selected: metadata.coord(),
+                    state_hash: metadata.metadata_hash(),
+                })
+            }
+            crate::WritePolicy::Serial => {
+                CircleMetadataStateRef::Serial(SerialCircleMetadataStateRef {
+                    current: metadata.coord(),
+                })
+            }
         };
         let mut leaves = Vec::with_capacity(store_members.len());
         for (recipient_pubkey, _) in &store_members {
