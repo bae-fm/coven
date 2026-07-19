@@ -26,6 +26,8 @@ pub(crate) enum ProtectedObjectDomain {
     DeviceJoinCleanupReceipt,
     StoreDeviceExclusionProposal,
     StoreDeviceExclusionOutcome,
+    StoreReclaimEvidence,
+    StoreReclaimAuthorization,
     ProviderAccessGrant,
     ProviderAccessWithdrawal,
     OwnerRecoveryNode,
@@ -266,6 +268,22 @@ impl ProtectedObjectDomain {
                 }]),
                 extension: ".json",
             },
+            Self::StoreReclaimEvidence => ProtocolObjectMetadata {
+                aad_label: b"store-reclaim-evidence",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "reclaim"), (2, "evidence")],
+                }]),
+                extension: ".json",
+            },
+            Self::StoreReclaimAuthorization => ProtocolObjectMetadata {
+                aad_label: b"store-reclaim-authorization",
+                path: ProtocolPathRule::Exact(&[ExactPathShape {
+                    component_count: 4,
+                    fixed_components: &[(0, "store-v1"), (1, "reclaim"), (2, "authorizations")],
+                }]),
+                extension: ".json",
+            },
             Self::ProviderAccessGrant => ProtocolObjectMetadata {
                 aad_label: b"provider-access-grant",
                 path: ProtocolPathRule::Exact(&[ExactPathShape {
@@ -484,6 +502,10 @@ impl ProtocolObjectDomain {
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceExclusionProposal);
     pub const StoreDeviceExclusionOutcome: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreDeviceExclusionOutcome);
+    pub const StoreReclaimEvidence: StoreEncryptedProtocolObjectDomain =
+        StoreEncryptedProtocolObjectDomain(ProtectedObjectDomain::StoreReclaimEvidence);
+    pub const StoreReclaimAuthorization: SignedStoreProtocolObjectDomain =
+        SignedStoreProtocolObjectDomain(ProtectedObjectDomain::StoreReclaimAuthorization);
     pub const ProviderAccessGrant: SignedStoreProtocolObjectDomain =
         SignedStoreProtocolObjectDomain(ProtectedObjectDomain::ProviderAccessGrant);
     pub const ProviderAccessWithdrawal: SignedStoreProtocolObjectDomain =
@@ -1478,6 +1500,16 @@ mod tests {
                 domain: ProtectedObjectDomain::StoreDeviceExclusionOutcome,
                 valid: &["store-v1/device-exclusion-outcomes/device/proposal"],
                 cross_domain: "store-v1/device-exclusion-proposals/device/proposal/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreReclaimEvidence,
+                valid: &["store-v1/reclaim/evidence/hash"],
+                cross_domain: "store-v1/reclaim/authorizations/hash",
+            },
+            DomainPathCase {
+                domain: ProtectedObjectDomain::StoreReclaimAuthorization,
+                valid: &["store-v1/reclaim/authorizations/hash"],
+                cross_domain: "store-v1/reclaim/evidence/hash",
             },
             DomainPathCase {
                 domain: ProtectedObjectDomain::ProviderAccessGrant,

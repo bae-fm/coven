@@ -2,15 +2,310 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::membership::{MemberRole, MembershipChain, SerialMembershipState};
-use super::storage::{ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage};
+use serde::{Deserialize, Serialize};
+
+use super::circle_control::StoreMembershipStateRef;
+use super::membership::{MemberRole, MembershipChain, MembershipGrantId, SerialMembershipState};
+use super::storage::{
+    ExactObjectRef, ProtocolObjectContext, ProtocolObjectDomain, StorageError, SyncStorage,
+};
 use super::store_commit::{
     ack_slot_prefix, snapshot_image_semantic_prefix, snapshot_slot_prefix, CommitFrontier,
     ObjectHash, SnapshotMeta, StoreAck, StoreAckRef, StoreBatchCommitRef, StoreCommitCoord,
-    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut, StoreRootRef,
-    StoreSerialPredecessor, StoreSnapshotRef,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreHistoryCut, StorePackageRef,
+    StoreProtocolError, StoreRootRef, StoreSerialPredecessor, StoreSnapshotRef,
+    STORE_PROTOCOL_VERSION,
 };
 use super::store_objects::StoreObjectError;
+use crate::keys::{self, UserKeypair};
+
+const RECLAIM_EVIDENCE_DOMAIN: &[u8] = b"coven.store-reclaim-evidence.v1\0";
+const RECLAIM_AUTHORIZATION_DOMAIN: &[u8] = b"coven.store-reclaim-authorization.v1\0";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorePackageReclaimClaim {
+    pub package: StorePackageRef,
+    pub activation: StoreBatchCommitRef,
+    pub covering_snapshot: StoreSnapshotRef,
+    pub acknowledgements: Vec<StoreAckRef>,
+}
+
+impl StorePackageReclaimClaim {
+    fn validate(&self) -> Result<(), StoreProtocolError> {
+        if self.acknowledgements.is_empty() {
+            return Err(StoreProtocolError::Malformed(
+                "Store package reclaim evidence has no acknowledgements".to_string(),
+            ));
+        }
+        if self
+            .acknowledgements
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(StoreProtocolError::Malformed(
+                "Store package reclaim acknowledgements are not strictly sorted and unique"
+                    .to_string(),
+            ));
+        }
+        let mut registrations = BTreeSet::new();
+        if self
+            .acknowledgements
+            .iter()
+            .any(|acknowledgement| !registrations.insert(&acknowledgement.registration))
+        {
+            return Err(StoreProtocolError::Malformed(
+                "Store package reclaim evidence repeats a device registration".to_string(),
+            ));
+        }
+        if self.package.object == self.activation.object
+            || self.package.object == self.covering_snapshot.object
+            || self
+                .acknowledgements
+                .iter()
+                .any(|acknowledgement| acknowledgement.object == self.package.object)
+        {
+            return Err(StoreProtocolError::Malformed(
+                "Store package reclaim target aliases proof authority".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReclaimEvidenceRef {
+    pub evidence_hash: ObjectHash,
+    pub object: ExactObjectRef,
+}
+
+impl ReclaimEvidenceRef {
+    pub fn from_evidence(evidence: &ReclaimEvidence, object: ExactObjectRef) -> Self {
+        Self {
+            evidence_hash: evidence.evidence_hash(),
+            object,
+        }
+    }
+
+    pub fn verify(&self, evidence: &ReclaimEvidence) -> Result<(), StoreProtocolError> {
+        let actual = evidence.evidence_hash();
+        if actual != self.evidence_hash {
+            return Err(StoreProtocolError::ObjectHashMismatch {
+                expected: self.evidence_hash,
+                actual,
+            });
+        }
+        evidence.verify()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReclaimEvidence {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub claim: StorePackageReclaimClaim,
+    pub author_pubkey: String,
+    pub signature: String,
+}
+
+#[derive(Serialize)]
+struct ReclaimEvidenceSignedFields<'a> {
+    version: u32,
+    store_root_hash: ObjectHash,
+    claim: &'a StorePackageReclaimClaim,
+    author_pubkey: &'a str,
+}
+
+impl ReclaimEvidence {
+    pub fn signed(
+        store_root_hash: ObjectHash,
+        mut claim: StorePackageReclaimClaim,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        claim.acknowledgements.sort();
+        claim.validate()?;
+        let mut evidence = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            claim,
+            author_pubkey: keys::public_key_hex(signer),
+            signature: String::new(),
+        };
+        let (_, signature) = keys::sign_hex(signer, &evidence.canonical_signed_bytes());
+        evidence.signature = signature;
+        Ok(evidence)
+    }
+
+    pub fn canonical_signed_bytes(&self) -> Vec<u8> {
+        super::store_commit::domain_json(
+            RECLAIM_EVIDENCE_DOMAIN,
+            &ReclaimEvidenceSignedFields {
+                version: self.version,
+                store_root_hash: self.store_root_hash,
+                claim: &self.claim,
+                author_pubkey: &self.author_pubkey,
+            },
+        )
+    }
+
+    pub fn evidence_hash(&self) -> ObjectHash {
+        ObjectHash::digest(&self.canonical_signed_bytes())
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("ReclaimEvidence serialization cannot fail")
+    }
+
+    pub fn verify(&self) -> Result<(), StoreProtocolError> {
+        if self.version != STORE_PROTOCOL_VERSION {
+            return Err(StoreProtocolError::UnsupportedVersion(self.version));
+        }
+        self.claim.validate()?;
+        if !keys::verify_signature_hex(
+            &self.author_pubkey,
+            &self.signature,
+            &self.canonical_signed_bytes(),
+        ) {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreReclaimAuthority {
+    pub membership: StoreMembershipStateRef,
+    pub owner_grant: MembershipGrantId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReclaimAuthorizationRef {
+    pub authorization_hash: ObjectHash,
+    pub evidence: ReclaimEvidenceRef,
+    pub object: ExactObjectRef,
+}
+
+impl ReclaimAuthorizationRef {
+    pub fn from_authorization(
+        authorization: &ReclaimAuthorization,
+        object: ExactObjectRef,
+    ) -> Self {
+        Self {
+            authorization_hash: authorization.authorization_hash(),
+            evidence: authorization.evidence.clone(),
+            object,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        authorization: &ReclaimAuthorization,
+        owner_pubkey: &str,
+    ) -> Result<(), StoreProtocolError> {
+        let actual = authorization.authorization_hash();
+        if actual != self.authorization_hash {
+            return Err(StoreProtocolError::ObjectHashMismatch {
+                expected: self.authorization_hash,
+                actual,
+            });
+        }
+        if authorization.evidence != self.evidence {
+            return Err(StoreProtocolError::Malformed(
+                "reclaim authorization evidence differs from its exact reference".to_string(),
+            ));
+        }
+        authorization.verify(owner_pubkey)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReclaimAuthorization {
+    pub version: u32,
+    pub store_root_hash: ObjectHash,
+    pub target: StorePackageRef,
+    pub evidence: ReclaimEvidenceRef,
+    pub authority: StoreReclaimAuthority,
+    pub signature: String,
+}
+
+#[derive(Serialize)]
+struct ReclaimAuthorizationSignedFields<'a> {
+    version: u32,
+    store_root_hash: ObjectHash,
+    target: &'a StorePackageRef,
+    evidence: &'a ReclaimEvidenceRef,
+    authority: &'a StoreReclaimAuthority,
+}
+
+impl ReclaimAuthorization {
+    pub fn signed(
+        store_root_hash: ObjectHash,
+        target: StorePackageRef,
+        evidence: ReclaimEvidenceRef,
+        authority: StoreReclaimAuthority,
+        signer: &UserKeypair,
+    ) -> Self {
+        let mut authorization = Self {
+            version: STORE_PROTOCOL_VERSION,
+            store_root_hash,
+            target,
+            evidence,
+            authority,
+            signature: String::new(),
+        };
+        let (_, signature) = keys::sign_hex(signer, &authorization.canonical_signed_bytes());
+        authorization.signature = signature;
+        authorization
+    }
+
+    pub fn canonical_signed_bytes(&self) -> Vec<u8> {
+        super::store_commit::domain_json(
+            RECLAIM_AUTHORIZATION_DOMAIN,
+            &ReclaimAuthorizationSignedFields {
+                version: self.version,
+                store_root_hash: self.store_root_hash,
+                target: &self.target,
+                evidence: &self.evidence,
+                authority: &self.authority,
+            },
+        )
+    }
+
+    pub fn authorization_hash(&self) -> ObjectHash {
+        ObjectHash::digest(&self.canonical_signed_bytes())
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("ReclaimAuthorization serialization cannot fail")
+    }
+
+    pub fn verify(&self, owner_pubkey: &str) -> Result<(), StoreProtocolError> {
+        if self.version != STORE_PROTOCOL_VERSION {
+            return Err(StoreProtocolError::UnsupportedVersion(self.version));
+        }
+        if !keys::verify_signature_hex(
+            owner_pubkey,
+            &self.signature,
+            &self.canonical_signed_bytes(),
+        ) {
+            return Err(StoreProtocolError::InvalidSignature);
+        }
+        Ok(())
+    }
+}
+
+pub fn reclaim_evidence_semantic_prefix(evidence_hash: ObjectHash) -> String {
+    format!("store-v1/reclaim/evidence/{evidence_hash}")
+}
+
+pub fn reclaim_authorization_semantic_prefix(authorization_hash: ObjectHash) -> String {
+    format!("store-v1/reclaim/authorizations/{authorization_hash}")
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct StoreReclaimResult {
@@ -513,4 +808,167 @@ async fn exact_package_targets(
         }
     }
     Ok(targets.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::cloud::ObjectSlot;
+
+    fn proof_object(path: &str) -> ExactObjectRef {
+        let bytes = path.as_bytes();
+        ExactObjectRef::new(
+            ObjectSlot::logical(path.to_string()).expect("valid proof slot"),
+            u64::try_from(bytes.len()).expect("proof length fits u64"),
+            ObjectHash::digest(bytes),
+        )
+    }
+
+    #[tokio::test]
+    async fn exact_reclaim_authorization_opens_its_encrypted_evidence() {
+        let db = crate::sync::test_helpers::open_test_db();
+        let store = crate::sync::test_helpers::TestStore::create(
+            &db,
+            "signed-reclaim-authority",
+            UserKeypair::generate(),
+        )
+        .await
+        .expect("create Store");
+        let changeset = crate::sync::test_helpers::capture_bytes(
+            &crate::sync::test_helpers::open_test_db(),
+            &[
+                "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+                 VALUES ('reclaim-row', 'reclaim', NULL, \
+                 '0000000001000-0000-reclaim', '2026-01-01')",
+            ],
+        )
+        .await;
+        let activation = store
+            .publish_changeset("founder", 1, &changeset, db.schema_version())
+            .await
+            .expect("publish package activation");
+        let (founder_ref, founder, _) = store
+            .founder_device_authority()
+            .await
+            .expect("load founder authority");
+        let activated = super::super::store_objects::load_commit_ref(
+            &store.storage,
+            store.root.store_root_hash,
+            &activation,
+            &founder,
+        )
+        .await
+        .expect("load package activation")
+        .value;
+        let package = activated
+            .store_package()
+            .expect("activation carries Store package")
+            .clone();
+        let evidence = ReclaimEvidence::signed(
+            store.root.store_root_hash,
+            StorePackageReclaimClaim {
+                package: package.clone(),
+                activation,
+                covering_snapshot: StoreSnapshotRef {
+                    sequence: 1,
+                    snapshot_hash: ObjectHash::digest(b"covering snapshot"),
+                    object: proof_object("store-v1/snapshots/founder/covering"),
+                },
+                acknowledgements: vec![StoreAckRef {
+                    registration: founder_ref,
+                    sequence: 1,
+                    ack_hash: ObjectHash::digest(b"acknowledgement"),
+                    object: proof_object("store-v1/acks/founder/1.json"),
+                }],
+            },
+            &store.signer,
+        )
+        .expect("sign reclaim evidence");
+        let evidence_context = ProtocolObjectContext::store_encrypted(
+            store.root.store_root_hash,
+            ProtocolObjectDomain::StoreReclaimEvidence,
+        );
+        let evidence_prefix = reclaim_evidence_semantic_prefix(evidence.evidence_hash());
+        let evidence_slot = store
+            .storage
+            .allocate_protocol_slot(&evidence_context, &evidence_prefix, ".json")
+            .await
+            .expect("allocate evidence slot");
+        let prepared_evidence = store
+            .storage
+            .prepare_protocol_object(
+                &evidence_context,
+                evidence_slot,
+                &evidence_prefix,
+                evidence.to_bytes(),
+            )
+            .expect("prepare evidence");
+        store
+            .storage
+            .create_protocol_object(&prepared_evidence)
+            .await
+            .expect("create evidence");
+        let evidence_ref =
+            ReclaimEvidenceRef::from_evidence(&evidence, prepared_evidence.reference().clone());
+        let authorization = ReclaimAuthorization::signed(
+            store.root.store_root_hash,
+            package,
+            evidence_ref,
+            StoreReclaimAuthority {
+                membership: activated.membership_state,
+                owner_grant: store.protocol_root.descriptor.founder_grant.clone(),
+            },
+            &store.signer,
+        );
+        let authorization_context = ProtocolObjectContext::signed_plaintext(
+            store.root.store_root_hash,
+            ProtocolObjectDomain::StoreReclaimAuthorization,
+        );
+        let authorization_prefix =
+            reclaim_authorization_semantic_prefix(authorization.authorization_hash());
+        let authorization_slot = store
+            .storage
+            .allocate_protocol_slot(&authorization_context, &authorization_prefix, ".json")
+            .await
+            .expect("allocate authorization slot");
+        let prepared_authorization = store
+            .storage
+            .prepare_protocol_object(
+                &authorization_context,
+                authorization_slot,
+                &authorization_prefix,
+                authorization.to_bytes(),
+            )
+            .expect("prepare authorization");
+        store
+            .storage
+            .create_protocol_object(&prepared_authorization)
+            .await
+            .expect("create authorization");
+        let authorization_ref = ReclaimAuthorizationRef::from_authorization(
+            &authorization,
+            prepared_authorization.reference().clone(),
+        );
+
+        let opened = super::super::store_objects::load_reclaim_authorization_ref(
+            &store.storage,
+            &store.root,
+            &authorization_ref,
+        )
+        .await
+        .expect("open exact reclaim authority graph");
+
+        assert_eq!(opened.authorization.value, authorization);
+        assert_eq!(opened.evidence.value, evidence);
+        let mut relocated = authorization.clone();
+        relocated.target.object =
+            proof_object("store-v1/candidates/family/packages/device/1/another-package.pkg");
+        assert!(authorization
+            .verify(&keys::public_key_hex(&store.signer))
+            .is_ok());
+        assert!(matches!(
+            relocated.verify(&keys::public_key_hex(&store.signer)),
+            Err(StoreProtocolError::InvalidSignature)
+        ));
+    }
 }

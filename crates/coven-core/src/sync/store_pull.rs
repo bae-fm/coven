@@ -34,8 +34,8 @@ use super::store_commit::{
 use super::store_objects::{
     load_commit_ref, load_device_exclusion_outcome_ref, load_device_exclusion_proposal_ref,
     load_device_join_attempt_ref, load_device_join_outcome_ref, load_founder_registration,
-    load_owner_recovery_node_ref, load_registration_ref, load_store_ack_ref, load_store_package,
-    load_store_protocol_root, StoreObjectError,
+    load_owner_recovery_node_ref, load_reclaim_authorization_ref, load_registration_ref,
+    load_store_ack_ref, load_store_package, load_store_protocol_root, StoreObjectError,
 };
 use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
 use crate::changeset::RowChange;
@@ -459,6 +459,56 @@ async fn validate_commit_acknowledgement(
     Ok(())
 }
 
+async fn validate_commit_reclaim_authorization(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    commit: &StoreBatchCommit,
+    activating_author: &StoreDeviceRegistration,
+    predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
+) -> Result<(), RegistrationLoadError> {
+    let Some(reference) = commit.reclaim_authorization() else {
+        return Ok(());
+    };
+    let predecessor = predecessor.ok_or_else(|| {
+        RegistrationLoadError::Invalid(
+            "reclaim authorization activation has no exact predecessor owner authority".to_string(),
+        )
+    })?;
+    let opened = load_reclaim_authorization_ref(storage, root, reference)
+        .await
+        .map_err(RegistrationLoadError::Object)?;
+    let evidence = &opened.evidence.value;
+    let authorization = &opened.authorization.value;
+    if evidence.author_pubkey != activating_author.author_pubkey
+        || authorization.authority.membership != commit.membership_state
+        || !predecessor.verifies_owner(
+            &authorization.authority.membership,
+            &evidence.author_pubkey,
+            &authorization.authority.owner_grant,
+        )
+    {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim authorization signer is not an active Owner at its exact predecessor"
+                .to_string(),
+        ));
+    }
+    let activation = predecessor_commit_matching(storage, root, &commit.order, |candidate, _| {
+        candidate == &evidence.claim.activation
+    })
+    .await?
+    .ok_or_else(|| {
+        RegistrationLoadError::Invalid(
+            "reclaim evidence package activation is absent from predecessor history".to_string(),
+        )
+    })?;
+    if activation.1.store_package() != Some(&authorization.target) {
+        return Err(RegistrationLoadError::Invalid(
+            "reclaim evidence target differs from its exact package activation".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn load_commit_registrations(
     storage: &dyn SyncStorage,
     root: &StoreRootRef,
@@ -472,6 +522,14 @@ async fn load_commit_registrations(
         root,
         commit,
         activating_author,
+    ))
+    .await?;
+    Box::pin(validate_commit_reclaim_authorization(
+        storage,
+        root,
+        commit,
+        activating_author,
+        predecessor,
     ))
     .await?;
     Box::pin(validate_commit_join_attempts(
@@ -1621,6 +1679,24 @@ async fn predecessor_contains_join_attempt(
     order: &super::store_commit::StoreCommitOrder,
     expected: &super::store_commit::DeviceJoinAttemptRef,
 ) -> Result<bool, RegistrationLoadError> {
+    Ok(
+        predecessor_commit_matching(storage, root, order, |_, commit| {
+            commit
+                .device_join_attempts()
+                .binary_search(expected)
+                .is_ok()
+        })
+        .await?
+        .is_some(),
+    )
+}
+
+async fn predecessor_commit_matching(
+    storage: &dyn SyncStorage,
+    root: &StoreRootRef,
+    order: &super::store_commit::StoreCommitOrder,
+    mut matches: impl FnMut(&StoreBatchCommitRef, &StoreBatchCommit) -> bool,
+) -> Result<Option<(StoreBatchCommitRef, StoreBatchCommit)>, RegistrationLoadError> {
     let mut pending = match order {
         super::store_commit::StoreCommitOrder::MergeConcurrent {
             predecessor,
@@ -1648,12 +1724,8 @@ async fn predecessor_contains_join_attempt(
         let (commit, _) = load_commit_with_author(storage, root, &reference)
             .await
             .map_err(RegistrationLoadError::Object)?;
-        if commit
-            .device_join_attempts()
-            .binary_search(expected)
-            .is_ok()
-        {
-            return Ok(true);
+        if matches(&reference, &commit) {
+            return Ok(Some((reference, commit)));
         }
         match commit.order {
             super::store_commit::StoreCommitOrder::MergeConcurrent {
@@ -1674,7 +1746,7 @@ async fn predecessor_contains_join_attempt(
             } => {}
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 async fn predecessor_contains_join_outcome(
@@ -1683,60 +1755,16 @@ async fn predecessor_contains_join_outcome(
     order: &super::store_commit::StoreCommitOrder,
     expected: &super::store_commit::DeviceJoinOutcomeRef,
 ) -> Result<bool, RegistrationLoadError> {
-    let mut pending = match order {
-        super::store_commit::StoreCommitOrder::MergeConcurrent {
-            predecessor,
-            dependencies,
-            ..
-        } => predecessor
-            .iter()
-            .chain(dependencies.values())
-            .cloned()
-            .collect::<Vec<_>>(),
-        super::store_commit::StoreCommitOrder::Serial {
-            predecessor: super::store_commit::StoreSerialPredecessor::Commit(predecessor),
-            ..
-        } => vec![predecessor.clone()],
-        super::store_commit::StoreCommitOrder::Serial {
-            predecessor: super::store_commit::StoreSerialPredecessor::Genesis { .. },
-            ..
-        } => Vec::new(),
-    };
-    let mut visited = BTreeSet::new();
-    while let Some(reference) = pending.pop() {
-        if !visited.insert(reference.clone()) {
-            continue;
-        }
-        let (commit, _) = load_commit_with_author(storage, root, &reference)
-            .await
-            .map_err(RegistrationLoadError::Object)?;
-        if commit
-            .device_join_outcomes()
-            .binary_search(expected)
-            .is_ok()
-        {
-            return Ok(true);
-        }
-        match commit.order {
-            super::store_commit::StoreCommitOrder::MergeConcurrent {
-                predecessor,
-                dependencies,
-                ..
-            } => {
-                pending.extend(predecessor);
-                pending.extend(dependencies.into_values());
-            }
-            super::store_commit::StoreCommitOrder::Serial {
-                predecessor: super::store_commit::StoreSerialPredecessor::Commit(predecessor),
-                ..
-            } => pending.push(predecessor),
-            super::store_commit::StoreCommitOrder::Serial {
-                predecessor: super::store_commit::StoreSerialPredecessor::Genesis { .. },
-                ..
-            } => {}
-        }
-    }
-    Ok(false)
+    Ok(
+        predecessor_commit_matching(storage, root, order, |_, commit| {
+            commit
+                .device_join_outcomes()
+                .binary_search(expected)
+                .is_ok()
+        })
+        .await?
+        .is_some(),
+    )
 }
 
 #[doc(hidden)]
@@ -1949,6 +1977,7 @@ pub async fn pull_store_commits_with_identity(
                 && commit.device_registrations().is_empty()
                 && commit.device_exclusion_proposals().is_empty()
                 && commit.device_exclusion_outcomes().is_empty()
+                && commit.reclaim_authorization().is_none()
             {
                 None
             } else {
@@ -2736,7 +2765,8 @@ pub(crate) async fn prepare_device_join_bootstrap(
             && commit.device_join_cleanup_receipts().is_empty()
             && commit.device_registrations().is_empty()
             && commit.device_exclusion_proposals().is_empty()
-            && commit.device_exclusion_outcomes().is_empty());
+            && commit.device_exclusion_outcomes().is_empty()
+            && commit.reclaim_authorization().is_none());
         let verified_state = match verified_authorization {
             DeviceJoinBootstrapAuthorization::MergeConcurrent { state, .. }
             | DeviceJoinBootstrapAuthorization::Serial { state, .. } => state,
@@ -2856,6 +2886,7 @@ pub(crate) async fn materialize_device_join_activation(
         || !commit.circle_controls().is_empty()
         || !commit.circle_packages().is_empty()
         || commit.store_package().is_some()
+        || commit.reclaim_authorization().is_some()
         || commit.membership_authority.is_some()
         || commit.control().is_some()
     {

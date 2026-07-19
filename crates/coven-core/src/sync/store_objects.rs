@@ -46,6 +46,12 @@ pub struct VerifiedDeviceExclusionOutcome {
     pub owner: StoreDeviceRegistration,
 }
 
+#[derive(Debug)]
+pub struct VerifiedReclaimAuthorization {
+    pub authorization: VerifiedObject<super::store_reclaim::ReclaimAuthorization>,
+    pub evidence: VerifiedObject<super::store_reclaim::ReclaimEvidence>,
+}
+
 pub async fn load_provider_access_grant_ref(
     storage: &dyn SyncStorage,
     store_root: &StoreRootRef,
@@ -539,6 +545,80 @@ pub async fn load_store_ack_ref(
         |bytes| StoreAck::parse_at(bytes, store_root, reference, registration),
     )
     .await
+}
+
+pub async fn load_reclaim_authorization_ref(
+    storage: &dyn SyncStorage,
+    store_root: &StoreRootRef,
+    reference: &super::store_reclaim::ReclaimAuthorizationRef,
+) -> Result<VerifiedReclaimAuthorization, StoreObjectError> {
+    let evidence_context = ProtocolObjectContext::store_encrypted(
+        store_root.store_root_hash,
+        ProtocolObjectDomain::StoreReclaimEvidence,
+    );
+    let evidence_prefix =
+        super::store_reclaim::reclaim_evidence_semantic_prefix(reference.evidence.evidence_hash);
+    let evidence = load_exact_object(
+        storage,
+        &evidence_context,
+        &reference.evidence.object,
+        &evidence_prefix,
+        reference.evidence.evidence_hash,
+        |bytes| {
+            let evidence: super::store_reclaim::ReclaimEvidence = serde_json::from_slice(bytes)
+                .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            reference.evidence.verify(&evidence)?;
+            if evidence.store_root_hash != store_root.store_root_hash {
+                return Err(StoreProtocolError::StoreRootMismatch {
+                    expected: store_root.store_root_hash,
+                    actual: evidence.store_root_hash,
+                });
+            }
+            Ok(evidence)
+        },
+    )
+    .await?;
+    let authorization_context = ProtocolObjectContext::signed_plaintext(
+        store_root.store_root_hash,
+        ProtocolObjectDomain::StoreReclaimAuthorization,
+    );
+    let authorization_prefix =
+        super::store_reclaim::reclaim_authorization_semantic_prefix(reference.authorization_hash);
+    let owner_pubkey = evidence.value.author_pubkey.clone();
+    let authorization = load_exact_object(
+        storage,
+        &authorization_context,
+        &reference.object,
+        &authorization_prefix,
+        reference.authorization_hash,
+        |bytes| {
+            let authorization: super::store_reclaim::ReclaimAuthorization =
+                serde_json::from_slice(bytes)
+                    .map_err(|error| StoreProtocolError::Malformed(error.to_string()))?;
+            reference.verify(&authorization, &owner_pubkey)?;
+            if authorization.store_root_hash != store_root.store_root_hash {
+                return Err(StoreProtocolError::StoreRootMismatch {
+                    expected: store_root.store_root_hash,
+                    actual: authorization.store_root_hash,
+                });
+            }
+            Ok(authorization)
+        },
+    )
+    .await?;
+    if authorization.value.target != evidence.value.claim.package {
+        return Err(StoreObjectError::InvalidObject {
+            semantic_prefix: authorization_prefix,
+            key: reference.object.slot().logical_key().to_string(),
+            source: Box::new(StoreProtocolError::Malformed(
+                "reclaim authorization target differs from its exact evidence".to_string(),
+            )),
+        });
+    }
+    Ok(VerifiedReclaimAuthorization {
+        authorization,
+        evidence,
+    })
 }
 
 pub async fn load_store_ack_predecessor(

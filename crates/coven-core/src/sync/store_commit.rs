@@ -1032,6 +1032,9 @@ impl StoreCommitOperations {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreCommitBody {
     Operations(StoreCommitOperations),
+    ReclaimAuthorization {
+        authorization: super::store_reclaim::ReclaimAuthorizationRef,
+    },
     SelfRetirement {
         retirement: StoreDeviceSelfRetirementRef,
     },
@@ -1112,7 +1115,8 @@ impl StoreBatchCommit {
     pub fn operations(&self) -> Option<&StoreCommitOperations> {
         match &self.body {
             StoreCommitBody::Operations(operations) => Some(operations),
-            StoreCommitBody::SelfRetirement { .. }
+            StoreCommitBody::ReclaimAuthorization { .. }
+            | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -1132,6 +1136,7 @@ impl StoreBatchCommit {
         match &self.body {
             StoreCommitBody::SerialRecoveryActivation { activation } => Some(activation),
             StoreCommitBody::Operations(_)
+            | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -1141,6 +1146,7 @@ impl StoreBatchCommit {
         match &self.body {
             StoreCommitBody::SelfRetirement { retirement } => Some(retirement),
             StoreCommitBody::Operations(_)
+            | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. }
             | StoreCommitBody::AbandonCandidates { .. } => None,
         }
@@ -1150,8 +1156,19 @@ impl StoreBatchCommit {
         match &self.body {
             StoreCommitBody::AbandonCandidates { manifests } => manifests,
             StoreCommitBody::Operations(_)
+            | StoreCommitBody::ReclaimAuthorization { .. }
             | StoreCommitBody::SelfRetirement { .. }
             | StoreCommitBody::SerialRecoveryActivation { .. } => &[],
+        }
+    }
+
+    pub fn reclaim_authorization(&self) -> Option<&super::store_reclaim::ReclaimAuthorizationRef> {
+        match &self.body {
+            StoreCommitBody::ReclaimAuthorization { authorization } => Some(authorization),
+            StoreCommitBody::Operations(_)
+            | StoreCommitBody::SelfRetirement { .. }
+            | StoreCommitBody::SerialRecoveryActivation { .. }
+            | StoreCommitBody::AbandonCandidates { .. } => None,
         }
     }
 
@@ -1199,7 +1216,8 @@ impl StoreBatchCommit {
             StoreCommitBody::SerialRecoveryActivation { activation } => {
                 std::slice::from_ref(&activation.registration)
             }
-            StoreCommitBody::SelfRetirement { .. } => &[],
+            StoreCommitBody::ReclaimAuthorization { .. }
+            | StoreCommitBody::SelfRetirement { .. } => &[],
             StoreCommitBody::AbandonCandidates { .. } => &[],
         }
     }
@@ -1219,9 +1237,9 @@ impl StoreBatchCommit {
     pub fn device_retirements(&self) -> &[StoreDeviceSelfRetirementRef] {
         match &self.body {
             StoreCommitBody::SelfRetirement { retirement } => std::slice::from_ref(retirement),
-            StoreCommitBody::Operations(_) | StoreCommitBody::SerialRecoveryActivation { .. } => {
-                &[]
-            }
+            StoreCommitBody::Operations(_)
+            | StoreCommitBody::ReclaimAuthorization { .. }
+            | StoreCommitBody::SerialRecoveryActivation { .. } => &[],
             StoreCommitBody::AbandonCandidates { .. } => &[],
         }
     }
@@ -1239,6 +1257,43 @@ impl StoreBatchCommit {
     pub fn circle_packages(&self) -> &[CirclePackageRef] {
         self.operations()
             .map_or(&[], |operations| operations.circle_packages.as_slice())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_reclaim_authorization(
+        store_root_hash: ObjectHash,
+        write_id: WriteId,
+        coord: StoreCommitCoord,
+        author_registration: StoreDeviceRegistrationRef,
+        author: &StoreDeviceRegistration,
+        order: StoreCommitOrder,
+        membership_state: StoreMembershipStateRef,
+        device_state: StoreDeviceStateRef,
+        authorization: super::store_reclaim::ReclaimAuthorizationRef,
+        signer: &UserKeypair,
+    ) -> Result<Self, StoreProtocolError> {
+        validate_commit_envelope(
+            store_root_hash,
+            &coord,
+            &author_registration,
+            author,
+            &order,
+            &membership_state,
+            &device_state,
+            None,
+            signer,
+        )?;
+        Self::finish_signed_body(
+            store_root_hash,
+            write_id,
+            author_registration,
+            order,
+            membership_state,
+            device_state,
+            None,
+            StoreCommitBody::ReclaimAuthorization { authorization },
+            signer,
+        )
     }
 
     pub fn merge_dependencies(
@@ -2188,6 +2243,7 @@ fn validate_commit_body(
                 &operations.device_exclusion_outcomes,
             )?;
         }
+        StoreCommitBody::ReclaimAuthorization { .. } => {}
         StoreCommitBody::SelfRetirement { retirement } => {
             validate_device_retirement_refs(
                 std::slice::from_ref(retirement),
@@ -2308,6 +2364,7 @@ fn candidate_manifest(
                 );
             }
         }
+        StoreCommitBody::ReclaimAuthorization { .. } => {}
         StoreCommitBody::SelfRetirement { retirement } => {
             objects.push(CandidateExclusiveObjectRef::SelfRetirement(
                 retirement.clone(),
@@ -6327,7 +6384,7 @@ pub fn snapshot_semantic_prefix(author: &str, snapshot_hash: ObjectHash) -> Stri
     format!("{STORE_SNAPSHOT_META_PREFIX}{author}/{snapshot_hash}")
 }
 
-fn domain_json(domain: &[u8], value: &impl Serialize) -> Vec<u8> {
+pub(crate) fn domain_json(domain: &[u8], value: &impl Serialize) -> Vec<u8> {
     let json = serde_json::to_vec(value).expect("canonical Store fields serialize");
     let mut bytes = Vec::with_capacity(domain.len() + json.len());
     bytes.extend_from_slice(domain);
