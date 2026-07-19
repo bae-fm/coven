@@ -7698,6 +7698,10 @@ impl Database {
             tx,
             synced_tables,
         )?);
+        let gates = Gates::from_tables(tx, synced_tables)
+            .map_err(|error| DbError::Message(error.to_string()))?;
+        let blob_decls = BlobDecls::from_tables(tx, synced_tables)
+            .map_err(|error| DbError::Message(error.to_string()))?;
         let mut statement = tx
             .prepare(
                 "SELECT write_id, status, inverse_changeset, base, prepared FROM store_writes
@@ -7814,47 +7818,13 @@ impl Database {
                     resolution.commit.seq()
                 )));
             }
-            if let Some(package) = resolution.package {
-                let changeset = crate::sync::apply::ValidatedChangeset::new(
-                    package,
-                    schema.clone(),
-                )
-                .map_err(|error| {
-                    DbError::Message(format!("invalid Serial resolution changeset: {error}"))
-                })?;
-                crate::sync::apply::apply_changeset_strict_on(tx, changeset).map_err(|error| {
-                    DbError::Message(format!(
-                        "apply Serial resolution commit {}: {error}",
-                        resolution.commit.seq()
-                    ))
-                })?;
-                let blob_decls = BlobDecls::from_tables(tx, synced_tables)
-                    .map_err(|error| DbError::Message(error.to_string()))?;
-                for intent in resolution.cleanup {
-                    crate::blob::local_cleanup::record_if_unreferenced_on(
-                        tx,
-                        &blob_decls,
-                        &intent,
-                    )?;
-                }
-            }
-            Self::record_activated_store_device_registrations_on(
+            crate::sync::store_pull::apply_prepared_serial_commit_on(
                 tx,
-                &resolution.commit,
-                &resolution.registrations,
-            )?;
-            Self::record_verified_circle_activations_on(
-                tx,
-                &resolution.commit,
-                &resolution.commit_ref,
-                &resolution.circle_activations,
-            )?;
-            Self::record_materialized_serial_commit_with_device_operations_on(
-                tx,
-                &resolution.commit,
-                &resolution.commit_ref,
-                &resolution.authorization_after,
-                &resolution.device_operations,
+                schema.clone(),
+                &gates,
+                synced_tables,
+                &blob_decls,
+                &resolution,
             )?;
             predecessor = Some(resolution.commit_ref);
         }

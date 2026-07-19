@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use rusqlite::ffi;
 use rusqlite::Connection;
+use tracing::debug;
 
 use super::ffi::{collect_deletes, for_each_change, ChangeRow, Changegroup};
 use super::model::{foreign_keys, rows_referencing, GateColumn, Gates, TableGate};
@@ -91,6 +92,84 @@ pub(crate) fn filter_inbound_circle_changeset(
     gates: &Gates,
 ) -> Result<Vec<u8>, GateError> {
     unsafe { filter_inbound_circle_changeset_raw(conn, changeset, circle_id, gates) }
+}
+
+pub(crate) struct SerialInboundChangesets {
+    pub(crate) deletes: Vec<u8>,
+    pub(crate) writes: Vec<u8>,
+}
+
+pub(crate) fn combine_serial_inbound_changesets(
+    conn: &Connection,
+    changesets: &[&[u8]],
+) -> Result<SerialInboundChangesets, GateError> {
+    unsafe {
+        let deletes = Changegroup::new()?;
+        deletes.set_schema(conn.handle())?;
+        let writes = Changegroup::new()?;
+        writes.set_schema(conn.handle())?;
+        for changeset in changesets {
+            for_each_change(changeset, |iter, row| {
+                if row.op == ffi::SQLITE_DELETE {
+                    deletes.add_change(iter)?;
+                } else {
+                    writes.add_change(iter)?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(SerialInboundChangesets {
+            deletes: deletes.output()?,
+            writes: writes.output()?,
+        })
+    }
+}
+
+pub(crate) fn validate_serial_visibility_deletes(
+    conn: &Connection,
+    gates: &Gates,
+    changeset: &[u8],
+    expected_audience: &Audience,
+) -> Result<(), GateError> {
+    unsafe {
+        for_each_change(changeset, |_iter, row| {
+            if row.op != ffi::SQLITE_DELETE {
+                return Ok(());
+            }
+            let row_id = row
+                .pk()
+                .ok_or_else(|| GateError::MissingChangesetPrimaryKey(row.table.clone()))?;
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM {} WHERE id = ?1)",
+                quote_ident(&row.table)
+            );
+            let exists = conn
+                .query_row(&sql, [row_id], |result| result.get::<_, bool>(0))
+                .map_err(|error| {
+                    GateError::Sql(
+                        format!("check Serial visibility removal {}.{row_id}", row.table),
+                        error,
+                    )
+                })?;
+            if !exists {
+                debug!(
+                    table = row.table,
+                    row_id,
+                    ?expected_audience,
+                    "Serial visibility removal already has no local row"
+                );
+                return Ok(());
+            }
+            let live = live_row_audience(conn, gates, &row.table, row_id)?;
+            if &live != expected_audience {
+                return Err(GateError::InvalidInboundAudiencePackage(format!(
+                    "Serial {:?} package cannot remove {}.{row_id} from {:?}",
+                    expected_audience, row.table, live
+                )));
+            }
+            Ok(())
+        })
+    }
 }
 
 unsafe fn filter_inbound_circle_changeset_raw(
@@ -260,6 +339,53 @@ pub(crate) fn prune_ineligible_scoped_rows(
             }
         }
     }
+    delete_scoped_rows(conn, gates, &removed, true)
+}
+
+pub(crate) fn prune_inactive_serial_circles(
+    conn: &Connection,
+    gates: &Gates,
+    inactive_circles: &BTreeSet<CircleId>,
+) -> Result<(), GateError> {
+    if inactive_circles.is_empty() || !gates.has_scoped_graph() {
+        return Ok(());
+    }
+    let mut removed = HashSet::<(String, String)>::new();
+    for (table, gate) in &gates.tables {
+        let TableGate::ScopedRoot { audience_col } = gate else {
+            continue;
+        };
+        let sql = format!(
+            "SELECT {id}, {audience} FROM {table}",
+            id = quote_ident("id"),
+            audience = quote_ident(&audience_col.name),
+            table = quote_ident(table),
+        );
+        let roots = query_mapped_rows(conn, &sql, [], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        for (row_id, local_audience) in roots {
+            let audience = Audience::from_column(local_audience.as_deref()).map_err(|error| {
+                GateError::InvalidAudience {
+                    table: table.clone(),
+                    value: local_audience,
+                    reason: error.to_string(),
+                }
+            })?;
+            if matches!(audience, Audience::Circle(circle) if inactive_circles.contains(&circle)) {
+                removed.extend(gates.subtree_rows(conn, table, &row_id)?);
+            }
+        }
+    }
+    delete_scoped_rows(conn, gates, &removed, false)
+}
+
+fn delete_scoped_rows(
+    conn: &Connection,
+    gates: &Gates,
+    removed: &HashSet<(String, String)>,
+    has_routing_tables: bool,
+) -> Result<(), GateError> {
     let mut order = gates.gated_tables_parent_first(conn)?;
     order.reverse();
     for table in order {
@@ -284,32 +410,36 @@ pub(crate) fn prune_ineligible_scoped_rows(
                     error,
                 )
             })?;
-            conn.execute(
-                "DELETE FROM _coven_row_routes WHERE table_name = ?1 AND row_id = ?2",
-                (&table, row_id),
-            )
-            .map_err(|error| {
-                GateError::Sql(
-                    format!("delete ineligible private route {table}.{row_id}"),
-                    error,
+            if has_routing_tables {
+                conn.execute(
+                    "DELETE FROM _coven_row_routes WHERE table_name = ?1 AND row_id = ?2",
+                    (&table, row_id),
                 )
-            })?;
+                .map_err(|error| {
+                    GateError::Sql(
+                        format!("delete ineligible private route {table}.{row_id}"),
+                        error,
+                    )
+                })?;
+            }
         }
-        conn.execute(
-            &format!(
-                "DELETE FROM _coven_row_routes AS route
+        if has_routing_tables {
+            conn.execute(
+                &format!(
+                    "DELETE FROM _coven_row_routes AS route
                  WHERE route.table_name = ?1
                    AND NOT EXISTS (
                        SELECT 1 FROM {table} AS host WHERE host.{id} = route.row_id
                    )",
-                table = quote_ident(&table),
-                id = quote_ident("id"),
-            ),
-            [&table],
-        )
-        .map_err(|error| {
-            GateError::Sql(format!("delete orphaned private routes for {table}"), error)
-        })?;
+                    table = quote_ident(&table),
+                    id = quote_ident("id"),
+                ),
+                [&table],
+            )
+            .map_err(|error| {
+                GateError::Sql(format!("delete orphaned private routes for {table}"), error)
+            })?;
+        }
     }
     Ok(())
 }
@@ -1436,6 +1566,44 @@ mod tests {
     }
 
     #[test]
+    fn serial_visibility_delete_requires_live_source_audience_authority() {
+        let source = Connection::open_in_memory().expect("open Serial delete source");
+        routing_schema(&source);
+        let actual = CircleId::from_bytes([2; 16]);
+        source
+            .execute(
+                "INSERT INTO notes VALUES ('row', ?1, 'body', '1')",
+                [actual.to_string()],
+            )
+            .expect("insert Serial delete source row");
+        let mut session = Session::new(&source).expect("create Serial delete session");
+        session.attach(Some("notes")).expect("attach Serial notes");
+        source
+            .execute("DELETE FROM notes WHERE id = 'row'", [])
+            .expect("delete Serial source row");
+        let mut changeset = Vec::new();
+        session
+            .changeset_strm(&mut changeset)
+            .expect("capture Serial source deletion");
+
+        let target = Connection::open_in_memory().expect("open Serial delete target");
+        routing_schema(&target);
+        target
+            .execute(
+                "INSERT INTO notes VALUES ('row', ?1, 'body', '1')",
+                [actual.to_string()],
+            )
+            .expect("insert live Serial target row");
+        let gates = note_gates(&target);
+        let unauthorized = Audience::Circle(CircleId::from_bytes([1; 16]));
+        let error = validate_serial_visibility_deletes(&target, &gates, &changeset, &unauthorized)
+            .expect_err("another Circle cannot remove the live row");
+        assert!(matches!(error, GateError::InvalidInboundAudiencePackage(_)));
+        validate_serial_visibility_deletes(&target, &gates, &changeset, &Audience::Circle(actual))
+            .expect("the live source Circle can remove its row");
+    }
+
+    #[test]
     fn audience_prune_removes_stale_scoped_subtrees_and_keeps_local_rows() {
         let conn = Connection::open_in_memory().expect("open target");
         routing_schema(&conn);
@@ -1502,5 +1670,70 @@ mod tests {
             })
             .expect("count routes");
         assert_eq!((notes, comments, routes), (1, 1, 2));
+    }
+
+    #[test]
+    fn serial_inactive_circle_prune_removes_its_subtrees_without_routing_tables() {
+        let conn = Connection::open_in_memory().expect("open Serial target");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE notes (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 body TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE comments (
+                 id TEXT PRIMARY KEY,
+                 note_id TEXT NOT NULL REFERENCES notes(id),
+                 body TEXT,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )
+        .expect("create Serial scoped schema");
+        let inactive = CircleId::from_bytes([1; 16]);
+        let active = CircleId::from_bytes([2; 16]);
+        conn.execute(
+            "INSERT INTO notes VALUES ('inactive', ?1, 'inactive', '1')",
+            [inactive.to_string()],
+        )
+        .expect("insert inactive Serial root");
+        conn.execute(
+            "INSERT INTO notes VALUES ('active', ?1, 'active', '1')",
+            [active.to_string()],
+        )
+        .expect("insert active Serial root");
+        conn.execute_batch(
+            "INSERT INTO notes VALUES ('store', NULL, 'store', '1');
+             INSERT INTO notes VALUES ('local', 'local', 'local', '1');
+             INSERT INTO comments VALUES ('inactive-child', 'inactive', 'inactive', '1');
+             INSERT INTO comments VALUES ('active-child', 'active', 'active', '1');",
+        )
+        .expect("insert retained and inherited Serial rows");
+        let tables = vec![
+            SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience"),
+            SyncedTable::new("comments", RowIdentity::IndependentUuid),
+        ];
+        let gates = Gates::from_tables(&conn, &tables).expect("build Serial scoped gates");
+
+        prune_inactive_serial_circles(&conn, &gates, &BTreeSet::from([inactive]))
+            .expect("prune inactive Serial Circle");
+
+        let remaining_notes = conn
+            .prepare("SELECT id FROM notes ORDER BY id")
+            .expect("prepare remaining Serial roots")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query remaining Serial roots")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read remaining Serial roots");
+        let remaining_comments = conn
+            .prepare("SELECT id FROM comments ORDER BY id")
+            .expect("prepare remaining Serial children")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query remaining Serial children")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read remaining Serial children");
+        assert_eq!(remaining_notes, ["active", "local", "store"]);
+        assert_eq!(remaining_comments, ["active-child"]);
     }
 }

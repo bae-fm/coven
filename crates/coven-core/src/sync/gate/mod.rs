@@ -70,9 +70,11 @@ mod model;
 mod outbound;
 
 pub(crate) use audience::{
-    active_circle_control, capture_routing_changes, filter_inbound_circle_changeset,
-    is_routing_table, live_row_audience, partition_outbound, prune_ineligible_scoped_rows,
-    AudiencePartition, CirclePartitionControl, RoutingChanges,
+    active_circle_control, capture_routing_changes, combine_serial_inbound_changesets,
+    filter_inbound_circle_changeset, is_routing_table, live_row_audience, partition_outbound,
+    prune_inactive_serial_circles, prune_ineligible_scoped_rows,
+    validate_serial_visibility_deletes, AudiencePartition, CirclePartitionControl, RoutingChanges,
+    SerialInboundChangesets,
 };
 pub(crate) use model::write_gate;
 pub use model::Gates;

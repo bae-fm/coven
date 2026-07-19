@@ -8,7 +8,9 @@
 //! the next outgoing changeset, while the pull's apply is a plain connection write
 //! that is never journaled and so never echoes applied rows.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::str::FromStr;
 
 use tracing::{debug, info, warn};
@@ -483,25 +485,26 @@ pub(crate) async fn run_single_sync_cycle_with_coordination(
     observer: Option<&dyn BlobTransitionObserver>,
 ) -> Result<SyncCycleResult, SyncCycleFailure> {
     let authorization = load_cycle_authorization(storage, serial_coordination, db).await?;
-    Box::pin(run_single_sync_cycle_with_authorization(
-        storage,
-        serial_coordination,
-        _store_id,
-        device_id,
-        hlc,
-        clock,
-        db,
-        cipher,
-        pending_rotation,
-        user_keypair,
-        custody,
-        routing_encryption,
-        store_dir,
-        cloud_home,
-        observer,
-        authorization,
-    ))
-    .await
+    let cycle_future: Pin<Box<dyn Future<Output = _> + Send + '_>> =
+        Box::pin(run_single_sync_cycle_with_authorization(
+            storage,
+            serial_coordination,
+            _store_id,
+            device_id,
+            hlc,
+            clock,
+            db,
+            cipher,
+            pending_rotation,
+            user_keypair,
+            custody,
+            routing_encryption,
+            store_dir,
+            cloud_home,
+            observer,
+            authorization,
+        ));
+    cycle_future.await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -549,18 +552,20 @@ async fn run_single_sync_cycle_with_authorization(
         .merge_membership
         .as_ref()
         .and_then(|membership| membership.chain.as_ref());
-    let store_pull = Box::pin(super::store_pull::pull_store_commits_with_identity(
-        db,
-        db.synced_tables(),
-        storage,
-        serial_coordination,
-        authorization.store_root.store_root_hash,
-        store_dir,
-        merge_chain,
-        Some(user_keypair),
-    ))
-    .await
-    .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
+    let store_pull_future: Pin<Box<dyn Future<Output = _> + Send + '_>> =
+        Box::pin(super::store_pull::pull_store_commits_with_identity(
+            db,
+            db.synced_tables(),
+            storage,
+            serial_coordination,
+            authorization.store_root.store_root_hash,
+            store_dir,
+            merge_chain,
+            Some(user_keypair),
+        ));
+    let store_pull = store_pull_future
+        .await
+        .map_err(|error| SyncCycleFailure::operation("pull Store commits", error))?;
     let completed = Box::pin(complete_cycle_after_pull(
         storage,
         serial_coordination,

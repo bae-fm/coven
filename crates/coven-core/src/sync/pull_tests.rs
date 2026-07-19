@@ -3293,6 +3293,275 @@ fn open_scoped_circle_test_db() -> crate::database::Database {
     )
 }
 
+fn open_serial_scoped_circle_test_db_at(path: &std::path::Path) -> crate::database::Database {
+    let (db, _stamper) = crate::database::Database::open(
+        path,
+        vec![
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::IndependentUuid)
+                .scoped_by("audience"),
+            SyncedTable::new(
+                "comments",
+                crate::sync::session::RowIdentity::IndependentUuid,
+            ),
+        ],
+        crate::blob::BLOB_TOMBSTONE_GRACE,
+        crate::blob::TransferLimits::serial(),
+        crate::WritePolicy::Serial,
+        "serial-circle-test".to_string(),
+        &[crate::migration::Migration::sql(
+            1,
+            "scoped Serial Circle schema",
+            "CREATE TABLE notes (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 body TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE comments (
+                 id TEXT PRIMARY KEY,
+                 note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+                 body TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+    .expect("open Serial scoped Circle database");
+    db
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_serial_circle_move<'a>(
+    source: &'a crate::database::Database,
+    storage: &'a TestStore,
+    owner: &'a UserKeypair,
+    device_id: &'a str,
+    note_id: &'a str,
+    source_dir: &'a crate::store_dir::StoreDir,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::sync::circle::CircleId> + 'a>> {
+    Box::pin(async move {
+        let coordination = storage
+            .storage
+            .serial_coordination()
+            .expect("Serial test Store exposes coordination");
+        let second_circle_id = crate::sync::circle_ops::create_circle(
+            source,
+            &storage.storage,
+            Some(coordination),
+            device_id,
+            "0000000003000-0000-owner",
+            "Editors",
+            owner,
+        )
+        .await
+        .expect("create second Serial Circle");
+        host_exec(
+            source,
+            &format!(
+                "UPDATE notes SET audience = '{second_circle_id}', _updated_at = '0000000004000-0000-owner'
+                 WHERE id = '{note_id}';"
+            ),
+        )
+        .await;
+        let prepared = crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+            source,
+            &storage.storage,
+            Some(coordination),
+            device_id,
+            "2026-07-16T00:01:00Z",
+            owner,
+            source_dir,
+            None,
+        )
+        .await
+        .expect("prepare cross-Circle Serial move");
+        assert!(prepared);
+        crate::sync::store_outbound::drain_store_writes_with_coordination(
+            source,
+            &storage.storage,
+            Some(coordination),
+        )
+        .await
+        .expect("publish cross-Circle Serial move");
+        second_circle_id
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_serial_circle_move<'a>(
+    target: &'a crate::database::Database,
+    storage: &'a TestStore,
+    owner: &'a UserKeypair,
+    note_id: &'a str,
+    comment_id: &'a str,
+    second_circle_id: crate::sync::circle::CircleId,
+    target_dir: &'a crate::store_dir::StoreDir,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let coordination = storage
+            .storage
+            .serial_coordination()
+            .expect("Serial test Store exposes coordination");
+        let moved = crate::sync::store_pull::pull_store_commits_with_identity(
+            target,
+            target.synced_tables(),
+            &storage.storage,
+            Some(coordination),
+            storage.root.store_root_hash,
+            target_dir,
+            None,
+            Some(owner),
+        )
+        .await
+        .expect("pull cross-Circle Serial move");
+        assert!(moved.held_positions.is_empty(), "{moved:?}");
+        let note_id_for_query = note_id.to_string();
+        let current_audience = target
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT audience FROM notes WHERE id = ?1",
+                    [note_id_for_query],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(crate::database::DbError::from)
+            })
+            .await
+            .expect("read moved Serial row audience");
+        assert_eq!(current_audience, second_circle_id.to_string(), "{moved:?}");
+        assert!(
+            row_exists(
+                target,
+                &format!("SELECT 1 FROM comments WHERE id = '{comment_id}'")
+            )
+            .await
+        );
+    })
+}
+
+fn prepare_conflicting_serial_branch<'a>(
+    db: &'a crate::database::Database,
+    storage: &'a TestStore,
+    owner: &'a UserKeypair,
+    device_id: &'a str,
+    store_dir: &'a crate::store_dir::StoreDir,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::PendingBranchId> + 'a>> {
+    Box::pin(async move {
+        let local_id = "550e8400-e29b-41d4-a716-446655440000";
+        host_exec(
+            db,
+            &format!(
+                "INSERT INTO notes VALUES ('{local_id}', NULL, 'losing local write', '0000000000500-0000-owner');"
+            ),
+        )
+        .await;
+        let pending = db
+            .pending_writes()
+            .await
+            .expect("read pending Serial branch");
+        let [pending] = pending.as_slice() else {
+            panic!("expected one pending Serial write, found {}", pending.len());
+        };
+        let branch_id = crate::PendingBranchId::from_first_write(pending.write_id.clone());
+        let coordination = storage
+            .storage
+            .serial_coordination()
+            .expect("Serial test Store exposes coordination");
+        assert!(
+            crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+                db,
+                &storage.storage,
+                Some(coordination),
+                device_id,
+                "2026-07-16T00:00:30Z",
+                owner,
+                store_dir,
+                None,
+            )
+            .await
+            .expect("prepare losing Serial branch")
+        );
+        branch_id
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_conflicting_serial_branch<'a>(
+    db: &'a crate::database::Database,
+    storage: &'a TestStore,
+    owner: &'a UserKeypair,
+    branch_id: crate::PendingBranchId,
+    store_dir: &'a crate::store_dir::StoreDir,
+    note_id: &'a str,
+    comment_id: &'a str,
+    expected_circle: crate::sync::circle::CircleId,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let coordination = storage
+            .storage
+            .serial_coordination()
+            .expect("Serial test Store exposes coordination");
+        assert_eq!(
+            crate::sync::store_outbound::drain_store_writes_with_coordination(
+                db,
+                &storage.storage,
+                Some(coordination),
+            )
+            .await
+            .expect("detect losing Serial branch"),
+            0
+        );
+        let pending = db.pending_writes().await.expect("read conflicted branch");
+        assert!(matches!(
+            pending.as_slice(),
+            [pending] if matches!(pending.status, crate::WriteStatus::Conflict(_))
+        ));
+        let plan = crate::sync::store_pull::prepare_serial_resolution(
+            db,
+            &storage.storage,
+            coordination,
+            storage.root.store_root_hash,
+            store_dir,
+            None,
+            owner,
+        )
+        .await
+        .expect("prepare Serial Circle conflict resolution");
+        crate::sync::store_pull::cleanup_serial_candidates(
+            db,
+            &storage.storage,
+            branch_id.clone(),
+            &plan,
+        )
+        .await
+        .expect("clean losing Serial candidate");
+        db.discard_pending_serial_branch(branch_id, plan)
+            .await
+            .expect("materialize accepted Serial Circle history");
+        assert!(
+            row_exists(
+                db,
+                &format!(
+                    "SELECT 1 FROM notes WHERE id = '{note_id}' AND audience = '{expected_circle}'"
+                )
+            )
+            .await
+        );
+        assert!(
+            row_exists(
+                db,
+                &format!("SELECT 1 FROM comments WHERE id = '{comment_id}'")
+            )
+            .await
+        );
+        assert!(
+            !row_exists(
+                db,
+                "SELECT 1 FROM notes WHERE id = '550e8400-e29b-41d4-a716-446655440000'"
+            )
+            .await
+        );
+    })
+}
+
 #[tokio::test]
 async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
     let owner = UserKeypair::generate();
@@ -3412,6 +3681,146 @@ async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
             .all(|change| !crate::sync::gate::is_routing_table(&change.table)),
         "host-visible row changes must not expose Coven routing tables"
     );
+}
+
+#[tokio::test]
+async fn serial_pull_applies_a_circle_only_commit_without_routing_tables() {
+    let owner = UserKeypair::generate();
+    let databases = tempfile::tempdir().expect("create Serial database directory");
+    let source = open_serial_scoped_circle_test_db_at(&databases.path().join("source.sqlite"));
+    let storage = create_store(&source, owner.clone()).await;
+    let coordination = storage
+        .storage
+        .serial_coordination()
+        .expect("Serial test Store exposes coordination");
+    let device_id = source
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read Serial scoped source device")
+        .expect("Serial scoped source device exists");
+    let target_path = databases.path().join("target.sqlite");
+    let target_path_string = target_path.to_string_lossy().into_owned();
+    source
+        .call(move |conn| {
+            conn.execute("VACUUM INTO ?1", [target_path_string])
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("clone founder Serial database");
+    let conflict_path = databases.path().join("conflict.sqlite");
+    let conflict_path_string = conflict_path.to_string_lossy().into_owned();
+    source
+        .call(move |conn| {
+            conn.execute("VACUUM INTO ?1", [conflict_path_string])
+                .map(|_| ())
+                .map_err(crate::database::DbError::from)
+        })
+        .await
+        .expect("clone conflicting founder Serial database");
+    let conflict = open_serial_scoped_circle_test_db_at(&conflict_path);
+    let (_conflict_temp, conflict_dir) = temp_store_dir();
+    let conflict_branch =
+        prepare_conflicting_serial_branch(&conflict, &storage, &owner, &device_id, &conflict_dir)
+            .await;
+    let circle_id = crate::sync::circle_ops::create_circle(
+        &source,
+        &storage.storage,
+        Some(coordination),
+        &device_id,
+        "0000000001000-0000-owner",
+        "Readers",
+        &owner,
+    )
+    .await
+    .expect("create Serial Circle");
+    let note_id = "01890a5d-ac96-774b-bcce-b302099c3f74";
+    let comment_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    host_exec(
+        &source,
+        &format!(
+            "INSERT INTO notes VALUES ('{note_id}', '{circle_id}', 'private', '0000000002000-0000-owner');
+             INSERT INTO comments VALUES ('{comment_id}', '{note_id}', 'child', '0000000002001-0000-owner');"
+        ),
+    )
+    .await;
+    let (_source_temp, source_dir) = temp_store_dir();
+    let prepared = crate::sync::store_outbound::prepare_pending_store_write_with_coordination(
+        &source,
+        &storage.storage,
+        Some(coordination),
+        &device_id,
+        "2026-07-16T00:00:00Z",
+        &owner,
+        &source_dir,
+        None,
+    )
+    .await
+    .expect("prepare Serial Circle-only write");
+    assert!(prepared);
+    crate::sync::store_outbound::drain_store_writes_with_coordination(
+        &source,
+        &storage.storage,
+        Some(coordination),
+    )
+    .await
+    .expect("publish Serial Circle-only write");
+
+    let target = open_serial_scoped_circle_test_db_at(&target_path);
+    let (_target_temp, target_dir) = temp_store_dir();
+    let result = crate::sync::store_pull::pull_store_commits_with_identity(
+        &target,
+        target.synced_tables(),
+        &storage.storage,
+        Some(coordination),
+        storage.root.store_root_hash,
+        &target_dir,
+        None,
+        Some(&owner),
+    )
+    .await
+    .expect("pull Serial Circle-only write");
+
+    assert!(result.changesets_applied >= 1);
+    assert!(
+        row_exists(
+            &target,
+            &format!("SELECT 1 FROM notes WHERE id = '{note_id}'")
+        )
+        .await
+    );
+    assert!(
+        row_exists(
+            &target,
+            &format!("SELECT 1 FROM comments WHERE id = '{comment_id}'")
+        )
+        .await
+    );
+
+    let second_circle_id =
+        publish_serial_circle_move(&source, &storage, &owner, &device_id, note_id, &source_dir)
+            .await;
+    assert_serial_circle_move(
+        &target,
+        &storage,
+        &owner,
+        note_id,
+        comment_id,
+        second_circle_id,
+        &target_dir,
+    )
+    .await;
+    resolve_conflicting_serial_branch(
+        &conflict,
+        &storage,
+        &owner,
+        conflict_branch,
+        &conflict_dir,
+        note_id,
+        comment_id,
+        second_circle_id,
+    )
+    .await;
 }
 
 #[tokio::test]

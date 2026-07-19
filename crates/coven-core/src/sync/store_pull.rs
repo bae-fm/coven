@@ -1,7 +1,12 @@
 //! Causal discovery and atomic materialization for immutable Store commits.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+
+use rusqlite::session::{ConflictAction, ConflictType};
+use tracing::debug;
 
 use super::apply::{
     apply_changeset_strict_on, resolve_and_apply_changeset_with_schema_on, ValidatedChangeset,
@@ -11,8 +16,7 @@ use super::circle_control::StoreMembershipStateRef;
 use super::conflict::TableSchema;
 use super::membership::{MembershipChain, MembershipStatus, SerialAuthorizationState};
 use super::pull::{
-    advance_max_updated_at, cache_eager_blobs, download_blobs, local_blob_cleanup_intents,
-    verify_package_blobs,
+    advance_max_updated_at, cache_eager_blobs, local_blob_cleanup_intents, verify_package_blobs,
 };
 use super::session::SyncedTable;
 use super::storage::{
@@ -39,10 +43,11 @@ use super::store_objects::{
     load_reclaim_receipt_ref, load_registration_ref, load_store_ack_ref, load_store_package,
     load_store_protocol_root, StoreObjectError,
 };
+use crate::blob::decl::BlobDecls;
 use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
 use crate::changeset::RowChange;
 use crate::database::{BlobActivation, Database, DbError};
-use crate::encryption::{EncryptionService, MasterKeyring};
+use crate::encryption::{EncryptionService, KeyFingerprint, MasterKeyring};
 use crate::store_dir::StoreDir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +224,16 @@ struct LoadedCirclePackage {
     bytes: Vec<u8>,
     blob_protection: BlobSpoolProtection,
 }
+
+#[derive(Clone)]
+struct CirclePackageAccess {
+    encryption: EncryptionService,
+    key_fingerprint: KeyFingerprint,
+    writers: BTreeSet<String>,
+}
+
+type CirclePackageAccesses =
+    BTreeMap<(super::circle::CircleId, super::circle::CircleControlCoord), CirclePackageAccess>;
 
 #[derive(Clone)]
 enum CandidateDeviceOperations {
@@ -1951,8 +1966,8 @@ async fn predecessor_contains_join_outcome(
 pub struct SerialResolutionCommit {
     pub(crate) commit: StoreBatchCommit,
     pub(crate) commit_ref: super::store_commit::StoreBatchCommitRef,
-    pub(crate) package: Option<Vec<u8>>,
-    pub(crate) cleanup: Vec<LocalBlobCleanupIntent>,
+    pub(crate) packages: Vec<AudiencePackage>,
+    pub(crate) changesets: super::gate::SerialInboundChangesets,
     pub(crate) registrations: Vec<(
         StoreDeviceRegistration,
         super::store_commit::StoreDeviceRegistrationActivation,
@@ -2047,19 +2062,20 @@ pub async fn pull_store_commits_with_identity(
     }
     let verified_root = load_store_protocol_root(storage, &root).await?.value;
     if db.write_policy() == crate::WritePolicy::Serial {
-        return pull_serial_store_commits(
-            db,
-            tables,
-            storage,
-            serial_coordination.ok_or_else(|| {
-                StorePullError::Serial("coordination capability is absent".to_string())
-            })?,
-            &root,
-            verified_root,
-            store_dir,
-            identity,
-        )
-        .await;
+        let serial_pull: Pin<Box<dyn Future<Output = _> + Send + '_>> =
+            Box::pin(pull_serial_store_commits(
+                db,
+                tables,
+                storage,
+                serial_coordination.ok_or_else(|| {
+                    StorePullError::Serial("coordination capability is absent".to_string())
+                })?,
+                &root,
+                verified_root,
+                store_dir,
+                identity,
+            ));
+        return serial_pull.await;
     }
     if verified_root.descriptor.write_policy != crate::WritePolicy::MergeConcurrent {
         return Err(StorePullError::Database(
@@ -3886,6 +3902,7 @@ pub async fn prepare_serial_resolution(
         )
     };
     let mut commits = Vec::with_capacity(authorized_chain.len() - first);
+    let mut prior_circle_accesses = CirclePackageAccesses::new();
     for authorized in authorized_chain.into_iter().skip(first) {
         let package =
             load_serial_store_package(db, storage, &authorized.commit_ref, &authorized.commit)
@@ -3916,13 +3933,24 @@ pub async fn prepare_serial_resolution(
             circle_activations,
             device_operations: CandidateDeviceOperations::Verified(authorized.device_operations),
         };
-        let cleanup = if candidate.package.is_some() {
-            prepare_serial_candidate(db, storage, store_dir, schema.clone(), &candidate)
-                .await?
-                .cleanup
-        } else {
-            Vec::new()
-        };
+        let prepared = prepare_serial_candidate(
+            db,
+            storage,
+            store_dir,
+            schema.clone(),
+            &candidate,
+            &prior_circle_accesses,
+        )
+        .await?;
+        for (key, access) in circle_package_accesses(&candidate.circle_activations)
+            .map_err(StorePullError::Serial)?
+        {
+            if prior_circle_accesses.insert(key, access).is_some() {
+                return Err(StorePullError::Serial(
+                    "Serial resolution repeats one exact Circle control".to_string(),
+                ));
+            }
+        }
         let device_operations = match candidate.device_operations {
             CandidateDeviceOperations::Verified(operations) => operations,
             CandidateDeviceOperations::MergePending { .. } => {
@@ -3934,8 +3962,8 @@ pub async fn prepare_serial_resolution(
         commits.push(SerialResolutionCommit {
             commit: candidate.commit,
             commit_ref: candidate.commit_ref,
-            package: candidate.package,
-            cleanup,
+            packages: prepared.packages,
+            changesets: prepared.changesets,
             registrations: candidate.registrations,
             circle_activations: candidate.circle_activations,
             device_operations,
@@ -4008,97 +4036,232 @@ async fn apply_serial_candidate(
             ))
         }
     };
-    if candidate.package.is_none() {
-        let commit = candidate.commit.clone();
-        let commit_ref = candidate.commit_ref.clone();
-        let registrations = candidate.registrations.clone();
-        let circle_activations = candidate.circle_activations.clone();
-        let authorization_after = authorization_after.clone();
-        let device_operations = device_operations.clone();
-        db.call(move |conn| {
+    let no_prior_circle_accesses = CirclePackageAccesses::new();
+    let prepared = prepare_serial_candidate(
+        db,
+        storage,
+        store_dir,
+        schema.clone(),
+        candidate,
+        &no_prior_circle_accesses,
+    )
+    .await?;
+    let resolution = SerialResolutionCommit {
+        commit: candidate.commit.clone(),
+        commit_ref: candidate.commit_ref.clone(),
+        packages: prepared.packages,
+        changesets: prepared.changesets,
+        registrations: candidate.registrations.clone(),
+        circle_activations: candidate.circle_activations.clone(),
+        device_operations,
+        authorization_after: authorization_after.clone(),
+    };
+    let blob_decls = db.blob_decls();
+    let gates = db.gates();
+    let synced_tables = db.synced_tables().to_vec();
+    let apply_schema = schema.clone();
+    let returned_changes = db
+        .call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
-            Database::record_verified_circle_activations_on(
+            let changes = apply_prepared_serial_commit_on(
                 &tx,
-                &commit,
-                &commit_ref,
-                &circle_activations,
+                apply_schema,
+                &gates,
+                &synced_tables,
+                &blob_decls,
+                &resolution,
             )?;
-            Database::record_materialized_serial_commit_with_device_operations_on(
-                &tx,
-                &commit,
-                &commit_ref,
-                &authorization_after,
-                &device_operations,
-            )?;
-            tx.commit().map_err(DbError::from)
+            tx.commit().map_err(DbError::from)?;
+            Ok(changes)
         })
         .await?;
-        return Ok(Vec::new());
-    }
-
-    let prepared = prepare_serial_candidate(db, storage, store_dir, schema, candidate).await?;
-    let PreparedSerialCandidate {
-        changeset,
-        changes,
-        cleanup,
-    } = prepared;
-    let commit = candidate.commit.clone();
-    let commit_ref = candidate.commit_ref.clone();
-    let registrations = candidate.registrations.clone();
-    let circle_activations = candidate.circle_activations.clone();
-    let authorization_after = authorization_after.clone();
-    let device_operations = device_operations.clone();
-    let returned_changes = changes.clone();
-    let blob_decls = db.blob_decls();
-    let receiver_wall_ms = db.receive_wall_ms();
     let mut changeset_max = None;
     advance_max_updated_at(
         &mut changeset_max,
-        &changes,
-        changeset.schema(),
-        receiver_wall_ms,
+        &returned_changes,
+        &schema,
+        db.receive_wall_ms(),
     );
-    let hlc = db.hlc();
-    db.call(move |conn| {
-        let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-        apply_changeset_strict_on(&tx, changeset).map_err(|error| {
-            DbError::Message(format!(
-                "Serial commit {} did not apply exactly: {error}",
-                commit_ref.coord.sequence()
-            ))
-        })?;
-        for intent in cleanup {
-            local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
-        }
-        Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
-        Database::record_verified_circle_activations_on(
-            &tx,
-            &commit,
-            &commit_ref,
-            &circle_activations,
-        )?;
-        Database::record_materialized_serial_commit_with_device_operations_on(
-            &tx,
-            &commit,
-            &commit_ref,
-            &authorization_after,
-            &device_operations,
-        )?;
-        tx.commit().map_err(DbError::from)?;
-        if let Some(max_applied) = changeset_max.as_ref() {
-            hlc.advance_past(max_applied);
-        }
-        Ok(())
-    })
-    .await?;
+    if let Some(max_applied) = changeset_max.as_ref() {
+        db.hlc().advance_past(max_applied);
+    }
     Ok(returned_changes)
 }
 
+pub(crate) fn apply_prepared_serial_commit_on(
+    conn: &rusqlite::Connection,
+    schema: Arc<TableSchema>,
+    gates: &super::gate::Gates,
+    synced_tables: &[SyncedTable],
+    blob_decls: &BlobDecls,
+    resolution: &SerialResolutionCommit,
+) -> Result<Vec<RowChange>, DbError> {
+    let deletes = ValidatedChangeset::new(resolution.changesets.deletes.as_slice(), schema.clone())
+        .map_err(|error| DbError::Message(format!("invalid Serial deletes: {error}")))?;
+    let writes = ValidatedChangeset::new(resolution.changesets.writes.as_slice(), schema.clone())
+        .map_err(|error| DbError::Message(format!("invalid Serial writes: {error}")))?;
+    let mut materialization_session =
+        rusqlite::session::Session::new(conn).map_err(DbError::from)?;
+    for table in synced_tables {
+        materialization_session
+            .attach(Some(table.name()))
+            .map_err(DbError::from)?;
+    }
+    for package in &resolution.packages {
+        super::gate::validate_serial_visibility_deletes(
+            conn,
+            gates,
+            package.changeset(),
+            &package_audience(package.audience()),
+        )
+        .map_err(|error| {
+            DbError::Message(format!("validate Serial visibility removal: {error}"))
+        })?;
+    }
+    apply_serial_visibility_deletes_on(conn, deletes).map_err(|error| {
+        DbError::Message(format!(
+            "apply Serial commit {} visibility removals: {error}",
+            resolution.commit_ref.coord.sequence()
+        ))
+    })?;
+    if !writes.bytes().is_empty() {
+        apply_changeset_strict_on(conn, writes).map_err(|error| {
+            DbError::Message(format!(
+                "Serial commit {} did not apply exactly: {error}",
+                resolution.commit_ref.coord.sequence()
+            ))
+        })?;
+    }
+    Database::record_activated_store_device_registrations_on(
+        conn,
+        &resolution.commit,
+        &resolution.registrations,
+    )
+    .map_err(|error| DbError::Message(format!("record Serial registrations: {error}")))?;
+    Database::record_verified_circle_activations_on(
+        conn,
+        &resolution.commit,
+        &resolution.commit_ref,
+        &resolution.circle_activations,
+    )
+    .map_err(|error| DbError::Message(format!("record Serial Circle controls: {error}")))?;
+    for package in &resolution.packages {
+        let expected_audience = package_audience(package.audience());
+        let winning_rows = crate::sync::apply::current_winning_rows_with_schema(
+            conn,
+            &schema,
+            package.changeset(),
+        )?;
+        for winner in winning_rows
+            .iter()
+            .filter(|winner| winner.row_stamp.is_some())
+        {
+            let live = super::gate::live_row_audience(conn, gates, &winner.table, &winner.row_id)
+                .map_err(|error| {
+                DbError::Message(format!(
+                    "resolve Serial package row audience for {}.{}: {error}",
+                    winner.table, winner.row_id
+                ))
+            })?;
+            if live != expected_audience {
+                return Err(DbError::Message(format!(
+                    "Serial {:?} package cannot write {}.{} into {:?}",
+                    expected_audience, winner.table, winner.row_id, live
+                )));
+            }
+        }
+        Database::install_pulled_blob_activations_on(conn, package, &resolution.commit_ref)
+            .map_err(|error| {
+                DbError::Message(format!("record Serial blob activations: {error}"))
+            })?;
+        Database::install_winning_blob_bindings_on(
+            conn,
+            gates,
+            synced_tables,
+            package,
+            &BlobActivation {
+                coord: resolution.commit_ref.coord.clone(),
+            },
+            &winning_rows,
+        )
+        .map_err(|error| DbError::Message(format!("record Serial blob bindings: {error}")))?;
+    }
+    let inactive_circles = resolution
+        .circle_activations
+        .iter()
+        .filter_map(|activation| {
+            activation
+                .local_access
+                .as_ref()
+                .filter(|access| access.active.is_none())
+                .map(|_| activation.circle_id)
+        })
+        .collect::<BTreeSet<_>>();
+    super::gate::prune_inactive_serial_circles(conn, gates, &inactive_circles)
+        .map_err(|error| DbError::Message(format!("prune inactive Serial Circles: {error}")))?;
+    let mut materialized_changeset = Vec::new();
+    materialization_session
+        .changeset_strm(&mut materialized_changeset)
+        .map_err(DbError::from)?;
+    drop(materialization_session);
+    let old_changes =
+        crate::changeset::walk_old(&materialized_changeset).map_err(DbError::Message)?;
+    let changes = crate::changeset::walk(&materialized_changeset).map_err(DbError::Message)?;
+    for intent in local_blob_cleanup_intents(blob_decls, &old_changes, &changes)
+        .map_err(|error| DbError::Message(error.to_string()))?
+    {
+        local_cleanup::record_if_unreferenced_on(conn, blob_decls, &intent)?;
+    }
+    Database::record_materialized_serial_commit_with_device_operations_on(
+        conn,
+        &resolution.commit,
+        &resolution.commit_ref,
+        &resolution.authorization_after,
+        &resolution.device_operations,
+    )
+    .map_err(|error| DbError::Message(format!("record Serial commit position: {error}")))?;
+    Ok(changes)
+}
+
+fn package_audience(audience: &PackageAudience) -> super::circle::Audience {
+    match audience {
+        PackageAudience::Store => super::circle::Audience::Store,
+        PackageAudience::Circle { circle_id, .. } => super::circle::Audience::Circle(*circle_id),
+    }
+}
+
+fn apply_serial_visibility_deletes_on<B: AsRef<[u8]>>(
+    conn: &rusqlite::Connection,
+    changeset: ValidatedChangeset<B>,
+) -> Result<(), DbError> {
+    if changeset.bytes().is_empty() {
+        return Ok(());
+    }
+    if crate::changeset::walk(changeset.bytes())
+        .map_err(DbError::Message)?
+        .iter()
+        .any(|change| change.op != crate::changeset::ChangeOp::Delete)
+    {
+        return Err(DbError::Message(
+            "Serial visibility removal contains a non-delete operation".to_string(),
+        ));
+    }
+    let bytes = changeset.bytes();
+    conn.apply_strm(
+        &mut &bytes[..],
+        None::<fn(&str) -> bool>,
+        |conflict, _item| match conflict {
+            ConflictType::SQLITE_CHANGESET_DATA => ConflictAction::SQLITE_CHANGESET_REPLACE,
+            ConflictType::SQLITE_CHANGESET_NOTFOUND => ConflictAction::SQLITE_CHANGESET_OMIT,
+            _ => ConflictAction::SQLITE_CHANGESET_ABORT,
+        },
+    )
+    .map_err(DbError::from)
+}
+
 struct PreparedSerialCandidate {
-    changeset: ValidatedChangeset<Vec<u8>>,
-    changes: Vec<RowChange>,
-    cleanup: Vec<LocalBlobCleanupIntent>,
+    packages: Vec<AudiencePackage>,
+    changesets: super::gate::SerialInboundChangesets,
 }
 
 async fn prepare_serial_candidate(
@@ -4107,30 +4270,74 @@ async fn prepare_serial_candidate(
     store_dir: &StoreDir,
     schema: Arc<TableSchema>,
     candidate: &Candidate,
+    prior_circle_accesses: &CirclePackageAccesses,
 ) -> Result<PreparedSerialCandidate, StorePullError> {
-    let package_bytes = candidate.package.as_ref().ok_or_else(|| {
-        StorePullError::Serial("row preparation requires a Store package".to_string())
-    })?;
-    let package =
-        parse_candidate_store_package(candidate, package_bytes).map_err(StorePullError::Serial)?;
-    let changeset = ValidatedChangeset::new(package.changeset().to_vec(), schema)
-        .map_err(|error| StorePullError::Serial(format!("invalid changeset: {error}")))?;
-    let changes = crate::changeset::walk(changeset.bytes())
-        .map_err(|error| StorePullError::Serial(format!("invalid changeset: {error}")))?;
-    let old_changes = crate::changeset::walk_old(changeset.bytes())
-        .map_err(|error| StorePullError::Serial(format!("invalid changeset: {error}")))?;
-    let blob_decls = db.blob_decls();
-    let eager = cache_eager_blobs(&blob_decls, &changes, &package)
-        .map_err(|error| StorePullError::Serial(format!("invalid blob changes: {error}")))?;
-    if let Err(failures) = download_blobs(db, eager, storage, store_dir).await {
-        return Err(StorePullError::BlobDownloads(failures));
+    let mut packages = Vec::<(AudiencePackage, BlobSpoolProtection)>::new();
+    if let Some(package_bytes) = candidate.package.as_ref() {
+        let package = parse_candidate_store_package(candidate, package_bytes)
+            .map_err(StorePullError::Serial)?;
+        packages.push((package, storage.store_blob_protection()?));
     }
-    let cleanup = local_blob_cleanup_intents(&blob_decls, &old_changes, &changes)
-        .map_err(|error| StorePullError::Serial(format!("invalid blob changes: {error}")))?;
+    let circle_packages = load_applicable_circle_packages_with_prior_accesses(
+        db,
+        storage,
+        &candidate.commit_ref,
+        &candidate.commit,
+        &candidate.circle_activations,
+        &candidate.author,
+        prior_circle_accesses,
+    )
+    .await
+    .map_err(|error| match error {
+        PullCircleActivationError::Database(error) => StorePullError::Database(error.to_string()),
+        PullCircleActivationError::Invalid(error) => StorePullError::Serial(error),
+    })?;
+    for loaded in circle_packages {
+        let package =
+            parse_candidate_circle_package(candidate, &loaded).map_err(StorePullError::Serial)?;
+        packages.push((package, loaded.blob_protection));
+    }
+
+    let blob_decls = db.blob_decls();
+    for (package, protection) in &packages {
+        let validated = ValidatedChangeset::new(package.changeset(), schema.clone())
+            .map_err(|error| StorePullError::Serial(format!("invalid changeset: {error}")))?;
+        let changes = crate::changeset::walk(validated.bytes())
+            .map_err(|error| StorePullError::Serial(format!("invalid changeset: {error}")))?;
+        let eager = cache_eager_blobs(&blob_decls, &changes, package)
+            .map_err(|error| StorePullError::Serial(format!("invalid blob changes: {error}")))?;
+        verify_package_blobs(
+            db,
+            storage,
+            store_dir,
+            package.blob_bindings(),
+            protection.clone(),
+            &eager,
+        )
+        .await
+        .map_err(StorePullError::BlobDownloads)?;
+    }
+    let package_changesets = packages
+        .iter()
+        .map(|(package, _)| package.changeset().to_vec())
+        .collect::<Vec<_>>();
+    let changesets = db
+        .call(move |conn| {
+            let changesets = package_changesets
+                .iter()
+                .map(Vec::as_slice)
+                .collect::<Vec<_>>();
+            super::gate::combine_serial_inbound_changesets(conn, &changesets)
+                .map_err(|error| DbError::Message(error.to_string()))
+        })
+        .await?;
+    ValidatedChangeset::new(changesets.deletes.as_slice(), schema.clone())
+        .map_err(|error| StorePullError::Serial(format!("invalid Serial deletes: {error}")))?;
+    ValidatedChangeset::new(changesets.writes.as_slice(), schema)
+        .map_err(|error| StorePullError::Serial(format!("invalid Serial writes: {error}")))?;
     Ok(PreparedSerialCandidate {
-        changeset,
-        changes,
-        cleanup,
+        packages: packages.into_iter().map(|(package, _)| package).collect(),
+        changesets,
     })
 }
 fn membership_authorizes(
@@ -4198,6 +4405,99 @@ async fn load_applicable_circle_packages(
     activations: &[super::circle_ops::VerifiedCircleReference],
     author: &StoreDeviceRegistration,
 ) -> Result<Vec<LoadedCirclePackage>, PullCircleActivationError> {
+    load_applicable_circle_packages_with_prior_accesses(
+        db,
+        storage,
+        commit_ref,
+        commit,
+        activations,
+        author,
+        &CirclePackageAccesses::new(),
+    )
+    .await
+}
+
+fn circle_package_access(
+    activation: &super::circle_ops::VerifiedCircleReference,
+) -> Result<Option<CirclePackageAccess>, String> {
+    let Some(access) = activation.local_access.as_ref() else {
+        return Ok(None);
+    };
+    let Some(active) = access.active.as_ref() else {
+        return Ok(None);
+    };
+    if !active.roster.verify() {
+        return Err(format!(
+            "Circle {} package roster is invalid",
+            activation.circle_id
+        ));
+    }
+    let super::circle::CircleAccessDisposition::Active {
+        keyring,
+        key_fingerprint,
+        ..
+    } = &access.leaf.value.disposition
+    else {
+        return Err(format!(
+            "active Circle access for {} has an inactive leaf",
+            activation.circle_id
+        ));
+    };
+    if *key_fingerprint != activation.control.value.key_fingerprint {
+        return Err(format!(
+            "Circle package key for {} differs from its activated control",
+            activation.circle_id
+        ));
+    }
+    let keyring = MasterKeyring::from_serialized(keyring).map_err(|error| {
+        format!(
+            "parse Circle package keyring for {}: {error}",
+            activation.circle_id
+        )
+    })?;
+    let encryption = EncryptionService::from(keyring)
+        .service_for_fingerprint(key_fingerprint.as_bytes())
+        .map_err(|error| {
+            format!(
+                "select Circle package key for {}: {error}",
+                activation.circle_id
+            )
+        })?;
+    Ok(Some(CirclePackageAccess {
+        encryption,
+        key_fingerprint: *key_fingerprint,
+        writers: active.roster.members().keys().cloned().collect(),
+    }))
+}
+
+fn circle_package_accesses(
+    activations: &[super::circle_ops::VerifiedCircleReference],
+) -> Result<CirclePackageAccesses, String> {
+    let mut accesses = CirclePackageAccesses::new();
+    for activation in activations {
+        let Some(access) = circle_package_access(activation)? else {
+            continue;
+        };
+        let key = (activation.circle_id, activation.control.coord.clone());
+        if accesses.insert(key, access).is_some() {
+            return Err(format!(
+                "Circle {} has duplicate package access at one control",
+                activation.circle_id
+            ));
+        }
+    }
+    Ok(accesses)
+}
+
+async fn load_applicable_circle_packages_with_prior_accesses(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
+    activations: &[super::circle_ops::VerifiedCircleReference],
+    author: &StoreDeviceRegistration,
+    prior_accesses: &CirclePackageAccesses,
+) -> Result<Vec<LoadedCirclePackage>, PullCircleActivationError> {
     let mut loaded = Vec::new();
     for reference in commit.circle_packages() {
         if reference.package.schema_version > db.schema_version() {
@@ -4213,57 +4513,56 @@ async fn load_applicable_circle_packages(
                 && activation.control.coord == reference.control
         });
         let context = if let Some(activation) = same_commit {
-            let Some(access) = activation.local_access.as_ref() else {
+            let Some(access) =
+                circle_package_access(activation).map_err(PullCircleActivationError::Invalid)?
+            else {
+                debug!(
+                    circle_id = %reference.circle_id,
+                    control = ?reference.control,
+                    "skipping Circle package without active local access"
+                );
                 continue;
             };
-            let Some(active) = access.active.as_ref() else {
-                continue;
-            };
-            if !active.roster.members().contains_key(&author.author_pubkey) {
+            if !access.writers.contains(&author.author_pubkey) {
                 return Err(PullCircleActivationError::Invalid(format!(
                     "Circle package author is not a member of {} at its exact control",
                     reference.circle_id
                 )));
             }
-            let super::circle::CircleAccessDisposition::Active {
-                keyring,
-                key_fingerprint,
-                ..
-            } = &access.leaf.value.disposition
-            else {
-                return Err(PullCircleActivationError::Invalid(format!(
-                    "active Circle access for {} has an inactive leaf",
-                    reference.circle_id
-                )));
-            };
-            if *key_fingerprint != reference.key_fingerprint
-                || activation.control.value.key_fingerprint != reference.key_fingerprint
-            {
+            if access.key_fingerprint != reference.key_fingerprint {
                 return Err(PullCircleActivationError::Invalid(format!(
                     "Circle package key for {} differs from its activated control",
                     reference.circle_id
                 )));
             }
-            let keyring = MasterKeyring::from_serialized(keyring).map_err(|error| {
-                PullCircleActivationError::Invalid(format!(
-                    "parse Circle package keyring for {}: {error}",
+            access.encryption
+        } else if let Some(access) =
+            prior_accesses.get(&(reference.circle_id, reference.control.clone()))
+        {
+            if !access.writers.contains(&author.author_pubkey) {
+                return Err(PullCircleActivationError::Invalid(format!(
+                    "Circle package author is not a member of {} at its exact control",
                     reference.circle_id
-                ))
-            })?;
-            EncryptionService::from(keyring)
-                .service_for_fingerprint(reference.key_fingerprint.as_bytes())
-                .map_err(|error| {
-                    PullCircleActivationError::Invalid(format!(
-                        "select Circle package key for {}: {error}",
-                        reference.circle_id
-                    ))
-                })?
+                )));
+            }
+            if access.key_fingerprint != reference.key_fingerprint {
+                return Err(PullCircleActivationError::Invalid(format!(
+                    "Circle package key for {} differs from prepared access",
+                    reference.circle_id
+                )));
+            }
+            access.encryption.clone()
         } else {
             let Some((encryption, key_fingerprint)) = db
                 .circle_access_context(reference.circle_id, reference.control.clone())
                 .await
                 .map_err(PullCircleActivationError::Database)?
             else {
+                debug!(
+                    circle_id = %reference.circle_id,
+                    control = ?reference.control,
+                    "skipping Circle package without durable local access"
+                );
                 continue;
             };
             if !db
@@ -4314,11 +4613,6 @@ async fn load_serial_store_package(
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
 ) -> Result<Option<Vec<u8>>, StorePullError> {
-    if !commit.circle_packages().is_empty() {
-        return Err(StorePullError::Serial(
-            "Serial Circle packages are not implemented".to_string(),
-        ));
-    }
     if let Some(package) = commit.store_package() {
         if package.schema_version > db.schema_version() {
             return Err(StorePullError::Serial(format!(
