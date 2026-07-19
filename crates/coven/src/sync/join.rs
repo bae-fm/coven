@@ -786,8 +786,17 @@ impl DeviceJoinClient {
         let pending_record = pending.load(attempt_id, crate::DeviceJoinRole::Joiner)?;
         let pending_readiness = match pending_record.as_ref().map(|record| &*record.progress) {
             Some(crate::sync::device_join::DeviceJoinRoleProgress::Joiner(
-                crate::sync::device_join::JoinerJoinProgress::Ready(readiness),
-            )) => Some(readiness),
+                crate::sync::device_join::JoinerJoinProgress::Ready(_),
+            )) => Some(crate::sync::device_join::observe_device_join_activation(
+                &pending,
+                &activation,
+            )?),
+            Some(crate::sync::device_join::DeviceJoinRoleProgress::Joiner(
+                crate::sync::device_join::JoinerJoinProgress::ActivationObserved { .. },
+            )) => Some(crate::sync::device_join::observe_device_join_activation(
+                &pending,
+                &activation,
+            )?),
             Some(_) => return Err(crate::DeviceJoinError::JournalConflict.into()),
             None => None,
         };
@@ -803,7 +812,7 @@ impl DeviceJoinClient {
         {
             return Err(crate::DeviceJoinError::JournalConflict.into());
         }
-        let device_id = match (pending_readiness, completed_config.as_ref()) {
+        let device_id = match (pending_readiness.as_ref(), completed_config.as_ref()) {
             (Some(readiness), _) => readiness.proof.registration.device_id.to_string(),
             (None, Some(config)) => config.device_id.clone(),
             (None, None) => return Err(crate::DeviceJoinError::JournalConflict.into()),
@@ -831,6 +840,7 @@ impl DeviceJoinClient {
         )
         .await?;
         if pending_readiness
+            .as_ref()
             .is_some_and(|readiness| joined.registration != readiness.proof.registration)
             || joined.registration.device_id.to_string() != device_id
         {

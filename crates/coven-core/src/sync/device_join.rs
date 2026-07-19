@@ -1327,7 +1327,10 @@ pub enum JoinerJoinProgress {
     AckCreated(crate::sync::store_commit::StoreAckRef),
     ResponseCreateIntent(DeviceJoinReadiness),
     Ready(DeviceJoinReadiness),
-    ActivationObserved(DeviceJoinActivation),
+    ActivationObserved {
+        readiness: DeviceJoinReadiness,
+        activation: DeviceJoinActivation,
+    },
     Activated(JoinedStore),
     Abandoned(DeviceJoinAbandonment),
     CleanupIntent {
@@ -4095,11 +4098,12 @@ pub fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoinStatus 
         DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
             activation, ..
         })
-        | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ActivationObserved(activation)) => {
-            DeviceJoinStatus::AwaitingCompletion {
-                activation: activation.clone(),
-            }
-        }
+        | DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ActivationObserved {
+            activation,
+            ..
+        }) => DeviceJoinStatus::AwaitingCompletion {
+            activation: activation.clone(),
+        },
         DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Activated(store)) => {
             DeviceJoinStatus::Activated {
                 store: store.clone(),
@@ -4528,7 +4532,7 @@ pub async fn materialize_device_join_activation(
     storage: &dyn SyncStorage,
     activation: DeviceJoinActivation,
 ) -> Result<JoinedStore, DeviceJoinError> {
-    if !matches!(activation.outcome, DeviceJoinOutcomeRef::Activated { .. }) {
+    if !matches!(&activation.outcome, DeviceJoinOutcomeRef::Activated { .. }) {
         return Err(DeviceJoinError::AttemptMismatch);
     }
     let root = db
@@ -4615,26 +4619,33 @@ pub async fn complete_device_join(
     activation: DeviceJoinActivation,
 ) -> Result<JoinedStore, DeviceJoinError> {
     let attempt_id = activation.outcome.attempt().attempt_id;
-    let joined = materialize_device_join_activation(db, storage, activation).await?;
     if let Some(record) = load_store_journal(db, attempt_id, DeviceJoinRole::Joiner).await? {
-        return match &*record.progress {
-            DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Activated(existing))
-                if existing == &joined =>
-            {
-                Ok(joined)
-            }
-            _ => Err(DeviceJoinError::JournalConflict),
+        let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Activated(existing)) =
+            &*record.progress
+        else {
+            return Err(DeviceJoinError::JournalConflict);
         };
+        let joined = materialize_device_join_activation(db, storage, activation).await?;
+        return (existing == &joined)
+            .then_some(joined)
+            .ok_or(DeviceJoinError::JournalConflict);
+    }
+    let current_readiness = observe_device_join_activation(pending, &activation)?;
+    let joined = materialize_device_join_activation(db, storage, activation).await?;
+    if current_readiness.proof.registration != joined.registration {
+        return Err(DeviceJoinError::JournalConflict);
     }
     let current = pending
         .load(attempt_id, DeviceJoinRole::Joiner)?
         .ok_or(DeviceJoinError::JournalConflict)?;
-    let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Ready(current_readiness)) =
-        &*current.progress
+    let DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ActivationObserved {
+        readiness,
+        activation: current_activation,
+    }) = &*current.progress
     else {
         return Err(DeviceJoinError::JournalConflict);
     };
-    if current_readiness.proof.registration != joined.registration {
+    if readiness != &current_readiness || current_activation != &joined.activation {
         return Err(DeviceJoinError::JournalConflict);
     }
     let activated_record = DeviceJoinJournalRecord {
@@ -4688,6 +4699,39 @@ pub async fn complete_device_join(
     .await
     .map_err(database_error)?;
     Ok(joined)
+}
+
+pub fn observe_device_join_activation(
+    pending: &DeviceJoinJournalDatabase,
+    activation: &DeviceJoinActivation,
+) -> Result<DeviceJoinReadiness, DeviceJoinError> {
+    if !matches!(activation.outcome, DeviceJoinOutcomeRef::Activated { .. }) {
+        return Err(DeviceJoinError::AttemptMismatch);
+    }
+    let attempt_id = activation.outcome.attempt().attempt_id;
+    let current = pending
+        .load(attempt_id, DeviceJoinRole::Joiner)?
+        .ok_or(DeviceJoinError::JournalConflict)?;
+    match &*current.progress {
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Ready(readiness)) => {
+            let observed = DeviceJoinJournalRecord {
+                attempt_id,
+                progress: Box::new(DeviceJoinRoleProgress::Joiner(
+                    JoinerJoinProgress::ActivationObserved {
+                        readiness: readiness.clone(),
+                        activation: activation.clone(),
+                    },
+                )),
+            };
+            pending.advance(&current, observed)?;
+            Ok(readiness.clone())
+        }
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ActivationObserved {
+            readiness,
+            activation: existing,
+        }) if existing == activation => Ok(readiness.clone()),
+        _ => Err(DeviceJoinError::JournalConflict),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5344,7 +5388,7 @@ fn joiner_adjacent(previous: &JoinerJoinProgress, next: &JoinerJoinProgress) -> 
             JoinerJoinProgress::CleanupIntent { .. }
         ) | (
             JoinerJoinProgress::Ready(_),
-            JoinerJoinProgress::ActivationObserved(_)
+            JoinerJoinProgress::ActivationObserved { .. }
         ) | (
             JoinerJoinProgress::Ready(_),
             JoinerJoinProgress::CleanupIntent { .. }
@@ -5373,7 +5417,7 @@ fn joiner_adjacent(previous: &JoinerJoinProgress, next: &JoinerJoinProgress) -> 
             JoinerJoinProgress::CleanupIntent { .. },
             JoinerJoinProgress::Cancelled(_)
         ) | (
-            JoinerJoinProgress::ActivationObserved(_),
+            JoinerJoinProgress::ActivationObserved { .. },
             JoinerJoinProgress::Activated(_)
         ) | (
             JoinerJoinProgress::Cancelled(_),

@@ -8,7 +8,7 @@ use crate::database::DbError;
 use crate::encryption::EncryptionService;
 use crate::join_code::encode;
 use crate::keys::UserKeypair;
-use crate::storage::cloud::CloudHomeJoinInfo;
+use crate::storage::cloud::{no_progress, BlobBody, CloudHomeJoinInfo, ExactSlotStorage};
 use crate::sync::hlc::Hlc;
 use crate::sync::snapshot::create_snapshot;
 use crate::sync::test_helpers::*;
@@ -238,6 +238,40 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
     ))
     .await
     .expect("resume finalization from the durable completion");
+    let activation_slot = activation.outcome_activation.object.slot();
+    let activation_bytes = store
+        .home
+        .read_at(activation_slot)
+        .await
+        .expect("activation commit is stored");
+    store
+        .home
+        .delete_at(activation_slot)
+        .await
+        .expect("remove activation commit");
+    let interrupted_completion = new_client()
+        .complete_device_join(activation.clone(), |_status| {})
+        .await;
+    assert!(
+        interrupted_completion.is_err(),
+        "a missing activation commit blocks completion"
+    );
+    assert!(matches!(
+        new_client()
+            .device_join_status(activation.outcome.attempt().attempt_id)
+            .expect("load interrupted joiner completion"),
+        Some(crate::DeviceJoinStatus::AwaitingCompletion { activation: durable })
+            if durable == activation
+    ));
+    store
+        .home
+        .create_at(
+            activation_slot,
+            BlobBody::from_bytes(activation_bytes),
+            &no_progress(),
+        )
+        .await
+        .expect("restore activation commit after interruption");
     let config = new_client()
         .complete_device_join(activation.clone(), |_status| {})
         .await
