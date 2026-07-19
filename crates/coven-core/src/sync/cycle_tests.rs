@@ -1026,6 +1026,26 @@ fn exercise_post_attempt_cancellation<'a>(
                 JoinerJoinTerminal::WriteRevoked(_)
             ),
         });
+        assert!(
+            crate::sync::device_join::load_store_device_join_actions(owner_db)
+                .await
+                .expect("enumerate terminal Store join actions")
+                .contains(
+                    &crate::sync::device_join::DeviceJoinAction::TransferProviderAdminTerminal(
+                        (*administrator_terminal).clone(),
+                    ),
+                )
+        );
+        assert_eq!(
+            pending
+                .actions()
+                .expect("enumerate terminal joiner actions"),
+            vec![
+                crate::sync::device_join::DeviceJoinAction::TransferJoinerTerminal(
+                    (*joiner_terminal).clone(),
+                ),
+            ],
+        );
 
         storage.home.fail_exact_create_before_call(1);
         let interrupted_cleanup = Box::pin(crate::sync::device_join::prepare_device_join_cleanup(

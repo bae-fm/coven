@@ -1293,6 +1293,10 @@ impl CovenHandle {
         )
     }
 
+    pub async fn resume_device_joins(&self) -> Result<Vec<crate::DeviceJoinAction>, SyncError> {
+        Ok(crate::sync::device_join::load_store_device_join_actions(&self.db).await?)
+    }
+
     fn device_join_storage(&self) -> Result<Arc<CloudSyncStorage>, SyncError> {
         let manager = self.sync_manager().ok_or(SyncError::NotConfigured)?;
         let loop_handle = manager

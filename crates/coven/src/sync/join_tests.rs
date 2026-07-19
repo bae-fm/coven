@@ -135,6 +135,14 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
             .expect("retry provider access request"),
         access_request,
     );
+    assert_eq!(
+        new_client()
+            .resume_device_joins()
+            .expect("enumerate pending join actions"),
+        vec![crate::DeviceJoinAction::TransferProviderAccessRequest(
+            access_request.clone(),
+        )],
+    );
     let approval = Box::pin(crate::sync::device_join::authorize_device_provider_access(
         &owner_db,
         &store.storage,
@@ -228,6 +236,15 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         Some(crate::DeviceJoinStatus::AwaitingActivation { completion: durable })
             if durable == completion
     ));
+    assert!(
+        crate::sync::device_join::load_store_device_join_actions(&owner_db)
+            .await
+            .expect("enumerate Store join actions")
+            .contains(&crate::DeviceJoinAction::ResumeOperation {
+                attempt_id: completion.readiness.proof.attempt.attempt_id,
+                role: crate::DeviceJoinRole::Owner,
+            })
+    );
     let activation = Box::pin(crate::sync::device_join::finalize_device_join(
         &owner_db,
         &store.storage,
@@ -263,6 +280,12 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         Some(crate::DeviceJoinStatus::AwaitingCompletion { activation: durable })
             if durable == activation
     ));
+    assert_eq!(
+        new_client()
+            .resume_device_joins()
+            .expect("enumerate interrupted completion"),
+        vec![crate::DeviceJoinAction::CompleteJoin(activation.clone())],
+    );
     store
         .home
         .create_at(
@@ -282,6 +305,10 @@ async fn run_device_join_client_four_transfer_retries_and_process_restarts() {
         .expect("retry completed join after lost response");
     assert_eq!(retry.device_id, config.device_id);
     assert!(config.store_dir.config_path().exists());
+    assert!(new_client()
+        .resume_device_joins()
+        .expect("enumerate completed joins")
+        .is_empty());
 }
 
 struct GrantingCloudHome(crate::InMemoryCloudHome);

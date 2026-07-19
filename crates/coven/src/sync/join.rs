@@ -592,6 +592,13 @@ impl DeviceJoinClient {
         )?)
     }
 
+    pub fn resume_device_joins(&self) -> Result<Vec<crate::DeviceJoinAction>, BootstrapError> {
+        let pending = self.open_pending_journal()?;
+        Ok(crate::sync::device_join::load_pending_device_join_actions(
+            &pending,
+        )?)
+    }
+
     pub async fn close_pending_device_join(
         &self,
         cancellation: crate::DeviceJoinCancellation,

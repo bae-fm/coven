@@ -1226,12 +1226,16 @@ pub enum DeviceJoinAction {
     TransferActivation(DeviceJoinActivation),
     TransferAbandonment(DeviceJoinAbandonment),
     TransferCancellation(DeviceJoinCancellation),
-    TransferProviderAdminClosure(ProviderAdminJoinClosure),
-    TransferJoinerClosure(JoinerJoinClosure),
+    TransferProviderAdminTerminal(ProviderAdminJoinTerminal),
+    TransferJoinerTerminal(JoinerJoinTerminal),
     TransferCleanupReceipt(DeviceJoinCleanupReceipt),
     TransferCleanupActivation(DeviceJoinCleanupActivation),
-    Complete(DeviceJoinActivation),
-    RetryProviderOperation { attempt_id: DeviceJoinAttemptId },
+    CompleteJoin(DeviceJoinActivation),
+    CompleteCleanup(DeviceJoinCleanupActivation),
+    ResumeOperation {
+        attempt_id: DeviceJoinAttemptId,
+        role: DeviceJoinRole,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1355,12 +1359,16 @@ pub enum DeviceJoinRoleProgress {
 }
 
 impl DeviceJoinRoleProgress {
-    fn role_name(&self) -> &'static str {
+    fn role(&self) -> DeviceJoinRole {
         match self {
-            Self::Owner(_) => "owner",
-            Self::ProviderAdministrator(_) => "provider_administrator",
-            Self::Joiner(_) => "joiner",
+            Self::Owner(_) => DeviceJoinRole::Owner,
+            Self::ProviderAdministrator(_) => DeviceJoinRole::ProviderAdministrator,
+            Self::Joiner(_) => DeviceJoinRole::Joiner,
         }
+    }
+
+    fn role_name(&self) -> &'static str {
+        self.role().as_str()
     }
 
     fn validate_transition(&self, next: &Self) -> Result<(), DeviceJoinError> {
@@ -1460,8 +1468,50 @@ impl DeviceJoinJournalDatabase {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        raw.map(|value| serde_json::from_str(&value).map_err(DeviceJoinError::from))
-            .transpose()
+        let record = raw
+            .map(|value| serde_json::from_str::<DeviceJoinJournalRecord>(&value))
+            .transpose()?;
+        if record
+            .as_ref()
+            .is_some_and(|record| record.attempt_id != attempt_id || record.progress.role() != role)
+        {
+            return Err(DeviceJoinError::JournalConflict);
+        }
+        Ok(record)
+    }
+
+    pub fn records(&self) -> Result<Vec<DeviceJoinJournalRecord>, DeviceJoinError> {
+        let connection = Connection::open(&self.path)?;
+        let mut statement = connection.prepare(
+            "SELECT attempt_id, role, payload FROM device_join_journals
+             ORDER BY attempt_id, role",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (attempt_id, role, payload) = row?;
+            let record: DeviceJoinJournalRecord = serde_json::from_str(&payload)?;
+            if attempt_key(record.attempt_id) != attempt_id || record.progress.role_name() != role {
+                return Err(DeviceJoinError::JournalConflict);
+            }
+            records.push(record);
+        }
+        records.sort_by_key(|record| (record.attempt_id, record.progress.role()));
+        Ok(records)
+    }
+
+    pub fn actions(&self) -> Result<Vec<DeviceJoinAction>, DeviceJoinError> {
+        Ok(self
+            .records()?
+            .iter()
+            .filter_map(device_join_action)
+            .collect())
     }
 
     pub fn advance(
@@ -1576,7 +1626,8 @@ impl DeviceJoinJournalDatabase {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DeviceJoinRole {
     Owner,
     ProviderAdministrator,
@@ -4196,6 +4247,162 @@ pub fn device_join_status(record: &DeviceJoinJournalRecord) -> DeviceJoinStatus 
             attempt_id: record.attempt_id,
         },
     }
+}
+
+pub fn device_join_action(record: &DeviceJoinJournalRecord) -> Option<DeviceJoinAction> {
+    let resume = || DeviceJoinAction::ResumeOperation {
+        attempt_id: record.attempt_id,
+        role: record.progress.role(),
+    };
+    match &*record.progress {
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Offered(offer)) => {
+            Some(DeviceJoinAction::TransferOffer(offer.clone()))
+        }
+        DeviceJoinRoleProgress::Owner(
+            OwnerJoinProgress::RegistrationRequested(_)
+            | OwnerJoinProgress::AbandonmentCreateIntent { .. }
+            | OwnerJoinProgress::ActivationCreateIntent { .. }
+            | OwnerJoinProgress::CancellationCreateIntent { .. }
+            | OwnerJoinProgress::CleanupReceiptCreateIntent { .. },
+        ) => Some(resume()),
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::AttemptActivated(bootstrap)) => Some(
+            DeviceJoinAction::TransferProvisionalBootstrap(bootstrap.clone()),
+        ),
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::ActivationPrepared {
+            activation, ..
+        }) => Some(DeviceJoinAction::TransferActivation(activation.clone())),
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Abandoned(abandonment)) => {
+            Some(DeviceJoinAction::TransferAbandonment(abandonment.clone()))
+        }
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::Cancelled(cancellation)) => {
+            Some(DeviceJoinAction::TransferCancellation(cancellation.clone()))
+        }
+        DeviceJoinRoleProgress::Owner(OwnerJoinProgress::CleanupReceipt(receipt)) => {
+            Some(DeviceJoinAction::TransferCleanupReceipt(receipt.clone()))
+        }
+        DeviceJoinRoleProgress::Owner(
+            OwnerJoinProgress::CleanupActivated(activation)
+            | OwnerJoinProgress::CancelledComplete(activation),
+        ) => Some(DeviceJoinAction::TransferCleanupActivation(
+            activation.clone(),
+        )),
+
+        DeviceJoinRoleProgress::ProviderAdministrator(
+            ProviderAdminJoinProgress::AccessRequested(_)
+            | ProviderAdminJoinProgress::AccessGrantPrepared { .. }
+            | ProviderAdminJoinProgress::AttemptObserved(_)
+            | ProviderAdminJoinProgress::ChallengeCreateIntent(_)
+            | ProviderAdminJoinProgress::ResponseObserved(_)
+            | ProviderAdminJoinProgress::CleanupIntent { .. },
+        ) => Some(resume()),
+        DeviceJoinRoleProgress::ProviderAdministrator(
+            ProviderAdminJoinProgress::ApprovalPrepared(approval),
+        ) => Some(DeviceJoinAction::TransferProviderAdmissionApproval(
+            approval.clone(),
+        )),
+        DeviceJoinRoleProgress::ProviderAdministrator(
+            ProviderAdminJoinProgress::ProviderReady(bootstrap),
+        ) => Some(DeviceJoinAction::TransferProviderReadyBootstrap(
+            bootstrap.clone(),
+        )),
+        DeviceJoinRoleProgress::ProviderAdministrator(ProviderAdminJoinProgress::Completed(
+            completion,
+        )) => Some(DeviceJoinAction::TransferProviderAdmissionCompletion(
+            completion.clone(),
+        )),
+        DeviceJoinRoleProgress::ProviderAdministrator(ProviderAdminJoinProgress::Cancelled(
+            closure,
+        )) => Some(DeviceJoinAction::TransferProviderAdminTerminal(
+            ProviderAdminJoinTerminal::Cancelled(closure.clone()),
+        )),
+        DeviceJoinRoleProgress::ProviderAdministrator(ProviderAdminJoinProgress::WriteRevoked(
+            revocation,
+        )) => Some(DeviceJoinAction::TransferProviderAdminTerminal(
+            ProviderAdminJoinTerminal::WriteRevoked(revocation.clone()),
+        )),
+
+        DeviceJoinRoleProgress::Joiner(
+            JoinerJoinProgress::OfferReceived(_)
+            | JoinerJoinProgress::ApprovalReceived(_)
+            | JoinerJoinProgress::ProviderReady(_)
+            | JoinerJoinProgress::RegistrationCreateIntent(_)
+            | JoinerJoinProgress::RegistrationCreated(_)
+            | JoinerJoinProgress::AckCreateIntent(_)
+            | JoinerJoinProgress::AckCreated(_)
+            | JoinerJoinProgress::ResponseCreateIntent(_)
+            | JoinerJoinProgress::CleanupIntent { .. },
+        ) => Some(resume()),
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::AccessRequested(request)) => Some(
+            DeviceJoinAction::TransferProviderAccessRequest(request.clone()),
+        ),
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::RegistrationPrepared(request)) => Some(
+            DeviceJoinAction::TransferRegistrationRequest(request.clone()),
+        ),
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Ready(readiness)) => {
+            Some(DeviceJoinAction::TransferReadiness(readiness.clone()))
+        }
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::ActivationObserved {
+            activation,
+            ..
+        }) => Some(DeviceJoinAction::CompleteJoin(activation.clone())),
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::Cancelled(closure)) => {
+            Some(DeviceJoinAction::TransferJoinerTerminal(
+                JoinerJoinTerminal::Cancelled(closure.clone()),
+            ))
+        }
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::WriteRevoked(revocation)) => {
+            Some(DeviceJoinAction::TransferJoinerTerminal(
+                JoinerJoinTerminal::WriteRevoked(revocation.clone()),
+            ))
+        }
+        DeviceJoinRoleProgress::Joiner(JoinerJoinProgress::CleanupActivated(activation)) => {
+            Some(DeviceJoinAction::CompleteCleanup(activation.clone()))
+        }
+        DeviceJoinRoleProgress::Joiner(
+            JoinerJoinProgress::Activated(_)
+            | JoinerJoinProgress::Abandoned(_)
+            | JoinerJoinProgress::CancelledComplete(_),
+        ) => None,
+    }
+}
+
+pub async fn load_store_device_join_actions(
+    db: &Database,
+) -> Result<Vec<DeviceJoinAction>, DeviceJoinError> {
+    let rows = db
+        .call(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT key, value FROM protocol_state
+                     WHERE key GLOB 'device_join/*' ORDER BY key",
+                )
+                .map_err(crate::database::DbError::from)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(crate::database::DbError::from)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(crate::database::DbError::from)
+        })
+        .await
+        .map_err(database_error)?;
+    let mut records = Vec::with_capacity(rows.len());
+    for (key, value) in rows {
+        let record: DeviceJoinJournalRecord = serde_json::from_str(&value)?;
+        if store_journal_key(record.attempt_id, record.progress.role_name()) != key {
+            return Err(DeviceJoinError::JournalConflict);
+        }
+        records.push(record);
+    }
+    records.sort_by_key(|record| (record.attempt_id, record.progress.role()));
+    Ok(records.iter().filter_map(device_join_action).collect())
+}
+
+pub fn load_pending_device_join_actions(
+    pending: &DeviceJoinJournalDatabase,
+) -> Result<Vec<DeviceJoinAction>, DeviceJoinError> {
+    pending.actions()
 }
 
 pub async fn load_store_device_join_status(
