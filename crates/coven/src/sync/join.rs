@@ -67,6 +67,8 @@ pub enum BootstrapError {
     /// proceed over the leftover directory or keyring entries.
     #[error("could not clear a torn bootstrap for {store_id}: {failures}")]
     TornBootstrapCleanup { store_id: String, failures: String },
+    #[error("could not remove cancelled join state for {store_id}: {failures}")]
+    CancelledJoinCleanup { store_id: String, failures: String },
     #[error("provider: {0}")]
     Provider(String),
     #[error("membership: {0}")]
@@ -606,6 +608,55 @@ impl DeviceJoinClient {
             cancellation,
         )
         .await?)
+    }
+
+    pub async fn complete_cancelled_device_join(
+        &self,
+        activation: crate::DeviceJoinCleanupActivation,
+    ) -> Result<(), BootstrapError> {
+        let pending = self.open_pending_journal()?;
+        match crate::sync::device_join::load_pending_device_join_status(
+            &pending,
+            activation.receipt.attempt_id,
+        )? {
+            Some(crate::DeviceJoinStatus::CleanupActivated {
+                activation: durable,
+            }) if durable == activation => {}
+            Some(crate::DeviceJoinStatus::CleanupActivated { .. }) => {
+                return Err(crate::DeviceJoinError::JournalConflict.into());
+            }
+            _ => {
+                let signer = crate::keys::peek_pending_identity(&self.member_pubkey)?;
+                let join = self.build_storage(&signer).await?;
+                crate::sync::device_join::accept_joiner_device_join_cleanup(
+                    &pending,
+                    &join.storage,
+                    &self.code.store_root,
+                    activation.clone(),
+                )
+                .await?;
+            }
+        }
+
+        let store_dir = self.layout.store_dir(&self.code.store_id);
+        if store_dir.config_path().exists() {
+            return Err(BootstrapError::StoreExists(self.code.store_id.clone()));
+        }
+        let failures = remove_bootstrap_residue(
+            &store_dir,
+            &StoreKeys::new(self.code.store_id.clone()),
+            self.custody.as_ref(),
+            self.identity_custody.as_ref(),
+        );
+        if !failures.is_empty() {
+            return Err(BootstrapError::CancelledJoinCleanup {
+                store_id: self.code.store_id.clone(),
+                failures: failures.join("; "),
+            });
+        }
+        crate::keys::discard_pending_identity(&self.member_pubkey)?;
+        crate::sync::device_join::complete_joiner_device_join_cleanup(&pending, activation)?;
+        Ok(())
     }
 
     pub async fn prepare_registration_request(
