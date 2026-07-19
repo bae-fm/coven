@@ -90,6 +90,13 @@ impl<B: AsRef<[u8]>> ValidatedChangeset<B> {
     pub(crate) fn schema(&self) -> &TableSchema {
         &self.schema
     }
+
+    pub(crate) fn validate_subset<C: AsRef<[u8]>>(
+        &self,
+        bytes: C,
+    ) -> Result<ValidatedChangeset<C>, ChangesetIdentityError> {
+        ValidatedChangeset::new(bytes, self.schema.clone())
+    }
 }
 
 /// Apply `bytes` to `conn`, resolving conflicts (premerge + row arbitration),
@@ -338,13 +345,12 @@ fn resolve_winning_rows(
     Ok(winners)
 }
 
-pub(crate) fn current_winning_rows(
+pub(crate) fn current_winning_rows_with_schema(
     conn: &Connection,
-    synced_tables: &[super::session::SyncedTable],
+    schema: &TableSchema,
     changeset: &[u8],
 ) -> Result<Vec<WinningRow>, DbError> {
-    let schema = TableSchema::from_db(conn, synced_tables)?;
-    resolve_winning_rows(conn, &schema, incoming_rows(changeset, &schema)?)
+    resolve_winning_rows(conn, schema, incoming_rows(changeset, schema)?)
 }
 
 pub(crate) fn apply_changeset_strict_on<B: AsRef<[u8]>>(

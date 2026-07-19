@@ -507,6 +507,76 @@ async fn fk_violation_is_reported_then_resolved_on_retry() {
     );
 }
 
+#[tokio::test]
+async fn caller_owned_transaction_can_resolve_fk_violation_with_a_later_changeset() {
+    use std::sync::Arc;
+
+    use crate::sync::apply::{resolve_and_apply_changeset_with_schema_on, ValidatedChangeset};
+    use crate::sync::conflict::TableSchema;
+
+    let source = open_test_db();
+    exec(
+        &source,
+        "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+         VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
+    )
+    .await;
+    let _ = capture_bytes(&source, &[]).await;
+    let child = capture_bytes(
+        &source,
+        &[
+            "INSERT INTO note_tags (id, note_id, tag, _updated_at, created_at) \
+           VALUES ('t1', 'n1', 'green', '0000000002000-0000-s', '2026-01-01')",
+        ],
+    )
+    .await;
+
+    let parent_source = open_test_db();
+    let parent = capture_bytes(
+        &parent_source,
+        &[
+            "INSERT INTO notes (id, title, body, _updated_at, created_at) \
+           VALUES ('n1', 'Parent', NULL, '0000000001000-0000-s', '2026-01-01')",
+        ],
+    )
+    .await;
+
+    let target = open_test_db();
+    let tables = test_synced_tables();
+    let receiver_wall_ms = target.receive_wall_ms();
+    target
+        .call(move |conn| {
+            let schema = Arc::new(TableSchema::from_db(conn, &tables)?);
+            let tx = conn.unchecked_transaction()?;
+            let child = ValidatedChangeset::new(child, schema.clone())
+                .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+            let child_result =
+                resolve_and_apply_changeset_with_schema_on(&tx, child, receiver_wall_ms)?;
+            assert!(child_result.had_fk_violations);
+
+            let parent = ValidatedChangeset::new(parent, schema)
+                .map_err(|error| crate::database::DbError::Message(error.to_string()))?;
+            let parent_result =
+                resolve_and_apply_changeset_with_schema_on(&tx, parent, receiver_wall_ms)?;
+            assert!(!parent_result.had_fk_violations);
+            let violations: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+                [],
+                |row| row.get(0),
+            )?;
+            assert!(!violations);
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .expect("apply dependent changesets atomically");
+
+    assert_eq!(
+        query_text(&target, "SELECT tag FROM note_tags WHERE id = 't1'").await,
+        "green"
+    );
+}
+
 /// Apply a changeset and report whether it had FK violations, through the same
 /// plain-`call` apply path as [`apply_to_db`].
 async fn apply_reporting(db: &crate::database::Database, bytes: &[u8]) -> bool {

@@ -1005,6 +1005,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
     let dest: HashMap<String, PathBuf> = [("photoaaa".to_string(), dest_path.clone())].into();
     let (_cancel_tx, cancel) = watch::channel(false);
     let recorder = Recorder::default();
+    let reads_before_make_local = storage.home.exact_stream_read_count();
     make_local(
         &db_a,
         &storage.storage,
@@ -1022,7 +1023,7 @@ async fn multi_device_make_local_retracts_peer_and_tombstones_cloud() {
 
     assert_eq!(
         storage.home.exact_stream_read_count(),
-        1,
+        reads_before_make_local + 1,
         "make_local materializes the Remote blob through the file download path",
     );
     assert_eq!(shared_flag(&db_a, "n1").await, 0, "A's release is Local");

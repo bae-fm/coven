@@ -1,5 +1,5 @@
 /// Membership and blob helpers shared by Store pull and bootstrap.
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use super::conflict::TableSchema;
 use super::hlc::Timestamp;
@@ -147,7 +147,6 @@ pub(super) fn advance_max_updated_at(
 }
 
 pub(crate) struct BlobDownload {
-    blob: crate::blob::BlobRef,
     authority: crate::blob::RowBlobAuthority,
     stored: crate::blob::locator::StoredBlobRef,
 }
@@ -228,7 +227,6 @@ impl BlobDownload {
             .cloned()
             .ok_or_else(|| "remote eager blob row has no exact stored reference".to_string())?;
         Ok(Self {
-            blob: reference.blob().clone(),
             authority: reference.authority().clone(),
             stored,
         })
@@ -286,7 +284,6 @@ pub(crate) fn cache_eager_blobs(
             ));
         };
         downloads.push(BlobDownload {
-            blob,
             authority: authority.clone(),
             stored: binding.blob().clone(),
         });
@@ -341,9 +338,9 @@ pub(super) fn local_blob_cleanup_intents(
 
 /// Download each blob in `blobs` into the evictable cache
 /// `storage/cache/<namespace>/<id>` under `store_dir`, decrypting via storage
-/// (which returns plaintext) and writing the bytes atomically. Returns true if every
-/// blob succeeded. Skips blobs already present in either cache folder (`pinned/` or
-/// `cache/`).
+/// (which returns plaintext) and writing the bytes atomically. Every blob is read and
+/// verified from the exact remote object. An existing exact plaintext copy in either
+/// cache folder (`pinned/` or `cache/`) prevents only the duplicate cache write.
 ///
 /// Only `CacheEager` blobs reach here (callers filter). On a peer the release is
 /// Remote, so a `CacheEager` blob's bytes are a cache copy — evictable +
@@ -371,96 +368,9 @@ pub(crate) async fn download_blobs(
 ) -> Result<(), BlobDownloadFailures> {
     let mut failures = Vec::new();
     for download in blobs {
-        let BlobDownload {
-            blob,
-            authority,
-            stored,
-        } = download;
-        // The blob's `id`/`namespace`/`cloud_path` come from a row in an incoming
-        // changeset authored by any write-capable member. An id or namespace that is
-        // not a single safe path token, or a cloud_path that escapes its prefix,
-        // would write attacker-chosen bytes outside the store or under a forged
-        // cloud key — refuse the blob as bad data before resolving or writing it, the
-        // same posture as any other failed blob in this loop. The id check makes
-        // local traversal unrepresentable: the destination path below is built from
-        // the validated id by coven, so there is no host-supplied local path left to
-        // independently re-check. The cloud path is checked below, once resolved,
-        // because that resolved value is the one the read keys with.
-        if let Err(e) = crate::store_dir::validate_path_token(&blob.namespace) {
-            error!(id = %blob.id, namespace = %blob.namespace, "blob namespace is not a safe path token ({e}); refusing");
-            failures.push(BlobDownloadFailure {
-                namespace: blob.namespace.clone(),
-                id: blob.id.clone(),
-                cause: BlobDownloadFailureCause::Invalid(e.to_string()),
-            });
-            continue;
-        }
-        if let Err(e) = crate::store_dir::validate_path_token(&blob.id) {
-            error!(id = %blob.id, namespace = %blob.namespace, "blob id is not a safe path token ({e}); refusing");
-            failures.push(BlobDownloadFailure {
-                namespace: blob.namespace.clone(),
-                id: blob.id.clone(),
-                cause: BlobDownloadFailureCause::Invalid(e.to_string()),
-            });
-            continue;
-        }
-
-        // The coven-built destination: the evictable cache
-        // `storage/cache/<namespace>/<id>`. Building it validates the namespace and id
-        // again (and that the id can form the `{ab}/{cd}` shard); a failure is the
-        // same bad-data refusal as the token check above. A pinned copy (in
-        // `pinned/`) is checked for presence below but never written here — a pull
-        // populates the evictable cache, never the kept folder.
-        let dest = match store_dir.cache_blob_path(&blob.namespace, &blob.id) {
-            Ok(p) => p,
-            Err(e) => {
-                error!(id = %blob.id, "cannot build cache blob path ({e}); refusing");
-                failures.push(BlobDownloadFailure {
-                    namespace: blob.namespace.clone(),
-                    id: blob.id.clone(),
-                    cause: BlobDownloadFailureCause::Invalid(e.to_string()),
-                });
-                continue;
-            }
-        };
-        let pinned = match store_dir.pinned_blob_path(&blob.namespace, &blob.id) {
-            Ok(p) => p,
-            Err(e) => {
-                error!(id = %blob.id, "cannot build pinned blob path ({e}); refusing");
-                failures.push(BlobDownloadFailure {
-                    namespace: blob.namespace.clone(),
-                    id: blob.id.clone(),
-                    cause: BlobDownloadFailureCause::Invalid(e.to_string()),
-                });
-                continue;
-            }
-        };
-
-        // Already on disk in either cache folder — don't re-download. A failed
-        // existence check is a local-disk fault, not a missing blob — and the
-        // download's own write would hit the same fault. Hold the position and retry
-        // next cycle rather than treat the error as absence.
-        match cached_exact_in_either_folder(
-            &dest,
-            &pinned,
-            stored.locator().plaintext_size(),
-            stored.locator().plaintext_hash(),
-        )
-        .await
-        {
-            Ok(true) => continue,
-            Ok(false) => {}
-            Err(e) => {
-                error!(id = %blob.id, error = %e, "cannot check for local blob; holding");
-                failures.push(BlobDownloadFailure {
-                    namespace: blob.namespace.clone(),
-                    id: blob.id.clone(),
-                    cause: BlobDownloadFailureCause::Local(e),
-                });
-                continue;
-            }
-        }
-
+        let BlobDownload { authority, stored } = download;
+        let namespace = stored.locator().namespace();
+        let id = stored.locator().blob_id();
         let protection = match crate::blob::cache::opening_protection_for_authority(
             db, storage, &authority, &stored,
         )
@@ -469,51 +379,24 @@ pub(crate) async fn download_blobs(
             Ok(protection) => protection,
             Err(error) => {
                 let message = error.to_string();
-                warn!(id = %blob.id, namespace = %blob.namespace, error = %message, "cannot resolve exact blob opening authority");
+                warn!(id, namespace, error = %message, "cannot resolve exact blob opening authority");
                 failures.push(BlobDownloadFailure {
-                    namespace: blob.namespace.clone(),
-                    id: blob.id.clone(),
+                    namespace: namespace.to_string(),
+                    id: id.to_string(),
                     cause: BlobDownloadFailureCause::Metadata(message),
                 });
                 continue;
             }
         };
-
-        match storage
-            .stage_verified_blob_plaintext(&stored, protection, &dest)
-            .await
+        if let Err(cause) =
+            verify_blob_plaintext(db, storage, store_dir, &stored, protection, true).await
         {
-            Ok(staged) => match staged.commit().await {
-                Ok(()) => {
-                    if let Err(error) = crate::blob::cache::evict_to_budget(
-                        db,
-                        store_dir,
-                        &blob.namespace,
-                        Some(&dest),
-                    )
-                    .await
-                    {
-                        failures.push(BlobDownloadFailure {
-                            namespace: blob.namespace.clone(),
-                            id: blob.id.clone(),
-                            cause: BlobDownloadFailureCause::Local(error.to_string()),
-                        });
-                    }
-                }
-                Err(error) => failures.push(BlobDownloadFailure {
-                    namespace: blob.namespace.clone(),
-                    id: blob.id.clone(),
-                    cause: BlobDownloadFailureCause::Local(error),
-                }),
-            },
-            Err(e) => {
-                warn!(id = %blob.id, namespace = %blob.namespace, error = %e, "failed to download blob");
-                failures.push(BlobDownloadFailure {
-                    namespace: blob.namespace.clone(),
-                    id: blob.id.clone(),
-                    cause: BlobDownloadFailureCause::Storage(e),
-                });
-            }
+            warn!(id, namespace, error = %cause, "failed to verify pulled blob");
+            failures.push(BlobDownloadFailure {
+                namespace: namespace.to_string(),
+                id: id.to_string(),
+                cause,
+            });
         }
     }
     if failures.is_empty() {
@@ -523,10 +406,94 @@ pub(crate) async fn download_blobs(
     }
 }
 
-/// Whether a pulled blob is already on disk in either cache folder (`cache/` or
-/// `pinned/`), so a pull doesn't re-download a blob a read already cached or the
-/// user pinned. An existence-check failure (a broken filesystem) is surfaced, never
-/// collapsed into "absent": re-downloading over a present file would mask the fault.
+pub(crate) async fn verify_package_blobs(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    store_dir: &StoreDir,
+    bindings: &[crate::sync::audience_package::RowBlobLocatorBinding],
+    protection: super::storage::BlobSpoolProtection,
+    eager: &[BlobDownload],
+) -> Result<(), BlobDownloadFailures> {
+    let mut verified = Vec::new();
+    let mut failures = Vec::new();
+    for binding in bindings {
+        let stored = binding.blob();
+        if verified.iter().any(|candidate| candidate == stored) {
+            continue;
+        }
+        verified.push(stored.clone());
+        let locator = stored.locator();
+        let namespace = locator.namespace();
+        let id = locator.blob_id();
+        let retain = eager.iter().any(|download| download.stored == *stored);
+        if let Err(cause) =
+            verify_blob_plaintext(db, storage, store_dir, stored, protection.clone(), retain).await
+        {
+            failures.push(BlobDownloadFailure {
+                namespace: namespace.to_string(),
+                id: id.to_string(),
+                cause,
+            });
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(BlobDownloadFailures(failures))
+    }
+}
+
+async fn verify_blob_plaintext(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    store_dir: &StoreDir,
+    stored: &crate::blob::locator::StoredBlobRef,
+    protection: super::storage::BlobSpoolProtection,
+    retain: bool,
+) -> Result<(), BlobDownloadFailureCause> {
+    let namespace = stored.locator().namespace();
+    let id = stored.locator().blob_id();
+    crate::store_dir::validate_path_token(namespace)
+        .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+    crate::store_dir::validate_path_token(id)
+        .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+    let cache = store_dir
+        .cache_blob_path(namespace, id)
+        .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+    let pinned = store_dir
+        .pinned_blob_path(namespace, id)
+        .map_err(|error| BlobDownloadFailureCause::Invalid(error.to_string()))?;
+    let staged = storage
+        .stage_verified_blob_plaintext(stored, protection, &cache)
+        .await
+        .map_err(BlobDownloadFailureCause::Storage)?;
+    if !retain {
+        return Ok(());
+    }
+    if cached_exact_in_either_folder(
+        &cache,
+        &pinned,
+        stored.locator().plaintext_size(),
+        stored.locator().plaintext_hash(),
+    )
+    .await
+    .map_err(BlobDownloadFailureCause::Local)?
+    {
+        return Ok(());
+    }
+    staged
+        .commit()
+        .await
+        .map_err(BlobDownloadFailureCause::Local)?;
+    crate::blob::cache::evict_to_budget(db, store_dir, namespace, Some(&cache))
+        .await
+        .map_err(|error| BlobDownloadFailureCause::Local(error.to_string()))
+}
+
+/// Whether a pulled blob already has an exact plaintext copy in either cache folder
+/// (`cache/` or `pinned/`). The remote object has already been read and verified when
+/// this runs; a match avoids committing its staged plaintext twice. An
+/// existence-check failure is surfaced rather than collapsed into "absent".
 async fn cached_exact_in_either_folder(
     cache: &std::path::Path,
     pinned: &std::path::Path,

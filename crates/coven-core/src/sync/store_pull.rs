@@ -12,18 +12,19 @@ use super::conflict::TableSchema;
 use super::membership::{MembershipChain, MembershipStatus, SerialAuthorizationState};
 use super::pull::{
     advance_max_updated_at, cache_eager_blobs, download_blobs, local_blob_cleanup_intents,
+    verify_package_blobs,
 };
 use super::session::SyncedTable;
 use super::storage::{
-    CoordinationError, CoordinationStorage, ProtocolObjectContext, ProtocolObjectDomain,
-    StorageError, SyncStorage,
+    BlobSpoolProtection, CoordinationError, CoordinationStorage, ProtocolObjectContext,
+    ProtocolObjectDomain, StorageError, SyncStorage,
 };
 use super::store_commit::{
-    head_slot_prefix, serial_head_key, ActivatedStoreDeviceRegistrationRef, CommitFrontier,
-    DeviceJoinAttempt, DeviceJoinOutcomeBody, DeviceStreamAnchor, ObjectHash, OwnerRecoveryCursor,
-    OwnerRecoveryNode, OwnerRecoveryNodeRef, OwnerRecoveryPosition, ResolvedStoreDeviceState,
-    StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor, StoreCommitCoord,
-    StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
+    head_slot_prefix, serial_head_key, ActivatedStoreDeviceRegistrationRef, CirclePackageRef,
+    CommitFrontier, DeviceJoinAttempt, DeviceJoinOutcomeBody, DeviceStreamAnchor, ObjectHash,
+    OwnerRecoveryCursor, OwnerRecoveryNode, OwnerRecoveryNodeRef, OwnerRecoveryPosition,
+    ResolvedStoreDeviceState, StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor,
+    StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
     StoreDeviceProposalAck, StoreDeviceProposalState, StoreDeviceRegistration,
     StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
@@ -32,15 +33,16 @@ use super::store_commit::{
     VerifiedStoreDeviceExclusionOutcome, VerifiedStoreDeviceOperations, SERIAL_STREAM_ID,
 };
 use super::store_objects::{
-    load_commit_ref, load_device_exclusion_outcome_ref, load_device_exclusion_proposal_ref,
-    load_device_join_attempt_ref, load_device_join_outcome_ref, load_founder_registration,
-    load_owner_recovery_node_ref, load_reclaim_authorization_ref, load_reclaim_receipt_ref,
-    load_registration_ref, load_store_ack_ref, load_store_package, load_store_protocol_root,
-    StoreObjectError,
+    load_circle_package, load_commit_ref, load_device_exclusion_outcome_ref,
+    load_device_exclusion_proposal_ref, load_device_join_attempt_ref, load_device_join_outcome_ref,
+    load_founder_registration, load_owner_recovery_node_ref, load_reclaim_authorization_ref,
+    load_reclaim_receipt_ref, load_registration_ref, load_store_ack_ref, load_store_package,
+    load_store_protocol_root, StoreObjectError,
 };
 use crate::blob::local_cleanup::{self, LocalBlobCleanupIntent};
 use crate::changeset::RowChange;
 use crate::database::{BlobActivation, Database, DbError};
+use crate::encryption::{EncryptionService, MasterKeyring};
 use crate::store_dir::StoreDir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +182,8 @@ pub enum StorePullError {
     Coordination(#[source] CoordinationError),
     #[error("{0}")]
     BlobDownloads(#[source] super::pull::BlobDownloadFailures),
+    #[error("storage: {0}")]
+    Storage(#[from] StorageError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -210,6 +214,13 @@ struct Candidate {
 }
 
 #[derive(Clone)]
+struct LoadedCirclePackage {
+    reference: CirclePackageRef,
+    bytes: Vec<u8>,
+    blob_protection: BlobSpoolProtection,
+}
+
+#[derive(Clone)]
 enum CandidateDeviceOperations {
     Verified(VerifiedStoreDeviceOperations),
     MergePending {
@@ -236,6 +247,36 @@ fn parse_candidate_store_package(
     {
         return Err("Store audience package differs from its exact commit".to_string());
     }
+    Ok(package)
+}
+
+fn parse_candidate_circle_package(
+    candidate: &Candidate,
+    loaded: &LoadedCirclePackage,
+) -> Result<AudiencePackage, String> {
+    let package = AudiencePackage::parse(&loaded.bytes)
+        .map_err(|error| format!("invalid Circle audience package: {error}"))?;
+    let expected = &loaded.reference;
+    if !matches!(
+        package.audience(),
+        PackageAudience::Circle {
+            circle_id,
+            control,
+            key_fingerprint,
+        } if *circle_id == expected.circle_id
+            && control == &expected.control
+            && *key_fingerprint == expected.key_fingerprint
+    ) || package.store_root_hash() != candidate.commit.store_root_hash
+        || package.write_id() != &candidate.commit.write_id
+        || package.commit_coord() != &candidate.commit_ref.coord
+        || package.candidate_family() != candidate.commit.candidate_family()
+        || package.schema_version() != expected.package.schema_version
+    {
+        return Err("Circle audience package differs from its exact commit".to_string());
+    }
+    package
+        .validate_blob_uploader(&candidate.commit.author_registration)
+        .map_err(|error| format!("invalid Circle blob authority: {error}"))?;
     Ok(package)
 }
 
@@ -2236,12 +2277,15 @@ pub async fn pull_store_commits_with_identity(
 
     let schema: Arc<TableSchema> = {
         let tables = tables.to_vec();
+        let gates = db.gates();
         Arc::new(
-            db.call(move |conn| TableSchema::from_db(conn, &tables))
-                .await
-                .map_err(|error| {
-                    StorePullError::Database(format!("load synced table schema: {error}"))
-                })?,
+            db.call(move |conn| {
+                TableSchema::for_apply(conn, &tables, &gates, crate::WritePolicy::MergeConcurrent)
+            })
+            .await
+            .map_err(|error| {
+                StorePullError::Database(format!("load synced table schema: {error}"))
+            })?,
         )
     };
     let coverage = db.snapshot_coverage_frontier().await.map_err(|error| {
@@ -2308,13 +2352,8 @@ pub async fn pull_store_commits_with_identity(
                         .remove(&key)
                         .expect("ready candidate remains present");
                     match apply_candidate(db, storage, &root, store_dir, schema.clone(), &candidate)
-                        .await
-                        .map_err(|error| {
-                            StorePullError::Database(format!(
-                                "materialize Store commit {}/{}: {error}",
-                                key.0, key.1
-                            ))
-                        })? {
+                        .await?
+                    {
                         ApplyOutcome::Applied(changes) => {
                             let stream_id = commit_stream_id(&candidate.commit_ref.coord);
                             frontier.insert(stream_id.clone(), candidate.commit_ref.clone());
@@ -4129,11 +4168,6 @@ async fn load_pull_circle_activations(
     if !carries_circle_payload(commit) {
         return Ok(Vec::new());
     }
-    if !commit.circle_packages().is_empty() {
-        return Err(PullCircleActivationError::Invalid(
-            "circle row packages are not implemented".to_string(),
-        ));
-    }
     let identity = identity.ok_or_else(|| {
         PullCircleActivationError::Invalid(format!(
             "commit {} carries circle controls but no device identity was supplied",
@@ -4156,12 +4190,135 @@ async fn load_pull_circle_activations(
     .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))
 }
 
+async fn load_applicable_circle_packages(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    commit_ref: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
+    activations: &[super::circle_ops::VerifiedCircleReference],
+    author: &StoreDeviceRegistration,
+) -> Result<Vec<LoadedCirclePackage>, PullCircleActivationError> {
+    let mut loaded = Vec::new();
+    for reference in commit.circle_packages() {
+        if reference.package.schema_version > db.schema_version() {
+            return Err(PullCircleActivationError::Invalid(format!(
+                "Circle package for {} requires schema {}, local schema is {}",
+                reference.circle_id,
+                reference.package.schema_version,
+                db.schema_version()
+            )));
+        }
+        let same_commit = activations.iter().find(|activation| {
+            activation.circle_id == reference.circle_id
+                && activation.control.coord == reference.control
+        });
+        let context = if let Some(activation) = same_commit {
+            let Some(access) = activation.local_access.as_ref() else {
+                continue;
+            };
+            let Some(active) = access.active.as_ref() else {
+                continue;
+            };
+            if !active.roster.members().contains_key(&author.author_pubkey) {
+                return Err(PullCircleActivationError::Invalid(format!(
+                    "Circle package author is not a member of {} at its exact control",
+                    reference.circle_id
+                )));
+            }
+            let super::circle::CircleAccessDisposition::Active {
+                keyring,
+                key_fingerprint,
+                ..
+            } = &access.leaf.value.disposition
+            else {
+                return Err(PullCircleActivationError::Invalid(format!(
+                    "active Circle access for {} has an inactive leaf",
+                    reference.circle_id
+                )));
+            };
+            if *key_fingerprint != reference.key_fingerprint
+                || activation.control.value.key_fingerprint != reference.key_fingerprint
+            {
+                return Err(PullCircleActivationError::Invalid(format!(
+                    "Circle package key for {} differs from its activated control",
+                    reference.circle_id
+                )));
+            }
+            let keyring = MasterKeyring::from_serialized(keyring).map_err(|error| {
+                PullCircleActivationError::Invalid(format!(
+                    "parse Circle package keyring for {}: {error}",
+                    reference.circle_id
+                ))
+            })?;
+            EncryptionService::from(keyring)
+                .service_for_fingerprint(reference.key_fingerprint.as_bytes())
+                .map_err(|error| {
+                    PullCircleActivationError::Invalid(format!(
+                        "select Circle package key for {}: {error}",
+                        reference.circle_id
+                    ))
+                })?
+        } else {
+            let Some((encryption, key_fingerprint)) = db
+                .circle_access_context(reference.circle_id, reference.control.clone())
+                .await
+                .map_err(PullCircleActivationError::Database)?
+            else {
+                continue;
+            };
+            if !db
+                .circle_authorizes_writer(
+                    reference.circle_id,
+                    reference.control.clone(),
+                    author.author_pubkey.clone(),
+                )
+                .await
+                .map_err(PullCircleActivationError::Database)?
+            {
+                return Err(PullCircleActivationError::Invalid(format!(
+                    "Circle package author is not a member of {} at its exact control",
+                    reference.circle_id
+                )));
+            }
+            if key_fingerprint != reference.key_fingerprint {
+                return Err(PullCircleActivationError::Invalid(format!(
+                    "Circle package key for {} differs from durable access",
+                    reference.circle_id
+                )));
+            }
+            encryption
+                .service_for_fingerprint(reference.key_fingerprint.as_bytes())
+                .map_err(|error| {
+                    PullCircleActivationError::Invalid(format!(
+                        "select durable Circle package key for {}: {error}",
+                        reference.circle_id
+                    ))
+                })?
+        };
+        let blob_protection = BlobSpoolProtection::Opaque(context.clone());
+        let package = load_circle_package(storage, commit_ref, commit, reference, context)
+            .await
+            .map_err(|error| PullCircleActivationError::Invalid(error.to_string()))?;
+        loaded.push(LoadedCirclePackage {
+            reference: reference.clone(),
+            bytes: package.value,
+            blob_protection,
+        });
+    }
+    Ok(loaded)
+}
+
 async fn load_serial_store_package(
     db: &Database,
     storage: &dyn SyncStorage,
     commit_ref: &StoreBatchCommitRef,
     commit: &StoreBatchCommit,
 ) -> Result<Option<Vec<u8>>, StorePullError> {
+    if !commit.circle_packages().is_empty() {
+        return Err(StorePullError::Serial(
+            "Serial Circle packages are not implemented".to_string(),
+        ));
+    }
     if let Some(package) = commit.store_package() {
         if package.schema_version > db.schema_version() {
             return Err(StorePullError::Serial(format!(
@@ -4479,105 +4636,74 @@ async fn apply_candidate(
 ) -> Result<ApplyOutcome, StorePullError> {
     let device_operations =
         resolve_candidate_device_operations(db, storage, root, candidate).await?;
-    let Some(package_bytes) = candidate.package.as_ref() else {
-        let commit = candidate.commit.clone();
-        let commit_ref = candidate.commit_ref.clone();
-        let registrations = candidate.registrations.clone();
-        let circle_activations = candidate.circle_activations.clone();
-        let device_operations = device_operations.clone();
-        db.call(move |conn| {
-            let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
-            Database::record_verified_circle_activations_on(
-                &tx,
-                &commit,
-                &commit_ref,
-                &circle_activations,
-            )?;
-            Database::record_materialized_commit_with_device_operations_on(
-                &tx,
-                &commit,
-                &commit_ref,
-                &device_operations,
-            )?;
-            tx.commit().map_err(DbError::from)
-        })
-        .await?;
-        return Ok(ApplyOutcome::Applied(Vec::new()));
-    };
-    let package = match parse_candidate_store_package(candidate, package_bytes) {
-        Ok(package) => package,
-        Err(error) => {
-            return Ok(ApplyOutcome::Held(
-                HeldStorePositionReason::InvalidChangeset(error),
-            ));
-        }
-    };
-    let changeset = match ValidatedChangeset::new(package.changeset().to_vec(), schema) {
-        Ok(changeset) => changeset,
-        Err(error) => {
-            return Ok(ApplyOutcome::Held(match error {
-                super::session::ChangesetIdentityError::Row(error) => {
-                    HeldStorePositionReason::InvalidRowIdentity {
-                        table: error.table().to_string(),
-                        reason: error.to_string(),
-                    }
-                }
-                error => HeldStorePositionReason::InvalidChangeset(error.to_string()),
-            }))
-        }
-    };
-    let changes = match crate::changeset::walk(changeset.bytes()) {
-        Ok(changes) => changes,
-        Err(error) => {
-            return Ok(ApplyOutcome::Held(
-                HeldStorePositionReason::InvalidChangeset(error.to_string()),
-            ))
-        }
-    };
-    let old_changes = match crate::changeset::walk_old(changeset.bytes()) {
-        Ok(changes) => changes,
-        Err(error) => {
-            return Ok(ApplyOutcome::Held(
-                HeldStorePositionReason::InvalidChangeset(error.to_string()),
-            ))
-        }
-    };
-    let blob_decls = db.blob_decls();
-    let eager = match cache_eager_blobs(&blob_decls, &changes, &package) {
-        Ok(eager) => eager,
-        Err(error) => {
-            return Ok(ApplyOutcome::Held(
-                HeldStorePositionReason::InvalidChangeset(error.to_string()),
-            ))
-        }
-    };
-    if let Err(failures) = download_blobs(db, eager, storage, store_dir).await {
-        if failures.has_transport_failure() {
-            return Err(StorePullError::BlobDownloads(failures));
-        }
-        return Ok(ApplyOutcome::Held(
-            HeldStorePositionReason::BlobDownloadFailed,
-        ));
-    }
-    let cleanup = match local_blob_cleanup_intents(&blob_decls, &old_changes, &changes) {
-        Ok(cleanup) => cleanup,
-        Err(error) => {
-            return Ok(ApplyOutcome::Held(
-                HeldStorePositionReason::InvalidChangeset(error.to_string()),
-            ))
-        }
-    };
-    let outcome = commit_candidate(
+    let circle_packages = match load_applicable_circle_packages(
         db,
-        candidate,
-        package,
-        changes,
-        changeset,
-        cleanup,
-        device_operations,
+        storage,
+        &candidate.commit_ref,
+        &candidate.commit,
+        &candidate.circle_activations,
+        &candidate.author,
     )
-    .await?;
+    .await
+    {
+        Ok(packages) => packages,
+        Err(PullCircleActivationError::Database(error)) => return Err(error.into()),
+        Err(PullCircleActivationError::Invalid(error)) => {
+            return Ok(ApplyOutcome::Held(HeldStorePositionReason::InvalidObject(
+                error,
+            )))
+        }
+    };
+    let mut packages =
+        Vec::with_capacity(usize::from(candidate.package.is_some()) + circle_packages.len());
+    if let Some(bytes) = candidate.package.as_ref() {
+        let package = match parse_candidate_store_package(candidate, bytes) {
+            Ok(package) => package,
+            Err(error) => {
+                return Ok(ApplyOutcome::Held(
+                    HeldStorePositionReason::InvalidChangeset(error),
+                ))
+            }
+        };
+        let protection = storage.store_blob_protection()?;
+        match prepare_merge_candidate_package(
+            db,
+            storage,
+            store_dir,
+            schema.clone(),
+            package,
+            protection,
+        )
+        .await?
+        {
+            Ok(package) => packages.push(package),
+            Err(reason) => return Ok(ApplyOutcome::Held(reason)),
+        }
+    }
+    for loaded in &circle_packages {
+        let package = match parse_candidate_circle_package(candidate, loaded) {
+            Ok(package) => package,
+            Err(error) => {
+                return Ok(ApplyOutcome::Held(
+                    HeldStorePositionReason::InvalidChangeset(error),
+                ))
+            }
+        };
+        match prepare_merge_candidate_package(
+            db,
+            storage,
+            store_dir,
+            schema.clone(),
+            package,
+            loaded.blob_protection.clone(),
+        )
+        .await?
+        {
+            Ok(package) => packages.push(package),
+            Err(reason) => return Ok(ApplyOutcome::Held(reason)),
+        }
+    }
+    let outcome = commit_candidate(db, candidate, packages, device_operations).await?;
     #[cfg(any(test, feature = "test-utils"))]
     if matches!(outcome, ApplyOutcome::Applied(_)) {
         db.reach_test_point(crate::database::DatabaseTestPoint::PullAfterRemoteCommit {
@@ -4589,65 +4715,114 @@ async fn apply_candidate(
     Ok(outcome)
 }
 
+struct PreparedMergeCandidatePackage {
+    package: AudiencePackage,
+    changeset: ValidatedChangeset<Vec<u8>>,
+    cleanup: Vec<LocalBlobCleanupIntent>,
+}
+
+async fn prepare_merge_candidate_package(
+    db: &Database,
+    storage: &dyn SyncStorage,
+    store_dir: &StoreDir,
+    schema: Arc<TableSchema>,
+    package: AudiencePackage,
+    blob_protection: BlobSpoolProtection,
+) -> Result<Result<PreparedMergeCandidatePackage, HeldStorePositionReason>, StorePullError> {
+    let changeset = match ValidatedChangeset::new(package.changeset().to_vec(), schema) {
+        Ok(changeset) => changeset,
+        Err(super::session::ChangesetIdentityError::Row(error)) => {
+            return Ok(Err(HeldStorePositionReason::InvalidRowIdentity {
+                table: error.table().to_string(),
+                reason: error.to_string(),
+            }))
+        }
+        Err(error) => {
+            return Ok(Err(HeldStorePositionReason::InvalidChangeset(
+                error.to_string(),
+            )))
+        }
+    };
+    let changes = crate::changeset::walk(changeset.bytes())
+        .map_err(HeldStorePositionReason::InvalidChangeset);
+    let changes = match changes {
+        Ok(changes) => changes,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    let old_changes = match crate::changeset::walk_old(changeset.bytes()) {
+        Ok(changes) => changes,
+        Err(error) => return Ok(Err(HeldStorePositionReason::InvalidChangeset(error))),
+    };
+    let blob_decls = db.blob_decls();
+    let eager = match cache_eager_blobs(&blob_decls, &changes, &package) {
+        Ok(eager) => eager,
+        Err(error) => {
+            return Ok(Err(HeldStorePositionReason::InvalidChangeset(
+                error.to_string(),
+            )))
+        }
+    };
+    if let Err(failures) = verify_package_blobs(
+        db,
+        storage,
+        store_dir,
+        package.blob_bindings(),
+        blob_protection,
+        &eager,
+    )
+    .await
+    {
+        if failures.has_transport_failure() {
+            return Err(StorePullError::BlobDownloads(failures));
+        }
+        return Ok(Err(HeldStorePositionReason::BlobDownloadFailed));
+    }
+    let cleanup = match local_blob_cleanup_intents(&blob_decls, &old_changes, &changes) {
+        Ok(cleanup) => cleanup,
+        Err(error) => {
+            return Ok(Err(HeldStorePositionReason::InvalidChangeset(
+                error.to_string(),
+            )))
+        }
+    };
+    Ok(Ok(PreparedMergeCandidatePackage {
+        package,
+        changeset,
+        cleanup,
+    }))
+}
+
 async fn commit_candidate(
     db: &Database,
     candidate: &Candidate,
-    package: AudiencePackage,
-    changes: Vec<RowChange>,
-    changeset: ValidatedChangeset<Vec<u8>>,
-    cleanup: Vec<LocalBlobCleanupIntent>,
+    packages: Vec<PreparedMergeCandidatePackage>,
     device_operations: VerifiedStoreDeviceOperations,
 ) -> Result<ApplyOutcome, StorePullError> {
     let commit = candidate.commit.clone();
     let commit_ref = candidate.commit_ref.clone();
     let registrations = candidate.registrations.clone();
     let circle_activations = candidate.circle_activations.clone();
-    let returned_changes = changes.clone();
     let receiver_wall_ms = db.receive_wall_ms();
     let blob_decls = db.blob_decls();
     let gates = db.gates();
     let synced_tables = db.synced_tables().to_vec();
+    let inactive_circles = circle_activations
+        .iter()
+        .filter_map(|activation| {
+            activation
+                .local_access
+                .as_ref()
+                .filter(|access| access.active.is_none())
+                .map(|_| activation.circle_id)
+        })
+        .collect::<BTreeSet<_>>();
     let mut changeset_max = None;
-    advance_max_updated_at(
-        &mut changeset_max,
-        &changes,
-        changeset.schema(),
-        receiver_wall_ms,
-    );
     let hlc = db.hlc();
     let outcome = db
         .call(move |conn| {
             let tx = conn.unchecked_transaction().map_err(DbError::from)?;
-            let apply =
-                resolve_and_apply_changeset_with_schema_on(&tx, changeset, receiver_wall_ms)?;
-            if !apply.constraint_conflict_tables.is_empty() {
-                tx.rollback().map_err(DbError::from)?;
-                return Ok(ApplyOutcome::Held(
-                    HeldStorePositionReason::ConstraintConflict(apply.constraint_conflict_tables),
-                ));
-            }
-            if apply.had_fk_violations {
-                tx.rollback().map_err(DbError::from)?;
-                return Ok(ApplyOutcome::Held(
-                    HeldStorePositionReason::ForeignKeyDependency,
-                ));
-            }
-            let winning_rows =
-                crate::sync::apply::current_winning_rows(&tx, &synced_tables, package.changeset())?;
-            Database::install_pulled_blob_activations_on(&tx, &package, &commit_ref)?;
-            Database::install_winning_blob_bindings_on(
-                &tx,
-                &gates,
-                &synced_tables,
-                &package,
-                &BlobActivation {
-                    coord: commit_ref.coord.clone(),
-                },
-                &winning_rows,
-            )?;
-            for intent in cleanup {
-                local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
-            }
+            let mut returned_changes = Vec::new();
+            let mut package_reported_fk_violation = false;
             Database::record_activated_store_device_registrations_on(&tx, &commit, &registrations)?;
             Database::record_verified_circle_activations_on(
                 &tx,
@@ -4655,6 +4830,114 @@ async fn commit_candidate(
                 &commit_ref,
                 &circle_activations,
             )?;
+            for prepared in packages {
+                let PreparedMergeCandidatePackage {
+                    package,
+                    changeset,
+                    cleanup,
+                    ..
+                } = prepared;
+                let applied_bytes = match package.audience() {
+                    PackageAudience::Store => package.changeset().to_vec(),
+                    PackageAudience::Circle { circle_id, .. } => {
+                        super::gate::filter_inbound_circle_changeset(
+                            &tx,
+                            package.changeset(),
+                            *circle_id,
+                            &gates,
+                        )
+                        .map_err(|error| DbError::Message(error.to_string()))?
+                    }
+                };
+                let applied_changeset = changeset
+                    .validate_subset(applied_bytes.clone())
+                    .map_err(|error| DbError::Message(error.to_string()))?;
+                let actual_changes =
+                    crate::changeset::walk(&applied_bytes).map_err(DbError::Message)?;
+                advance_max_updated_at(
+                    &mut changeset_max,
+                    &actual_changes,
+                    changeset.schema(),
+                    receiver_wall_ms,
+                );
+                returned_changes.extend(
+                    actual_changes
+                        .iter()
+                        .filter(|change| !super::gate::is_routing_table(&change.table))
+                        .cloned(),
+                );
+                let apply = resolve_and_apply_changeset_with_schema_on(
+                    &tx,
+                    applied_changeset,
+                    receiver_wall_ms,
+                )?;
+                if !apply.constraint_conflict_tables.is_empty() {
+                    tx.rollback().map_err(DbError::from)?;
+                    return Ok(ApplyOutcome::Held(
+                        HeldStorePositionReason::ConstraintConflict(
+                            apply.constraint_conflict_tables,
+                        ),
+                    ));
+                }
+                package_reported_fk_violation |= apply.had_fk_violations;
+                let winning_rows = crate::sync::apply::current_winning_rows_with_schema(
+                    &tx,
+                    changeset.schema(),
+                    &applied_bytes,
+                )?;
+                Database::install_pulled_blob_activations_on(&tx, &package, &commit_ref)?;
+                Database::install_winning_blob_bindings_on(
+                    &tx,
+                    &gates,
+                    &synced_tables,
+                    &package,
+                    &BlobActivation {
+                        coord: commit_ref.coord.clone(),
+                    },
+                    &winning_rows,
+                )?;
+                for intent in cleanup {
+                    local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
+                }
+            }
+            let mut removal_session =
+                rusqlite::session::Session::new(&tx).map_err(DbError::from)?;
+            for table in &synced_tables {
+                removal_session
+                    .attach(Some(table.name()))
+                    .map_err(DbError::from)?;
+            }
+            super::gate::prune_ineligible_scoped_rows(&tx, &gates, &inactive_circles)
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            let mut removal_changeset = Vec::new();
+            removal_session
+                .changeset_strm(&mut removal_changeset)
+                .map_err(DbError::from)?;
+            drop(removal_session);
+            let removed =
+                crate::changeset::walk_old(&removal_changeset).map_err(DbError::Message)?;
+            let removal_cleanup = local_blob_cleanup_intents(&blob_decls, &removed, &[])
+                .map_err(|error| DbError::Message(error.to_string()))?;
+            returned_changes
+                .extend(crate::changeset::walk(&removal_changeset).map_err(DbError::Message)?);
+            for intent in removal_cleanup {
+                local_cleanup::record_if_unreferenced_on(&tx, &blob_decls, &intent)?;
+            }
+            if package_reported_fk_violation {
+                let violations: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)?;
+                if violations {
+                    tx.rollback().map_err(DbError::from)?;
+                    return Ok(ApplyOutcome::Held(
+                        HeldStorePositionReason::ForeignKeyDependency,
+                    ));
+                }
+            }
             Database::record_materialized_commit_with_device_operations_on(
                 &tx,
                 &commit,

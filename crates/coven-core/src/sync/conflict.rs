@@ -58,6 +58,24 @@ pub enum LwwComparison {
 }
 
 impl TableSchema {
+    pub fn for_apply(
+        conn: &Connection,
+        synced_tables: &[SyncedTable],
+        gates: &super::gate::Gates,
+        write_policy: crate::WritePolicy,
+    ) -> Result<Self, DbError> {
+        let mut tables = synced_tables.to_vec();
+        if write_policy == crate::WritePolicy::MergeConcurrent && gates.has_scoped_graph() {
+            for table in ["_coven_audience", "_coven_row_routes"] {
+                tables.push(SyncedTable::new(
+                    table,
+                    super::session::RowIdentity::SharedKey,
+                ));
+            }
+        }
+        Self::from_db(conn, &tables)
+    }
+
     /// Build schema info by querying `PRAGMA table_info` for each synced table.
     /// A registered table that has no `_updated_at` column is a host integration
     /// error and surfaces as `Err`.

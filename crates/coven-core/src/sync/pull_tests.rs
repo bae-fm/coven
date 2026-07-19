@@ -3161,12 +3161,10 @@ async fn update_to_null_drops_old_local_blob_copy() {
     );
 }
 
-/// A `CacheLazy` blob's row still crosses to the puller, but its bytes are NOT
-/// downloaded on pull (it streams on demand, fetched on first read) — the opposite
-/// pull outcome from the `CacheEager` round-trip above. The split is declared:
-/// `note_photos` carries a user-provided · `CacheLazy` blob here.
+/// A `CacheLazy` blob is authenticated before its row crosses to the puller, but
+/// its verified plaintext is discarded instead of being retained in the cache.
 #[tokio::test]
-async fn user_provided_lazy_blob_publishes_via_transition_without_pull_download() {
+async fn user_provided_lazy_blob_is_verified_without_being_retained() {
     let db1 = open_test_db_with_blob(BlobDecl::new(
         "audio",
         Provenance::UserProvided,
@@ -3215,17 +3213,40 @@ async fn user_provided_lazy_blob_publishes_via_transition_without_pull_download(
         "the transition publishes the exact user-provided bytes",
     );
 
-    // Destination pulls.
+    // A failed exact read rejects the row and leaves the commit available for retry.
     let db2 = open_test_db_with_blob(BlobDecl::new(
         "audio",
         Provenance::UserProvided,
         CacheFill::CacheLazy,
     ));
     let (_t, ld) = temp_store_dir();
+    let membership = storage
+        .open_into(&db2)
+        .await
+        .expect("open exact Store before failed lazy verification");
+    let failing = FaultingStorage::blob(&storage.storage);
+    let error = crate::sync::store_pull::pull_store_commits(
+        &db2,
+        db2.synced_tables(),
+        &failing,
+        storage.root.store_root_hash,
+        &ld,
+        Some(&membership),
+    )
+    .await
+    .expect_err("lazy blob verification failure rejects the Store commit");
+    assert!(
+        matches!(
+            &error,
+            crate::sync::store_pull::StorePullError::BlobDownloads(_)
+        ),
+        "unexpected lazy verification error: {error:?}"
+    );
+    assert!(!row_exists(&db2, "SELECT 1 FROM notes WHERE id = 'n1'").await);
+
+    // The same commit applies once the exact blob can be opened and verified.
     let (updated, result) = pull_into(&db2, &storage, &ld).await;
 
-    // The row applied and the position advanced — the CacheLazy blob never blocks the
-    // apply, and its absence is not a download failure.
     assert_eq!(result.changesets_applied, 1);
     assert!(!result.asset_downloads_failed);
     assert_eq!(updated.values().copied().collect::<Vec<_>>(), vec![1]);
@@ -3234,12 +3255,162 @@ async fn user_provided_lazy_blob_publishes_via_transition_without_pull_download(
         "WithAudio",
         "the row carrying the CacheLazy blob still reaches the peer",
     );
-    // ...but the blob was NOT downloaded to the puller's cache: CacheLazy is fetched
-    // on first read, not eagerly on pull.
+    // Verification used an unpublished temporary file, so the plaintext remains
+    // absent from both cache locations until an application read requests it.
     assert!(
         !ld.pinned_blob_path("audio", "audio1").unwrap().exists()
             && !ld.cache_blob_path("audio", "audio1").unwrap().exists(),
         "a CacheLazy blob must NOT be downloaded on pull — it stays in the cloud for on-demand fetch",
+    );
+}
+
+fn open_scoped_circle_test_db() -> crate::database::Database {
+    open_test_db_schema(
+        vec![
+            SyncedTable::new("notes", crate::sync::session::RowIdentity::IndependentUuid)
+                .scoped_by("audience"),
+            SyncedTable::new(
+                "comments",
+                crate::sync::session::RowIdentity::IndependentUuid,
+            ),
+        ],
+        vec![crate::migration::Migration::sql(
+            1,
+            "scoped Circle schema",
+            "CREATE TABLE notes (
+                 id TEXT PRIMARY KEY,
+                 audience TEXT,
+                 body TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;
+             CREATE TABLE comments (
+                 id TEXT PRIMARY KEY,
+                 note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+                 body TEXT NOT NULL,
+                 _updated_at TEXT NOT NULL
+             ) STRICT;",
+        )],
+    )
+}
+
+#[tokio::test]
+async fn merge_pull_applies_circle_rows_and_private_routes_atomically() {
+    let owner = UserKeypair::generate();
+    let source = open_scoped_circle_test_db();
+    let storage = create_store(&source, owner.clone()).await;
+    let _source_membership = storage
+        .open_into(&source)
+        .await
+        .expect("open scoped source Store");
+    let device_id = source
+        .get_protocol_state(crate::database::LOCAL_DEVICE_ID_STATE_KEY)
+        .await
+        .expect("read scoped source device")
+        .expect("scoped source device exists");
+    let circle_id = crate::sync::circle_ops::create_circle(
+        &source,
+        &storage.storage,
+        None,
+        &device_id,
+        "0000000001000-0000-owner",
+        "Readers",
+        &owner,
+    )
+    .await
+    .expect("create exact Circle");
+    let note_id = "01890a5d-ac96-774b-bcce-b302099c3f74";
+    let comment_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    let sql = format!(
+        "INSERT INTO notes VALUES ('{note_id}', '{circle_id}', 'private', '0000000002000-0000-owner');
+         INSERT INTO comments VALUES ('{comment_id}', '{note_id}', 'child', '0000000002001-0000-owner');"
+    );
+    let tables = source.synced_tables().to_vec();
+    let gates = source.gates();
+    let blob_decls = source.blob_decls();
+    let write_policy = source.write_policy();
+    let write_id = source.new_write_id();
+    source
+        .call(move |conn| {
+            let routing = EncryptionService::from_key([42; 32]);
+            crate::database::Database::run_store_write_transaction_on(
+                conn,
+                &tables,
+                &gates,
+                &blob_decls,
+                write_policy,
+                Some(&routing),
+                write_id,
+                |tx| {
+                    tx.execute_batch(&sql)
+                        .map_err(crate::database::DbError::from)
+                },
+            )
+        })
+        .await
+        .expect("commit scoped host transaction");
+    let (_source_temp, source_dir) = temp_store_dir();
+    storage
+        .publish_pending(&source, &source_dir)
+        .await
+        .expect("publish Circle-scoped rows");
+
+    let target = open_scoped_circle_test_db();
+    let target_membership = storage
+        .open_into(&target)
+        .await
+        .expect("open scoped target Store");
+    let (_target_temp, target_dir) = temp_store_dir();
+    let result = crate::sync::store_pull::pull_store_commits_with_identity(
+        &target,
+        target.synced_tables(),
+        &storage.storage,
+        None,
+        storage.root.store_root_hash,
+        &target_dir,
+        Some(&target_membership),
+        Some(&owner),
+    )
+    .await
+    .expect("pull Circle-scoped rows");
+
+    assert!(result.changesets_applied >= 1);
+    assert!(
+        row_exists(
+            &target,
+            &format!("SELECT 1 FROM notes WHERE id = '{note_id}'")
+        )
+        .await,
+        "Circle root was not applied: {:?}",
+        result.held_positions
+    );
+    assert!(
+        row_exists(
+            &target,
+            &format!("SELECT 1 FROM comments WHERE id = '{comment_id}'")
+        )
+        .await
+    );
+    let (routes, mirrors): (i64, i64) = target
+        .call(move |conn| {
+            let routes = conn.query_row("SELECT COUNT(*) FROM _coven_row_routes", [], |row| {
+                row.get(0)
+            })?;
+            let mirrors = conn.query_row(
+                "SELECT COUNT(*) FROM _coven_audience WHERE circle_id = ?1",
+                [circle_id.to_string()],
+                |row| row.get(0),
+            )?;
+            Ok((routes, mirrors))
+        })
+        .await
+        .expect("read pulled routing state");
+    assert_eq!((routes, mirrors), (2, 2));
+    assert!(
+        result
+            .row_changes
+            .iter()
+            .all(|change| !crate::sync::gate::is_routing_table(&change.table)),
+        "host-visible row changes must not expose Coven routing tables"
     );
 }
 

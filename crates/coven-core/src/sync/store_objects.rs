@@ -15,9 +15,9 @@ use super::store_commit::{
     membership_entry_semantic_prefix, membership_resolution_semantic_prefix,
     package_semantic_prefix, provider_access_grant_semantic_prefix,
     provider_access_withdrawal_semantic_prefix, registration_semantic_prefix,
-    store_protocol_root_logical_key, DeviceJoinAttempt, DeviceJoinAttemptRef, DeviceJoinOutcome,
-    DeviceJoinOutcomeRef, ObjectHash, OwnerRecoveryNode, OwnerRecoveryNodeRef, StoreAck,
-    StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
+    store_protocol_root_logical_key, CirclePackageRef, DeviceJoinAttempt, DeviceJoinAttemptRef,
+    DeviceJoinOutcome, DeviceJoinOutcomeRef, ObjectHash, OwnerRecoveryNode, OwnerRecoveryNodeRef,
+    StoreAck, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitCoord,
     StoreDeviceExclusionOutcome, StoreDeviceExclusionOutcomeRef, StoreDeviceExclusionProposal,
     StoreDeviceExclusionProposalRef, StoreDeviceHead, StoreDeviceHeadRef, StoreDeviceRegistration,
     StoreDeviceRegistrationRef, StoreProtocolError, StoreProtocolRoot, StoreRootRef,
@@ -893,6 +893,63 @@ pub async fn load_store_package(
     )
     .await
     .map(Some)
+}
+
+pub async fn load_circle_package(
+    storage: &dyn SyncStorage,
+    reference: &StoreBatchCommitRef,
+    commit: &StoreBatchCommit,
+    package: &CirclePackageRef,
+    encryption: crate::encryption::EncryptionService,
+) -> Result<VerifiedObject<Vec<u8>>, StoreObjectError> {
+    let stream_id = commit_stream_id(&reference.coord);
+    reference
+        .verify_commit(commit)
+        .map_err(|source| StoreObjectError::InvalidObject {
+            semantic_prefix: commit_semantic_prefix(
+                commit.candidate_family(),
+                &stream_id,
+                reference.coord.sequence(),
+                reference.commit_hash,
+            ),
+            key: reference.object.slot().logical_key().to_string(),
+            source: Box::new(source),
+        })?;
+    if !commit
+        .circle_packages()
+        .iter()
+        .any(|committed| committed == package)
+    {
+        return Err(StoreObjectError::InvalidObject {
+            semantic_prefix: package.package.object.slot().logical_key().to_string(),
+            key: package.package.object.slot().logical_key().to_string(),
+            source: Box::new(StoreProtocolError::MissingCirclePackage(package.circle_id)),
+        });
+    }
+    let semantic_prefix = super::store_commit::circle_package_semantic_prefix(
+        package.circle_id,
+        commit.candidate_family(),
+        &stream_id,
+        commit.seq(),
+        package.package.content_hash,
+    );
+    let context = ProtocolObjectContext::circle(
+        commit.store_root_hash,
+        ProtocolObjectDomain::CirclePackage,
+        encryption,
+    );
+    load_exact_object(
+        storage,
+        &context,
+        &package.package.object,
+        &semantic_prefix,
+        package.package.content_hash,
+        |bytes| {
+            commit.verify_circle_package(package.circle_id, bytes)?;
+            Ok(bytes.to_vec())
+        },
+    )
+    .await
 }
 
 pub async fn prepare_membership_entry(

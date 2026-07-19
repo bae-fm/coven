@@ -12932,11 +12932,23 @@ impl Database {
         circle_id: crate::sync::circle::CircleId,
         expected_control: crate::sync::circle::CircleControlCoord,
     ) -> Result<(EncryptionService, crate::KeyFingerprint), DbError> {
+        self.circle_access_context(circle_id, expected_control)
+            .await?
+            .ok_or_else(|| {
+                DbError::Message(format!("Circle {circle_id} has no active publication key"))
+            })
+    }
+
+    pub(crate) async fn circle_access_context(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        expected_control: crate::sync::circle::CircleControlCoord,
+    ) -> Result<Option<(EncryptionService, crate::KeyFingerprint)>, DbError> {
         self.call(move |conn| {
             let control_coord = serde_json::to_string(&expected_control).map_err(|error| {
                 DbError::Message(format!("serialize Circle publication coordinate: {error}"))
             })?;
-            let (control_bytes, access_bytes): (Vec<u8>, Vec<u8>) = conn
+            let stored: Option<(Vec<u8>, Vec<u8>)> = conn
                 .query_row(
                     "SELECT activation.control_bytes, access.access_bytes
                      FROM circle_control_activations AS activation
@@ -12949,7 +12961,11 @@ impl Database {
                     (circle_id.to_string(), control_coord),
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
+                .optional()
                 .map_err(DbError::from)?;
+            let Some((control_bytes, access_bytes)) = stored else {
+                return Ok(None);
+            };
             let control: crate::sync::circle::CircleControl =
                 serde_json::from_slice(&control_bytes).map_err(|error| {
                     DbError::Message(format!("parse Circle publication control: {error}"))
@@ -12975,9 +12991,7 @@ impl Database {
                 roster,
             } = access.disposition
             else {
-                return Err(DbError::Message(format!(
-                    "Circle {circle_id} has no active publication key"
-                )));
+                return Ok(None);
             };
             if key_fingerprint != control.key_fingerprint || roster != control.roster {
                 return Err(DbError::Message(format!(
@@ -12994,7 +13008,48 @@ impl Database {
                     "Circle {circle_id} publication key fingerprint is invalid"
                 )));
             }
-            Ok((encryption, key_fingerprint))
+            Ok(Some((encryption, key_fingerprint)))
+        })
+        .await
+    }
+
+    pub(crate) async fn circle_authorizes_writer(
+        &self,
+        circle_id: crate::sync::circle::CircleId,
+        expected_control: crate::sync::circle::CircleControlCoord,
+        author_pubkey: String,
+    ) -> Result<bool, DbError> {
+        self.call(move |conn| {
+            let control_coord = serde_json::to_string(&expected_control).map_err(|error| {
+                DbError::Message(format!("serialize Circle writer coordinate: {error}"))
+            })?;
+            let roster_bytes: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT roster.roster_bytes
+                     FROM circle_control_activations AS activation
+                     JOIN circle_roster_cache AS roster
+                       ON roster.circle_id = activation.circle_id
+                      AND roster.control_coord = activation.control_coord
+                     WHERE activation.circle_id = ?1
+                       AND activation.control_coord = ?2",
+                    (circle_id.to_string(), control_coord),
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DbError::from)?;
+            let Some(roster_bytes) = roster_bytes else {
+                return Ok(false);
+            };
+            let roster: crate::sync::circle_roster::CircleMaterializedRoster =
+                serde_json::from_slice(&roster_bytes).map_err(|error| {
+                    DbError::Message(format!("parse Circle writer roster: {error}"))
+                })?;
+            if !roster.verify() {
+                return Err(DbError::Message(format!(
+                    "Circle {circle_id} writer roster is invalid"
+                )));
+            }
+            Ok(roster.members().contains_key(&author_pubkey))
         })
         .await
     }
@@ -15285,11 +15340,17 @@ impl Database {
         let activation = BlobActivation {
             coord: commit_ref.coord.clone(),
         };
+        let apply_schema = crate::sync::conflict::TableSchema::for_apply(
+            conn,
+            synced_tables,
+            gates,
+            commit.order.policy(),
+        )?;
         let mut consumed_uploads = 0;
         for package in &audiences.packages {
-            let winning_rows = crate::sync::apply::current_winning_rows(
+            let winning_rows = crate::sync::apply::current_winning_rows_with_schema(
                 conn,
-                synced_tables,
+                &apply_schema,
                 package.package().changeset(),
             )?;
             Self::install_winning_blob_bindings_on(
@@ -16655,6 +16716,9 @@ impl Database {
 
         let package_audience = package.audience().remote_audience();
         for winner in winning_rows {
+            if gate::is_routing_table(&winner.table) {
+                continue;
+            }
             let Some(table) = synced_tables
                 .iter()
                 .find(|table| table.name() == winner.table)
