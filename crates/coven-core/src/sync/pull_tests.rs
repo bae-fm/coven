@@ -1004,9 +1004,8 @@ fn sign_exact_commit_with_package(
         crate::sync::store_commit::StoreCommitOperationsInput {
             acknowledgement: None,
             control: graph.commit.control().cloned(),
-            device_join_attempts: graph.commit.device_join_attempts().to_vec(),
+            device_join_attempt_decisions: graph.commit.device_join_attempt_decisions().to_vec(),
             device_join_outcomes: graph.commit.device_join_outcomes().to_vec(),
-            device_join_abandonments: graph.commit.device_join_abandonments().to_vec(),
             device_join_cleanup_receipts: graph.commit.device_join_cleanup_receipts().to_vec(),
             provider_access_grants: graph.commit.provider_access_grants().to_vec(),
             provider_access_withdrawals: graph.commit.provider_access_withdrawals().to_vec(),

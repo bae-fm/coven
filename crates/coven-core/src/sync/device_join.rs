@@ -28,9 +28,9 @@ use crate::sync::storage::{
     StoreProviderBinding, SyncStorage,
 };
 use crate::sync::store_commit::{
-    DeviceJoinAttempt, DeviceJoinAttemptId, DeviceJoinAttemptRef, DeviceJoinOutcomeRef,
-    DeviceReadinessProof, ObjectHash, StoreBatchCommitRef, StoreDeviceRegistration,
-    StoreDeviceRegistrationRef, StoreRootRef, STORE_PROTOCOL_VERSION,
+    DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef,
+    DeviceJoinOutcomeRef, DeviceReadinessProof, ObjectHash, StoreBatchCommitRef,
+    StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef, STORE_PROTOCOL_VERSION,
 };
 
 const OFFER_DOMAIN: &[u8] = b"coven.device-join-offer.v1\0";
@@ -4537,10 +4537,16 @@ pub async fn observe_device_join_abandonment(
     )
     .await?;
     if author != owner
-        || activation
-            .device_join_abandonments()
-            .binary_search(&abandonment.abandonment)
-            .is_err()
+        || !activation
+            .device_join_attempt_decisions()
+            .iter()
+            .any(|decision| {
+                matches!(
+                    decision,
+                    DeviceJoinAttemptDecisionRef::Abandoned(reference)
+                        if reference == &abandonment.abandonment
+                )
+            })
     {
         return Err(DeviceJoinError::AttemptMismatch);
     }

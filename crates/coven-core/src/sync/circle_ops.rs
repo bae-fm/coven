@@ -227,9 +227,8 @@ fn signed_circle_commit(
         StoreCommitOperationsInput {
             acknowledgement: None,
             control: None,
-            device_join_attempts: Vec::new(),
+            device_join_attempt_decisions: Vec::new(),
             device_join_outcomes: Vec::new(),
-            device_join_abandonments: Vec::new(),
             device_join_cleanup_receipts: Vec::new(),
             provider_access_grants: Vec::new(),
             provider_access_withdrawals: Vec::new(),

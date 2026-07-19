@@ -11,8 +11,8 @@ use super::store_commit::{
     ack_slot_prefix, commit_semantic_prefix, device_self_retirement_semantic_prefix,
     head_slot_prefix, owner_recovery_semantic_prefix, registration_semantic_prefix,
     snapshot_slot_prefix, ActivatedStoreDeviceRegistrationRef, CandidateFamilyId, CommitFrontier,
-    DeviceJoinAttempt, DeviceJoinAttemptRef, DeviceReadinessProof, DeviceRecoveryId,
-    DeviceRecoveryReadiness, DeviceStreamAnchor, ObjectHash, OwnerRecoveryNode,
+    DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinAttemptRef, DeviceReadinessProof,
+    DeviceRecoveryId, DeviceRecoveryReadiness, DeviceStreamAnchor, ObjectHash, OwnerRecoveryNode,
     OwnerRecoveryNodeRef, OwnerRecoveryPosition, SerialRecoveryActivation, StoreAck,
     StoreAckExclusionState, StoreAckRef, StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor,
     StoreCommitCoord, StoreCommitOrder, StoreDeviceHead, StoreDeviceRegistration,
@@ -2195,10 +2195,16 @@ pub(crate) async fn bootstrap_pending_device(
         .await?;
     if activation_author != *owner
         || activation_commit.author_registration != attempt.owner_registration
-        || activation_commit
-            .device_join_attempts()
-            .binary_search(&attempt_ref)
-            .is_err()
+        || !activation_commit
+            .device_join_attempt_decisions()
+            .iter()
+            .any(|decision| {
+                matches!(
+                    decision,
+                    DeviceJoinAttemptDecisionRef::Attempt(reference)
+                        if reference == &attempt_ref
+                )
+            })
         || activation_commit
             .order
             .predecessor_cut()

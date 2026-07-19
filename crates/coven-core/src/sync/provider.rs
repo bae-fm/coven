@@ -15,8 +15,9 @@ use crate::sync::storage::{
     ReplaceHeadError, StorageError, StoreProviderBinding, SyncStorage, VersionedObject,
 };
 use crate::sync::store_commit::{
-    DeviceJoinAttemptId, DeviceJoinAttemptRef, DeviceJoinOutcomeRef, ObjectHash,
-    StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef, StoreRootRef,
+    DeviceJoinAttemptDecisionRef, DeviceJoinAttemptId, DeviceJoinAttemptRef, DeviceJoinOutcomeRef,
+    ObjectHash, StoreBatchCommitRef, StoreDeviceRegistration, StoreDeviceRegistrationRef,
+    StoreRootRef,
 };
 
 const EXACT_TRANSCRIPT_DOMAIN: &[u8] = b"coven.provider-exact-slot-probe.v1\0";
@@ -2216,11 +2217,17 @@ pub async fn publish_cross_principal_challenge(
     )
     .await
     .map_err(|error| ProviderProbeError::Storage(StorageError::Storage(error.to_string())))?;
-    if activation
+    if !activation
         .value
-        .device_join_attempts()
-        .binary_search(&authorization.attempt)
-        .is_err()
+        .device_join_attempt_decisions()
+        .iter()
+        .any(|decision| {
+            matches!(
+                decision,
+                DeviceJoinAttemptDecisionRef::Attempt(reference)
+                    if reference == &authorization.attempt
+            )
+        })
     {
         return invalid("activation commit does not activate the authorized join attempt");
     }

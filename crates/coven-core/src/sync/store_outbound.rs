@@ -462,9 +462,8 @@ pub(crate) async fn prepare_pending_store_write_with_coordination(
             StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,
-                device_join_attempts: Vec::new(),
+                device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
-                device_join_abandonments: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
@@ -2593,9 +2592,8 @@ async fn prepare_serial_store_branch(
                 StoreCommitOperationsInput {
                     acknowledgement: None,
                     control: None,
-                    device_join_attempts: Vec::new(),
+                    device_join_attempt_decisions: Vec::new(),
                     device_join_outcomes: Vec::new(),
-                    device_join_abandonments: Vec::new(),
                     device_join_cleanup_receipts: Vec::new(),
                     provider_access_grants: Vec::new(),
                     provider_access_withdrawals: Vec::new(),
@@ -3622,9 +3620,8 @@ pub(crate) async fn prepare_store_operation_candidate(
                 StoreCommitOperationsInput {
                     acknowledgement: Some(acknowledgement),
                     control: None,
-                    device_join_attempts: Vec::new(),
+                    device_join_attempt_decisions: Vec::new(),
                     device_join_outcomes: Vec::new(),
-                    device_join_abandonments: Vec::new(),
                     device_join_cleanup_receipts: Vec::new(),
                     provider_access_grants: Vec::new(),
                     provider_access_withdrawals: Vec::new(),

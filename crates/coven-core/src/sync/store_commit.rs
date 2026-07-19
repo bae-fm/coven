@@ -983,13 +983,28 @@ pub enum CandidateExclusiveObjectRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeviceJoinAttemptDecisionRef {
+    Attempt(DeviceJoinAttemptRef),
+    Abandoned(super::device_join::DeviceJoinAbandonmentRef),
+}
+
+impl DeviceJoinAttemptDecisionRef {
+    pub fn attempt_id(&self) -> DeviceJoinAttemptId {
+        match self {
+            Self::Attempt(reference) => reference.attempt_id,
+            Self::Abandoned(reference) => reference.attempt_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoreCommitOperations {
     pub acknowledgement: Option<StoreAckRef>,
     pub control: Option<StoreControl>,
-    pub device_join_attempts: Vec<DeviceJoinAttemptRef>,
+    pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
-    pub device_join_abandonments: Vec<super::device_join::DeviceJoinAbandonmentRef>,
     pub device_join_cleanup_receipts: Vec<super::device_join::DeviceJoinCleanupReceiptRef>,
     pub provider_access_grants: Vec<super::provider::StoreMemberProviderAccessGrantRef>,
     pub provider_access_withdrawals:
@@ -1013,9 +1028,8 @@ impl StoreCommitOperations {
 
     fn has_no_other_operations(&self) -> bool {
         self.control.is_none()
-            && self.device_join_attempts.is_empty()
+            && self.device_join_attempt_decisions.is_empty()
             && self.device_join_outcomes.is_empty()
-            && self.device_join_abandonments.is_empty()
             && self.device_join_cleanup_receipts.is_empty()
             && self.provider_access_grants.is_empty()
             && self.provider_access_withdrawals.is_empty()
@@ -1052,9 +1066,8 @@ pub enum StoreCommitBody {
 pub struct StoreCommitOperationsInput<'a> {
     pub acknowledgement: Option<StoreAckRef>,
     pub control: Option<StoreControl>,
-    pub device_join_attempts: Vec<DeviceJoinAttemptRef>,
+    pub device_join_attempt_decisions: Vec<DeviceJoinAttemptDecisionRef>,
     pub device_join_outcomes: Vec<DeviceJoinOutcomeRef>,
-    pub device_join_abandonments: Vec<super::device_join::DeviceJoinAbandonmentRef>,
     pub device_join_cleanup_receipts: Vec<super::device_join::DeviceJoinCleanupReceiptRef>,
     pub provider_access_grants: Vec<super::provider::StoreMemberProviderAccessGrantRef>,
     pub provider_access_withdrawals:
@@ -1191,20 +1204,15 @@ impl StoreBatchCommit {
         }
     }
 
-    pub fn device_join_attempts(&self) -> &[DeviceJoinAttemptRef] {
-        self.operations()
-            .map_or(&[], |operations| operations.device_join_attempts.as_slice())
+    pub fn device_join_attempt_decisions(&self) -> &[DeviceJoinAttemptDecisionRef] {
+        self.operations().map_or(&[], |operations| {
+            operations.device_join_attempt_decisions.as_slice()
+        })
     }
 
     pub fn device_join_outcomes(&self) -> &[DeviceJoinOutcomeRef] {
         self.operations()
             .map_or(&[], |operations| operations.device_join_outcomes.as_slice())
-    }
-
-    pub fn device_join_abandonments(&self) -> &[super::device_join::DeviceJoinAbandonmentRef] {
-        self.operations().map_or(&[], |operations| {
-            operations.device_join_abandonments.as_slice()
-        })
     }
 
     pub fn device_join_cleanup_receipts(
@@ -1397,9 +1405,8 @@ impl StoreBatchCommit {
             StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,
-                device_join_attempts: Vec::new(),
+                device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
-                device_join_abandonments: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
@@ -1442,9 +1449,8 @@ impl StoreBatchCommit {
             StoreCommitOperationsInput {
                 acknowledgement: None,
                 control,
-                device_join_attempts: Vec::new(),
+                device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
-                device_join_abandonments: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
@@ -1486,9 +1492,8 @@ impl StoreBatchCommit {
             StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,
-                device_join_attempts: Vec::new(),
+                device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
-                device_join_abandonments: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
@@ -1642,7 +1647,7 @@ impl StoreBatchCommit {
         membership_state: StoreMembershipStateRef,
         device_state: StoreDeviceStateRef,
         membership_authority: Option<MembershipGrantCreationAuthority>,
-        device_join_attempts: Vec<DeviceJoinAttemptRef>,
+        attempts: Vec<DeviceJoinAttemptRef>,
         signer: &UserKeypair,
     ) -> Result<Self, StoreProtocolError> {
         Self::signed_operations(
@@ -1658,9 +1663,11 @@ impl StoreBatchCommit {
             StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,
-                device_join_attempts,
+                device_join_attempt_decisions: attempts
+                    .into_iter()
+                    .map(DeviceJoinAttemptDecisionRef::Attempt)
+                    .collect(),
                 device_join_outcomes: Vec::new(),
-                device_join_abandonments: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
@@ -1703,9 +1710,8 @@ impl StoreBatchCommit {
             StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,
-                device_join_attempts: Vec::new(),
+                device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes,
-                device_join_abandonments: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
@@ -1747,9 +1753,11 @@ impl StoreBatchCommit {
             StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,
-                device_join_attempts: Vec::new(),
+                device_join_attempt_decisions: abandonments
+                    .into_iter()
+                    .map(DeviceJoinAttemptDecisionRef::Abandoned)
+                    .collect(),
                 device_join_outcomes: Vec::new(),
-                device_join_abandonments: abandonments,
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
@@ -1791,9 +1799,8 @@ impl StoreBatchCommit {
             StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,
-                device_join_attempts: Vec::new(),
+                device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
-                device_join_abandonments: Vec::new(),
                 device_join_cleanup_receipts: receipts,
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
@@ -1836,9 +1843,8 @@ impl StoreBatchCommit {
             StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,
-                device_join_attempts: Vec::new(),
+                device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
-                device_join_abandonments: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants: Vec::new(),
                 provider_access_withdrawals: Vec::new(),
@@ -1883,9 +1889,8 @@ impl StoreBatchCommit {
             StoreCommitOperationsInput {
                 acknowledgement: None,
                 control: None,
-                device_join_attempts: Vec::new(),
+                device_join_attempt_decisions: Vec::new(),
                 device_join_outcomes: Vec::new(),
-                device_join_abandonments: Vec::new(),
                 device_join_cleanup_receipts: Vec::new(),
                 provider_access_grants,
                 provider_access_withdrawals,
@@ -1928,9 +1933,8 @@ impl StoreBatchCommit {
         let StoreCommitOperationsInput {
             acknowledgement,
             control,
-            device_join_attempts,
+            device_join_attempt_decisions,
             device_join_outcomes,
-            device_join_abandonments,
             device_join_cleanup_receipts,
             provider_access_grants,
             provider_access_withdrawals,
@@ -1968,9 +1972,8 @@ impl StoreBatchCommit {
                 package_ref(&semantic_prefix, &input)
             })
             .transpose()?;
-        validate_device_join_attempt_refs(&device_join_attempts)?;
+        validate_device_join_attempt_decision_refs(&device_join_attempt_decisions)?;
         validate_device_join_outcome_refs(&device_join_outcomes)?;
-        validate_device_join_abandonment_refs(&device_join_abandonments)?;
         validate_device_join_cleanup_receipt_refs(&device_join_cleanup_receipts)?;
         validate_provider_access_refs(&provider_access_grants, &provider_access_withdrawals)?;
         validate_device_registration_refs(&device_registrations)?;
@@ -2008,9 +2011,8 @@ impl StoreBatchCommit {
         let operations = StoreCommitOperations {
             acknowledgement,
             control,
-            device_join_attempts,
+            device_join_attempt_decisions,
             device_join_outcomes,
-            device_join_abandonments,
             device_join_cleanup_receipts,
             provider_access_grants,
             provider_access_withdrawals,
@@ -2291,9 +2293,8 @@ fn validate_commit_body(
             }
             validate_circle_control_refs(order.policy(), &operations.circle_controls)?;
             validate_commit_acknowledgement(&operations.acknowledgement, author)?;
-            validate_device_join_attempt_refs(&operations.device_join_attempts)?;
+            validate_device_join_attempt_decision_refs(&operations.device_join_attempt_decisions)?;
             validate_device_join_outcome_refs(&operations.device_join_outcomes)?;
-            validate_device_join_abandonment_refs(&operations.device_join_abandonments)?;
             validate_device_join_cleanup_receipt_refs(&operations.device_join_cleanup_receipts)?;
             validate_provider_access_refs(
                 &operations.provider_access_grants,
@@ -2807,10 +2808,13 @@ fn validate_commit_acknowledgement(
     Ok(())
 }
 
-fn validate_device_join_attempt_refs(
-    attempts: &[DeviceJoinAttemptRef],
+fn validate_device_join_attempt_decision_refs(
+    decisions: &[DeviceJoinAttemptDecisionRef],
 ) -> Result<(), StoreProtocolError> {
-    if attempts.windows(2).any(|pair| pair[0] >= pair[1]) {
+    if decisions
+        .windows(2)
+        .any(|pair| pair[0].attempt_id() >= pair[1].attempt_id())
+    {
         return Err(StoreProtocolError::JoinAttemptMismatch);
     }
     Ok(())
@@ -2825,15 +2829,6 @@ fn validate_device_join_outcome_refs(
             .iter()
             .any(|outcome| !attempts.insert(outcome.attempt().attempt_id))
     {
-        return Err(StoreProtocolError::JoinOutcomeMismatch);
-    }
-    Ok(())
-}
-
-fn validate_device_join_abandonment_refs(
-    abandonments: &[super::device_join::DeviceJoinAbandonmentRef],
-) -> Result<(), StoreProtocolError> {
-    if abandonments.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(StoreProtocolError::JoinOutcomeMismatch);
     }
     Ok(())
@@ -7506,6 +7501,10 @@ mod tests {
             Some(&serde_json::json!([]))
         );
         assert_eq!(
+            operations.get("device_join_attempt_decisions"),
+            Some(&serde_json::json!([]))
+        );
+        assert_eq!(
             operations.get("circle_controls"),
             Some(&serde_json::json!([]))
         );
@@ -7518,6 +7517,35 @@ mod tests {
                 .get("candidate_objects")
                 .and_then(|manifest| manifest.get("family")),
             Some(&serde_json::to_value(fixture.commit.candidate_family()).unwrap())
+        );
+    }
+
+    #[test]
+    fn one_join_attempt_cannot_be_activated_and_abandoned_in_the_same_commit() {
+        let attempt_id = DeviceJoinAttemptId::from_hash(ObjectHash::digest(b"join attempt"));
+        let attempt = DeviceJoinAttemptRef {
+            attempt_id,
+            attempt_hash: ObjectHash::digest(b"attempt body"),
+            object: exact(
+                "store-v1/device-join-attempts/attempt.json".to_string(),
+                b"attempt body",
+            ),
+        };
+        let abandonment = super::super::device_join::DeviceJoinAbandonmentRef {
+            attempt_id,
+            abandonment_hash: ObjectHash::digest(b"abandonment body"),
+            object: exact(
+                "store-v1/device-join-abandonments/attempt.json".to_string(),
+                b"abandonment body",
+            ),
+        };
+
+        assert_eq!(
+            validate_device_join_attempt_decision_refs(&[
+                DeviceJoinAttemptDecisionRef::Attempt(attempt),
+                DeviceJoinAttemptDecisionRef::Abandoned(abandonment),
+            ]),
+            Err(StoreProtocolError::JoinAttemptMismatch)
         );
     }
 

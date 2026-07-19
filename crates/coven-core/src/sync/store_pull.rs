@@ -25,11 +25,11 @@ use super::storage::{
 };
 use super::store_commit::{
     head_slot_prefix, serial_head_key, ActivatedStoreDeviceRegistrationRef, CirclePackageRef,
-    CommitFrontier, DeviceJoinAttempt, DeviceJoinOutcomeBody, DeviceStreamAnchor, ObjectHash,
-    OwnerRecoveryCursor, OwnerRecoveryNode, OwnerRecoveryNodeRef, OwnerRecoveryPosition,
-    ResolvedStoreDeviceState, StoreBatchCommit, StoreBatchCommitRef, StoreCommitAnchor,
-    StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof, StoreDeviceHead,
-    StoreDeviceProposalAck, StoreDeviceProposalState, StoreDeviceRegistration,
+    CommitFrontier, DeviceJoinAttempt, DeviceJoinAttemptDecisionRef, DeviceJoinOutcomeBody,
+    DeviceStreamAnchor, ObjectHash, OwnerRecoveryCursor, OwnerRecoveryNode, OwnerRecoveryNodeRef,
+    OwnerRecoveryPosition, ResolvedStoreDeviceState, StoreBatchCommit, StoreBatchCommitRef,
+    StoreCommitAnchor, StoreCommitCoord, StoreDeviceExclusionOutcome, StoreDeviceExclusionProof,
+    StoreDeviceHead, StoreDeviceProposalAck, StoreDeviceProposalState, StoreDeviceRegistration,
     StoreDeviceRegistrationActivation, StoreDeviceRegistrationActivationRef,
     StoreDeviceRegistrationOrigin, StoreDeviceRegistrationRef, StoreDeviceStateRef,
     StoreDeviceStatus, StoreHistoryCut, StoreProtocolError, StoreRootRef, StoreSerialHead,
@@ -1400,7 +1400,11 @@ async fn validate_commit_join_abandonments(
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
 ) -> Result<(), RegistrationLoadError> {
-    if commit.device_join_abandonments().is_empty() {
+    if !commit
+        .device_join_attempt_decisions()
+        .iter()
+        .any(|decision| matches!(decision, DeviceJoinAttemptDecisionRef::Abandoned(_)))
+    {
         return Ok(());
     }
     let predecessor = predecessor.ok_or_else(|| {
@@ -1413,16 +1417,14 @@ async fn validate_commit_join_abandonments(
             "device join abandonment activation author is not an active Owner".to_string(),
         ));
     }
-    for reference in commit.device_join_abandonments() {
-        if commit
-            .device_join_attempts()
-            .iter()
-            .any(|attempt| attempt.attempt_id == reference.attempt_id)
-        {
-            return Err(RegistrationLoadError::Invalid(
-                "device join abandonment and attempt are activated together".to_string(),
-            ));
-        }
+    for reference in commit
+        .device_join_attempt_decisions()
+        .iter()
+        .filter_map(|decision| match decision {
+            DeviceJoinAttemptDecisionRef::Attempt(_) => None,
+            DeviceJoinAttemptDecisionRef::Abandoned(reference) => Some(reference),
+        })
+    {
         let context = ProtocolObjectContext::signed_plaintext(
             root.store_root_hash,
             ProtocolObjectDomain::DeviceJoinAbandonment,
@@ -1685,7 +1687,11 @@ async fn validate_commit_join_attempts(
     activating_author: &StoreDeviceRegistration,
     predecessor: Option<&RegistrationPredecessorAuthority<'_>>,
 ) -> Result<(), RegistrationLoadError> {
-    if commit.device_join_attempts().is_empty() {
+    if !commit
+        .device_join_attempt_decisions()
+        .iter()
+        .any(|decision| matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(_)))
+    {
         return Ok(());
     }
     let predecessor = predecessor.ok_or_else(|| {
@@ -1704,7 +1710,14 @@ async fn validate_commit_join_attempts(
         .order
         .predecessor_cut()
         .map_err(|error| RegistrationLoadError::Invalid(error.to_string()))?;
-    for reference in commit.device_join_attempts() {
+    for reference in commit
+        .device_join_attempt_decisions()
+        .iter()
+        .filter_map(|decision| match decision {
+            DeviceJoinAttemptDecisionRef::Attempt(reference) => Some(reference),
+            DeviceJoinAttemptDecisionRef::Abandoned(_) => None,
+        })
+    {
         let attempt = Box::pin(load_device_join_attempt_ref(
             storage,
             root,
@@ -1929,10 +1942,9 @@ async fn predecessor_contains_join_attempt(
 ) -> Result<bool, RegistrationLoadError> {
     Ok(
         predecessor_commit_matching(storage, root, order, |_, commit| {
-            commit
-                .device_join_attempts()
-                .binary_search(expected)
-                .is_ok()
+            commit.device_join_attempt_decisions().iter().any(|decision| {
+                matches!(decision, DeviceJoinAttemptDecisionRef::Attempt(reference) if reference == expected)
+            })
         })
         .await?
         .is_some(),
@@ -2219,9 +2231,8 @@ pub async fn pull_store_commits_with_identity(
                 ));
                 continue;
             }
-            let predecessor_membership = if commit.device_join_attempts().is_empty()
+            let predecessor_membership = if commit.device_join_attempt_decisions().is_empty()
                 && commit.device_join_outcomes().is_empty()
-                && commit.device_join_abandonments().is_empty()
                 && commit.device_join_cleanup_receipts().is_empty()
                 && commit.device_registrations().is_empty()
                 && commit.device_exclusion_proposals().is_empty()
@@ -3007,9 +3018,8 @@ pub(crate) async fn prepare_device_join_bootstrap(
                     .to_string(),
             ));
         }
-        let carries_lifecycle = !(commit.device_join_attempts().is_empty()
+        let carries_lifecycle = !(commit.device_join_attempt_decisions().is_empty()
             && commit.device_join_outcomes().is_empty()
-            && commit.device_join_abandonments().is_empty()
             && commit.device_join_cleanup_receipts().is_empty()
             && commit.device_registrations().is_empty()
             && commit.device_exclusion_proposals().is_empty()
@@ -3126,8 +3136,7 @@ pub(crate) async fn materialize_device_join_activation(
     }
     let (commit, author) = Box::pin(load_commit_with_author(storage, root, reference)).await?;
     if commit.device_join_outcomes() != std::slice::from_ref(expected_outcome)
-        || !commit.device_join_attempts().is_empty()
-        || !commit.device_join_abandonments().is_empty()
+        || !commit.device_join_attempt_decisions().is_empty()
         || !commit.device_join_cleanup_receipts().is_empty()
         || commit.device_registrations().len() != 1
         || !commit.provider_access_grants().is_empty()
